@@ -60,9 +60,13 @@ class RemoteControlAction implements TacticalAction
 
     /**
      * Runs at APPROVAL time: fetch the MeshCentral link for the requested type,
-     * validate it, and return it as the result stdout so the cockpit can surface
-     * it to the approver. A missing/invalid link is a normal `error` outcome
-     * (the device may not expose that session type).
+     * validate it, and return it on the result's TRANSIENT sessionUrl (via
+     * ::session()) — NOT stdout. This path runs through the TacticalActionService
+     * bus, whose audit() persists stdout to tactical_action_logs.output; a live
+     * session URL is a one-time credential, so it must never land there. The
+     * staged-approval executor reads sessionUrl and hands it to the approver over
+     * the one-time no-store secret channel. A missing/invalid link is a normal
+     * `error` outcome (the device may not expose that session type).
      *
      * @param  array<string, mixed>  $params  already normalized by validateParams()
      */
@@ -77,6 +81,6 @@ class RemoteControlAction implements TacticalAction
             return TacticalActionResult::error("MeshCentral {$type} link is not available for this device.");
         }
 
-        return TacticalActionResult::ok($url);
+        return TacticalActionResult::session($url);
     }
 }

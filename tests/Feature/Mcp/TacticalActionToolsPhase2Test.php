@@ -25,6 +25,8 @@ use App\Support\McpToolModes;
 use App\Support\McpToolRegistry;
 use App\Support\McpToolSurface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Testing\TestResponse;
 use Mockery;
 use Tests\TestCase;
@@ -632,5 +634,77 @@ class TacticalActionToolsPhase2Test extends TestCase
         $result = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id);
         $this->assertSame('executed', $result->status);
         $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        // Increment 2: the freshly-minted URL rides back to the approver on the
+        // transient one-time secret channel (never a persisted field).
+        $this->assertSame($url, $result->secret);
+    }
+
+    /**
+     * Increment 2 — the payoff + the leak fence. Approving a staged remote-control
+     * run must hand the freshly-minted MeshCentral URL to the operator ONCE (JSON
+     * `secret`, Cache-Control:no-store, never flashed to the session) AND that URL
+     * must appear in NO persistent sink — including tactical_action_logs.output,
+     * which the immediate path avoids by being off-bus but the staged path routes
+     * through TacticalActionService::audit(). Mirrors the CIPP create-user
+     * one-time-password contract and the immediate path's no-audit assertion.
+     */
+    public function test_staged_remote_control_approval_delivers_url_no_store_and_never_persists_it(): void
+    {
+        $this->configureTactical();
+        $approver = $this->configureAiActor();
+        $fixture = $this->endpointFixture();
+        $token = $this->token(['tactical_stage_open_remote_control']);
+        $url = 'https://mesh.example.test/control/session-token';
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getMeshCentralLinks')->once()->with('agent-1')->andReturn(['control' => $url]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $staged = $this->callTool($token, 'tactical_stage_open_remote_control', [
+            'client_id' => $fixture['client']->id,
+            'ticket_id' => $fixture['ticket']->id,
+            'hostname' => 'PC-01',
+            'type' => 'control',
+            'reason' => 'Open a remote session after cockpit approval.',
+        ]);
+        $staged->assertOk();
+        $this->assertFalse((bool) $staged->json('result.isError'), (string) $staged->json('result.content.0.text'));
+
+        $run = TechnicianRun::where('action_type', 'tactical_stage_open_remote_control')->firstOrFail();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+
+        $logged = [];
+        Log::listen(function (MessageLogged $m) use (&$logged) {
+            $logged[] = $m->message.' '.json_encode($m->context);
+        });
+
+        $approval = $this->actingAs($approver)->postJson(route('cockpit.approve', $run));
+
+        $approval->assertOk();
+        $this->assertTrue((bool) $approval->json('ok'));
+        $this->assertSame('executed', $approval->json('status'));
+        // Delivered exactly once, in this response only, on a no-store payload.
+        $this->assertSame($url, $approval->json('secret'));
+        $this->assertStringContainsString('no-store', (string) $approval->headers->get('Cache-Control'));
+        $this->assertStringNotContainsString($url, (string) $approval->json('message'));
+
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $this->assertDatabaseHas('technician_action_logs', [
+            'action_type' => 'tactical_stage_open_remote_control',
+            'result_status' => 'executed',
+            'ticket_id' => $fixture['ticket']->id,
+            'client_id' => $fixture['client']->id,
+            'approver_user_id' => $approver->id,
+        ]);
+
+        // The live URL exists in NO persistent sink and NO log line. tactical_action_logs
+        // is the one the on-bus staged path could leak into (output = redacted stdout).
+        $this->assertStringNotContainsString($url, json_encode(TacticalActionLog::all()->toArray()));
+        $this->assertStringNotContainsString($url, json_encode(TechnicianActionLog::all()->toArray()));
+        $this->assertStringNotContainsString($url, json_encode(McpAuditLog::all()->toArray()));
+        $this->assertStringNotContainsString($url, json_encode(TechnicianRun::all()->toArray()));
+        foreach ($logged as $line) {
+            $this->assertStringNotContainsString($url, $line, 'remote-control URL leaked into a log line');
+        }
     }
 }

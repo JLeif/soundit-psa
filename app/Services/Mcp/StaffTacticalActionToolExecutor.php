@@ -357,6 +357,21 @@ class StaffTacticalActionToolExecutor
 
             $run->advanceTo(TechnicianRunState::Done);
 
+            // psa-5s4r2 Increment 2 — remote-control is the one staged action that
+            // returns a LIVE MeshCentral URL, minted fresh at THIS approval. It rides
+            // on the result's TRANSIENT sessionUrl (never stdout), so the bus audit
+            // above did not persist it. Hand it to the approver over the one-time
+            // credential channel: the cockpit controller emits it JSON-only +
+            // Cache-Control:no-store and never flashes it to the session. Every other
+            // staged action has no such value and returns the plain 'executed'.
+            if ($directTool === 'tactical_open_remote_control' && $result->sessionUrl !== null && $result->sessionUrl !== '') {
+                return new TechnicianApprovalResult(
+                    'executed',
+                    message: 'Remote-control session link is ready — open it now. It is shown once and is never stored.',
+                    secret: $result->sessionUrl,
+                );
+            }
+
             return new TechnicianApprovalResult('executed');
         } catch (\Throwable $e) {
             $run->releaseClaimTo($releaseState);

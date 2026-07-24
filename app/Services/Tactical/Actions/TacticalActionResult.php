@@ -28,11 +28,25 @@ final class TacticalActionResult
         public readonly ?int $retcode = null,
         public readonly ?string $message = null,
         public readonly ?string $stderr = null,
+        public readonly ?string $sessionUrl = null,
     ) {}
 
     public static function ok(?string $stdout = null, ?int $retcode = null, ?string $stderr = null): self
     {
         return new self('ok', $stdout, $retcode, null, $stderr);
+    }
+
+    /**
+     * A live, credential-bearing session URL (e.g. a MeshCentral remote-control
+     * link). It rides in $sessionUrl, NOT $stdout, precisely so audit() cannot
+     * persist it: the staged-approval path routes through the bus's audit(), and
+     * a live session URL must reach the approver exactly once and never be stored.
+     * status is 'ok' so the caller's isOk() branch surfaces it. Only
+     * RemoteControlAction sets this (psa-5s4r2 / so-1jq4).
+     */
+    public static function session(string $url): self
+    {
+        return new self('ok', null, null, null, null, $url);
     }
 
     public static function offline(string $message): self
@@ -84,6 +98,9 @@ final class TacticalActionResult
      */
     public function audit(): array
     {
+        // NOTE: $sessionUrl is DELIBERATELY absent here. A live session URL is a
+        // one-time credential surfaced to the approver, never a persisted field —
+        // adding it to this row would leak it into tactical_action_logs.output.
         $output = $this->stdout;
         if ($this->stderr !== null && $this->stderr !== '') {
             $output = ($output ?? '')."\n[stderr]\n".$this->stderr;
