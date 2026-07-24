@@ -24,9 +24,17 @@ class RemoteControlAction implements TacticalAction
     /** MeshCentral session types getMeshCentralLinks() returns. */
     private const TYPES = ['control', 'terminal', 'file'];
 
+    /**
+     * The CANONICAL Tactical action key — must equal what the immediate path
+     * (StaffTacticalActionToolExecutor::auditRemoteControl) writes AND what
+     * cooldownActive() looks up via tacticalActionKey('tactical_open_remote_control').
+     * The staged path dispatches through the bus, whose audit() writes this key; a
+     * tool-name-derived 'tactical.open_remote_control' would split cooldown, audit
+     * history, and reporting across two keys (psa-5s4r2 ARCH re-gate, psa-reuko).
+     */
     public function key(): string
     {
-        return 'tactical.open_remote_control';
+        return 'tactical.remote_control';
     }
 
     public function isDestructive(): bool

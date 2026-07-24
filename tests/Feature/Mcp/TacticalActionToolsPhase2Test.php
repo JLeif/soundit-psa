@@ -707,4 +707,59 @@ class TacticalActionToolsPhase2Test extends TestCase
             $this->assertStringNotContainsString($url, $line, 'remote-control URL leaked into a log line');
         }
     }
+
+    /**
+     * ARCH re-gate blocker (psa-reuko): staged + immediate remote-control must share
+     * ONE canonical TacticalActionLog key (tactical.remote_control) so cooldown, audit
+     * history, and reporting do not split. Inc1's RemoteControlAction keyed itself
+     * tactical.open_remote_control, so the bus wrote THAT on a staged approval — the
+     * immediate path's cooldown (which looks up tactical.remote_control) never saw it,
+     * and the next immediate open bypassed the cooldown.
+     */
+    public function test_staged_and_immediate_remote_control_share_the_canonical_cooldown_key(): void
+    {
+        $this->configureTactical();
+        $approver = $this->configureAiActor();
+        $fixture = $this->endpointFixture();
+        $url = 'https://mesh.example.test/control/session-token';
+
+        // Minted exactly ONCE — at the staged approval. The immediate call that
+        // follows must be refused by the cooldown BEFORE any second upstream call.
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getMeshCentralLinks')->once()->with('agent-1')->andReturn(['control' => $url]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $staged = $this->callTool($this->token(['tactical_stage_open_remote_control']), 'tactical_stage_open_remote_control', [
+            'client_id' => $fixture['client']->id,
+            'ticket_id' => $fixture['ticket']->id,
+            'hostname' => 'PC-01',
+            'type' => 'control',
+            'reason' => 'Stage a remote session for approval.',
+        ]);
+        $staged->assertOk();
+        $run = TechnicianRun::where('action_type', 'tactical_stage_open_remote_control')->firstOrFail();
+        app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id);
+
+        // (1) The staged approval logged under the CANONICAL key — the same key the
+        // immediate path (auditRemoteControl) uses — not the tool-name-derived one.
+        $this->assertDatabaseHas('tactical_action_logs', [
+            'action_key' => 'tactical.remote_control',
+            'asset_id' => $fixture['asset']->id,
+            'result_status' => 'ok',
+        ]);
+        $this->assertDatabaseMissing('tactical_action_logs', ['action_key' => 'tactical.open_remote_control']);
+
+        // (2) A subsequent IMMEDIATE open on the same asset is cooldown-blocked by that
+        // staged log — proving both paths share one cooldown key. getMeshCentralLinks is
+        // NOT called again: the refusal lands before any upstream call.
+        $immediate = $this->callTool($this->token(['tactical_open_remote_control']), 'tactical_open_remote_control', [
+            'client_id' => $fixture['client']->id,
+            'hostname' => 'PC-01',
+            'type' => 'control',
+            'reason' => 'Immediate open right after the staged session.',
+        ]);
+        $immediate->assertOk();
+        $this->assertTrue((bool) $immediate->json('result.isError'), (string) $immediate->json('result.content.0.text'));
+        $this->assertStringContainsString('cooldown', (string) $immediate->json('result.content.0.text'));
+    }
 }

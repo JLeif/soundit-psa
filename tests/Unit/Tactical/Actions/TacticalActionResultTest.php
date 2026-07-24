@@ -130,4 +130,24 @@ class TacticalActionResultTest extends TestCase
         $this->assertStringContainsStringIgnoringCase('stderr', $audit['output']);
         $this->assertSame(2, $audit['retcode']);
     }
+
+    public function test_session_factory_carries_url_out_of_band_and_audit_never_persists_it(): void
+    {
+        // A live session URL (e.g. a MeshCentral remote-control link, psa-5s4r2)
+        // rides on the TRANSIENT sessionUrl, NOT stdout — and audit() must NEVER
+        // surface it, or it would leak into tactical_action_logs.output. This pins
+        // that contract against a future audit() field silently re-including it.
+        $url = 'https://mesh.example.test/control/session-token';
+        $r = TacticalActionResult::session($url);
+
+        $this->assertSame('ok', $r->status);
+        $this->assertTrue($r->isOk());
+        $this->assertSame($url, $r->sessionUrl);
+        $this->assertNull($r->stdout);
+
+        $audit = $r->audit();
+        $this->assertNull($audit['output']);
+        $this->assertArrayNotHasKey('sessionUrl', $audit);
+        $this->assertStringNotContainsString($url, (string) json_encode($audit));
+    }
 }
