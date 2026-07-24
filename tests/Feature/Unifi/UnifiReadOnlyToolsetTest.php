@@ -3,6 +3,7 @@
 namespace Tests\Feature\Unifi;
 
 use App\Models\Client;
+use App\Models\ClientUnifiSite;
 use App\Models\Setting;
 use App\Services\Unifi\UnifiClient;
 use App\Services\Unifi\UnifiReadOnlyToolset;
@@ -14,7 +15,14 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 /**
- * UniFi read-only tool surface (psa-1ynqc).
+ * UniFi read-only tool surface (psa-1ynqc), now MULTI-SITE per client (psa-jpygj).
+ *
+ * A client can map to MANY UniFi sites (several physical locations). Mappings live in
+ * client_unifi_sites (client_id, unifi_site_id UNIQUE, unifi_host_id) — never on the
+ * client row. The telemetry tools AGGREGATE across a client's sites; the presentation
+ * is one consistent shape regardless of how many sites a client has (site_count + a
+ * per-site array for the site-grained tools; a flat host-tagged device list for the
+ * host-grained one).
  *
  * DATA-BOUNDARY RULE (a UI account can administer consoles for more than one MSP
  * client, and in principle for more than one MSP):
@@ -29,11 +37,11 @@ use Tests\TestCase;
  *     client-side; forwarding the raw response would hand one client another's WAN data.
  *  2. GET /v1/devices is grouped by HOST and carries no siteId on any row. Devices are
  *     only attributable to a client via its console, and only when that console serves
- *     exactly ONE UniFi site — otherwise the tool refuses, because an over-broad answer
- *     here is a data leak. Counting mapped PSA clients is NOT enough: a console with
- *     two sites where only one is mapped would pass that and return the other site's
- *     hardware (psa-51mhv R1). It is also paginated, so a console on page 2 must not
- *     read as zero devices (psa-5rizk R1).
+ *     UniFi sites that ALL belong to that one client — otherwise the console is refused
+ *     (skipped), because an over-broad answer here is a data leak. Counting mapped PSA
+ *     clients is NOT enough: a console with two sites where only one is this client's
+ *     would pass that and return the other site's hardware (psa-51mhv R1). It is also
+ *     paginated, so a console on page 2 must not read as zero devices (psa-5rizk R1).
  */
 class UnifiReadOnlyToolsetTest extends TestCase
 {
@@ -43,9 +51,13 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
     private const SITE_B = '772ef944c7c3574g1d31c420';
 
+    private const SITE_C = '883fa055d8d4685h2e42d531';
+
     private const HOST_A = '900A6F00301100000000074A6BA90000000007A3387E0000000063EC9853:123456789';
 
     private const HOST_B = '811B7E11402200000000085B7CB10000000008B4498F0000000074FD9964:987654321';
+
+    private const HOST_C = '722C8F22503300000000096C8DC20000000009C5509G0000000085GE0075:555555555';
 
     protected function setUp(): void
     {
@@ -53,6 +65,21 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
         Setting::setEncrypted('unifi_api_key', 'test-key');
         Setting::setValue('unifi_enabled', '1');
+    }
+
+    /**
+     * Map a client to a UniFi site — the pivot IS the source of truth now, so tests
+     * seed it instead of client columns. Returns the client so calls chain.
+     */
+    private function mapSite(Client $client, string $siteId, ?string $hostId = null): Client
+    {
+        ClientUnifiSite::create([
+            'client_id' => $client->id,
+            'unifi_site_id' => $siteId,
+            'unifi_host_id' => $hostId,
+        ]);
+
+        return $client;
     }
 
     /** @param array<int, Response> $queue */
@@ -95,12 +122,13 @@ class UnifiReadOnlyToolsetTest extends TestCase
                 [
                     'siteId' => self::SITE_B,
                     'hostId' => self::HOST_B,
-                    'meta' => ['desc' => 'Someone Elses Site', 'name' => 'other'],
+                    'meta' => ['desc' => 'Branch Office', 'name' => 'branch'],
                     'statistics' => [
                         'counts' => ['totalDevice' => 3, 'offlineDevice' => 0],
                         'ispInfo' => ['name' => 'Telus', 'organization' => 'Telus Communications'],
                         'percentages' => ['wanUptime' => 100],
                         'internetIssues' => [],
+                        'gateway' => ['shortname' => 'UDMSE'],
                     ],
                     'permission' => 'admin',
                     'isOwner' => true,
@@ -116,23 +144,43 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
     public function test_list_sites_is_account_wide_and_annotates_the_mapped_psa_client(): void
     {
-        $client = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(['name' => 'Acme Co']), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
 
         $result = $this->toolset()->execute('unifi_list_sites', []);
 
         $this->assertSame(2, $result['count'], 'the mapping helper must show unmapped sites too');
-        $this->assertSame($client->id, $result['sites'][0]['psa_client_id']);
-        $this->assertSame('Acme Co', $result['sites'][0]['psa_client_name']);
-        $this->assertNull($result['sites'][1]['psa_client_id'], 'unmapped site must be surfaced as unmapped, not hidden');
+        $bySite = collect($result['sites'])->keyBy('site_id');
+        $this->assertSame($client->id, $bySite[self::SITE_A]['psa_client_id']);
+        $this->assertSame('Acme Co', $bySite[self::SITE_A]['psa_client_name']);
+        $this->assertNull($bySite[self::SITE_B]['psa_client_id'], 'unmapped site must be surfaced as unmapped, not hidden');
         $this->assertSame('cursor-2', $result['next_page_token']);
+    }
+
+    public function test_list_sites_annotates_two_sites_that_map_to_the_same_client(): void
+    {
+        // The multi-site win, seen from the mapping helper: one client legitimately owns
+        // two sites, and BOTH rows must name it (a site still maps to <=1 client).
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
+
+        $result = $this->toolset()->execute('unifi_list_sites', []);
+
+        $bySite = collect($result['sites'])->keyBy('site_id');
+        $this->assertSame($client->id, $bySite[self::SITE_A]['psa_client_id']);
+        $this->assertSame($client->id, $bySite[self::SITE_B]['psa_client_id'], 'both of a client\'s sites annotate it');
+        $this->assertSame('Smart-Service', $bySite[self::SITE_B]['psa_client_name']);
     }
 
     public function test_list_sites_exposes_metadata_only_and_never_telemetry(): void
     {
         $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
 
-        $row = $this->toolset()->execute('unifi_list_sites', [])['sites'][1];
+        $row = collect($this->toolset()->execute('unifi_list_sites', [])['sites'])
+            ->firstWhere('site_id', self::SITE_B);
 
         // The unmapped row is the sensitive one: it belongs to someone we have not
         // mapped, so its health/ISP data must not ride along on the mapping helper.
@@ -142,40 +190,71 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertSame(self::SITE_B, $row['site_id']);
     }
 
-    // ── telemetry: mapped-sites-only ───────────────────────────────────────────
+    // ── telemetry: mapped-sites-only, aggregated per site ──────────────────────
 
     public function test_get_site_health_returns_the_wan_fields_for_a_mapped_client(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
 
         $result = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id]);
 
+        // One consistent shape regardless of site count: a per-site array, so a
+        // single-site client is simply site_count = 1.
+        $this->assertSame(1, $result['site_count']);
+        $this->assertCount(1, $result['sites']);
+        $site = $result['sites'][0];
+        $this->assertSame(self::SITE_A, $site['site_id']);
+
         // Vendor-supplied free text reaches an LLM, so it arrives redacted and fenced
         // by ChetDataSurfaceTextSanitizer rather than raw — assert containment, and see
         // test_vendor_supplied_free_text_is_fenced_before_it_reaches_the_model below.
-        $this->assertStringContainsString('Comcast', $result['isp_name']);
-        $this->assertSame(97, $result['wan_uptime_percent']);
-        $this->assertSame([], $result['internet_issues']);
-        $this->assertSame(12, $result['counts']['totalDevice']);
-        $this->assertSame(1, $result['counts']['offlineDevice']);
+        $this->assertStringContainsString('Comcast', $site['isp_name']);
+        $this->assertSame(97, $site['wan_uptime_percent']);
+        $this->assertSame([], $site['internet_issues']);
+        $this->assertSame(12, $site['counts']['totalDevice']);
+        $this->assertSame(1, $site['counts']['offlineDevice']);
+    }
+
+    public function test_get_site_health_aggregates_every_site_of_a_multi_site_client(): void
+    {
+        // THE CORE WIN (psa-jpygj): a client with two locations gets both sites' health
+        // in one call, each independently. Smart-Service could not see its second site
+        // at all before this.
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
+
+        $result = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id]);
+
+        $this->assertSame(2, $result['site_count']);
+        $bySite = collect($result['sites'])->keyBy('site_id');
+
+        $this->assertStringContainsString('Comcast', $bySite[self::SITE_A]['isp_name']);
+        $this->assertSame(97, $bySite[self::SITE_A]['wan_uptime_percent']);
+
+        $this->assertStringContainsString('Telus', $bySite[self::SITE_B]['isp_name']);
+        $this->assertSame(100, $bySite[self::SITE_B]['wan_uptime_percent']);
+        $this->assertSame(3, $bySite[self::SITE_B]['counts']['totalDevice']);
     }
 
     public function test_get_site_health_refuses_a_client_with_no_unifi_mapping(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => null]);
+        $client = Client::factory()->create();
         $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
 
         $result = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id]);
 
         $this->assertArrayHasKey('error', $result);
         $this->assertStringContainsString('not mapped', $result['error']);
-        $this->assertArrayNotHasKey('isp_name', $result);
+        $this->assertArrayNotHasKey('sites', $result);
     }
 
     public function test_isp_metrics_are_filtered_to_the_clients_site_because_the_api_has_no_site_filter(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         // GET /v1/isp-metrics/{type} returns EVERY visible site — including SITE_B,
         // which belongs to a client we have not mapped.
@@ -200,10 +279,11 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
         $result = $this->toolset()->execute('unifi_get_isp_metrics', ['client_id' => $client->id, 'type' => '5m', 'duration' => '24h']);
 
-        $this->assertSame(self::SITE_A, $result['site_id']);
-        $this->assertCount(1, $result['periods'], 'another site\'s WAN metrics must never ride along');
+        $this->assertSame(1, $result['site_count']);
+        $this->assertSame(self::SITE_A, $result['sites'][0]['site_id']);
+        $this->assertCount(1, $result['sites'][0]['periods'], 'another site\'s WAN metrics must never ride along');
 
-        $period = $result['periods'][0];
+        $period = $result['sites'][0]['periods'][0];
         $this->assertSame(41, $period['avg_latency_ms']);
         $this->assertSame(220, $period['max_latency_ms']);
         $this->assertSame(3, $period['packet_loss_percent']);
@@ -217,19 +297,54 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertStringNotContainsString(self::SITE_B, $encoded);
     }
 
+    public function test_isp_metrics_aggregate_across_a_multi_site_clients_sites_and_still_exclude_foreign_sites(): void
+    {
+        // A multi-site client gets ALL its sites' WAN metrics; a third site belonging to
+        // someone else (SITE_C) is still filtered out — the boundary is the client's
+        // OWN set of sites, not "everything the key can see".
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        $this->bindClientReturning([$this->jsonResponse([
+            'data' => [
+                ['metricType' => '5m', 'hostId' => self::HOST_A, 'siteId' => self::SITE_A, 'periods' => [
+                    ['metricTime' => '2026-07-23T13:35:00Z', 'data' => ['wan' => ['avgLatency' => 41, 'ispName' => 'Comcast']]],
+                ]],
+                ['metricType' => '5m', 'hostId' => self::HOST_B, 'siteId' => self::SITE_B, 'periods' => [
+                    ['metricTime' => '2026-07-23T13:35:00Z', 'data' => ['wan' => ['avgLatency' => 12, 'ispName' => 'Telus']]],
+                ]],
+                ['metricType' => '5m', 'hostId' => self::HOST_C, 'siteId' => self::SITE_C, 'periods' => [
+                    ['metricTime' => '2026-07-23T13:35:00Z', 'data' => ['wan' => ['avgLatency' => 200, 'ispName' => 'SomeoneElse']]],
+                ]],
+            ],
+            'httpStatusCode' => 200,
+        ])]);
+
+        $result = $this->toolset()->execute('unifi_get_isp_metrics', ['client_id' => $client->id, 'type' => '5m', 'duration' => '24h']);
+
+        $this->assertSame(2, $result['site_count']);
+        $bySite = collect($result['sites'])->keyBy('site_id');
+        $this->assertSame(41, $bySite[self::SITE_A]['periods'][0]['avg_latency_ms']);
+        $this->assertSame(12, $bySite[self::SITE_B]['periods'][0]['avg_latency_ms']);
+
+        $encoded = json_encode($result);
+        $this->assertStringNotContainsString('SomeoneElse', $encoded, 'a foreign site must never ride along');
+        $this->assertStringNotContainsString(self::SITE_C, $encoded);
+    }
+
     public function test_the_not_mapped_error_names_a_remediation_that_actually_exists(): void
     {
         // UX review (psa-zsn8p) R1 set the rule: an agent-facing error must name a
-        // recovery path that exists in the build. Originally that meant NOT naming a
-        // settings screen (none shipped); psa-g5l80 shipped Settings → Integrations →
-        // UniFi → Site Mapping, so the copy now points there and this test pins it.
-        $client = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => null]);
+        // recovery path that exists in the build. psa-g5l80 shipped Settings →
+        // Integrations → UniFi → Site Mapping, so the copy points there and this test
+        // pins it (and unifi_list_sites, which discovers the id).
+        $client = Client::factory()->create(['name' => 'Acme Co']);
         $this->bindClientReturning([]);
 
         $error = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id])['error'];
 
         $this->assertStringContainsString('Site Mapping', $error, 'name the mapping screen that now exists (psa-g5l80)');
-        $this->assertStringContainsString('unifi_site_id', $error, 'name the field the mapping writes');
         $this->assertStringContainsString('unifi_list_sites', $error, 'and the tool that discovers the id');
     }
 
@@ -268,7 +383,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
     #[\PHPUnit\Framework\Attributes\DataProvider('badTimeWindowProvider')]
     public function test_isp_metrics_reject_unsupported_time_windows_before_calling_upstream(array $input, string $expected): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         // Empty queue: any upstream call at all fails the test, which is the point —
         // the rejection must happen before we spend a request.
         $this->bindClientReturning([]);
@@ -277,12 +392,12 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
         $this->assertArrayHasKey('error', $result);
         $this->assertStringContainsString($expected, $result['error']);
-        $this->assertArrayNotHasKey('periods', $result);
+        $this->assertArrayNotHasKey('sites', $result);
     }
 
     public function test_isp_metrics_accept_a_valid_explicit_window(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([$this->jsonResponse([
             'data' => [['metricType' => '1h', 'hostId' => self::HOST_A, 'siteId' => self::SITE_A, 'periods' => []]],
             'httpStatusCode' => 200,
@@ -296,12 +411,12 @@ class UnifiReadOnlyToolsetTest extends TestCase
         ]);
 
         $this->assertArrayNotHasKey('error', $result);
-        $this->assertSame(self::SITE_A, $result['site_id']);
+        $this->assertSame(self::SITE_A, $result['sites'][0]['site_id']);
     }
 
     public function test_isp_metrics_reject_an_undocumented_interval_type(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([]);
 
         $result = $this->toolset()->execute('unifi_get_isp_metrics', ['client_id' => $client->id, 'type' => '1m']);
@@ -310,7 +425,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertStringContainsString('5m', $result['error']);
     }
 
-    // ── devices: host-grained, so shared consoles must refuse ──────────────────
+    // ── devices: host-grained, so a console must serve only this client's sites ─
 
     /** A /v1/sites page listing exactly the given siteId=>hostId pairs. */
     private function sitesOn(array $pairs): Response
@@ -329,11 +444,11 @@ class UnifiReadOnlyToolsetTest extends TestCase
     {
         // SECURITY review (psa-51mhv) R1 — the leak I missed. The original guard only
         // counted MAPPED PSA CLIENTS sharing a console. A console carrying two UniFi
-        // sites where only ONE is mapped passed that check, and /v1/devices (host-
-        // grained, no siteId on any row) then returned the OTHER site's hardware under
-        // this client. The boundary question is how many SITES the console serves, not
-        // how many of them we happen to have mapped.
-        $client = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        // sites where only ONE is this client's passed that check, and /v1/devices
+        // (host-grained, no siteId on any row) then returned the OTHER site's hardware
+        // under this client. The boundary question is which SITES the console serves,
+        // not how many of them we happen to have mapped.
+        $client = $this->mapSite(Client::factory()->create(['name' => 'Acme Co']), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning([
             $this->sitesOn([self::SITE_A => self::HOST_A, self::SITE_B => self::HOST_A]),
@@ -348,7 +463,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
     public function test_list_devices_returns_up_down_state_for_a_clients_console(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning([
             // Console serves exactly one site, so device attribution is unambiguous.
@@ -373,8 +488,124 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertSame(1, $result['offline_count']);
         $this->assertStringContainsString('HQ-AP-1', $result['devices'][0]['name']);
         $this->assertSame('online', $result['devices'][0]['status']);
+        $this->assertSame(self::HOST_A, $result['devices'][0]['host_id'], 'every device is tagged with its console');
         $this->assertSame('offline', $result['devices'][1]['status']);
         $this->assertSame('USW-24', $result['devices'][1]['model']);
+
+        // The console summary names which of the client's sites the console serves.
+        $this->assertCount(1, $result['consoles']);
+        $this->assertSame(self::HOST_A, $result['consoles'][0]['host_id']);
+        $this->assertSame([self::SITE_A], $result['consoles'][0]['site_ids']);
+    }
+
+    public function test_list_devices_aggregates_across_a_multi_site_clients_two_consoles(): void
+    {
+        // Two locations, one console each. The device list aggregates both, each device
+        // tagged with the console it came from, and the totals cover both.
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        $this->bindClientReturning([
+            // One sites listing serves the site-uniqueness proof for BOTH consoles.
+            $this->sitesOn([self::SITE_A => self::HOST_A, self::SITE_B => self::HOST_B]),
+            // devices for HOST_A
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'hq', 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP-1', 'status' => 'online'],
+                    ['id' => 'A2', 'mac' => 'AB', 'name' => 'HQ-SW-1', 'status' => 'offline'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+            // devices for HOST_B
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_B, 'hostName' => 'branch', 'devices' => [
+                    ['id' => 'B1', 'mac' => 'BA', 'name' => 'Branch-AP-1', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertSame(3, $result['count'], 'both consoles\' devices are aggregated');
+        $this->assertSame(1, $result['offline_count']);
+        $this->assertCount(2, $result['consoles']);
+
+        $macsByHost = collect($result['devices'])->groupBy('host_id')->map(fn ($d) => $d->pluck('mac')->all());
+        $this->assertSame(['AA', 'AB'], $macsByHost[self::HOST_A]);
+        $this->assertSame(['BA'], $macsByHost[self::HOST_B]);
+    }
+
+    public function test_list_devices_allows_a_console_serving_two_of_the_same_clients_sites(): void
+    {
+        // Both of the client's sites are on ONE console. Every site the console serves
+        // belongs to THIS client, so attribution to the client is unambiguous even
+        // though devices cannot be split between the two sites. The console is allowed;
+        // its site_ids name both.
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_A);
+
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A, self::SITE_B => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'shared', 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP-1', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame(1, $result['count']);
+        $this->assertCount(1, $result['consoles']);
+        $this->assertEqualsCanonicalizing([self::SITE_A, self::SITE_B], $result['consoles'][0]['site_ids']);
+    }
+
+    public function test_list_devices_skips_a_shared_console_but_still_returns_the_clean_one(): void
+    {
+        // THE BLEED TEST (psa-jpygj). A two-location client: HOST_A is clean, but HOST_B
+        // is ALSO mapped to another PSA client. The clean console's devices come back;
+        // the shared console is skipped WITH A REASON; and the other client's hardware
+        // is never fetched, let alone returned. Partial aggregation must stay safe.
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        // Another PSA client owns a site on HOST_B.
+        $this->mapSite(Client::factory()->create(['name' => 'Rival LLC']), self::SITE_C, self::HOST_B);
+
+        $this->bindClientReturning([
+            // Only HOST_A survives the DB cross-client guard, so only its uniqueness is
+            // proved and only its devices are fetched.
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'hq', 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP-1', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertSame(1, $result['count'], 'only the clean console\'s devices are returned');
+        $this->assertSame('AA', $result['devices'][0]['mac']);
+        $this->assertSame(self::HOST_A, $result['devices'][0]['host_id']);
+
+        // The shared console is surfaced, not silently dropped — the caller can see the
+        // gap and why (mirrors this file's "scream, never a clean empty" rule).
+        $this->assertArrayHasKey('skipped', $result);
+        $skippedHosts = collect($result['skipped'])->pluck('host_id')->all();
+        $this->assertContains(self::HOST_B, $skippedHosts);
+
+        // The rival's site and hardware never appear anywhere in the payload.
+        $encoded = json_encode($result);
+        $this->assertStringNotContainsString(self::SITE_C, $encoded);
+        $this->assertStringNotContainsString('Rival', $encoded);
     }
 
     public function test_list_devices_finds_a_console_that_lands_on_a_later_page(): void
@@ -382,7 +613,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
         // ARCH review (psa-5rizk) R1: /v1/devices is paginated, and reading only page 1
         // meant a console on page 2 produced a clean EMPTY device list — the confident
         // empty answer this surface is supposed to never give.
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning([
             $this->sitesOn([self::SITE_A => self::HOST_A]),
@@ -410,9 +641,10 @@ class UnifiReadOnlyToolsetTest extends TestCase
     {
         // Both clients live on ONE console. /v1/devices carries no siteId, so upstream
         // gives us nothing to split them by — answering would show each client the
-        // other's hardware.
-        $a = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
-        Client::factory()->create(['unifi_site_id' => self::SITE_B, 'unifi_host_id' => self::HOST_A]);
+        // other's hardware. This guard is a pure DB check and must fire BEFORE any
+        // upstream call (nothing is queued).
+        $a = $this->mapSite(Client::factory()->create(['name' => 'Acme Co']), self::SITE_A, self::HOST_A);
+        $this->mapSite(Client::factory()->create(['name' => 'Beta LLC']), self::SITE_B, self::HOST_A);
 
         $this->bindClientReturning([]);
 
@@ -449,13 +681,13 @@ class UnifiReadOnlyToolsetTest extends TestCase
     /**
      * ARCH review (psa-smns1) R2: the bounded walks returned whatever they had when the
      * page cap was reached with a cursor still outstanding — a partial answer wearing a
-     * success shape. For siteIdsOnHost that is worse than cosmetic: an unseen SECOND
-     * site on a later page would let the device uniqueness guard pass and attribute a
-     * whole console's hardware to the wrong client. Cap exhaustion must be an error.
+     * success shape. For the site-uniqueness proof that is worse than cosmetic: an
+     * unseen SECOND site on a later page would let a console pass the guard and attribute
+     * its hardware to the wrong client. Cap exhaustion must be an error.
      */
     public function test_site_lookup_that_exhausts_the_page_cap_errors_instead_of_reporting_not_found(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         // Pages full of OTHER sites, endlessly — ours is never reached.
         $this->bindClientReturning($this->endlessPages([
             ['siteId' => 'someone-else', 'hostId' => self::HOST_B, 'meta' => [], 'statistics' => []],
@@ -470,7 +702,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
     public function test_device_read_that_exhausts_the_page_cap_errors_instead_of_under_reporting(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning(array_merge(
             // site-uniqueness pre-check resolves cleanly on one page...
@@ -492,7 +724,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
         // THE SECURITY EDGE: if the walk gives up early having seen only one site on
         // this console, the uniqueness guard would wrongly pass and devices would be
         // attributed to this client. It must refuse instead.
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning($this->endlessPages([
             ['siteId' => self::SITE_A, 'hostId' => self::HOST_A, 'meta' => [], 'statistics' => []],
@@ -511,7 +743,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
         // siteId was silently skipped. If that row is a real second site, the console
         // is multi-site but we would count one, pass the uniqueness guard, and hand
         // over its hardware. Unprovable attribution must fail closed, not fall through.
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning([$this->jsonResponse([
             'data' => [
@@ -531,7 +763,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
     {
         // SECURITY review (psa-2mgit) R2, non-blocking note: explicit begin/end strings
         // reached the vendor unvalidated. Cheap to close locally.
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([]);
 
         $result = $this->toolset()->execute('unifi_get_isp_metrics', [
@@ -550,7 +782,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
     public function test_every_tool_refuses_when_the_integration_is_switched_off(): void
     {
         Setting::setValue('unifi_enabled', '0');
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([]);
 
         foreach (['unifi_list_sites', 'unifi_get_site_health', 'unifi_list_devices', 'unifi_get_isp_metrics'] as $tool) {
@@ -563,7 +795,7 @@ class UnifiReadOnlyToolsetTest extends TestCase
     {
         // A device name is attacker-controllable: anyone who can rename an access point
         // on the client's network can plant text that an LLM reads as instructions.
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
 
         $this->bindClientReturning([
             $this->sitesOn([self::SITE_A => self::HOST_A]),
@@ -595,12 +827,12 @@ class UnifiReadOnlyToolsetTest extends TestCase
 
     public function test_an_upstream_failure_is_reported_not_returned_as_an_empty_result(): void
     {
-        $client = Client::factory()->create(['unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
         $this->bindClientReturning([new Response(500, [], 'upstream boom')]);
 
         $result = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id]);
 
         $this->assertArrayHasKey('error', $result);
-        $this->assertArrayNotHasKey('isp_name', $result);
+        $this->assertArrayNotHasKey('sites', $result);
     }
 }

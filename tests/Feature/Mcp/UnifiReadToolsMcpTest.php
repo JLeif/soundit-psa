@@ -133,7 +133,8 @@ class UnifiReadToolsMcpTest extends TestCase
     public function test_get_site_health_roundtrips_and_stays_scoped_to_the_mapped_site(): void
     {
         $this->configureUnifi();
-        $client = Client::factory()->create(['name' => 'Acme', 'unifi_site_id' => self::SITE_A]);
+        $client = Client::factory()->create(['name' => 'Acme']);
+        \App\Models\ClientUnifiSite::create(['client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => 'host-1']);
 
         $mock = Mockery::mock(UnifiClient::class);
         $mock->shouldReceive('listSites')->andReturn([
@@ -160,8 +161,11 @@ class UnifiReadToolsMcpTest extends TestCase
 
         $result = $this->decodedResult($response);
         $this->assertSame('Acme', $result['psa_client_name']);
-        $this->assertSame(88, $result['wan_uptime_percent']);
-        $this->assertSame(2, $result['counts']['offlineDevice']);
-        $this->assertStringContainsString('Comcast', $result['isp_name']);
+        $this->assertSame(1, $result['site_count']);
+        $site = $result['sites'][0];
+        $this->assertSame(self::SITE_A, $site['site_id']);
+        $this->assertSame(88, $site['wan_uptime_percent']);
+        $this->assertSame(2, $site['counts']['offlineDevice']);
+        $this->assertStringContainsString('Comcast', $site['isp_name']);
     }
 }

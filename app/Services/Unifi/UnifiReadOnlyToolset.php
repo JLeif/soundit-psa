@@ -3,12 +3,14 @@
 namespace App\Services\Unifi;
 
 use App\Models\Client;
+use App\Models\ClientUnifiSite;
 use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Support\UnifiConfig;
 use Illuminate\Support\Facades\Log;
 
 /**
- * UniFi read-only network telemetry tools for the staff MCP surface (psa-1ynqc).
+ * UniFi read-only network telemetry tools for the staff MCP surface (psa-1ynqc),
+ * MULTI-SITE per client (psa-jpygj).
  *
  * Motivating incident: T-22724, a Comcast WAN fault whose root cause required a human
  * to open the UniFi console by hand because the agent had no way to see WAN state.
@@ -18,27 +20,38 @@ use Illuminate\Support\Facades\Log;
  * inference. See UnifiClient's docblock for the four shape facts that matter and
  * tests/Fixtures/unifi/*.json for the vendor payloads the tests assert against.
  *
+ * MULTI-SITE: a PSA client can map to MANY UniFi sites (several physical locations).
+ * Mappings live in client_unifi_sites (client_id, unifi_site_id UNIQUE so a site still
+ * maps to <=1 client, unifi_host_id), NEVER on the client row. The client-scoped tools
+ * AGGREGATE across a client's sites and present ONE consistent shape whatever the count:
+ * a per-site array (site_count + sites[]) for the site-grained tools, and a flat device
+ * list where each row is tagged with its console for the host-grained one.
+ *
  * DATA-BOUNDARY RULE (mirrors HuntressReadOnlyToolset — a UI account can administer
  * consoles belonging to more than one client, and in principle more than one MSP):
  *  - Site METADATA is account-wide and annotated with its mapped PSA client (or null),
  *    so a human can discover what still needs mapping. Metadata ONLY — no telemetry.
- *  - TELEMETRY (health, devices, ISP metrics) is MAPPED-SITES-ONLY, resolved from
- *    clients.unifi_site_id / clients.unifi_host_id — never from tool input.
+ *  - TELEMETRY (health, devices, ISP metrics) is MAPPED-SITES-ONLY, resolved from the
+ *    caller client's own client_unifi_sites rows — never from tool input.
  *
  * TWO SCOPING HAZARDS THE UPSTREAM API CREATES, both handled here rather than papered
  * over — read these before changing any filter:
  *  1. GET /v1/isp-metrics/{type} accepts NO site filter. It returns one row per visible
- *     site, each tagged {hostId, siteId}. We filter to the caller's site ourselves;
- *     handing the response back unfiltered would leak every other client's WAN data.
+ *     site, each tagged {hostId, siteId}. We filter to the caller's SET of sites
+ *     ourselves; handing the response back unfiltered would leak every other client's
+ *     WAN data.
  *  2. GET /v1/devices is grouped by HOST and carries NO siteId anywhere. A device is
- *     therefore only attributable to a client through its console, and ONLY when that
- *     console serves exactly ONE UniFi site. unifi_list_devices proves that upstream
- *     (siteIdsOnHost) before returning anything and REFUSES otherwise.
+ *     therefore only attributable to a client through its console, and ONLY when every
+ *     UniFi site that console serves belongs to THAT ONE client. unifi_list_devices
+ *     proves that upstream (siteIdsByHost) before returning anything and skips any
+ *     console that fails it.
  *     The test that matters: counting how many PSA CLIENTS share the console is NOT
- *     sufficient — a console carrying two UniFi sites where only one is mapped passes
- *     that check, and every device on the console would then be returned under the
- *     mapped client. The question is how many SITES the console serves, not how many
- *     of them we happen to have mapped. (Caught in review as psa-51mhv R1.)
+ *     sufficient — a console carrying two UniFi sites where only one is this client's
+ *     passes that check, and every device on the console would then be returned under
+ *     the client. The question is which SITES the console serves, not how many of them
+ *     we happen to have mapped. (Caught in review as psa-51mhv R1.) A console serving
+ *     several sites is fine IFF they are all this client's (psa-jpygj) — attribution to
+ *     the client is then unambiguous even though devices cannot be split between sites.
  *
  * READ-ONLY. The spec also exposes /v1/connector/consoles/{id}/*path — a generic
  * passthrough to a console's local Network API supporting POST/PUT/PATCH/DELETE. It is
@@ -86,7 +99,7 @@ class UnifiReadOnlyToolset
         return [
             [
                 'name' => 'unifi_list_sites',
-                'description' => 'List UniFi sites across every console the UniFi account administers, each annotated with its mapped PSA client (or null when unmapped). Use this to resolve a PSA client to its UniFi site and to discover sites that still need mapping. Returns site metadata only — no health, ISP or device data; use unifi_get_site_health for a mapped client.',
+                'description' => 'List UniFi sites across every console the UniFi account administers, each annotated with its mapped PSA client (or null when unmapped). Use this to resolve a PSA client to its UniFi site(s) — a client with several locations maps to several sites — and to discover sites that still need mapping. Returns site metadata only — no health, ISP or device data; use unifi_get_site_health for a mapped client.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -105,18 +118,18 @@ class UnifiReadOnlyToolset
         return [
             [
                 'name' => 'unifi_get_site_health',
-                'description' => "Get current network health for a PSA client's mapped UniFi site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem.",
+                'description' => 'Get current network health for every UniFi site mapped to a PSA client — a client with several locations returns one entry per site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem. Results are a per-site array (site_count + sites[]).',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID. The client must be mapped to a UniFi site.'],
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID. The client must be mapped to at least one UniFi site.'],
                     ],
                     'required' => ['client_id'],
                 ],
             ],
             [
                 'name' => 'unifi_list_devices',
-                'description' => "List UniFi devices (gateways, switches, access points) on a PSA client's console with their up/down status, model, IP, firmware status and uptime. Use this to find which access point or switch is offline.",
+                'description' => "List UniFi devices (gateways, switches, access points) across a PSA client's console(s) with their up/down status, model, IP, firmware status and uptime. Use this to find which access point or switch is offline. Each device is tagged with the console (host_id) it belongs to; any console that cannot be safely attributed to this client alone is reported under skipped rather than guessed at.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -128,7 +141,7 @@ class UnifiReadOnlyToolset
             ],
             [
                 'name' => 'unifi_get_isp_metrics',
-                'description' => "Get WAN/ISP telemetry over time for a PSA client's mapped UniFi site: average and peak latency, packet loss, downtime, and throughput per sample period, plus the ISP name and ASN. Use this to evidence or rule out an ISP fault — it answers 'was the internet actually down, and when'.",
+                'description' => "Get WAN/ISP telemetry over time for each UniFi site mapped to a PSA client: average and peak latency, packet loss, downtime, and throughput per sample period, plus the ISP name and ASN. Use this to evidence or rule out an ISP fault — it answers 'was the internet actually down, and when'. Results are a per-site array (site_count + sites[], each with its periods).",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -229,7 +242,7 @@ class UnifiReadOnlyToolset
         ];
     }
 
-    // ── telemetry (mapped-sites-only) ──────────────────────────────────────────
+    // ── telemetry (mapped-sites-only), aggregated across a client's sites ───────
 
     /**
      * @param  array<string, mixed>  $input
@@ -242,32 +255,54 @@ class UnifiReadOnlyToolset
             return $client; // error payload
         }
 
+        $mappings = $client->unifiSites;
+        $targetIds = $mappings->pluck('unifi_site_id')->all();
+
         try {
-            $row = $this->findSiteRow($client->unifi_site_id);
+            // One bounded sites walk covers every site the client maps.
+            $rows = $this->collectSiteRows($targetIds);
         } catch (\Throwable $e) {
             return $this->apiError($e);
         }
 
-        if ($row === null) {
-            return ['error' => "UniFi site {$client->unifi_site_id} (mapped to {$client->name}) was not found on this UniFi account."];
-        }
+        $sites = [];
+        foreach ($mappings as $mapping) {
+            $row = $rows[$mapping->unifi_site_id] ?? null;
 
-        $stats = is_array($row['statistics'] ?? null) ? $row['statistics'] : [];
+            if ($row === null) {
+                // Natural cursor exhaustion without this site = it is genuinely gone
+                // upstream (cap exhaustion would have thrown above, not landed here).
+                // Surface the gap per-site rather than sinking the whole read.
+                $sites[] = [
+                    'site_id' => $mapping->unifi_site_id,
+                    'error' => "UniFi site {$mapping->unifi_site_id} was not found on this UniFi account.",
+                ];
+
+                continue;
+            }
+
+            $stats = is_array($row['statistics'] ?? null) ? $row['statistics'] : [];
+
+            $sites[] = [
+                'site_id' => $this->scalarOrNull($row['siteId'] ?? null),
+                'host_id' => $this->scalarOrNull($row['hostId'] ?? null),
+                'site_name' => $this->textSanitizer->sanitizeNullable('UniFi site name', $row['meta']['name'] ?? null, 200),
+                'isp_name' => $this->textSanitizer->sanitizeNullable('UniFi ISP name', $stats['ispInfo']['name'] ?? null, 200),
+                'isp_organization' => $this->textSanitizer->sanitizeNullable('UniFi ISP organization', $stats['ispInfo']['organization'] ?? null, 200),
+                'wan_uptime_percent' => $this->numberOrNull($stats['percentages']['wanUptime'] ?? null),
+                // Element shape is unverified — the vendor example carries an empty array —
+                // so this is passed through the bounded leaf-sanitizer, never field-projected.
+                'internet_issues' => $this->sanitizeStructure('UniFi internet issue', $stats['internetIssues'] ?? []),
+                'gateway_model' => $this->scalarOrNull($stats['gateway']['shortname'] ?? null),
+                'counts' => $this->scalarMap($stats['counts'] ?? null),
+            ];
+        }
 
         return [
             'psa_client_id' => $client->id,
             'psa_client_name' => $client->name,
-            'site_id' => $this->scalarOrNull($row['siteId'] ?? null),
-            'host_id' => $this->scalarOrNull($row['hostId'] ?? null),
-            'site_name' => $this->textSanitizer->sanitizeNullable('UniFi site name', $row['meta']['name'] ?? null, 200),
-            'isp_name' => $this->textSanitizer->sanitizeNullable('UniFi ISP name', $stats['ispInfo']['name'] ?? null, 200),
-            'isp_organization' => $this->textSanitizer->sanitizeNullable('UniFi ISP organization', $stats['ispInfo']['organization'] ?? null, 200),
-            'wan_uptime_percent' => $this->numberOrNull($stats['percentages']['wanUptime'] ?? null),
-            // Element shape is unverified — the vendor example carries an empty array —
-            // so this is passed through the bounded leaf-sanitizer, never field-projected.
-            'internet_issues' => $this->sanitizeStructure('UniFi internet issue', $stats['internetIssues'] ?? []),
-            'gateway_model' => $this->scalarOrNull($stats['gateway']['shortname'] ?? null),
-            'counts' => $this->scalarMap($stats['counts'] ?? null),
+            'site_count' => count($sites),
+            'sites' => $sites,
         ];
     }
 
@@ -282,96 +317,168 @@ class UnifiReadOnlyToolset
             return $client;
         }
 
-        $hostId = $client->unifi_host_id;
-        if ($hostId === null || $hostId === '') {
-            return ['error' => "{$client->name} is mapped to a UniFi site but not to a console (unifi_host_id), and device state is reported per console. Set the console mapping to use this tool."];
+        // Group the client's site mappings by console. Device state is reported per
+        // console, so a site with no console mapping cannot contribute devices.
+        $sitesByHost = [];
+        $skipped = [];
+        foreach ($client->unifiSites as $mapping) {
+            $host = $mapping->unifi_host_id;
+            if ($host === null || $host === '') {
+                $skipped[] = [
+                    'site_ids' => [$mapping->unifi_site_id],
+                    'reason' => "site {$mapping->unifi_site_id} has no console (host) mapping, and device state is reported per console",
+                ];
+
+                continue;
+            }
+            $sitesByHost[$host][] = $mapping->unifi_site_id;
         }
 
-        // Hazard 2: /v1/devices has no siteId. If this console serves more than one
-        // mapped client, upstream gives us nothing to split its devices by — answering
-        // would show this client another client's hardware. Refuse instead.
-        $sharing = Client::where('unifi_host_id', $hostId)
-            ->whereNotNull('unifi_site_id')
-            ->pluck('name')
-            ->all();
-
-        if (count($sharing) > 1) {
-            return ['error' => 'That UniFi console is mapped to more than one PSA client ('.implode(', ', $sharing).') and UniFi does not report a site for each device, so devices cannot be attributed to a single client. Map each client to its own console, or read device state in the UniFi UI.'];
+        if ($sitesByHost === []) {
+            return ['error' => "{$client->name} is mapped to UniFi site(s) but none has a console (unifi_host_id), and device state is reported per console. Set the console mapping to read devices."];
         }
 
-        // THE ACTUAL BOUNDARY: how many UniFi SITES this console serves — not how many
-        // of them we happen to have mapped. /v1/devices is host-grained with no siteId
-        // on any row, so devices are attributable to one client only when the console
-        // serves exactly one site. The PSA-mapping check above is a weaker signal: a
-        // console with two sites where only ONE is mapped passes it, and we would then
-        // return the unmapped site's hardware under this client. Prove uniqueness
-        // upstream and fail closed on anything else.
-        try {
-            $siteIds = $this->siteIdsOnHost($hostId);
-        } catch (\Throwable $e) {
-            return $this->apiError($e);
-        }
+        // GUARD 1 (pure DB, BEFORE any upstream call): a console mapped to ANOTHER PSA
+        // client cannot be split (/v1/devices carries no siteId), so skip it. Doing this
+        // first means a wholly-shared client never spends a request — and it is what the
+        // empty-queue "shared console" test pins.
+        $cleanHosts = [];
+        foreach ($sitesByHost as $host => $siteIds) {
+            $sharedWithOther = ClientUnifiSite::where('unifi_host_id', $host)
+                ->where('client_id', '!=', $client->id)
+                ->exists();
 
-        if (count($siteIds) === 0) {
-            return ['error' => "No UniFi site was found on the console mapped to {$client->name} (unifi_host_id). Verify the console mapping — device attribution cannot be confirmed without it."];
-        }
+            if ($sharedWithOther) {
+                $skipped[] = [
+                    'host_id' => $host,
+                    'site_ids' => $siteIds,
+                    'reason' => 'that UniFi console is shared with another PSA client, and UniFi does not report a site for each device, so its devices cannot be attributed to a single client',
+                ];
 
-        if (count($siteIds) > 1) {
-            return ['error' => 'That UniFi console serves more than one UniFi site ('.count($siteIds).'), and UniFi does not report a site for each device, so devices cannot be attributed to a single client. Read device state in the UniFi UI, or split the sites across separate consoles.'];
-        }
-
-        if ($siteIds[0] !== $client->unifi_site_id) {
-            return ['error' => "{$client->name} is mapped to site {$client->unifi_site_id}, but its mapped console serves a different site ({$siteIds[0]}). Correct the unifi_site_id / unifi_host_id mapping before reading devices."];
-        }
-
-        try {
-            $groups = $this->deviceGroupsForHost($hostId);
-        } catch (\Throwable $e) {
-            return $this->apiError($e);
-        }
-
-        $devices = $this->client()->flattenDevices($groups);
-
-        $statusFilter = strtolower(trim((string) ($input['status'] ?? '')));
-
-        $rows = [];
-        $offline = 0;
-        foreach ($devices as $device) {
-            $status = $this->scalarOrNull($device['status'] ?? null);
-
-            if ($statusFilter !== '' && strtolower((string) $status) !== $statusFilter) {
                 continue;
             }
 
-            if (is_string($status) && strtolower($status) !== 'online') {
-                $offline++;
-            }
-
-            $rows[] = [
-                'id' => $this->scalarOrNull($device['id'] ?? null),
-                'mac' => $this->scalarOrNull($device['mac'] ?? null),
-                'name' => $this->textSanitizer->sanitizeNullable('UniFi device name', $device['name'] ?? null, 200),
-                'model' => $this->scalarOrNull($device['model'] ?? null),
-                'status' => $status,
-                'ip' => $this->scalarOrNull($device['ip'] ?? null),
-                'product_line' => $this->scalarOrNull($device['productLine'] ?? null),
-                'firmware_version' => $this->scalarOrNull($device['version'] ?? null),
-                'firmware_status' => $this->scalarOrNull($device['firmwareStatus'] ?? null),
-                'is_console' => (bool) ($device['isConsole'] ?? false),
-                'is_managed' => (bool) ($device['isManaged'] ?? false),
-                'startup_time' => $this->scalarOrNull($device['startupTime'] ?? null),
-                'note' => $this->textSanitizer->sanitizeNullable('UniFi device note', $device['note'] ?? null, 500),
-            ];
+            $cleanHosts[$host] = $siteIds;
         }
 
-        return [
+        if ($cleanHosts === []) {
+            return ['error' => $this->noConsoleReadableError($client->name, $skipped)];
+        }
+
+        $statusFilter = strtolower(trim((string) ($input['status'] ?? '')));
+
+        $devices = [];
+        $consoles = [];
+        $offline = 0;
+
+        try {
+            // One sites walk proves which UniFi sites each of the client's consoles
+            // serves. An upstream failure or cap exhaustion here (or in a device walk
+            // below) is an INFRA failure — it hard-errors the whole read rather than
+            // returning a partial list wearing a success shape. A per-console
+            // ATTRIBUTION refusal, by contrast, is a skip (recorded, never thrown).
+            $servedByHost = $this->siteIdsByHost(array_keys($cleanHosts));
+
+            foreach ($cleanHosts as $host => $clientSiteIds) {
+                $servedSites = $servedByHost[$host] ?? [];
+
+                if ($servedSites === []) {
+                    $skipped[] = [
+                        'host_id' => $host,
+                        'site_ids' => $clientSiteIds,
+                        'reason' => 'no UniFi site was found on that console, so device attribution cannot be confirmed',
+                    ];
+
+                    continue;
+                }
+
+                // THE BOUNDARY: every site the console serves must belong to THIS client.
+                // A console serving any foreign/unmapped site is refused — its hardware
+                // cannot be split by site, so returning it would leak the other site's
+                // devices. A console serving several of THIS client's sites is fine.
+                $foreign = array_values(array_diff($servedSites, $clientSiteIds));
+                if ($foreign !== []) {
+                    $skipped[] = [
+                        'host_id' => $host,
+                        'site_ids' => $clientSiteIds,
+                        'reason' => count($servedSites) > 1
+                            ? 'that UniFi console serves more than one UniFi site ('.count($servedSites).') and at least one is not mapped to this client, so its devices cannot be attributed to this client'
+                            : "that UniFi console serves a different UniFi site ({$foreign[0]}) than the one mapped to this client; correct the site/console mapping",
+                    ];
+
+                    continue;
+                }
+
+                $groups = $this->deviceGroupsForHost($host);
+                $hostDevices = $this->client()->flattenDevices($groups);
+
+                $hostCount = 0;
+                $hostOffline = 0;
+                foreach ($hostDevices as $device) {
+                    $status = $this->scalarOrNull($device['status'] ?? null);
+
+                    if ($statusFilter !== '' && strtolower((string) $status) !== $statusFilter) {
+                        continue;
+                    }
+
+                    if (is_string($status) && strtolower($status) !== 'online') {
+                        $offline++;
+                        $hostOffline++;
+                    }
+
+                    $devices[] = [
+                        'host_id' => $host,
+                        'id' => $this->scalarOrNull($device['id'] ?? null),
+                        'mac' => $this->scalarOrNull($device['mac'] ?? null),
+                        'name' => $this->textSanitizer->sanitizeNullable('UniFi device name', $device['name'] ?? null, 200),
+                        'model' => $this->scalarOrNull($device['model'] ?? null),
+                        'status' => $status,
+                        'ip' => $this->scalarOrNull($device['ip'] ?? null),
+                        'product_line' => $this->scalarOrNull($device['productLine'] ?? null),
+                        'firmware_version' => $this->scalarOrNull($device['version'] ?? null),
+                        'firmware_status' => $this->scalarOrNull($device['firmwareStatus'] ?? null),
+                        'is_console' => (bool) ($device['isConsole'] ?? false),
+                        'is_managed' => (bool) ($device['isManaged'] ?? false),
+                        'startup_time' => $this->scalarOrNull($device['startupTime'] ?? null),
+                        'note' => $this->textSanitizer->sanitizeNullable('UniFi device note', $device['note'] ?? null, 500),
+                    ];
+                    $hostCount++;
+                }
+
+                $consoles[] = [
+                    'host_id' => $host,
+                    'site_ids' => array_values($clientSiteIds),
+                    'count' => $hostCount,
+                    'offline_count' => $hostOffline,
+                ];
+            }
+        } catch (\Throwable $e) {
+            return $this->apiError($e);
+        }
+
+        // Every console the client has was refused — fail closed with the reasons,
+        // never a clean empty device list (this file's "scream, never a false all-clear"
+        // rule). Preserves the single-console refusal contract too.
+        if ($consoles === []) {
+            return ['error' => $this->noConsoleReadableError($client->name, $skipped)];
+        }
+
+        $out = [
             'psa_client_id' => $client->id,
             'psa_client_name' => $client->name,
-            'host_id' => $hostId,
-            'count' => count($rows),
+            'count' => count($devices),
             'offline_count' => $offline,
-            'devices' => $rows,
+            'consoles' => $consoles,
+            'devices' => $devices,
         ];
+
+        // A partial read must SAY what it could not attribute — a skipped console is a
+        // gap the agent has to see, not one to hide behind a clean count.
+        if ($skipped !== []) {
+            $out['skipped'] = $skipped;
+        }
+
+        return $out;
     }
 
     /**
@@ -443,11 +550,14 @@ class UnifiReadOnlyToolset
         }
 
         // Hazard 1: the endpoint has no site filter and returns every visible site.
-        // Scope to the caller's site here — this filter is the data boundary.
-        $siteId = $client->unifi_site_id;
-        $periods = [];
+        // Scope to the caller's SET of sites here — this filter is the data boundary.
+        $clientSiteIds = $client->unifiSites->pluck('unifi_site_id');
+        $clientSiteSet = array_flip($clientSiteIds->all());
+
+        $periodsBySite = [];
         foreach ($this->rows($response) as $row) {
-            if (($row['siteId'] ?? null) !== $siteId) {
+            $siteId = $row['siteId'] ?? null;
+            if (! is_string($siteId) || ! isset($clientSiteSet[$siteId])) {
                 continue;
             }
 
@@ -457,7 +567,7 @@ class UnifiReadOnlyToolset
                 }
                 $wan = is_array($period['data']['wan'] ?? null) ? $period['data']['wan'] : [];
 
-                $periods[] = [
+                $periodsBySite[$siteId][] = [
                     'metric_time' => $this->scalarOrNull($period['metricTime'] ?? null),
                     'avg_latency_ms' => $this->numberOrNull($wan['avgLatency'] ?? null),
                     'max_latency_ms' => $this->numberOrNull($wan['maxLatency'] ?? null),
@@ -474,13 +584,20 @@ class UnifiReadOnlyToolset
             }
         }
 
+        $sites = [];
+        foreach ($client->unifiSites as $mapping) {
+            $sites[] = [
+                'site_id' => $mapping->unifi_site_id,
+                'periods' => $periodsBySite[$mapping->unifi_site_id] ?? [],
+            ];
+        }
+
         return [
             'psa_client_id' => $client->id,
             'psa_client_name' => $client->name,
-            'site_id' => $siteId,
             'interval' => $type,
-            'count' => count($periods),
-            'periods' => $periods,
+            'site_count' => count($sites),
+            'sites' => $sites,
         ];
     }
 
@@ -488,7 +605,8 @@ class UnifiReadOnlyToolset
 
     /**
      * Resolve the PSA client for a client-scoped tool and prove it is UniFi-mapped.
-     * Returns the Client, or an error payload array to hand straight back.
+     * Returns the Client (with its unifiSites loaded on demand), or an error payload
+     * array to hand straight back.
      *
      * @param  array<string, mixed>  $input
      * @return Client|array<string, mixed>
@@ -505,12 +623,11 @@ class UnifiReadOnlyToolset
             return ['error' => "PSA client {$id} was not found."];
         }
 
-        if (empty($client->unifi_site_id)) {
+        if ($client->unifiSites()->count() === 0) {
             // Name a remediation that EXISTS (UX rule from psa-zsn8p R1 — this copy
             // once pointed at a screen no build shipped and dead-ended the agent).
-            // psa-g5l80 shipped that screen: Settings → Integrations → UniFi → Site
-            // Mapping, which writes clients.unifi_site_id + unifi_host_id as a pair.
-            return ['error' => "{$client->name} is not mapped to a UniFi site. An operator can map it in Settings → Integrations → UniFi → Site Mapping, which sets clients.unifi_site_id (and unifi_host_id, needed for device reads) from the live site list. To find the right site first, run unifi_list_sites — it annotates every site with its mapped PSA client."];
+            // psa-g5l80 shipped Settings → Integrations → UniFi → Site Mapping.
+            return ['error' => "{$client->name} is not mapped to a UniFi site. An operator can map it in Settings → Integrations → UniFi → Site Mapping, which links the client to one or more UniFi sites (and their consoles, needed for device reads) from the live site list. To find the right site first, run unifi_list_sites — it annotates every site with its mapped PSA client."];
         }
 
         return $client;
@@ -557,11 +674,11 @@ class UnifiReadOnlyToolset
      * cursor still outstanding). Returning what we had in the second case produces a
      * partial answer wearing a success shape, which this surface must never do.
      *
-     * For siteIdsOnHost() it is worse than cosmetic: a second site on a page we never
-     * fetched would leave the console looking single-site, letting the device
-     * uniqueness guard pass and attributing a whole console's hardware to the wrong
-     * client. Both the arch and security lanes independently found this (psa-smns1 /
-     * psa-2mgit R2), which is why it throws rather than warns.
+     * For siteIdsByHost() it is worse than cosmetic: a second site on a page we never
+     * fetched would leave a console looking single-site, letting the device attribution
+     * guard pass and attributing a whole console's hardware to the wrong client. Both
+     * the arch and security lanes independently found this (psa-smns1 / psa-2mgit R2),
+     * which is why it throws rather than warns.
      *
      * $consume may return false to stop early — that is a satisfied search, not a
      * degraded read, so it does not throw.
@@ -595,70 +712,76 @@ class UnifiReadOnlyToolset
     }
 
     /**
-     * Every UniFi site id served by one console, walking the cursor a bounded number
-     * of pages. Used to prove device attribution is unambiguous before any device is
+     * Every UniFi site id each of the given consoles serves, from ONE bounded sites
+     * walk. Used to prove device attribution is unambiguous before any device is
      * returned — see the boundary note in listDevices().
      *
-     * @return array<int, string>
+     * A row on a TARGET console carrying a null/empty site id makes attribution
+     * unprovable (it may be a real second site), so it fails closed rather than being
+     * skipped (psa-2mgit R2). Cap exhaustion throws via walkPages, for the same reason.
+     *
+     * @param  array<int, string>  $hostIds
+     * @return array<string, array<int, string>> host id => the site ids it serves
      */
-    private function siteIdsOnHost(string $hostId): array
+    private function siteIdsByHost(array $hostIds): array
     {
-        $siteIds = [];
+        $targets = array_flip($hostIds);
+        $byHost = [];
 
         $this->walkPages(
             'sites',
             fn (array $params) => $this->client()->listSites($params),
-            function (array $rows) use ($hostId, &$siteIds) {
+            function (array $rows) use ($targets, &$byHost) {
                 foreach ($rows as $row) {
-                    if (($row['hostId'] ?? null) !== $hostId) {
+                    $hostId = $row['hostId'] ?? null;
+                    if (! is_string($hostId) || ! isset($targets[$hostId])) {
                         continue;
                     }
 
                     $siteId = $row['siteId'] ?? null;
-
-                    // A row on THIS console with no usable site id makes attribution
-                    // unprovable: it may be a second site, in which case skipping it
-                    // would let a multi-site console pass the uniqueness guard. Fail
-                    // closed instead of ignoring it (psa-2mgit R2).
                     if (! is_string($siteId) || $siteId === '') {
                         throw new UnifiClientException(
                             'UniFi returned a site on this console with no usable site id, so device attribution cannot be proven. Refusing the read.'
                         );
                     }
 
-                    $siteIds[$siteId] = true;
-                }
-            },
-        );
-
-        return array_keys($siteIds);
-    }
-
-    /**
-     * Locate one site row by id, walking the cursor a bounded number of pages.
-     *
-     * @return array<string, mixed>|null
-     */
-    private function findSiteRow(string $siteId): ?array
-    {
-        $found = null;
-
-        // Cap exhaustion throws (see walkPages): giving up early would turn an
-        // unreached later page into a confident "site not found", which is a different
-        // and wrong answer.
-        $this->walkPages(
-            'sites',
-            fn (array $params) => $this->client()->listSites($params),
-            function (array $rows) use ($siteId, &$found) {
-                foreach ($rows as $row) {
-                    if (($row['siteId'] ?? null) === $siteId) {
-                        $found = $row;
-
-                        return false; // satisfied search, stop without throwing
-                    }
+                    $byHost[$hostId][$siteId] = true;
                 }
 
                 return null;
+            },
+        );
+
+        return array_map(fn (array $set) => array_keys($set), $byHost);
+    }
+
+    /**
+     * Locate the requested site rows by id, walking the cursor a bounded number of
+     * pages and stopping as soon as all are found. A target that never appears before
+     * natural cursor exhaustion is simply absent from the returned map (genuinely gone);
+     * cap exhaustion throws via walkPages so "we didn't finish looking" can never read
+     * as "not found".
+     *
+     * @param  array<int, string>  $siteIds
+     * @return array<string, array<string, mixed>> site id => row
+     */
+    private function collectSiteRows(array $siteIds): array
+    {
+        $targets = array_flip($siteIds);
+        $found = [];
+
+        $this->walkPages(
+            'sites',
+            fn (array $params) => $this->client()->listSites($params),
+            function (array $rows) use ($targets, &$found) {
+                foreach ($rows as $row) {
+                    $siteId = $row['siteId'] ?? null;
+                    if (is_string($siteId) && isset($targets[$siteId])) {
+                        $found[$siteId] = $row;
+                    }
+                }
+
+                return count($found) >= count($targets) ? false : null;
             },
         );
 
@@ -668,9 +791,30 @@ class UnifiReadOnlyToolset
     /** @return \Illuminate\Support\Collection<string, Client> PSA clients keyed by unifi_site_id. */
     private function mappedClientsBySiteId(): \Illuminate\Support\Collection
     {
-        return Client::whereNotNull('unifi_site_id')
-            ->get(['id', 'name', 'unifi_site_id', 'unifi_host_id'])
+        // Source of truth is the pivot (client_unifi_sites); a client may key several
+        // rows. Joining through Client::query() keeps the soft-delete scope, so a
+        // trashed client's sites read as unmapped — same as before the pivot.
+        return Client::query()
+            ->join('client_unifi_sites', 'client_unifi_sites.client_id', '=', 'clients.id')
+            ->get(['clients.id', 'clients.name', 'client_unifi_sites.unifi_site_id'])
             ->keyBy('unifi_site_id');
+    }
+
+    /**
+     * The fail-closed error for a device read where no console could be attributed —
+     * always names "console" and folds in every per-console reason, so the record can
+     * never read as a clean all-clear.
+     *
+     * @param  array<int, array<string, mixed>>  $skipped
+     */
+    private function noConsoleReadableError(string $clientName, array $skipped): string
+    {
+        $reasons = array_map(
+            fn (array $s) => (isset($s['host_id']) ? $s['host_id'].': ' : '').($s['reason'] ?? 'unavailable'),
+            $skipped,
+        );
+
+        return "No UniFi console could be read for {$clientName}. ".implode('; ', $reasons).'.';
     }
 
     // ── plumbing ───────────────────────────────────────────────────────────────
