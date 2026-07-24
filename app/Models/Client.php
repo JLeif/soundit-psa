@@ -185,6 +185,15 @@ class Client extends Model
         return $this->hasMany(Client::class, 'reseller_id');
     }
 
+    /**
+     * UniFi sites mapped to this client (psa-jpygj: one-to-MANY). Supersedes the
+     * single unifi_site_id/unifi_host_id columns; a site maps to at most one client.
+     */
+    public function unifiSites(): HasMany
+    {
+        return $this->hasMany(ClientUnifiSite::class);
+    }
+
     // ── Scopes ──
 
     public function scopeActive(Builder $query): Builder
