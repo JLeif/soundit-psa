@@ -78,6 +78,7 @@ class TechnicianCockpitController extends Controller
             'tactical_stage_shutdown',
             'tactical_stage_recover_mesh',
             'tactical_stage_maintenance',
+            'tactical_stage_open_remote_control',
             'tactical_stage_start_service',
             'tactical_stage_stop_service',
             'tactical_stage_restart_service',

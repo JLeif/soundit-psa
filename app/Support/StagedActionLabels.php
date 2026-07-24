@@ -49,6 +49,7 @@ class StagedActionLabels
         'tactical_stage_shutdown' => 'Tactical shutdown',
         'tactical_stage_recover_mesh' => 'Tactical recovery',
         'tactical_stage_maintenance' => 'Tactical maintenance',
+        'tactical_stage_open_remote_control' => 'Tactical remote control',
         'tactical_stage_start_service' => 'Tactical start service',
         'tactical_stage_stop_service' => 'Tactical stop service',
         'tactical_stage_restart_service' => 'Tactical restart service',

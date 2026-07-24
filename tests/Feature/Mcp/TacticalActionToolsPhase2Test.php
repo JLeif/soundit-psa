@@ -558,4 +558,79 @@ class TacticalActionToolsPhase2Test extends TestCase
         $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'executed')->count());
         $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'blocked')->count());
     }
+
+    // ── psa-5s4r2: stage-gate tactical_open_remote_control (Charlie GO / so-1jq4) ──
+
+    public function test_open_remote_control_is_stageable_and_alias_round_trips(): void
+    {
+        $this->assertTrue(McpToolModes::isStageable('tactical_open_remote_control'));
+        $this->assertSame('tactical_open_remote_control', McpToolModes::canonicalForAlias('tactical_stage_open_remote_control'));
+        $this->assertSame('tactical_stage_open_remote_control', McpToolModes::stagedInternalFor('tactical_open_remote_control'));
+    }
+
+    /**
+     * THE fail-closed proof: a staged-only grant that asks to open a session
+     * immediately is held for approval — the MeshCentral link is NEVER minted
+     * without a human, i.e. no live remote session opens un-approved.
+     */
+    public function test_staged_only_grant_downgrades_an_immediate_remote_control_call(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->endpointFixture();
+        $token = $this->token(['tactical_open_remote_control:staged']);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldNotReceive('getMeshCentralLinks'); // no link minted without approval
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $response = $this->callTool($token, 'tactical_open_remote_control', [
+            'client_id' => $fixture['client']->id,
+            'ticket_id' => $fixture['ticket']->id,
+            'hostname' => 'PC-01',
+            'type' => 'control',
+            'reason' => 'Open a remote session now.',
+            'staged' => false,
+        ]);
+
+        $response->assertOk();
+        $result = $this->decodedResult($response);
+        $this->assertTrue((bool) ($result['downgraded_to_staged'] ?? false), 'immediate remote-control call without the immediate grant must downgrade to staged');
+
+        $run = TechnicianRun::where('action_type', 'tactical_stage_open_remote_control')->firstOrFail();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+    }
+
+    public function test_staged_remote_control_is_held_then_approval_mints_the_link(): void
+    {
+        $this->configureTactical();
+        $approver = $this->configureAiActor();
+        $fixture = $this->endpointFixture();
+        $token = $this->token(['tactical_stage_open_remote_control']);
+        $url = 'https://mesh.example.test/control/session-token';
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        // Minted ONCE, at APPROVAL time (fresh URL) — never at proposal time.
+        $tactical->shouldReceive('getMeshCentralLinks')->once()->with('agent-1')->andReturn(['control' => $url]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $response = $this->callTool($token, 'tactical_stage_open_remote_control', [
+            'client_id' => $fixture['client']->id,
+            'ticket_id' => $fixture['ticket']->id,
+            'hostname' => 'PC-01',
+            'type' => 'control',
+            'reason' => 'Open a remote session after cockpit approval.',
+        ]);
+
+        $response->assertOk();
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+
+        $run = TechnicianRun::where('action_type', 'tactical_stage_open_remote_control')->firstOrFail();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertStringContainsString('Open control remote-control session', (string) $run->proposed_content);
+
+        $result = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id);
+        $this->assertSame('executed', $result->status);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+    }
 }

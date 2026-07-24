@@ -19,6 +19,7 @@ use App\Services\Tactical\Actions\PatchInstallAction;
 use App\Services\Tactical\Actions\PatchScanAction;
 use App\Services\Tactical\Actions\RebootAction;
 use App\Services\Tactical\Actions\RecoverAction;
+use App\Services\Tactical\Actions\RemoteControlAction;
 use App\Services\Tactical\Actions\RunCommandAction;
 use App\Services\Tactical\Actions\RunScriptAction;
 use App\Services\Tactical\Actions\ServiceControlAction;
@@ -86,6 +87,7 @@ class StaffTacticalActionToolExecutor
         'tactical_set_maintenance' => 60,
         'tactical_stage_maintenance' => 60,
         'tactical_open_remote_control' => 60,
+        'tactical_stage_open_remote_control' => 60,
         'tactical_refresh_device_snapshot' => 60,
         'tactical_start_service' => 120,
         'tactical_stage_start_service' => 120,
@@ -108,6 +110,7 @@ class StaffTacticalActionToolExecutor
         'tactical_stage_shutdown' => 'tactical_shutdown_device',
         'tactical_stage_recover_mesh' => 'tactical_recover_mesh',
         'tactical_stage_maintenance' => 'tactical_set_maintenance',
+        'tactical_stage_open_remote_control' => 'tactical_open_remote_control',
         'tactical_stage_start_service' => 'tactical_start_service',
         'tactical_stage_stop_service' => 'tactical_stop_service',
         'tactical_stage_restart_service' => 'tactical_restart_service',
@@ -138,6 +141,7 @@ class StaffTacticalActionToolExecutor
             self::setMaintenanceTool(),
             self::stageMaintenanceTool(),
             self::remoteControlTool(),
+            self::stageOpenRemoteControlTool(),
             self::refreshSnapshotTool(),
             self::startServiceTool(),
             self::stageStartServiceTool(),
@@ -873,6 +877,7 @@ class StaffTacticalActionToolExecutor
                 'tactical_recover_mesh' => [new RecoverAction, ['mode' => 'mesh'], null],
                 'tactical_set_maintenance' => [new SetMaintenanceAction, ['enabled' => $arguments['enabled'] ?? null], null],
                 'tactical_start_service' => [new ServiceControlAction('start'), ['service_name' => $arguments['service_name'] ?? null], null],
+                'tactical_open_remote_control' => [new RemoteControlAction, ['type' => $arguments['type'] ?? null], null],
                 'tactical_stop_service' => [new ServiceControlAction('stop'), ['service_name' => $arguments['service_name'] ?? null], null],
                 'tactical_restart_service' => [new ServiceControlAction('restart'), ['service_name' => $arguments['service_name'] ?? null], null],
                 'tactical_set_service_start_type' => [new ServiceStartTypeAction, ['service_name' => $arguments['service_name'] ?? null, 'start_type' => $arguments['start_type'] ?? null], null],
@@ -922,6 +927,7 @@ class StaffTacticalActionToolExecutor
             'tactical_recover_mesh' => [new RecoverAction, $params],
             'tactical_set_maintenance' => [new SetMaintenanceAction, $params],
             'tactical_start_service' => [new ServiceControlAction('start'), $params],
+            'tactical_open_remote_control' => [new RemoteControlAction, $params],
             'tactical_stop_service' => [new ServiceControlAction('stop'), $params],
             'tactical_restart_service' => [new ServiceControlAction('restart'), $params],
             'tactical_set_service_start_type' => [new ServiceStartTypeAction, $params],
@@ -1110,6 +1116,10 @@ class StaffTacticalActionToolExecutor
      */
     private function prepareArgumentsForTool(string $tool, array $arguments, Asset $asset): array
     {
+        if ($tool === 'tactical_open_remote_control' && $this->linkType($arguments['type'] ?? null) === null) {
+            return ['error' => 'type must be one of: control, terminal, file.'];
+        }
+
         if ($tool === 'tactical_set_service_start_type' && ServiceStartTypeAction::normalizeStartType($arguments['start_type'] ?? null) === null) {
             return ['error' => 'start_type must be one of: '.implode(', ', ServiceStartTypeAction::ALLOWED_START_TYPES).'.'];
         }
@@ -1525,7 +1535,7 @@ class StaffTacticalActionToolExecutor
             'tactical_shutdown_device' => (new ShutdownAction)->summary([]).' Target: '.$this->targetHostname($asset).'.',
             'tactical_recover_mesh' => 'Recover Mesh agent services on '.$this->targetHostname($asset).'.',
             'tactical_set_maintenance' => (new SetMaintenanceAction)->summary($params).' on '.$this->targetHostname($asset).'.',
-            'tactical_start_service', 'tactical_stop_service', 'tactical_restart_service' => $action->summary($params).' on '.$this->targetHostname($asset).'.',
+            'tactical_open_remote_control', 'tactical_start_service', 'tactical_stop_service', 'tactical_restart_service' => $action->summary($params).' on '.$this->targetHostname($asset).'.',
             'tactical_install_approved_patches' => 'Install approved Windows patches on '.$this->targetHostname($asset).'.',
             default => "{$stageTool} for ".$this->targetHostname($asset).'.',
         };
@@ -1756,6 +1766,19 @@ class StaffTacticalActionToolExecutor
                 'type' => ['type' => 'string', 'enum' => ['control', 'terminal', 'file'], 'description' => 'Remote session link type.'],
             ]),
             ['reason', 'type'],
+        );
+    }
+
+    /** @return array<string, mixed> */
+    private static function stageOpenRemoteControlTool(): array
+    {
+        return self::tool(
+            'tactical_stage_open_remote_control',
+            'Stage a MeshCentral remote-control session for cockpit approval instead of opening it now. On approval the link is minted fresh and surfaced to the approver; approval revalidates ticket, asset, kill-switch, and cooldown first.',
+            array_merge(self::targetProperties(ticket: true), [
+                'type' => ['type' => 'string', 'enum' => ['control', 'terminal', 'file'], 'description' => 'Remote session link type.'],
+            ]),
+            ['ticket_id', 'reason', 'type'],
         );
     }
 
