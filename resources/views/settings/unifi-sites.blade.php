@@ -20,7 +20,8 @@
         <p class="text-muted mb-3">
             Map UniFi sites to local clients. This scopes network telemetry (WAN/ISP health, devices) to the right client.
             Saving a mapping stores both the site ID and its console (host) ID &mdash; the console is resolved automatically
-            from the UniFi site listing and is required for device reads.
+            from the UniFi site listing and is required for device reads. A client with several locations can map to
+            several sites &mdash; just choose the same client on each of its site rows.
         </p>
 
         {{-- success/error flashes are rendered globally by the layout; info is not --}}

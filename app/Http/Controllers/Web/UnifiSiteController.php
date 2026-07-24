@@ -4,22 +4,27 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client;
+use App\Models\ClientUnifiSite;
 use App\Services\Unifi\UnifiClient;
 use App\Support\UnifiConfig;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Settings > Integrations > UniFi > Site Mapping (psa-g5l80).
+ * Settings > Integrations > UniFi > Site Mapping (psa-g5l80; multi-site psa-jpygj).
  *
  * Mirrors HuntressOrganizationController, with one deliberate difference forced by the
- * vendor's data model: a mapping writes TWO columns as a pair — unifi_site_id (the
- * telemetry grain) and unifi_host_id (the owning console, which unifi_list_devices
- * requires because /v1/devices is host-grained). The console id is resolved SERVER-SIDE
- * from the vendor's own /v1/sites listing at save time, never from the submitted form:
- * UnifiReadOnlyToolset's device-attribution guards trust the pair, and letting the
- * browser supply the console id would let a tampered request bind a client to an
- * arbitrary console.
+ * vendor's data model: a mapping is the PAIR unifi_site_id (the telemetry grain) +
+ * unifi_host_id (the owning console, which unifi_list_devices requires because
+ * /v1/devices is host-grained). The console id is resolved SERVER-SIDE from the vendor's
+ * own /v1/sites listing at save time, never from the submitted form: UnifiReadOnlyToolset's
+ * device-attribution guards trust the pair, and letting the browser supply the console id
+ * would let a tampered request bind a client to an arbitrary console.
+ *
+ * Mappings live in the client_unifi_sites pivot: a client may map to MANY sites (several
+ * physical locations), while a SITE still maps to at most one client (the pivot's UNIQUE
+ * on unifi_site_id). The page is one row per site with a client dropdown, so N sites → 1
+ * client is expressed by choosing the same client on several rows.
  *
  * Field names in the projection below come from the vendor's OpenAPI spec
  * (https://developer.ui.com/site-manager/v1.0.0/openapi.json) via UnifiClient::listSites
@@ -41,8 +46,11 @@ class UnifiSiteController extends Controller
                 ->with('error', "Could not list UniFi sites: {$e->getMessage()}");
         }
 
-        $mappedClients = Client::whereNotNull('unifi_site_id')
-            ->get(['id', 'name', 'unifi_site_id', 'unifi_host_id'])
+        // site id => the client mapped to it, for per-row preselection. Joining through
+        // Client::query() keeps the soft-delete scope (a trashed client reads unmapped).
+        $mappedClients = Client::query()
+            ->join('client_unifi_sites', 'client_unifi_sites.client_id', '=', 'clients.id')
+            ->get(['clients.id', 'clients.name', 'client_unifi_sites.unifi_site_id'])
             ->keyBy('unifi_site_id');
 
         $allClients = Client::operational()->orderBy('name')->get(['id', 'name']);
@@ -61,21 +69,17 @@ class UnifiSiteController extends Controller
                 ->with('error', 'UniFi is not configured. Add an API key first.');
         }
 
-        $selected = collect((array) $request->input('mappings', []))
-            ->map(fn ($clientId) => trim((string) $clientId))
-            ->filter(fn ($clientId) => $clientId !== '');
+        // The form is one row per VISIBLE site. Keep every submitted site id (including
+        // deselections, value '') so we can re-assert exactly the rows the operator saw;
+        // sites not on the form (e.g. no longer visible to the key) are left untouched.
+        $submitted = collect((array) $request->input('mappings', []))
+            ->mapWithKeys(fn ($clientId, $siteId) => [(string) $siteId => trim((string) $clientId)]);
 
-        // A client row carries ONE site pair, so the same client on two sites cannot be
-        // stored — and silently letting the last one win would misattribute telemetry.
-        // Refuse the whole save with the offender named.
-        $duplicateClientIds = $selected->countBy()->filter(fn ($count) => $count > 1)->keys();
-        if ($duplicateClientIds->isNotEmpty()) {
-            $names = Client::whereIn('id', $duplicateClientIds)->pluck('name')->implode(', ');
+        $selected = $submitted->filter(fn ($clientId) => $clientId !== '');
 
-            return redirect()->route('settings.unifi-sites.index')
-                ->with('error', 'A client can only be mapped to one UniFi site, but '.($names !== '' ? $names : 'a client')
-                    .' was selected for more than one. Nothing was saved.');
-        }
+        // psa-jpygj: the one-to-one refusal is gone — a client MAY map to several sites.
+        // A SITE still maps to <=1 client (the pivot's UNIQUE), and the form is keyed by
+        // site, so a single save cannot double-map a site.
 
         // Console ids come from the live vendor listing at save time (see class
         // docblock). If the listing cannot be fetched, save nothing — a save that
@@ -90,17 +94,12 @@ class UnifiSiteController extends Controller
 
         $skipped = [];
 
-        DB::transaction(function () use ($selected, $sites, &$skipped) {
-            // Clear where EITHER column is set: the pair is the invariant, and a
-            // host-only orphan (possible via manual DB edits) is unusable state.
-            // withTrashed matters — unifi_site_id is UNIQUE across all client rows,
-            // so a soft-deleted client still occupies its site id and remapping that
-            // site to a live client would otherwise hit the unique index.
-            Client::withTrashed()
-                ->where(function ($query) {
-                    $query->whereNotNull('unifi_site_id')->orWhereNotNull('unifi_host_id');
-                })
-                ->update(['unifi_site_id' => null, 'unifi_host_id' => null]);
+        DB::transaction(function () use ($submitted, $selected, $sites, &$skipped) {
+            // Re-assert only the sites shown in this form: drop their current pivot rows,
+            // then insert the chosen ones. Deleting by site id (the pivot is not soft-
+            // deleted) also clears a row held by a soft-deleted client, so remapping that
+            // site to a live client cannot collide on the UNIQUE.
+            ClientUnifiSite::whereIn('unifi_site_id', $submitted->keys()->all())->delete();
 
             foreach ($selected as $siteId => $clientId) {
                 $site = $sites[(string) $siteId] ?? null;
@@ -113,7 +112,8 @@ class UnifiSiteController extends Controller
                     continue;
                 }
 
-                Client::where('id', (int) $clientId)->update([
+                ClientUnifiSite::create([
+                    'client_id' => (int) $clientId,
                     'unifi_site_id' => $site['site_id'],
                     'unifi_host_id' => $site['host_id'],
                 ]);
@@ -149,18 +149,18 @@ class UnifiSiteController extends Controller
                 ->with('error', "Could not list UniFi sites: {$e->getMessage()}");
         }
 
-        // Lookup: lowercase client name → client, unmapped clients only.
+        // Lookup: lowercase client name → client, clients with no site yet only.
         $clientsByName = Client::operational()
-            ->whereNull('unifi_site_id')
+            ->whereDoesntHave('unifiSites')
             ->get(['id', 'name'])
             ->keyBy(fn ($client) => mb_strtolower(trim($client->name)));
 
         $matched = 0;
 
         foreach ($sites as $site) {
-            // withTrashed: a soft-deleted client still occupies its (unique) site id,
-            // and writing that id onto a live client would hit the unique index.
-            if (Client::withTrashed()->where('unifi_site_id', $site['site_id'])->exists()) {
+            // A site already mapped to any client (the pivot's UNIQUE holds it) is never
+            // re-assigned by auto-match.
+            if (ClientUnifiSite::where('unifi_site_id', $site['site_id'])->exists()) {
                 continue;
             }
 
@@ -173,7 +173,8 @@ class UnifiSiteController extends Controller
                 $client = $clientsByName->get($key);
 
                 if ($client) {
-                    Client::where('id', $client->id)->update([
+                    ClientUnifiSite::create([
+                        'client_id' => $client->id,
                         'unifi_site_id' => $site['site_id'],
                         'unifi_host_id' => $site['host_id'],
                     ]);

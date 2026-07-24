@@ -3,6 +3,7 @@
 namespace Tests\Feature\Settings;
 
 use App\Models\Client;
+use App\Models\ClientUnifiSite;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\Unifi\UnifiClient;
@@ -16,10 +17,12 @@ use Tests\TestCase;
 /**
  * UniFi Site Mapping page (psa-g5l80) — Settings → Integrations → UniFi → Site Mapping.
  *
- * The invariant this page owns: a mapping is the PAIR clients.unifi_site_id +
- * unifi_host_id, and the console (host) id is resolved server-side from the vendor's
- * own /v1/sites listing at save time — never from the submitted form. The downstream
- * device-attribution guards in UnifiReadOnlyToolset trust that pair.
+ * The invariant this page owns: a mapping is the PAIR unifi_site_id + unifi_host_id,
+ * stored in the client_unifi_sites pivot (psa-jpygj — a client may map to MANY sites),
+ * and the console (host) id is resolved server-side from the vendor's own /v1/sites
+ * listing at save time — never from the submitted form. The downstream device-
+ * attribution guards in UnifiReadOnlyToolset trust that pair. A site still maps to at
+ * most one client (the UNIQUE on the pivot's unifi_site_id).
  *
  * Envelope and row shapes below mirror the vendor's committed example payload
  * (tests/Fixtures/unifi/list_sites.json): {data, httpStatusCode, traceId, nextToken},
@@ -96,7 +99,8 @@ class UnifiSiteMappingTest extends TestCase
 
     public function test_the_page_lists_sites_across_pages_and_surfaces_both_ids(): void
     {
-        $mapped = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $mapped = Client::factory()->create(['name' => 'Acme Co']);
+        ClientUnifiSite::create(['client_id' => $mapped->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
 
         // Two pages: the page must walk the cursor, not render page 1 only.
         $this->bindClientReturning([
@@ -139,14 +143,19 @@ class UnifiSiteMappingTest extends TestCase
             ->assertRedirect(route('settings.unifi-sites.index'))
             ->assertSessionHas('success');
 
-        $client->refresh();
-        $this->assertSame(self::SITE_A, $client->unifi_site_id);
-        $this->assertSame(self::HOST_A, $client->unifi_host_id, 'console id must come from the vendor listing, never the form');
+        // The console id comes from the vendor listing, never the tampered form field.
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $client->id,
+            'unifi_site_id' => self::SITE_A,
+            'unifi_host_id' => self::HOST_A,
+        ]);
+        $this->assertDatabaseMissing('client_unifi_sites', ['unifi_host_id' => 'attacker-chosen-console']);
     }
 
     public function test_saving_clears_mappings_deselected_in_the_form(): void
     {
-        $client = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = Client::factory()->create(['name' => 'Acme Co']);
+        ClientUnifiSite::create(['client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
 
         $this->bindClientReturning([
             $this->sitesPage([$this->siteRow(self::SITE_A, self::HOST_A, 'HQ')]),
@@ -158,17 +167,21 @@ class UnifiSiteMappingTest extends TestCase
             ])
             ->assertRedirect(route('settings.unifi-sites.index'));
 
-        $client->refresh();
-        $this->assertNull($client->unifi_site_id);
-        $this->assertNull($client->unifi_host_id, 'the pair clears together');
+        $this->assertDatabaseMissing('client_unifi_sites', ['unifi_site_id' => self::SITE_A]);
     }
 
-    public function test_saving_refuses_to_map_one_client_to_two_sites(): void
+    public function test_saving_maps_one_client_to_two_sites(): void
     {
-        $client = Client::factory()->create(['name' => 'Acme Co']);
+        // psa-jpygj: the one-to-one refusal is gone. A client with two locations maps to
+        // BOTH — the per-site rows already express it; the pivot stores both pairs.
+        $client = Client::factory()->create(['name' => 'Smart-Service']);
 
-        // The guard fires before any API call — nothing to queue.
-        $this->bindClientReturning([]);
+        $this->bindClientReturning([
+            $this->sitesPage([
+                $this->siteRow(self::SITE_A, self::HOST_A, 'HQ'),
+                $this->siteRow(self::SITE_B, self::HOST_B, 'Branch Office', 'branch'),
+            ]),
+        ]);
 
         $this->actingAs($this->user)
             ->post(route('settings.unifi-sites.update'), [
@@ -178,10 +191,39 @@ class UnifiSiteMappingTest extends TestCase
                 ],
             ])
             ->assertRedirect(route('settings.unifi-sites.index'))
-            ->assertSessionHas('error', fn (string $message) => str_contains($message, 'Acme Co'));
+            ->assertSessionHas('success');
 
-        $client->refresh();
-        $this->assertNull($client->unifi_site_id, 'a refused save must write nothing');
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A,
+        ]);
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $client->id, 'unifi_site_id' => self::SITE_B, 'unifi_host_id' => self::HOST_B,
+        ]);
+        $this->assertSame(2, $client->unifiSites()->count());
+    }
+
+    public function test_saving_still_refuses_to_map_two_clients_to_one_site(): void
+    {
+        // The other direction of the invariant holds: a SITE maps to at most one client
+        // (the UNIQUE on the pivot). The form is keyed by site, so this can only arise
+        // if an existing mapping collides — a fresh save re-asserts the site's row.
+        $a = Client::factory()->create(['name' => 'Acme Co']);
+        $b = Client::factory()->create(['name' => 'Beta LLC']);
+        ClientUnifiSite::create(['client_id' => $a->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+
+        $this->bindClientReturning([
+            $this->sitesPage([$this->siteRow(self::SITE_A, self::HOST_A, 'HQ')]),
+        ]);
+
+        // Re-mapping SITE_A to Beta must move it, not duplicate it (site->client stays 1).
+        $this->actingAs($this->user)
+            ->post(route('settings.unifi-sites.update'), [
+                'mappings' => [self::SITE_A => (string) $b->id],
+            ])
+            ->assertRedirect(route('settings.unifi-sites.index'));
+
+        $this->assertSame(1, ClientUnifiSite::where('unifi_site_id', self::SITE_A)->count());
+        $this->assertSame($b->id, ClientUnifiSite::where('unifi_site_id', self::SITE_A)->value('client_id'));
     }
 
     public function test_saving_skips_sites_the_account_can_no_longer_see_and_says_so(): void
@@ -203,13 +245,14 @@ class UnifiSiteMappingTest extends TestCase
             ->assertRedirect(route('settings.unifi-sites.index'))
             ->assertSessionHas('success', fn (string $message) => str_contains($message, 'ghost-site-id'));
 
-        $this->assertSame(self::SITE_A, $kept->refresh()->unifi_site_id);
-        $this->assertNull($ghosted->refresh()->unifi_site_id, 'an unverifiable site must not be written');
+        $this->assertDatabaseHas('client_unifi_sites', ['client_id' => $kept->id, 'unifi_site_id' => self::SITE_A]);
+        $this->assertSame(0, $ghosted->unifiSites()->count(), 'an unverifiable site must not be written');
     }
 
     public function test_a_failed_site_listing_aborts_the_save_without_wiping_mappings(): void
     {
-        $client = Client::factory()->create(['name' => 'Acme Co', 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
+        $client = Client::factory()->create(['name' => 'Acme Co']);
+        ClientUnifiSite::create(['client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A]);
 
         $this->bindClientReturning([new Response(500, [], '{"httpStatusCode":500}')]);
 
@@ -220,16 +263,18 @@ class UnifiSiteMappingTest extends TestCase
             ->assertRedirect(route('settings.unifi-sites.index'))
             ->assertSessionHas('error');
 
-        $client->refresh();
-        $this->assertSame(self::SITE_A, $client->unifi_site_id, 'existing mappings must survive an aborted save');
-        $this->assertSame(self::HOST_A, $client->unifi_host_id);
+        // The listing failed BEFORE the DB was touched, so the mapping must survive.
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A,
+        ]);
     }
 
     public function test_auto_match_pairs_sites_to_clients_by_display_name_and_writes_both_ids(): void
     {
         // Case-insensitive on the site's display label (meta.desc).
         $hq = Client::factory()->create(['name' => 'hq']);
-        $taken = Client::factory()->create(['name' => 'Gamma Corp', 'unifi_site_id' => self::SITE_B, 'unifi_host_id' => self::HOST_B]);
+        $taken = Client::factory()->create(['name' => 'Gamma Corp']);
+        ClientUnifiSite::create(['client_id' => $taken->id, 'unifi_site_id' => self::SITE_B, 'unifi_host_id' => self::HOST_B]);
         $unmatched = Client::factory()->create(['name' => 'Branch Office']);
 
         $this->bindClientReturning([
@@ -246,12 +291,15 @@ class UnifiSiteMappingTest extends TestCase
             ->assertRedirect(route('settings.unifi-sites.index'))
             ->assertSessionHas('success', fn (string $message) => str_contains($message, '1'));
 
-        $hq->refresh();
-        $this->assertSame(self::SITE_A, $hq->unifi_site_id);
-        $this->assertSame(self::HOST_A, $hq->unifi_host_id, 'auto-match must write the pair, same as a manual save');
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $hq->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => self::HOST_A,
+        ]);
 
-        $this->assertSame(self::SITE_B, $taken->refresh()->unifi_site_id, 'existing mappings are never overwritten');
-        $this->assertNull($unmatched->refresh()->unifi_site_id, 'an already-mapped site must not be re-assigned');
+        // Existing mappings are never overwritten by auto-match.
+        $this->assertDatabaseHas('client_unifi_sites', [
+            'client_id' => $taken->id, 'unifi_site_id' => self::SITE_B,
+        ]);
+        $this->assertSame(0, $unmatched->unifiSites()->count(), 'an already-mapped site must not be re-assigned');
     }
 
     public function test_the_page_fails_loud_when_the_cursor_outlives_the_page_cap(): void
