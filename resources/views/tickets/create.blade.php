@@ -139,6 +139,15 @@
                            class="form-control" value="{{ old('due_at') }}">
                     <small class="form-text text-muted">Auto-set from priority SLA</small>
                 </div>
+
+                {{-- ITIL taxonomy SOP category (so-0ftg) — the node that carries the
+                     SOP, distinct from the legacy free-text category/subcategory. --}}
+                <div class="col-md-6">
+                    <x-ticket-category-picker
+                        :nodes="$taxonomyNodes"
+                        :selected-id="old('category_id')"
+                        id="createCategoryNode" />
+                </div>
             </div>
 
             <div class="mt-4">

@@ -74,7 +74,28 @@ class TicketController extends Controller
             'types' => TicketType::cases(),
             'priorities' => TicketPriority::cases(),
             'categories' => config('tickets.categories', []),
+            // ITIL taxonomy nodes for the per-ticket SOP-category picker (so-0ftg),
+            // same {id, path} option set the edit form uses.
+            'taxonomyNodes' => $this->activeTaxonomyNodeOptions(),
         ]);
+    }
+
+    /**
+     * Active ITIL taxonomy nodes as flat {id, path} options for the per-ticket
+     * category picker (so-0ftg) — shared by the create and edit forms.
+     * parent.parent covers the depth<=3 tree so pathString() walks ancestors
+     * with no N+1.
+     *
+     * @return \Illuminate\Support\Collection<int, array{id: int, path: string}>
+     */
+    private function activeTaxonomyNodeOptions(): \Illuminate\Support\Collection
+    {
+        return TicketCategory::active()
+            ->with('parent.parent')
+            ->get()
+            ->map(fn (TicketCategory $node) => ['id' => $node->id, 'path' => $node->pathString()])
+            ->sortBy('path', SORT_NATURAL | SORT_FLAG_CASE)
+            ->values();
     }
 
     public function store(TicketStoreRequest $request)
@@ -155,14 +176,8 @@ class TicketController extends Controller
             'priorities' => TicketPriority::cases(),
             'categories' => config('tickets.categories', []),
             // Active ITIL taxonomy nodes as flat {id, path} options for the
-            // per-ticket category picker (so-0ftg). parent.parent covers the
-            // depth<=3 tree so pathString() walks ancestors with no N+1.
-            'taxonomyNodes' => TicketCategory::active()
-                ->with('parent.parent')
-                ->get()
-                ->map(fn (TicketCategory $node) => ['id' => $node->id, 'path' => $node->pathString()])
-                ->sortBy('path', SORT_NATURAL | SORT_FLAG_CASE)
-                ->values(),
+            // per-ticket category picker (so-0ftg) — shared with the create form.
+            'taxonomyNodes' => $this->activeTaxonomyNodeOptions(),
             'clientAssets' => $clientAssets,
             'clientContacts' => $clientContacts,
             'defaultBillable' => $defaultBillable,

@@ -666,42 +666,13 @@
                             </select>
                         </div>
                     </div>
-                    {{-- ITIL taxonomy category (so-0ftg): the node that carries the SOP.
-                         Distinct from the legacy free-text category/subcategory above. --}}
-                    <div class="mb-2">
-                        <label for="editCategoryNode" class="form-label small text-muted mb-1">
-                            SOP Category <span class="fw-normal">(taxonomy)</span>
-                        </label>
-                        @php
-                            // The ticket's current node may be soft-retired and so absent
-                            // from the ACTIVE-only $taxonomyNodes list. Re-surface it here,
-                            // pre-selected and flagged, so an unrelated save re-posts this
-                            // exact id (a no-op) instead of the blank option — which would
-                            // silently null a retired node. TicketUpdateRequest grandfathers
-                            // this exact id through validation.
-                            $currentNode = $ticket->categoryNode;
-                            $currentIsRetired = $currentNode && ! $currentNode->is_active;
-                        @endphp
-                        <select name="category_id" class="form-select form-select-sm" id="editCategoryNode">
-                            <option value="">-- Uncategorized --</option>
-                            @if($currentIsRetired)
-                                <option value="{{ $currentNode->id }}" selected>{{ $currentNode->pathString() }} (retired)</option>
-                            @endif
-                            @foreach($taxonomyNodes as $node)
-                                <option value="{{ $node['id'] }}" @selected((int) $ticket->category_id === (int) $node['id'])>{{ $node['path'] }}</option>
-                            @endforeach
-                        </select>
-                        @if($ticket->categoryNode)
-                            <div class="small mt-1">
-                                @if($ticket->categoryNode->hasSop())
-                                    <span class="text-success"><i class="bi bi-file-earmark-text me-1"></i>SOP available</span>
-                                @else
-                                    <span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>No SOP yet</span>
-                                @endif
-                                <a href="{{ route('ticket-categories.show', $ticket->categoryNode) }}" class="ms-1">manage</a>
-                            </div>
-                        @endif
-                    </div>
+                    {{-- ITIL taxonomy SOP-category picker (so-0ftg) — shared with the
+                         create form via the ticket-category-picker component. --}}
+                    <x-ticket-category-picker
+                        :nodes="$taxonomyNodes"
+                        :current="$ticket->categoryNode"
+                        :selected-id="$ticket->category_id"
+                        id="editCategoryNode" />
                     <div class="mb-2">
                         <button type="submit" class="btn btn-primary btn-sm">Save</button>
                     </div>
