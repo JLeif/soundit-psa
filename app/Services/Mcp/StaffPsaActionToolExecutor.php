@@ -17,6 +17,7 @@ use App\Models\Setting;
 use App\Models\TechnicianActionLog;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
+use App\Models\TicketCategory;
 use App\Models\TicketNote;
 use App\Models\User;
 use App\Services\Agent\CloseAutoEligibility;
@@ -53,6 +54,14 @@ class StaffPsaActionToolExecutor
      * and param names verified there), and (3) that null clears the assignment.
      */
     private const CATEGORY_ID_RECOVERY_COPY = 'category_id must reference an ACTIVE ticket taxonomy node; retired or unknown ids are rejected. Call the list_ticket_categories tool without include_inactive to list the valid active node ids, then retry update_ticket with one of them. Pass null to clear the ticket category.';
+
+    /**
+     * The create_ticket counterpart of CATEGORY_ID_RECOVERY_COPY (so-0ftg,
+     * psa-begf3.2). Same guidance, reworded for the create surface: retry
+     * create_ticket, and the escape hatch is to omit the field / pass null
+     * (there is nothing to "clear" on a brand-new ticket).
+     */
+    private const CREATE_CATEGORY_ID_RECOVERY_COPY = 'category_id must reference an ACTIVE ticket taxonomy node; retired or unknown ids are rejected. Call the list_ticket_categories tool without include_inactive to list the valid active node ids, then retry create_ticket with one of them. Omit category_id (or pass null) to create the ticket uncategorized.';
 
     public function __construct(
         private readonly TechnicianActionGate $gate,
@@ -127,10 +136,25 @@ class StaffPsaActionToolExecutor
             return ['error' => 'reason is required'];
         }
 
+        // ITIL taxonomy node (so-0ftg, psa-begf3.2): validate before building the
+        // payload so a bad node fails fast with actionable recovery copy.
+        $categoryId = $this->validateCreateCategoryId($arguments);
+        if (is_array($categoryId)) {
+            return $categoryId;
+        }
+
         try {
             $payload = $this->ticketCreator->payload($clientId, $arguments);
         } catch (\InvalidArgumentException $e) {
             return ['error' => $e->getMessage()];
+        }
+
+        // A chosen node rides into TicketService::createTicket (category_id is
+        // fillable); TicketObserver stamps category_source=System + logs it. The
+        // dedup content hash intentionally ignores category_id (it is not part of
+        // ticket identity), so it stays computed on subject/description/client.
+        if ($categoryId !== null) {
+            $payload['category_id'] = $categoryId;
         }
 
         $contentHash = $this->ticketCreator->contentHashFromPayload($payload);
@@ -2447,6 +2471,36 @@ class StaffPsaActionToolExecutor
         unset($validated['reason']);
 
         return $validated;
+    }
+
+    /**
+     * Validate an optional create_ticket category_id (so-0ftg, psa-begf3.2):
+     * an ACTIVE taxonomy node, else the actionable recovery copy. Returns the
+     * int node id, null when none was supplied (or an explicit null → the
+     * ticket is created uncategorized), or an ['error' => ...] array to
+     * short-circuit the tool call. category_source is stamped by TicketObserver
+     * (System on this no-auth surface), never taken from tool input.
+     *
+     * @return int|array<string, mixed>|null
+     */
+    private function validateCreateCategoryId(array $arguments): int|array|null
+    {
+        if (! array_key_exists('category_id', $arguments) || $arguments['category_id'] === null) {
+            return null;
+        }
+
+        $value = $arguments['category_id'];
+
+        $isActiveNode = is_numeric($value) && TicketCategory::query()
+            ->whereKey((int) $value)
+            ->where('is_active', true)
+            ->exists();
+
+        if (! $isActiveNode) {
+            return ['error' => self::CREATE_CATEGORY_ID_RECOVERY_COPY];
+        }
+
+        return (int) $value;
     }
 
     private function ticketStatusFrom(mixed $value): ?\App\Enums\TicketStatus

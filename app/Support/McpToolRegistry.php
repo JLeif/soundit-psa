@@ -497,6 +497,10 @@ class McpToolRegistry
                         'enum' => [1, 2, 3, 4],
                         'description' => 'Optional priority: 1 critical, 2 high, 3 medium, 4 low. Defaults to 3.',
                     ],
+                    'category_id' => [
+                        'type' => ['integer', 'null'],
+                        'description' => 'Optional ITIL taxonomy category node id — sets the category whose SOP surfaces on get_ticket_detail. Must be an ACTIVE node (get ids from the list_ticket_categories tool); a retired or unknown node is rejected. Omit or pass null to create the ticket uncategorized. A category set here is authoritative — triage will not overwrite it.',
+                    ],
                     'reason' => [
                         'type' => 'string',
                         'description' => 'Specific client evidence for creating this ticket now.',
