@@ -650,6 +650,108 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertTrue($byHost[self::HOST_B]['stale']);
     }
 
+    public function test_list_devices_treats_a_relative_or_malformed_updated_at_as_stale(): void
+    {
+        // Carbon::parse would happily read "tomorrow" as a real (future) date and
+        // mark the console FRESH — a fail-open. Only the vendor's RFC3339 shape is
+        // accepted; anything else is unknown ⇒ stale (arch/security REVISE).
+        foreach (['tomorrow', 'not-a-date', '2026-13-45T99:99:99Z', ''] as $i => $bad) {
+            // Distinct site/host per iteration — unifi_site_id is UNIQUE in the pivot.
+            $siteId = "site-bad-{$i}";
+            $hostId = "host-bad-{$i}";
+            $client = $this->mapSite(Client::factory()->create(), $siteId, $hostId);
+            $this->bindClientReturning([
+                $this->sitesOn([$siteId => $hostId]),
+                $this->jsonResponse([
+                    'data' => [['hostId' => $hostId, 'hostName' => 'hq', 'updatedAt' => $bad, 'devices' => [
+                        ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP', 'status' => 'online'],
+                    ]]],
+                    'httpStatusCode' => 200,
+                ]),
+            ]);
+
+            $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+            $this->assertTrue($result['data_stale'], "updatedAt='{$bad}' must not read fresh");
+            $this->assertNull($result['data_as_of'], "updatedAt='{$bad}' is not a known time");
+            $this->assertTrue($result['consoles'][0]['stale']);
+            $this->assertNull($result['consoles'][0]['reported_at']);
+        }
+    }
+
+    public function test_list_devices_treats_a_future_skewed_updated_at_as_stale(): void
+    {
+        // A report timestamp in the future cannot be a real "last report" (bad data
+        // or clock skew) — it must not count as fresh (arch/security REVISE).
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'hq', 'updatedAt' => now()->addDays(3)->toIso8601ZuluString(), 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertTrue($result['data_stale']);
+        $this->assertNull($result['consoles'][0]['reported_at']);
+    }
+
+    public function test_list_devices_one_malformed_group_makes_the_console_unknown_despite_a_fresh_sibling(): void
+    {
+        // Same console split across two group rows: one fresh, one malformed. The
+        // fresh sibling must NOT hide the malformed group — the whole console reads
+        // unknown/stale (the data-safety fail-open the review flagged).
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [
+                    ['hostId' => self::HOST_A, 'hostName' => 'hq', 'updatedAt' => now()->subMinutes(5)->toIso8601ZuluString(), 'devices' => [
+                        ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP-1', 'status' => 'online'],
+                    ]],
+                    ['hostId' => self::HOST_A, 'hostName' => 'hq', 'updatedAt' => 'tomorrow', 'devices' => [
+                        ['id' => 'A2', 'mac' => 'AB', 'name' => 'AP-2', 'status' => 'online'],
+                    ]],
+                ],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertTrue($result['data_stale'], 'a malformed sibling group makes the console unknown');
+        $this->assertTrue($result['consoles'][0]['stale']);
+        $this->assertNull($result['consoles'][0]['reported_at']);
+    }
+
+    public function test_list_devices_gives_every_device_row_a_stale_flag(): void
+    {
+        // The self-describing contract (arch/UX REVISE): a device row must carry its
+        // own stale boolean alongside reported_at, so a caller need not join it back
+        // to the console row.
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $staleAt = now()->subHours(72)->toIso8601ZuluString();
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'hq', 'updatedAt' => $staleAt, 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertArrayHasKey('stale', $result['devices'][0]);
+        $this->assertTrue($result['devices'][0]['stale']);
+        $this->assertSame($staleAt, $result['devices'][0]['reported_at']);
+    }
+
     public function test_list_devices_aggregates_across_a_multi_site_clients_two_consoles(): void
     {
         // Two locations, one console each. The device list aggregates both, each device
