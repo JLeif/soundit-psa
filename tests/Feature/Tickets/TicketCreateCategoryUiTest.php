@@ -121,4 +121,44 @@ class TicketCreateCategoryUiTest extends TestCase
 
         $this->assertSame(0, Ticket::count());
     }
+
+    /**
+     * Shape guard (arch/security REVISE, PR #314): an ARRAY category_id must be a
+     * clean validation error, never a 500. Without a scalar guard, whereKey(array)
+     * becomes an IN() existence check that PASSES for an active id, then the array
+     * reaches the integer column and throws a QueryException.
+     */
+    public function test_an_array_category_id_is_rejected_not_a_500(): void
+    {
+        $node = $this->leaf(); // an ACTIVE node — the exact vector: [<active id>]
+
+        $this->actingAs(User::factory()->create())
+            ->from(route('tickets.create'))
+            ->post(route('tickets.store'), $this->payload(['category_id' => [$node->id]]))
+            ->assertRedirect(route('tickets.create'))
+            ->assertSessionHasErrors('category_id');
+
+        $this->assertSame(0, Ticket::count()); // never reached the integer column
+    }
+
+    /**
+     * Field-level feedback (UX REVISE, PR #314): the shared picker must render the
+     * category_id error inline (is-invalid + invalid-feedback), like the form's
+     * other required fields — so a rejected submit explains the fix where the
+     * decision is made.
+     */
+    public function test_the_picker_renders_field_level_validation_feedback(): void
+    {
+        $this->leaf();
+
+        // The real flow: a rejected submit redirects back to the form with the
+        // error flashed; ShareErrorsFromSession then feeds the component's @error.
+        $this->actingAs(User::factory()->create())
+            ->from(route('tickets.create'))
+            ->followingRedirects()
+            ->post(route('tickets.store'), $this->payload(['category_id' => 999999]))
+            ->assertOk()
+            ->assertSee('is-invalid', false)
+            ->assertSee('The selected SOP category must be an active taxonomy node.');
+    }
 }

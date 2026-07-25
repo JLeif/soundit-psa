@@ -50,6 +50,16 @@ class TicketUpdateRequest extends FormRequest
                         return; // explicit clear — nullable nulls it; nothing to check
                     }
 
+                    // Shape guard: a non-scalar (e.g. category_id[]=<active id>) must
+                    // fail here. Otherwise whereKey(array) is an IN() existence check
+                    // that PASSES and the array reaches the integer column and 500s;
+                    // the grandfather (int)-cast below would also mis-handle it.
+                    if (! is_scalar($value)) {
+                        $fail('The selected SOP category must be an active taxonomy node.');
+
+                        return;
+                    }
+
                     if ($currentCategoryId !== null && (int) $value === (int) $currentCategoryId) {
                         return; // grandfather the ticket's own current node, retired or not
                     }

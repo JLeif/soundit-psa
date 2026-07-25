@@ -19,7 +19,7 @@
     <label for="{{ $id }}" class="form-label small text-muted mb-1">
         SOP Category <span class="fw-normal">(taxonomy)</span>
     </label>
-    <select name="category_id" class="form-select form-select-sm" id="{{ $id }}">
+    <select name="category_id" class="form-select form-select-sm @error('category_id') is-invalid @enderror" id="{{ $id }}">
         <option value="">-- Uncategorized --</option>
         @if($currentIsRetired)
             <option value="{{ $current->id }}" selected>{{ $current->pathString() }} (retired)</option>
@@ -28,6 +28,11 @@
             <option value="{{ $node['id'] }}" @selected($selectedId === (int) $node['id'])>{{ $node['path'] }}</option>
         @endforeach
     </select>
+    {{-- Field-level validation feedback, like the form's other required fields
+         (UX REVISE, PR #314) — explains the fix where the decision is made. --}}
+    @error('category_id')
+        <div class="invalid-feedback">{{ $message }}</div>
+    @enderror
     @if($current)
         <div class="small mt-1">
             @if($current->hasSop())

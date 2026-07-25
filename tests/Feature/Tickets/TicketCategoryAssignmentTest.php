@@ -167,6 +167,27 @@ class TicketCategoryAssignmentTest extends TestCase
         $this->assertNull($ticket->refresh()->category_id);
     }
 
+    /**
+     * Shape guard (arch/security REVISE, PR #314): the update path shares the
+     * store path's custom-closure shape, so an ARRAY category_id must be a clean
+     * validation error here too — not a whereKey(array) IN() pass that then 500s
+     * on the integer column.
+     */
+    public function test_an_array_category_id_is_rejected_on_update(): void
+    {
+        ['leaf' => $node] = $this->tree(); // an ACTIVE node
+        $ticket = Ticket::factory()->create(['category_id' => null]);
+
+        $this->actingAs(User::factory()->create())
+            ->patch(route('tickets.update', $ticket), [
+                'subject' => $ticket->subject,
+                'category_id' => [$node->id],
+            ])
+            ->assertSessionHasErrors('category_id');
+
+        $this->assertNull($ticket->refresh()->category_id);
+    }
+
     // ── RETIRED-NODE PRESERVATION (psa-alzsw R1 must-fix) ──
     //
     // The picker lists only ACTIVE nodes and the form always posts category_id.

@@ -43,6 +43,16 @@ class TicketStoreRequest extends FormRequest
                         return; // no category chosen — nothing to check
                     }
 
+                    // Shape guard: a non-scalar (e.g. category_id[]=<active id>) must
+                    // fail here. whereKey(array) becomes an IN() existence check that
+                    // would PASS, then the array reaches the integer column and 500s.
+                    // A malformed shape is not an active node.
+                    if (! is_scalar($value)) {
+                        $fail('The selected SOP category must be an active taxonomy node.');
+
+                        return;
+                    }
+
                     $isActiveNode = TicketCategory::query()
                         ->whereKey($value)
                         ->where('is_active', true)
