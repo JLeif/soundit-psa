@@ -498,6 +498,137 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertSame([self::SITE_A], $result['consoles'][0]['site_ids']);
     }
 
+    // ── READ FRESHNESS (psa-47vxh) ──────────────────────────────────────────
+    //
+    // The Site Manager API returns CACHED telemetry. When a console goes dark its
+    // last report is frozen and served on unchanged, so device status reads as a
+    // confident "online" with nothing signalling the reading is stale — the agent
+    // treats a nine-months-dark site as healthy. The only last-report signal the
+    // vendor exposes is the /v1/devices host-group `updatedAt` (UnifiClient shape
+    // fact 2); it stops advancing when the console stops reporting. Surface it as
+    // reported_at + a computed stale flag, mirroring the psa-wedk RMM last-seen
+    // staleness idiom on this read surface. A missing report time fails to STALE,
+    // never to a false-fresh.
+
+    public function test_list_devices_flags_a_console_whose_last_report_is_stale(): void
+    {
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $staleAt = now()->subHours(72)->toIso8601ZuluString();
+
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [[
+                    'hostId' => self::HOST_A,
+                    'hostName' => 'hq',
+                    'updatedAt' => $staleAt,
+                    'devices' => [['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP-1', 'status' => 'online']],
+                ]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        // Payload freshness envelope — the whole read is as-fresh-as its oldest console.
+        $this->assertTrue($result['data_stale'], 'a 72h-old console report is stale');
+        $this->assertSame($staleAt, $result['data_as_of']);
+        $this->assertArrayHasKey('freshness_note', $result);
+        // Per-console freshness.
+        $this->assertSame($staleAt, $result['consoles'][0]['reported_at']);
+        $this->assertTrue($result['consoles'][0]['stale']);
+        // Each device row carries its console's report time — self-describing.
+        $this->assertSame($staleAt, $result['devices'][0]['reported_at']);
+        // The status itself is untouched: freshness is added alongside, not instead.
+        $this->assertSame('online', $result['devices'][0]['status']);
+    }
+
+    public function test_list_devices_marks_a_freshly_reporting_console_as_current(): void
+    {
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $freshAt = now()->subMinutes(10)->toIso8601ZuluString();
+
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [[
+                    'hostId' => self::HOST_A,
+                    'hostName' => 'hq',
+                    'updatedAt' => $freshAt,
+                    'devices' => [['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP-1', 'status' => 'online']],
+                ]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertFalse($result['data_stale']);
+        $this->assertSame($freshAt, $result['data_as_of']);
+        $this->assertFalse($result['consoles'][0]['stale']);
+    }
+
+    public function test_list_devices_treats_a_missing_report_time_as_stale_not_fresh(): void
+    {
+        // A console group with NO updatedAt — never fail closed into a false-fresh.
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A]),
+            $this->jsonResponse([
+                'data' => [[
+                    'hostId' => self::HOST_A,
+                    'hostName' => 'hq',
+                    'devices' => [['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP-1', 'status' => 'online']],
+                ]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertTrue($result['data_stale']);
+        $this->assertNull($result['data_as_of']);
+        $this->assertNull($result['consoles'][0]['reported_at']);
+        $this->assertTrue($result['consoles'][0]['stale']);
+    }
+
+    public function test_list_devices_data_as_of_is_the_oldest_console_across_consoles(): void
+    {
+        // Two consoles: one reported minutes ago, one three days ago. The read can
+        // only honestly claim to be as fresh as its OLDEST console.
+        $client = Client::factory()->create(['name' => 'Two-Site']);
+        $this->mapSite($client, self::SITE_A, self::HOST_A);
+        $this->mapSite($client, self::SITE_B, self::HOST_B);
+
+        $freshAt = now()->subMinutes(5)->toIso8601ZuluString();
+        $staleAt = now()->subHours(72)->toIso8601ZuluString();
+
+        $this->bindClientReturning([
+            $this->sitesOn([self::SITE_A => self::HOST_A, self::SITE_B => self::HOST_B]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_A, 'hostName' => 'hq', 'updatedAt' => $freshAt, 'devices' => [
+                    ['id' => 'A1', 'mac' => 'AA', 'name' => 'HQ-AP', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+            $this->jsonResponse([
+                'data' => [['hostId' => self::HOST_B, 'hostName' => 'branch', 'updatedAt' => $staleAt, 'devices' => [
+                    ['id' => 'B1', 'mac' => 'BA', 'name' => 'Branch-AP', 'status' => 'online'],
+                ]]],
+                'httpStatusCode' => 200,
+            ]),
+        ]);
+
+        $result = $this->toolset()->execute('unifi_list_devices', ['client_id' => $client->id]);
+
+        $this->assertSame($staleAt, $result['data_as_of'], 'as-of is the oldest console');
+        $this->assertTrue($result['data_stale']);
+        $byHost = collect($result['consoles'])->keyBy('host_id');
+        $this->assertFalse($byHost[self::HOST_A]['stale']);
+        $this->assertTrue($byHost[self::HOST_B]['stale']);
+    }
+
     public function test_list_devices_aggregates_across_a_multi_site_clients_two_consoles(): void
     {
         // Two locations, one console each. The device list aggregates both, each device

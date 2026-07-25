@@ -74,6 +74,20 @@ class UnifiReadOnlyToolset
     private const MAX_SITE_LOOKUP_PAGES = 20;
 
     /**
+     * Read freshness (psa-47vxh). The Site Manager API serves CACHED telemetry:
+     * when a console goes dark its last report is frozen and handed back on
+     * unchanged, so a nine-months-dark site reads as a confident "up"/"online".
+     * We surface the vendor's own last-report time + a computed staleness flag so
+     * that never travels as current truth — the psa-wedk RMM last-seen staleness
+     * idiom, on this read surface. A console reports continuously, so no report in
+     * this long means it is almost certainly offline (conservative enough not to
+     * false-flag a healthy console). A missing/unparseable time fails to STALE.
+     */
+    private const STALE_AFTER_HOURS = 24;
+
+    private const DEVICE_FRESHNESS_NOTE = 'reported_at is the UniFi Site Manager updatedAt for a console\'s device data; it stops advancing when the console goes offline, so a stale reading means the console may be dark and these device states are last-known, not live. data_as_of is the oldest console\'s report across this result; data_stale is true when it is older than '.self::STALE_AFTER_HOURS.'h or unknown.';
+
+    /**
      * Durations the vendor documents per interval, first entry = default. 5-minute
      * samples are retained at least 24h; 1-hour samples at least 30 days. Source:
      * the `duration` parameter description in the Site Manager OpenAPI spec.
@@ -370,6 +384,7 @@ class UnifiReadOnlyToolset
         $devices = [];
         $consoles = [];
         $offline = 0;
+        $reportedAts = []; // per-console last-report times, for the freshness envelope
 
         try {
             // One sites walk proves which UniFi sites each of the client's consoles
@@ -412,6 +427,13 @@ class UnifiReadOnlyToolset
                 $groups = $this->deviceGroupsForHost($host);
                 $hostDevices = $this->client()->flattenDevices($groups);
 
+                // Freshness (psa-47vxh): the console's last report to UniFi's cloud
+                // is the /devices host-group updatedAt (the only last-report signal
+                // the API exposes). It governs every device on the console.
+                $reportedAt = $this->latestReportedAt($groups);
+                $reportedAtIso = $reportedAt?->toIso8601ZuluString();
+                $reportedAts[] = $reportedAt;
+
                 $hostCount = 0;
                 $hostOffline = 0;
                 foreach ($hostDevices as $device) {
@@ -441,6 +463,9 @@ class UnifiReadOnlyToolset
                         'is_managed' => (bool) ($device['isManaged'] ?? false),
                         'startup_time' => $this->scalarOrNull($device['startupTime'] ?? null),
                         'note' => $this->textSanitizer->sanitizeNullable('UniFi device note', $device['note'] ?? null, 500),
+                        // The console's last report — a stale value means this status
+                        // is last-known, not live (freshness note on the payload).
+                        'reported_at' => $reportedAtIso,
                     ];
                     $hostCount++;
                 }
@@ -450,6 +475,8 @@ class UnifiReadOnlyToolset
                     'site_ids' => array_values($clientSiteIds),
                     'count' => $hostCount,
                     'offline_count' => $hostOffline,
+                    'reported_at' => $reportedAtIso,
+                    'stale' => $this->isStale($reportedAt),
                 ];
             }
         } catch (\Throwable $e) {
@@ -468,6 +495,7 @@ class UnifiReadOnlyToolset
             'psa_client_name' => $client->name,
             'count' => count($devices),
             'offline_count' => $offline,
+            ...$this->freshnessEnvelope($reportedAts, self::DEVICE_FRESHNESS_NOTE),
             'consoles' => $consoles,
             'devices' => $devices,
         ];
@@ -894,6 +922,75 @@ class UnifiReadOnlyToolset
     private function numberOrNull(mixed $value): int|float|null
     {
         return is_int($value) || is_float($value) ? $value : null;
+    }
+
+    // ── freshness (psa-47vxh) ──────────────────────────────────────────────────
+
+    /** Parse a vendor ISO8601 timestamp, or null when absent/unparseable. */
+    private function parseTimestamp(mixed $value): ?\Illuminate\Support\Carbon
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        try {
+            return \Illuminate\Support\Carbon::parse($value);
+        } catch (\Throwable) {
+            return null; // an unreadable time is unknown, not fresh
+        }
+    }
+
+    /** A report time is stale when it is missing or older than the threshold. */
+    private function isStale(?\Illuminate\Support\Carbon $reportedAt): bool
+    {
+        return $reportedAt === null || $reportedAt->lt(now()->subHours(self::STALE_AFTER_HOURS));
+    }
+
+    /**
+     * The newest updatedAt across a host's device groups (a host normally maps to
+     * one group, but pagination can split it), or null if none is parseable.
+     *
+     * @param  array<int, array<string, mixed>>  $groups
+     */
+    private function latestReportedAt(array $groups): ?\Illuminate\Support\Carbon
+    {
+        $latest = null;
+        foreach ($groups as $group) {
+            $ts = $this->parseTimestamp($group['updatedAt'] ?? null);
+            if ($ts !== null && ($latest === null || $ts->gt($latest))) {
+                $latest = $ts;
+            }
+        }
+
+        return $latest;
+    }
+
+    /**
+     * The payload-level freshness envelope for a set of per-item report times.
+     * data_as_of is the OLDEST known report — the freshest the WHOLE reading can
+     * honestly claim — and data_stale is true when that is beyond the threshold OR
+     * any item's time is unknown (a console that never reported can hide a dark
+     * site behind a fresh sibling, so it fails the set to stale, never fresh).
+     *
+     * @param  array<int, ?\Illuminate\Support\Carbon>  $reportedAts
+     * @return array{data_as_of: ?string, data_stale: bool, freshness_note: string}
+     */
+    private function freshnessEnvelope(array $reportedAts, string $note): array
+    {
+        $hasUnknown = in_array(null, $reportedAts, true);
+
+        $oldest = null;
+        foreach ($reportedAts as $ts) {
+            if ($ts !== null && ($oldest === null || $ts->lt($oldest))) {
+                $oldest = $ts;
+            }
+        }
+
+        return [
+            'data_as_of' => $oldest?->toIso8601ZuluString(),
+            'data_stale' => $hasUnknown || $this->isStale($oldest),
+            'freshness_note' => $note,
+        ];
     }
 
     /**
