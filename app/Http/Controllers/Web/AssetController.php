@@ -177,7 +177,7 @@ class AssetController extends Controller
         $cometJobData = null;
         if ($asset->comet_device_id) {
             try {
-                $cometJobService = new \App\Services\Comet\CometJobService(new \App\Services\Comet\CometClient);
+                $cometJobService = new \App\Services\Comet\CometJobService(app(\App\Services\Comet\CometClient::class));
                 $cometJobData = $cometJobService->getRecentJobs($asset);
             } catch (\Exception $e) {
                 // Silently fail — job data is optional

@@ -958,7 +958,7 @@ class TriageToolDefinitions
             ],
             [
                 'name' => 'comet_get_backup_jobs',
-                'description' => 'Get recent backup job history for a device. Shows job status, type, timestamps, duration, and error details.',
+                'description' => 'Get recent backup job history for a device. Shows each job\'s outcome with failure subtype (error, timeout, quota, missed schedule, cancelled), type (backup/restore/retention), timestamps, duration, and sizes. Error message text is not available here — it lives in the Comet job log.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [

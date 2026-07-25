@@ -8,6 +8,14 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Receives Comet Server webhook events. The POST body is a StreamableEvent
+ * (vendor/cometbackup/comet-php-sdk/Comet/StreamableEvent.php): Type is an
+ * INTEGER SEVT_ code — Def.php:2115 SEVT_JOB_COMPLETED = 4201, "Data is the
+ * job object" (a serialized BackupJobDetail). The previous string match on
+ * 'job.completed' matched nothing Comet ever sends, so every real webhook
+ * event was ignored at this gate (psa-enpew).
+ */
 class CometWebhookController extends Controller
 {
     public function __construct(
@@ -18,36 +26,29 @@ class CometWebhookController extends Controller
     {
         $data = $request->json()->all();
 
-        Log::debug('[Comet Webhook] Received', ['type' => $data['Type'] ?? 'unknown']);
+        Log::debug('[Comet Webhook] Received', [
+            'type' => $data['Type'] ?? 'unknown',
+            'type_string' => $data['TypeString'] ?? null,
+        ]);
 
         try {
             $type = $data['Type'] ?? null;
 
-            if ($type === 'job.completed') {
-                $jobData = $data['Data'] ?? $data;
-                $status = $jobData['Status'] ?? null;
+            if ($type === \Comet\Def::SEVT_JOB_COMPLETED) {
+                $jobData = $data['Data'] ?? null;
 
-                if ($status === 7002) {
-                    $alert = $this->alertService->handleJobFailure($jobData);
+                if (! is_array($jobData)) {
+                    Log::warning('[Comet Webhook] Job-completed event without job Data payload');
 
-                    return response()->json([
-                        'status' => 'processed',
-                        'alert_id' => $alert?->id,
-                    ]);
+                    return response()->json(['status' => 'ignored']);
                 }
 
-                if ($status === 5000) {
-                    $alert = $this->alertService->handleJobSuccess($jobData);
+                $alert = $this->alertService->handleJobCompleted($jobData);
 
-                    return response()->json([
-                        'status' => 'processed',
-                        'alert_id' => $alert?->id,
-                    ]);
-                }
-
-                Log::debug('[Comet Webhook] Ignoring job status', ['status' => $status]);
-
-                return response()->json(['status' => 'ignored']);
+                return response()->json([
+                    'status' => 'processed',
+                    'alert_id' => $alert?->id,
+                ]);
             }
 
             Log::debug('[Comet Webhook] Ignoring event type', ['type' => $type]);

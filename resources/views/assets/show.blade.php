@@ -2192,12 +2192,13 @@
                                         <tr>
                                             <td>
                                                 @php
-                                                    $badgeClass = match($job['status']) {
-                                                        'Completed' => 'bg-success',
-                                                        'Failed' => 'bg-danger',
-                                                        'Warning' => 'bg-warning text-dark',
-                                                        'Running' => 'bg-info',
-                                                        'Cancelled' => 'bg-secondary',
+                                                    // Badge by vendor status RANGE category (Comet/Def.php:708-841);
+                                                    // completed-with-warnings keeps its amber badge.
+                                                    $badgeClass = match(true) {
+                                                        $job['status_code'] === \Comet\Def::JOB_STATUS_FAILED_WARNING => 'bg-warning text-dark',
+                                                        $job['category'] === 'success' => 'bg-success',
+                                                        $job['category'] === 'failed' => 'bg-danger',
+                                                        $job['category'] === 'running' => 'bg-info',
                                                         default => 'bg-secondary',
                                                     };
                                                 @endphp

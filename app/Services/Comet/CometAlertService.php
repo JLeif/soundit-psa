@@ -11,27 +11,53 @@ use App\Services\AlertService;
 use App\Support\CometConfig;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Turns Comet job-completion webhook events into PSA alerts.
+ *
+ * Job field names and code values come from the vendor SDK, not from guesses
+ * (psa-enpew — the previous constants CLASS_BACKUP=4 / STATUS_ERROR=7002-exact
+ * matched nothing Comet ever sends, so no backup-failure alert ever fired):
+ * - classifications: vendor/cometbackup/comet-php-sdk/Comet/Def.php:610-701
+ *   (a 4000-4999 range; BACKUP = 4001)
+ * - statuses: Def.php:708-841 — RANGES, not single codes: success 5000-5999,
+ *   running 6000-6999, failed 7000-7999 (timeout/warning/error/quota/
+ *   missed-schedule/cancelled/skip-already-running/abandoned)
+ * - job payload fields: Comet/BackupJobDetail.php (note: it has NO FileErrors
+ *   property — error text lives in the job log, not the job object)
+ */
 class CometAlertService
 {
-    private const STATUS_SUCCESS = 5000;
-
-    private const STATUS_RUNNING = 6001;
-
-    private const STATUS_WARNING = 7001;
-
-    private const STATUS_ERROR = 7002;
-
-    private const STATUS_CANCELLED = 7005;
-
-    private const CLASS_BACKUP = 4;
-
-    private const CLASS_RESTORE = 5;
-
-    private const CLASS_RETENTION = 7;
-
     public function __construct(
         private readonly AlertService $alertService,
     ) {}
+
+    /**
+     * Route a completed job (webhook Data payload) by its vendor status range:
+     * failed range raises/refreshes an alert, success range resolves one,
+     * anything else (running/unknown) is not a completion outcome and is ignored.
+     */
+    public function handleJobCompleted(array $data): ?Alert
+    {
+        $status = $data['Status'] ?? null;
+
+        if (! is_int($status)) {
+            Log::debug('[Comet Alert] Job payload without integer Status, ignoring', ['status' => $status]);
+
+            return null;
+        }
+
+        if ($this->isFailedStatus($status)) {
+            return $this->handleJobFailure($data);
+        }
+
+        if ($this->isSuccessStatus($status)) {
+            return $this->handleJobSuccess($data);
+        }
+
+        Log::debug('[Comet Alert] Job status outside success/failed ranges, ignoring', ['status' => $status]);
+
+        return null;
+    }
 
     public function handleJobFailure(array $data): ?Alert
     {
@@ -45,18 +71,17 @@ class CometAlertService
         $deviceId = $data['DeviceID'] ?? null;
         $status = $data['Status'] ?? null;
         $classification = $data['Classification'] ?? null;
-        $fileErrors = $data['FileErrors'] ?? null;
         $startTime = $data['StartTime'] ?? null;
         $endTime = $data['EndTime'] ?? null;
         $totalSize = $data['TotalSize'] ?? null;
 
-        if ($status !== self::STATUS_ERROR) {
-            Log::debug('[Comet Alert] Non-error status, ignoring', ['status' => $status]);
+        if (! is_int($status) || ! $this->isFailedStatus($status)) {
+            Log::debug('[Comet Alert] Non-failed status, ignoring', ['status' => $status]);
 
             return null;
         }
 
-        if ($classification !== self::CLASS_BACKUP) {
+        if ($classification !== \Comet\Def::JOB_CLASSIFICATION_BACKUP) {
             Log::debug('[Comet Alert] Non-backup classification, ignoring', ['classification' => $classification]);
 
             return null;
@@ -74,12 +99,13 @@ class CometAlertService
 
         $hostname = $asset?->hostname ?? $username ?? 'Unknown';
         $jobType = $this->classificationLabel($classification);
+        $statusLabel = $this->statusLabel($status);
 
         // source_alert_id: {DeviceID}:{Classification} — Comet has no unique job failure ID
         $sourceAlertId = "{$deviceId}:{$classification}";
 
         // Build message
-        $msgLines = ["Device: {$hostname}", "Job type: {$jobType}", 'Status: Failed'];
+        $msgLines = ["Device: {$hostname}", "Job type: {$jobType}", "Status: {$statusLabel}"];
         if ($startTime) {
             $msgLines[] = 'Started: '.date('Y-m-d H:i:s', $startTime);
         }
@@ -89,11 +115,6 @@ class CometAlertService
         if ($totalSize) {
             $msgLines[] = 'Total size: '.number_format($totalSize / (1024 ** 3), 2).' GB';
         }
-        if ($fileErrors) {
-            $msgLines[] = '';
-            $msgLines[] = 'Errors:';
-            $msgLines[] = substr($fileErrors, 0, 2000);
-        }
 
         $alert = $this->alertService->upsert(
             AlertSource::Comet,
@@ -102,7 +123,7 @@ class CometAlertService
                 'asset_id' => $asset?->id,
                 'client_id' => $clientId,
                 'severity' => AlertSeverity::fromVendor(AlertSource::Comet, null),
-                'title' => mb_substr("Backup Failed - {$jobType} on {$hostname}", 0, 255),
+                'title' => mb_substr("Backup {$statusLabel} on {$hostname}", 0, 255),
                 'message' => implode("\n", $msgLines),
                 'hostname' => $hostname,
                 'fired_at' => $endTime ? \Illuminate\Support\Carbon::createFromTimestamp($endTime) : now(),
@@ -110,6 +131,7 @@ class CometAlertService
                     'device_id' => $deviceId,
                     'username' => $username,
                     'classification' => $classification,
+                    'status' => $status,
                     'start_time' => $startTime,
                     'end_time' => $endTime,
                     'total_size' => $totalSize,
@@ -121,6 +143,7 @@ class CometAlertService
             'alert_id' => $alert->id,
             'source_alert_id' => $sourceAlertId,
             'hostname' => $hostname,
+            'status' => $status,
             'client_id' => $clientId,
         ]);
 
@@ -130,9 +153,14 @@ class CometAlertService
     public function handleJobSuccess(array $data): ?Alert
     {
         $deviceId = $data['DeviceID'] ?? null;
+        $status = $data['Status'] ?? null;
         $classification = $data['Classification'] ?? null;
 
-        if ($classification !== self::CLASS_BACKUP) {
+        if (! is_int($status) || ! $this->isSuccessStatus($status)) {
+            return null;
+        }
+
+        if ($classification !== \Comet\Def::JOB_CLASSIFICATION_BACKUP) {
             return null;
         }
 
@@ -159,13 +187,43 @@ class CometAlertService
         return $alert;
     }
 
+    private function isSuccessStatus(int $status): bool
+    {
+        return $status >= \Comet\Def::JOB_STATUS_STOP_SUCCESS__MIN
+            && $status <= \Comet\Def::JOB_STATUS_STOP_SUCCESS__MAX;
+    }
+
+    private function isFailedStatus(int $status): bool
+    {
+        return $status >= \Comet\Def::JOB_STATUS_FAILED__MIN
+            && $status <= \Comet\Def::JOB_STATUS_FAILED__MAX;
+    }
+
+    private function statusLabel(int $status): string
+    {
+        return match (true) {
+            $status === \Comet\Def::JOB_STATUS_FAILED_TIMEOUT => 'Failed (timeout)',
+            $status === \Comet\Def::JOB_STATUS_FAILED_WARNING => 'Completed with warnings',
+            $status === \Comet\Def::JOB_STATUS_FAILED_ERROR => 'Failed (error)',
+            $status === \Comet\Def::JOB_STATUS_FAILED_QUOTA => 'Failed (quota exceeded)',
+            $status === \Comet\Def::JOB_STATUS_FAILED_SCHEDULEMISSED => 'Failed (missed schedule)',
+            $status === \Comet\Def::JOB_STATUS_FAILED_CANCELLED => 'Cancelled',
+            $status === \Comet\Def::JOB_STATUS_FAILED_SKIPALREADYRUNNING => 'Skipped (already running)',
+            $status === \Comet\Def::JOB_STATUS_FAILED_ABANDONED => 'Abandoned',
+            $this->isFailedStatus($status) => "Failed (code {$status})",
+            default => "Unknown (code {$status})",
+        };
+    }
+
+    /** Classification values per vendor Comet/Def.php:610-701. */
     private function classificationLabel(int $classification): string
     {
         return match ($classification) {
-            self::CLASS_BACKUP => 'Backup',
-            self::CLASS_RESTORE => 'Restore',
-            self::CLASS_RETENTION => 'Retention',
-            default => 'Job',
+            \Comet\Def::JOB_CLASSIFICATION_BACKUP => 'Backup',
+            \Comet\Def::JOB_CLASSIFICATION_RESTORE => 'Restore',
+            \Comet\Def::JOB_CLASSIFICATION_RETENTION => 'Retention',
+            \Comet\Def::JOB_CLASSIFICATION_DEEPVERIFY => 'Deep verify',
+            default => "Other ({$classification})",
         };
     }
 }

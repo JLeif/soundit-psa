@@ -584,7 +584,7 @@ Syncs backup storage usage, device protection status, and license counts from Co
 3. Click **Test Connection** to verify
 4. Map PSA clients to Comet organizations in the **Organization Mapping** section
 5. Click **Sync Backup Usage** or wait for the daily 05:40 cron (`php artisan comet:sync-backup`)
-6. **Webhooks (optional):** Click **Generate Webhook Key**, then configure a webhook event streamer in your Comet server for `job.completed` events pointing to `https://psa.yourmsp.com/api/webhooks/comet` with `Authorization: Bearer <key>` header
+6. **Webhooks (optional):** Click **Generate Webhook Key**, then configure a webhook event streamer in your Comet server for **Job completed** events (`SEVT_JOB_COMPLETED`) pointing to `https://psa.yourmsp.com/api/webhooks/comet` with `Authorization: Bearer <key>` header
 
 **Composer dependency:** `cometbackup/comet-php-sdk`
 
