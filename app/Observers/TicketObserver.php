@@ -23,10 +23,43 @@ use Illuminate\Support\Facades\Log;
 class TicketObserver
 {
     /**
+     * Ownership stamp for a category chosen AT creation (so-0ftg CREATE path,
+     * psa-begf3). Mirrors updating(): whoever sets category_id gets written
+     * into tickets.category_source in the SAME INSERT, so a human/agent create
+     * is honestly attributed (Staff / System, from execution context — never
+     * caller-supplied, so it cannot be forged) and stays triage-protected. Only
+     * a real node is stamped: a null category at create is the absence of a
+     * choice, not a deliberate clear, so it carries no ownership (leaving triage
+     * free to map it later).
+     */
+    public function creating(Ticket $ticket): void
+    {
+        if (filled($ticket->category_id)) {
+            $ticket->category_source = TicketCategoryChangeLog::attributionSource();
+        }
+    }
+
+    /**
      * Notify technicians and auto-dispatch triage when a new ticket is created.
      */
     public function created(Ticket $ticket): void
     {
+        // Taxonomy audit for a category set AT creation (so-0ftg CREATE path):
+        // mirrors updated()'s change log — same seam, so every create surface
+        // (web form, MCP create_ticket, imports) is captured without opting in.
+        // previous is null (there was no prior node). AUDIT-ONLY and never lets
+        // a broken log write take the ticket creation down with it, but screams.
+        if (filled($ticket->category_id)) {
+            try {
+                TicketCategoryChangeLog::recordFor($ticket);
+            } catch (\Throwable $e) {
+                Log::error('[TicketObserver] Failed to record create category change log', [
+                    'ticket_id' => $ticket->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         try {
             app(SignalHub::class)->emit('ticket.created', $ticket, "Ticket #{$ticket->id} created", [
                 'client_id' => $ticket->client_id,
