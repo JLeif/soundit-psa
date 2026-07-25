@@ -520,6 +520,11 @@
                              "N failing" count still shows regardless of staleness. --}}
                         @if($insight->checksFailing === null)
                             checks: <span class="text-muted">—</span>
+                        @elseif($insight->checksTotal === 0)
+                            {{-- psa-0pb9m: zero checks is the ABSENCE of monitoring, not a
+                                 clean result — a Mac whose broken check was deleted must
+                                 read unmonitored, never "all passing". --}}
+                            <span class="text-warning-emphasis fw-semibold" title="No Tactical checks are configured on this device — nothing verifies its health">no checks — unmonitored</span>
                         @elseif($insight->checksFailing > 0)
                             <span class="text-danger fw-semibold">{{ $insight->checksFailing }} checks failing</span>
                         @elseif($insight->checksKnownClean() && !$insight->stale)
@@ -3443,6 +3448,13 @@ function renderPatches(data) {
     }
 
     function renderChecks(d) {
+        // psa-0pb9m: zero checks is the ABSENCE of monitoring — never render it
+        // as a green "All checks passing (0)".
+        if (d.checks_total === 0) {
+            return '<div class="text-warning-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>' +
+                   'No checks configured — this device is not monitored. Nothing verifies its health.</div>' +
+                   viewInTacticalLink();
+        }
         if (typeof d.checks_failing !== 'number' || d.checks_failing === 0) {
             return '<div class="text-success"><i class="bi bi-check-circle me-1"></i>All checks passing' +
                    (typeof d.checks_total === 'number' ? ' (' + d.checks_total + ')' : '') + '.</div>';

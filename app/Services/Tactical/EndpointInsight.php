@@ -132,15 +132,29 @@ final readonly class EndpointInsight
     }
 
     /**
-     * True only when the checks signal was actually READ (Live or Snapshot) AND
-     * reports zero failing. An Unavailable checks state is NOT clean — we simply
-     * don't know (§11.7). Guards the UI/AI from rendering a fetch failure as
-     * "✓ all checks passing".
+     * True only when the checks signal was actually READ (Live or Snapshot),
+     * at least one check EXISTS, and zero are failing. An Unavailable checks
+     * state is NOT clean — we simply don't know (§11.7) — and ZERO configured
+     * checks is the ABSENCE of monitoring, not a clean result (psa-0pb9m):
+     * "0 of 0 passing" must never render as "✓ all checks passing".
      */
     public function checksKnownClean(): bool
     {
         return $this->checksState !== SignalState::Unavailable
+            && $this->checksTotal !== null
+            && $this->checksTotal > 0
             && $this->checksFailing === 0;
+    }
+
+    /**
+     * The coverage verdict for this endpoint's checks signal (psa-0pb9m):
+     * verified / unverified / none / unknown, per the shared classifier.
+     * "Is this device actually monitored?" — answered separately from
+     * "is it healthy?" (checksFailing).
+     */
+    public function checksCoverage(): string
+    {
+        return TacticalFieldMap::checksCoverage($this->checksTotal, $this->checksFailing);
     }
 
     /**

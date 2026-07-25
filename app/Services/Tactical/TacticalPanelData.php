@@ -279,6 +279,9 @@ class TacticalPanelData
             'tactical' => true,
             'checks_total' => $counts['total'],
             'checks_failing' => $counts['failing'],
+            // psa-0pb9m: self-describing coverage, same vocabulary as the MCP
+            // payloads (zero checks => 'none' => the panel renders unmonitored).
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
             'failing_checks' => $failing,
         ];
     }

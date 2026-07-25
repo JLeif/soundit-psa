@@ -56,10 +56,14 @@ final class TacticalContextProvider
             .', stale: '.$this->yn($i->stale)
             .', maintenance: '.$this->yn($i->maintenance)
             .', user logged in: '.$this->yn($i->userLoggedIn);   // G6: boolean, never the username
-        // G7: distinguish unavailable from clean.
+        // G7: distinguish unavailable from clean. psa-0pb9m: distinguish
+        // UNMONITORED (zero checks) and unverified (all failing) from both —
+        // an endpoint that is merely VISIBLE in RMM must never read as covered.
         $lines[] = 'Checks: '.match (true) {
             $i->checksState === SignalState::Unavailable => 'unavailable (could not read)',
+            $i->checksCoverage() === TacticalFieldMap::COVERAGE_NONE => 'no checks configured - UNMONITORED (nothing verifies this endpoint)',
             $i->checksKnownClean() => 'all passing',
+            $i->checksCoverage() === TacticalFieldMap::COVERAGE_UNVERIFIED => "{$i->checksFailing} failing of {$i->checksTotal} - ALL failing (monitoring unverified: real incident or broken/wrong-platform check)",
             default => "{$i->checksFailing} failing of {$i->checksTotal}",
         };
         $lines[] = 'Patches: '.($i->pendingPatchCount !== null

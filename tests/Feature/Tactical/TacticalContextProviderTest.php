@@ -105,6 +105,32 @@ class TacticalContextProviderTest extends TestCase
         $this->assertStringNotContainsStringIgnoringCase('all checks passing', $block);
     }
 
+    public function test_zero_checks_renders_unmonitored_never_all_passing(): void
+    {
+        // psa-0pb9m: ZERO checks is the ABSENCE of monitoring. The live checks
+        // read succeeds and returns an empty list (0 of 0) — the AI context must
+        // say UNMONITORED, never "all passing".
+        [$asset] = $this->seedTacticalAssetWithFailingCheck();
+        $block = $this->provider([
+            new Response(200, [], json_encode($this->agentStatusPayload())),
+            new Response(200, [], json_encode([])),
+        ])->forAsset($asset)->text;
+
+        $this->assertStringContainsString('UNMONITORED', $block);
+        $this->assertStringNotContainsStringIgnoringCase('all passing', $block);
+    }
+
+    public function test_all_checks_failing_renders_monitoring_unverified(): void
+    {
+        // psa-0pb9m: the Mac case — every check failing. A payload that only
+        // says "1 failing of 1" reads like a covered-but-unhealthy box; it must
+        // carry the explicit monitoring-unverified marker instead.
+        [$asset] = $this->seedTacticalAssetWithFailingCheck();
+        $block = $this->provider($this->liveReads())->forAsset($asset)->text;
+
+        $this->assertStringContainsString('ALL failing (monitoring unverified', $block);
+    }
+
     /**
      * Seed a TacticalAsset with one failing check. Returns [$asset].
      *

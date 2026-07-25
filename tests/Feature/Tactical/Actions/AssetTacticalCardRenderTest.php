@@ -197,6 +197,25 @@ class AssetTacticalCardRenderTest extends TestCase
         $resp->assertOk()->assertDontSee('all passing');
     }
 
+    public function test_zero_checks_renders_unmonitored_not_all_passing(): void
+    {
+        // psa-0pb9m: ZERO configured checks is the ABSENCE of monitoring — the
+        // delete-the-broken-check trap. A fresh 0-of-0 snapshot must render the
+        // explicit unmonitored chip, never the green "all passing".
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 0,
+            'checks_total' => 0,
+            'synced_at' => now()->subMinutes(2), // fresh — freshness must not rescue it
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertDontSee('all passing')
+            ->assertSee('no checks — unmonitored');
+    }
+
     public function test_failing_checks_chip_still_shows_the_count_when_stale(): void
     {
         // Staleness gates only the POSITIVE claim; a known-failing count is still a

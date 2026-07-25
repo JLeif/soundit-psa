@@ -145,6 +145,41 @@ class EndpointInsightTest extends TestCase
         $this->assertFalse($failing->checksKnownClean());
     }
 
+    public function test_zero_checks_is_unmonitored_never_clean(): void
+    {
+        // psa-0pb9m: a device with NO checks at all read "all passing" (0 of 0)
+        // — the delete-the-broken-check trap. Zero checks is the ABSENCE of
+        // monitoring, not a clean result.
+        $unmonitored = $this->insight([
+            'checksState' => SignalState::Live,
+            'checksFailing' => 0,
+            'checksTotal' => 0,
+        ]);
+
+        $this->assertFalse($unmonitored->checksKnownClean());
+        $this->assertSame('none', $unmonitored->checksCoverage());
+    }
+
+    public function test_checks_coverage_reflects_the_shared_classifier(): void
+    {
+        // The bead's exact case: one check, always failing — unverified.
+        $this->assertSame('unverified', $this->insight([
+            'checksFailing' => 1,
+            'checksTotal' => 1,
+        ])->checksCoverage());
+
+        $this->assertSame('verified', $this->insight([
+            'checksFailing' => 0,
+            'checksTotal' => 3,
+        ])->checksCoverage());
+
+        $this->assertSame('unknown', $this->insight([
+            'checksState' => SignalState::Unavailable,
+            'checksFailing' => null,
+            'checksTotal' => null,
+        ])->checksCoverage());
+    }
+
     public function test_deterministic_flags_are_plain_booleans(): void
     {
         $insight = $this->insight([
