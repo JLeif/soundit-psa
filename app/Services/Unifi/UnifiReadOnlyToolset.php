@@ -88,6 +88,16 @@ class UnifiReadOnlyToolset
     private const DEVICE_FRESHNESS_NOTE = 'reported_at is the UniFi Site Manager updatedAt for a console\'s device data; it stops advancing when the console goes offline, so a stale reading means the console may be dark and these device states are last-known, not live. data_as_of is the oldest console\'s report across this result; data_stale is true when it is older than '.self::STALE_AFTER_HOURS.'h or unknown.';
 
     /**
+     * Site health has no last-report of its own: the Site Manager /sites
+     * statistics block carries NO last-contact timestamp (verified against the
+     * vendor payload), so a dark console\'s cached wanUptime/counts read as
+     * healthy with nothing on THIS endpoint to tell. Rather than compute a false
+     * fresh/stale, we flag freshness unverifiable (data_as_of/data_stale null) and
+     * point at unifi_list_devices, which DOES carry per-console reported_at.
+     */
+    private const SITE_HEALTH_FRESHNESS_NOTE = 'UniFi Site Manager provides no last-contact timestamp for site statistics, so freshness here is UNVERIFIABLE (data_as_of and data_stale are null): wan_uptime_percent and counts are the console\'s last-cached values and read as healthy even if the console is offline. To confirm a site is actually reporting, call unifi_list_devices for this client and check each console\'s reported_at / stale.';
+
+    /**
      * Durations the vendor documents per interval, first entry = default. 5-minute
      * samples are retained at least 24h; 1-hour samples at least 30 days. Source:
      * the `duration` parameter description in the Site Manager OpenAPI spec.
@@ -132,7 +142,7 @@ class UnifiReadOnlyToolset
         return [
             [
                 'name' => 'unifi_get_site_health',
-                'description' => 'Get current network health for every UniFi site mapped to a PSA client — a client with several locations returns one entry per site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem. Results are a per-site array (site_count + sites[]).',
+                'description' => 'Get current network health for every UniFi site mapped to a PSA client — a client with several locations returns one entry per site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem. Results are a per-site array (site_count + sites[]). NOTE: these are cached figures with NO vendor freshness stamp (data_stale is null = unverifiable) — a dark console still reads as healthy here, so confirm the site is actually reporting via unifi_list_devices (its reported_at/stale) before trusting an "up" reading.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -143,7 +153,7 @@ class UnifiReadOnlyToolset
             ],
             [
                 'name' => 'unifi_list_devices',
-                'description' => "List UniFi devices (gateways, switches, access points) across a PSA client's console(s) with their up/down status, model, IP, firmware status and uptime. Use this to find which access point or switch is offline. Each device is tagged with the console (host_id) it belongs to; any console that cannot be safely attributed to this client alone is reported under skipped rather than guessed at.",
+                'description' => "List UniFi devices (gateways, switches, access points) across a PSA client's console(s) with their up/down status, model, IP, firmware status and uptime. Use this to find which access point or switch is offline. Each device is tagged with the console (host_id) it belongs to; any console that cannot be safely attributed to this client alone is reported under skipped rather than guessed at. Each device and console carries reported_at + a stale flag, and the payload carries data_as_of/data_stale: a stale console is one UniFi has not heard from recently, so its device statuses are last-known, NOT live — do not read a stale console's devices as currently online.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -315,6 +325,12 @@ class UnifiReadOnlyToolset
         return [
             'psa_client_id' => $client->id,
             'psa_client_name' => $client->name,
+            // Freshness is unverifiable on this endpoint (psa-47vxh) — the vendor
+            // gives no site-level last-contact. Null, never a false fresh/stale;
+            // the note points at unifi_list_devices for the real per-console signal.
+            'data_as_of' => null,
+            'data_stale' => null,
+            'freshness_note' => self::SITE_HEALTH_FRESHNESS_NOTE,
             'site_count' => count($sites),
             'sites' => $sites,
         ];

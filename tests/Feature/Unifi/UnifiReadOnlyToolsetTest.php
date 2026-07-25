@@ -240,6 +240,27 @@ class UnifiReadOnlyToolsetTest extends TestCase
         $this->assertSame(3, $bySite[self::SITE_B]['counts']['totalDevice']);
     }
 
+    public function test_get_site_health_marks_freshness_unverifiable_and_points_to_device_reports(): void
+    {
+        // The /sites statistics block carries NO last-contact timestamp, so a dark
+        // console's cached wanUptime/counts read as healthy with no way to tell from
+        // this endpoint (psa-47vxh). The honest fix: flag freshness UNVERIFIABLE and
+        // direct the agent to unifi_list_devices, which DOES carry per-console
+        // reported_at — never present the figures as confidently current.
+        $client = $this->mapSite(Client::factory()->create(), self::SITE_A, self::HOST_A);
+        $this->bindClientReturning([$this->jsonResponse($this->sitesPayload())]);
+
+        $result = $this->toolset()->execute('unifi_get_site_health', ['client_id' => $client->id]);
+
+        $this->assertNull($result['data_as_of'], 'no vendor timestamp on /sites');
+        $this->assertNull($result['data_stale'], 'unverifiable — neither confidently fresh nor stale');
+        $this->assertArrayHasKey('freshness_note', $result);
+        $this->assertStringContainsStringIgnoringCase('unverifiable', $result['freshness_note']);
+        $this->assertStringContainsString('unifi_list_devices', $result['freshness_note']);
+        // Health data is still present — flagged alongside, not suppressed.
+        $this->assertSame(97, $result['sites'][0]['wan_uptime_percent']);
+    }
+
     public function test_get_site_health_refuses_a_client_with_no_unifi_mapping(): void
     {
         $client = Client::factory()->create();
