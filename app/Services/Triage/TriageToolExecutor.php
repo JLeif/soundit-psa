@@ -1262,16 +1262,28 @@ class TriageToolExecutor
             $daysSinceBackup = (int) \Carbon\Carbon::parse($jobData['last_success']['started'])->diffInDays(now());
         }
 
-        return [
+        $result = [
             'hostname' => $asset->hostname,
             'comet_username' => $asset->comet_username,
             'cloud_storage_bytes' => $asset->backup_cloud_bytes,
             'local_storage_bytes' => $asset->backup_local_bytes,
             'last_synced' => $asset->backup_synced_at?->toDateTimeString(),
+            'job_data_state' => $jobData['state'],
+            'jobs_checked_at' => $jobData['jobs_checked_at'],
             'last_success' => $jobData['last_success']['started'] ?? null,
             'last_failure' => $jobData['last_failure']['started'] ?? null,
             'days_since_last_success' => $daysSinceBackup,
         ];
+
+        // A failed/impossible job read must scream, never read as all-clear
+        // (psa-enpew; vocabulary shared with comet_get_backup_posture).
+        if ($jobData['state'] === 'unavailable') {
+            $result['job_history_note'] = 'Backup job history could not be fetched from the Comet server — last_success/last_failure are UNKNOWN, not clean. Treat backup state as unknown, never as passing.';
+        } elseif ($jobData['state'] === 'not_queried') {
+            $result['job_history_note'] = 'Job history was not queried — the asset has no synced Comet username. Backup state is unknown, not passing.';
+        }
+
+        return $result;
     }
 
     private function executeCometGetBackupJobs(array $input): array
@@ -1291,8 +1303,28 @@ class TriageToolExecutor
         $jobService = new CometJobService($client);
         $jobData = $jobService->getRecentJobs($asset, $days);
 
+        // Distinguish "the server reported no jobs" from "we could not ask" —
+        // a job_count of 0 on a failed read is a false all-clear (psa-enpew).
+        if ($jobData['state'] === 'unavailable') {
+            return [
+                'hostname' => $asset->hostname,
+                'job_data_state' => 'unavailable',
+                'error' => 'Backup job history unavailable — the Comet server could not be reached. Backup state is UNKNOWN, not passing. Retry, or verify in the Comet console.',
+            ];
+        }
+
+        if ($jobData['state'] === 'not_queried') {
+            return [
+                'hostname' => $asset->hostname,
+                'job_data_state' => 'not_queried',
+                'error' => 'Job history not queried — the asset has no synced Comet username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.',
+            ];
+        }
+
         return [
             'hostname' => $asset->hostname,
+            'job_data_state' => 'ok',
+            'jobs_checked_at' => $jobData['jobs_checked_at'],
             'job_count' => count($jobData['jobs']),
             'jobs' => array_slice($jobData['jobs'], 0, 20),
         ];

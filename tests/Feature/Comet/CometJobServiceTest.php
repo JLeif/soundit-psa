@@ -5,6 +5,7 @@ namespace Tests\Feature\Comet;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Services\Comet\CometClient;
+use App\Services\Comet\CometClientException;
 use App\Services\Comet\CometJobService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -15,9 +16,14 @@ use Tests\TestCase;
  * Job fixtures are REAL \Comet\BackupJobDetail objects carrying \Comet\Def
  * constants — the SDK ships the vendor shape, so the fixtures cannot drift
  * from it (CLAUDE.md fixture rule). The previous implementation exact-matched
- * invented small-int classifications (4/5/7, real scale is 4001+) and five
- * status codes, so real SDK jobs labelled 'Other'/'Unknown' and last_failure
- * missed every failure subtype except 7002.
+ * small-int classifications and five status codes, so real SDK-scale jobs
+ * labelled 'Other'/'Unknown' and last_failure missed every failure subtype
+ * except 7002; per the psa-enpew honest limit, backup classification is now
+ * accepted on BOTH scales (4001 and legacy 4) via CometJobCodes.
+ *
+ * The service's availability contract is also pinned here: a failed or
+ * impossible read returns state=unavailable/not_queried, never the clean
+ * empty shape a genuine no-jobs answer has.
  */
 class CometJobServiceTest extends TestCase
 {
@@ -80,6 +86,8 @@ class CometJobServiceTest extends TestCase
 
         $result = $this->service($jobs)->getRecentJobs($this->asset());
 
+        $this->assertSame('ok', $result['state']);
+        $this->assertNotNull($result['jobs_checked_at']);
         $this->assertCount(count($expected), $result['jobs']);
         foreach ($result['jobs'] as $row) {
             $this->assertSame($expected[$row['status_code']], $row['status']);
@@ -99,9 +107,31 @@ class CometJobServiceTest extends TestCase
         ])->getRecentJobs($this->asset());
 
         $this->assertSame(
-            ['Backup', 'Restore', 'Retention', 'Deep verify', 'Other ('.\Comet\Def::JOB_CLASSIFICATION_DELETE_CUSTOM.')'],
+            ['Backup', 'Restore', 'Retention', 'Deep verify', 'Delete (custom)'],
             array_column($result['jobs'], 'classification'),
         );
+    }
+
+    public function test_an_out_of_catalog_classification_says_interpretation_failed_not_other(): void
+    {
+        // 'Other' reads as benign; an unrecognised code must say so.
+        $result = $this->service([
+            $this->job(['classification' => 9999, 'start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('Unrecognized job type (code 9999)', $result['jobs'][0]['classification']);
+    }
+
+    public function test_legacy_scale_classification_4_counts_as_backup_for_posture(): void
+    {
+        // Dual-scale (psa-enpew): posture tracking must recognise backup on
+        // the legacy small-int scale too, not just SDK 4001.
+        $result = $this->service([
+            $this->job(['classification' => 4, 'status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertNotNull($result['last_failure'], 'legacy-scale backup failures must register');
+        $this->assertSame('Backup', $result['jobs'][0]['classification']);
     }
 
     public function test_last_failure_catches_failure_subtypes_beyond_7002(): void
@@ -146,7 +176,7 @@ class CometJobServiceTest extends TestCase
 
         $rows = array_combine(array_column($result['jobs'], 'status_code'), $result['jobs']);
 
-        $this->assertSame(['Completed (code 5001)', 'success'], [$rows[5001]['status'], $rows[5001]['category']]);
+        $this->assertSame(['Success (code 5001)', 'success'], [$rows[5001]['status'], $rows[5001]['category']]);
         $this->assertSame(['Running', 'running'], [$rows[6004]['status'], $rows[6004]['category']]);
         $this->assertSame(['Failed (code 7042)', 'failed'], [$rows[7042]['status'], $rows[7042]['category']]);
         $this->assertSame(['Unknown (code 4242)', 'unknown'], [$rows[4242]['status'], $rows[4242]['category']]);
@@ -154,6 +184,17 @@ class CometJobServiceTest extends TestCase
         // Range-derived posture: the unnamed success/failed codes still count.
         $this->assertSame(5001, $result['last_success']['status_code']);
         $this->assertSame(7042, $result['last_failure']['status_code']);
+    }
+
+    public function test_success_label_matches_the_backup_read_toolset_vocabulary(): void
+    {
+        // One backup-state vocabulary across surfaces (psa-z30dv): 'Success',
+        // not 'Completed'.
+        $result = $this->service([
+            $this->job(['start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('Success', $result['jobs'][0]['status']);
     }
 
     public function test_job_rows_no_longer_carry_the_dead_error_field(): void
@@ -166,16 +207,57 @@ class CometJobServiceTest extends TestCase
         $this->assertArrayNotHasKey('error', $result['jobs'][0]);
     }
 
+    // ── Availability contract: degraded reads scream, never clean-empty ──────
+
+    public function test_a_failed_live_read_returns_unavailable_not_a_clean_empty_history(): void
+    {
+        $client = $this->mock(CometClient::class);
+        $client->shouldReceive('getJobsForUser')->andThrow(new CometClientException('connection refused'));
+
+        $result = (new CometJobService($client))->getRecentJobs($this->asset());
+
+        $this->assertSame('unavailable', $result['state']);
+        $this->assertNotNull($result['jobs_checked_at']);
+        $this->assertSame([], $result['jobs']);
+        $this->assertNull($result['last_success']);
+        $this->assertNull($result['last_failure']);
+    }
+
+    public function test_an_asset_without_a_comet_username_is_not_queried(): void
+    {
+        $asset = $this->asset(['comet_username' => null]);
+
+        $client = $this->mock(CometClient::class);
+        $client->shouldNotReceive('getJobsForUser');
+
+        $result = (new CometJobService($client))->getRecentJobs($asset);
+
+        $this->assertSame('not_queried', $result['state']);
+        $this->assertNull($result['jobs_checked_at']);
+        $this->assertSame([], $result['jobs']);
+    }
+
+    public function test_a_genuinely_empty_history_is_state_ok(): void
+    {
+        $result = $this->service([])->getRecentJobs($this->asset());
+
+        $this->assertSame('ok', $result['state'], 'only a real answer from the server is ok');
+        $this->assertSame([], $result['jobs']);
+    }
+
+    // ── Asset detail page rendering ───────────────────────────────────────────
+
     public function test_asset_detail_page_renders_range_based_status_badges(): void
     {
         // End-to-end through AssetController + the Blade badge matcher, which
-        // now keys off the row's range category (and \Comet\Def) instead of
-        // exact label strings.
+        // keys off the row's range category (and \Comet\Def) instead of
+        // exact label strings. Running gets dark text on the cyan badge (WCAG).
         $user = \App\Models\User::factory()->create();
         $asset = $this->asset();
         $this->mock(CometClient::class)->shouldReceive('getJobsForUser')->andReturn([
             $this->job(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'start' => now()->subHour()->timestamp]),
             $this->job(['status' => \Comet\Def::JOB_STATUS_FAILED_WARNING, 'start' => now()->subHours(2)->timestamp]),
+            $this->job(['status' => \Comet\Def::JOB_STATUS_RUNNING_ACTIVE, 'start' => now()->subMinutes(10)->timestamp, 'end' => 0]),
             $this->job(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'start' => now()->subHours(3)->timestamp]),
         ]);
 
@@ -185,7 +267,36 @@ class CometJobServiceTest extends TestCase
         $response->assertSeeText('Failed (quota exceeded)');
         $response->assertSeeText('Completed with warnings');
         $response->assertSee('bg-warning text-dark', false);
+        $response->assertSee('bg-info text-dark', false);
         $response->assertSeeText('Last failure:');
+    }
+
+    public function test_asset_detail_page_says_unavailable_when_the_live_read_fails(): void
+    {
+        // "No recent backup jobs found" on a failed read is a false all-clear.
+        $user = \App\Models\User::factory()->create();
+        $asset = $this->asset();
+        $this->mock(CometClient::class)->shouldReceive('getJobsForUser')
+            ->andThrow(new CometClientException('timeout'));
+
+        $response = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $response->assertOk();
+        $response->assertSeeText('Backup job history unavailable');
+        $response->assertDontSeeText('No backup jobs observed');
+    }
+
+    public function test_asset_detail_page_distinguishes_a_genuinely_empty_history(): void
+    {
+        $user = \App\Models\User::factory()->create();
+        $asset = $this->asset();
+        $this->mock(CometClient::class)->shouldReceive('getJobsForUser')->andReturn([]);
+
+        $response = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $response->assertOk();
+        $response->assertSeeText('No backup jobs observed');
+        $response->assertDontSeeText('Backup job history unavailable');
     }
 
     public function test_device_filter_and_recency_cutoff_still_apply(): void

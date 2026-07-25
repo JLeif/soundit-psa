@@ -1111,7 +1111,7 @@
                             <input class="form-check-input" type="checkbox" name="comet_alert_enabled" value="1"
                                    {{ \App\Support\CometConfig::alertsEnabled() ? 'checked' : '' }}
                                    onchange="this.form.submit()">
-                            <label class="form-check-label">Create tickets for failed backups</label>
+                            <label class="form-check-label">Create alerts for failed backup jobs</label>
                         </div>
                     </form>
 
@@ -1120,8 +1120,10 @@
                     <h6><i class="bi bi-broadcast me-1"></i>Webhook Setup</h6>
                     <p class="small text-muted mb-3">
                         Configure Comet to push backup job results to this PSA.
-                        When a backup fails, a ticket is created automatically.
-                        When the next backup succeeds, the ticket is resolved.
+                        The webhook is <strong>required for real-time backup-failure alerts</strong> —
+                        without it, failed backups raise no alert here. When a backup job fails, an
+                        alert appears on the Alerts page; when the next backup for the same device
+                        and protected item succeeds, the alert is resolved automatically.
                     </p>
 
                     @php $cometWebhookKey = \App\Support\CometConfig::get('comet_webhook_key'); @endphp
@@ -1186,11 +1188,39 @@
                         </ul>
                     </div>
 
-                    <div class="alert alert-light border small mb-0">
-                        <strong>How it works:</strong> Comet sends a webhook when any backup job finishes.
-                        The PSA checks the status &mdash; failed jobs (status 7002) create a P3 ticket.
-                        Successful jobs (status 5000) auto-resolve any matching open ticket for that device.
-                        Warnings and cancellations are ignored.
+                    <div class="alert alert-light border small mb-3">
+                        <strong>How it works:</strong> Comet sends a webhook when any job finishes.
+                        A backup job ending anywhere in the vendor's failed range (7000&ndash;7999 &mdash;
+                        error, timeout, quota exceeded, missed schedule, cancelled, skipped because already
+                        running, abandoned, or completed with warnings) creates an <strong>alert</strong> on
+                        the Alerts page (severity Error), deduplicated per device + protected item + storage
+                        vault. Repeat failures refresh the same alert. A successful backup (5000&ndash;5999)
+                        for the same device and protected item auto-resolves it. Restore and retention jobs
+                        never raise or resolve backup alerts.
+                    </div>
+
+                    {{-- Webhook delivery status: post-deploy, real-traffic proof that recognition works --}}
+                    @php
+                        $cometLastReceived = \App\Models\Setting::getValue('comet_webhook_last_received_at');
+                        $cometLastRecognized = \App\Models\Setting::getValue('comet_webhook_last_recognized_at');
+                        $cometLastAlert = \App\Models\Setting::getValue('comet_webhook_last_alert_at');
+                        $cometStamp = fn (?string $v) => $v
+                            ? rescue(fn () => \Illuminate\Support\Carbon::parse($v)->toAppTz()->format('Y-m-d H:i:s T'), $v, false)
+                            : 'never';
+                    @endphp
+                    <div class="mb-0">
+                        <label class="form-label small fw-bold mb-1">Webhook Delivery Status</label>
+                        <ul class="small mb-1">
+                            <li>Last event received: <strong>{{ $cometStamp($cometLastReceived) }}</strong></li>
+                            <li>Last job event recognized: <strong>{{ $cometStamp($cometLastRecognized) }}</strong></li>
+                            <li>Last alert created: <strong>{{ $cometStamp($cometLastAlert) }}</strong></li>
+                        </ul>
+                        <p class="small text-muted mb-0">
+                            Use these to verify the pipeline against real traffic after setup: "received"
+                            advancing while "recognized" stays put means the event streamer is not sending
+                            <em>Job completed</em> events; "recognized" advancing with no alerts simply means
+                            no backup has failed. If nothing advances, check the webhook URL and key.
+                        </p>
                     </div>
                     @endif
 

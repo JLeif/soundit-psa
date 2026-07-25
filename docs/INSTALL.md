@@ -577,14 +577,15 @@ All other integrations are configured through the **Settings > Integrations** pa
 
 ### Comet Backup
 
-Syncs backup storage usage, device protection status, and license counts from Comet Backup. Creates tickets for failed backup jobs via webhook.
+Syncs backup storage usage, device protection status, and license counts from Comet Backup. Raises **unified alerts** (Alerts page, severity Error — not tickets) for failed backup jobs via webhook: the whole vendor failed range 7000–7999 alerts (error, timeout, quota, missed schedule, cancelled, skipped because already running, abandoned, completed with warnings), deduplicated per device + protected item + storage vault; the next successful backup for the same device and protected item auto-resolves the alert.
 
 1. Settings > Integrations > Comet Backup (RMM & Monitoring tab)
 2. Enter your Comet server **URL**, **Admin Username**, and **Admin Password**
 3. Click **Test Connection** to verify
 4. Map PSA clients to Comet organizations in the **Organization Mapping** section
 5. Click **Sync Backup Usage** or wait for the daily 05:40 cron (`php artisan comet:sync-backup`)
-6. **Webhooks (optional):** Click **Generate Webhook Key**, then configure a webhook event streamer in your Comet server for **Job completed** events (`SEVT_JOB_COMPLETED`) pointing to `https://psa.yourmsp.com/api/webhooks/comet` with `Authorization: Bearer <key>` header
+6. **Webhook (required for real-time backup-failure alerts** — skip only if you intentionally run without them): Click **Generate Webhook Key**, then configure a webhook event streamer in your Comet server for **Job completed** events (`SEVT_JOB_COMPLETED`) pointing to `https://psa.yourmsp.com/api/webhooks/comet` with `Authorization: Bearer <key>` header
+7. **Verify against real traffic:** after setup, the **Webhook Delivery Status** stamps on the Comet settings card ("Last event received" / "Last job event recognized" / "Last alert created") must advance as jobs complete. Received advancing while recognized stays "never" means the event streamer is not sending *Job completed* events; nothing advancing means the URL/key is wrong. `grep '\[Comet' storage/logs/laravel.log` shows the same pipeline in detail, including WARNING lines for any event the PSA could not route.
 
 **Composer dependency:** `cometbackup/comet-php-sdk`
 

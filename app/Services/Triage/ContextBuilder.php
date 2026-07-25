@@ -723,6 +723,10 @@ class ContextBuilder
                     $cometClient = new CometClient;
                     $jobService = new CometJobService($cometClient);
                     $jobData = $jobService->getRecentJobs($asset, 3);
+                    if ($jobData['state'] !== 'ok') {
+                        // A failed/unqueried read must not read as "no failures" (psa-enpew)
+                        $info .= "\n    ⚠ Backup job history {$jobData['state']} — backup state UNKNOWN, not passing";
+                    }
                     if ($jobData['last_success']) {
                         $info .= "\n    Last successful backup: ".$jobData['last_success']['started'];
                     }
@@ -738,7 +742,8 @@ class ContextBuilder
                         $info .= "\n    ⚠ No successful backup in {$daysSinceBackup} days";
                     }
                 } catch (\Exception $e) {
-                    // Silently fail — backup context is supplementary
+                    // Even the last-resort path says so — never silently absent (psa-enpew)
+                    $info .= "\n    ⚠ Backup job history unavailable — backup state UNKNOWN, not passing";
                 }
             }
 

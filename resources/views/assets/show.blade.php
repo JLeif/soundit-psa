@@ -2165,7 +2165,30 @@
             </div>
 
             {{-- Comet Backup Jobs --}}
-            @if($cometJobData && !empty($cometJobData['jobs']))
+            @if($cometJobData && ($cometJobData['state'] ?? null) === 'unavailable')
+                {{-- A failed live read must never look like a clean empty history (psa-enpew) --}}
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
+                    <div class="card-body">
+                        <p class="mb-0 text-danger">
+                            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                            Backup job history unavailable — the Comet server could not be reached.
+                            Backup state is unknown, not passing. Retry, or verify in the Comet console.
+                        </p>
+                    </div>
+                </div>
+            @elseif($cometJobData && ($cometJobData['state'] ?? null) === 'not_queried')
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
+                    <div class="card-body">
+                        <p class="mb-0 text-muted">
+                            <i class="bi bi-question-circle me-1"></i>
+                            Job history not queried — this asset has no synced Comet username.
+                            Re-run the Comet backup sync, then reload.
+                        </p>
+                    </div>
+                </div>
+            @elseif($cometJobData && !empty($cometJobData['jobs']))
                 <div class="card mb-3">
                     <div class="card-header">
                         <i class="bi bi-clock-history me-2"></i>Recent Backup Jobs
@@ -2193,12 +2216,13 @@
                                             <td>
                                                 @php
                                                     // Badge by vendor status RANGE category (Comet/Def.php:708-841);
-                                                    // completed-with-warnings keeps its amber badge.
+                                                    // completed-with-warnings keeps its amber badge. Info and
+                                                    // warning backgrounds need dark text for WCAG contrast.
                                                     $badgeClass = match(true) {
                                                         $job['status_code'] === \Comet\Def::JOB_STATUS_FAILED_WARNING => 'bg-warning text-dark',
                                                         $job['category'] === 'success' => 'bg-success',
                                                         $job['category'] === 'failed' => 'bg-danger',
-                                                        $job['category'] === 'running' => 'bg-info',
+                                                        $job['category'] === 'running' => 'bg-info text-dark',
                                                         default => 'bg-secondary',
                                                     };
                                                 @endphp
@@ -2224,7 +2248,10 @@
                 <div class="card mb-3">
                     <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
                     <div class="card-body">
-                        <p class="text-muted mb-0">No recent backup jobs found.</p>
+                        <p class="text-muted mb-0">
+                            No backup jobs observed in the last 7 days. No jobs is not evidence of
+                            success — verify the backup schedule in Comet if this device should be protected.
+                        </p>
                     </div>
                 </div>
             @endif

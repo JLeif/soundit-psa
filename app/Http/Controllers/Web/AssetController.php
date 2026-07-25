@@ -180,7 +180,17 @@ class AssetController extends Controller
                 $cometJobService = new \App\Services\Comet\CometJobService(app(\App\Services\Comet\CometClient::class));
                 $cometJobData = $cometJobService->getRecentJobs($asset);
             } catch (\Exception $e) {
-                // Silently fail — job data is optional
+                // Last-resort guard (the service reports expected failures via
+                // state) — still render an explicit unavailable card, never a
+                // page that reads as "no failures" (psa-enpew).
+                Log::warning("[AssetController] Comet job history unavailable for asset {$asset->id}: {$e->getMessage()}");
+                $cometJobData = [
+                    'state' => 'unavailable',
+                    'jobs_checked_at' => null,
+                    'last_success' => null,
+                    'last_failure' => null,
+                    'jobs' => [],
+                ];
             }
         }
 
