@@ -154,4 +154,53 @@ class TacticalFieldMapTest extends TestCase
         $this->assertSame([], TacticalFieldMap::softwareRows(['id' => 4, 'agent' => 12]));
         $this->assertSame([], TacticalFieldMap::softwareRows(['detail' => 'Not found.']));
     }
+
+    // ── checks coverage (psa-0pb9m) ──────────────────────────────────────────
+
+    public function test_checks_coverage_distinguishes_unmonitored_from_unknown_and_verified(): void
+    {
+        // No snapshot/live read at all — we do not know (never "clean").
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNKNOWN, TacticalFieldMap::checksCoverage(null, null));
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNKNOWN, TacticalFieldMap::checksCoverage(null, 3));
+
+        // ZERO checks: nothing verifies this device. Must never read as clean —
+        // deleting a broken check must not turn a Mac green (psa-0pb9m).
+        $this->assertSame(TacticalFieldMap::COVERAGE_NONE, TacticalFieldMap::checksCoverage(0, 0));
+        $this->assertSame(TacticalFieldMap::COVERAGE_NONE, TacticalFieldMap::checksCoverage(0, null));
+
+        // ALL checks failing: indistinguishable from a broken/wrong-platform
+        // check — nothing currently demonstrates working monitoring. The
+        // "one check on every Mac, fails on all of them" case is exactly 1/1.
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNVERIFIED, TacticalFieldMap::checksCoverage(1, 1));
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNVERIFIED, TacticalFieldMap::checksCoverage(3, 3));
+        // Defensive: failing above total still means nothing passes.
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNVERIFIED, TacticalFieldMap::checksCoverage(3, 5));
+
+        // At least one check currently passing: monitoring demonstrably works.
+        $this->assertSame(TacticalFieldMap::COVERAGE_VERIFIED, TacticalFieldMap::checksCoverage(8, 1));
+        $this->assertSame(TacticalFieldMap::COVERAGE_VERIFIED, TacticalFieldMap::checksCoverage(8, 0));
+        // A null failing count with a positive total is a partial payload —
+        // we cannot show a passing check, so it stays unverified, not verified.
+        $this->assertSame(TacticalFieldMap::COVERAGE_UNVERIFIED, TacticalFieldMap::checksCoverage(4, null));
+    }
+
+    public function test_checks_summary_line_makes_unmonitored_and_all_failing_explicit(): void
+    {
+        // Unknown stays null (callers render their own "—"/unavailable state).
+        $this->assertNull(TacticalFieldMap::checksSummaryLine(null, null));
+
+        // Zero checks must SAY unmonitored, not render a clean-looking count.
+        $line = TacticalFieldMap::checksSummaryLine(0, 0);
+        $this->assertIsString($line);
+        $this->assertStringContainsStringIgnoringCase('unmonitored', $line);
+
+        // All failing carries the unverified warning inline.
+        $line = TacticalFieldMap::checksSummaryLine(1, 1);
+        $this->assertStringContainsString('1 failing / 1 total', $line);
+        $this->assertStringContainsStringIgnoringCase('all checks failing', $line);
+
+        // Healthy shapes keep the exact legacy wording.
+        $this->assertSame('1 failing / 8 total', TacticalFieldMap::checksSummaryLine(8, 1));
+        $this->assertSame('0 failing / 8 total', TacticalFieldMap::checksSummaryLine(8, 0));
+    }
 }

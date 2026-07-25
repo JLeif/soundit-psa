@@ -147,6 +147,73 @@ class TacticalFieldMap
         return $check['check_result']['status'] ?? $check['status'] ?? 'unknown';
     }
 
+    // ── checks coverage (psa-0pb9m) ──────────────────────────────────────────
+
+    /**
+     * The one coverage-semantics note, shared by every AI-facing Tactical
+     * surface (MCP read toolset + triage tool loop) — the sibling of the
+     * psa-47vxh freshness_note. Presence in RMM is NOT coverage.
+     */
+    public const COVERAGE_NOTE = 'checks_coverage semantics: "verified" = at least one check is currently passing (monitoring demonstrably works); "unverified" = checks exist but ALL are failing (a real incident or a broken/wrong-platform check — nothing currently demonstrates working monitoring); "none" = ZERO checks configured, the device is UNMONITORED (do not read it as healthy); "unknown" = the checks signal was never read. A device that is visible in RMM but "none"/"unverified" is NOT covered — use tactical_get_device_checks to see each check and its platform_mismatch reason.';
+
+    /** At least one check is currently passing — monitoring demonstrably works. */
+    public const COVERAGE_VERIFIED = 'verified';
+
+    /**
+     * Checks exist but NONE passes — indistinguishable from a broken or
+     * wrong-platform check. Nothing currently demonstrates working monitoring.
+     */
+    public const COVERAGE_UNVERIFIED = 'unverified';
+
+    /** Zero checks configured — nothing verifies this device at all. */
+    public const COVERAGE_NONE = 'none';
+
+    /** The checks signal was never read (no snapshot, no live) — we don't know. */
+    public const COVERAGE_UNKNOWN = 'unknown';
+
+    /**
+     * Classify check counts into a coverage state (psa-0pb9m). The point:
+     * "RMM shows the device" must never be readable as "something verifies the
+     * device". A Mac whose ONE check always fails is UNVERIFIED, not unhealthy-
+     * but-covered; a Mac with zero checks is UNMONITORED, not clean. Single
+     * source of truth for the MCP payloads, EndpointInsight, the AI context
+     * provider, and the asset-page panels.
+     */
+    public static function checksCoverage(?int $total, ?int $failing): string
+    {
+        if ($total === null) {
+            return self::COVERAGE_UNKNOWN;
+        }
+
+        if ($total <= 0) {
+            return self::COVERAGE_NONE;
+        }
+
+        // A missing failing count on a positive total cannot demonstrate a
+        // passing check — unverified, never verified-by-default.
+        if ($failing === null || $failing >= $total) {
+            return self::COVERAGE_UNVERIFIED;
+        }
+
+        return self::COVERAGE_VERIFIED;
+    }
+
+    /**
+     * Human/AI-facing one-line summary for a checks count pair. Keeps the exact
+     * legacy "{failing} failing / {total} total" wording for verified coverage;
+     * makes the two dangerous shapes explicit instead of clean-looking:
+     * zero checks → UNMONITORED, all failing → coverage unverified.
+     */
+    public static function checksSummaryLine(?int $total, ?int $failing): ?string
+    {
+        return match (self::checksCoverage($total, $failing)) {
+            self::COVERAGE_UNKNOWN => null,
+            self::COVERAGE_NONE => 'no checks configured - UNMONITORED (nothing verifies this device)',
+            self::COVERAGE_UNVERIFIED => ($failing ?? $total).' failing / '.$total.' total - ALL checks failing (monitoring unverified: real incident or broken/wrong-platform check)',
+            default => "{$failing} failing / {$total} total",
+        };
+    }
+
     /**
      * Normalize a getSoftware (GET software/{agent}/) payload to a flat list of
      * software rows.

@@ -984,7 +984,7 @@ class TriageToolDefinitions
         return [
             [
                 'name' => 'tactical_get_device',
-                'description' => 'Get comprehensive device info from Tactical RMM: status, hardware (CPU, RAM, disks), OS, network (public/local IPs), logged-in user, uptime, reboot status, check summary.',
+                'description' => 'Get comprehensive device info from Tactical RMM: status, hardware (CPU, RAM, disks), OS, platform, network (public/local IPs), logged-in user, uptime, reboot status, check summary. checks_coverage answers "is this device actually monitored?" separately from "is it healthy?": "none" = zero checks (UNMONITORED), "unverified" = ALL checks failing (broken/wrong-platform check or real incident — nothing demonstrates working monitoring).',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -995,7 +995,7 @@ class TriageToolDefinitions
             ],
             [
                 'name' => 'tactical_get_device_checks',
-                'description' => 'Get all monitoring check results for a device: check name, pass/fail status, return code, and output. Shows what health checks are failing and why.',
+                'description' => 'Get all monitoring check results for a device: check name, type, pass/fail status, return code, and output, plus the payload-level checks_coverage verdict. Script checks are annotated with platform_mismatch/platform_mismatch_reason when the attached script cannot run on the device platform (e.g. a Windows-only script on a Mac) — such a check fails on every run and is noise, not monitoring.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [

@@ -70,6 +70,9 @@ class TacticalDeviceSyncService
         if (! empty($agent['operating_system'])) {
             $update['os_version'] = $agent['operating_system'];
         }
+        if (($plat = TacticalPlatform::fromAgentPayload($agent['plat'] ?? null, $agent['operating_system'] ?? null)) !== null) {
+            $update['plat'] = $plat;
+        }
         if (isset($agent['last_seen'])) {
             $update['last_seen_at'] = Carbon::parse($agent['last_seen']);
         }
@@ -245,6 +248,7 @@ class TacticalDeviceSyncService
         $mapped = [
             'hostname' => $agent['hostname'] ?? null,
             'os' => $agent['operating_system'] ?? null,
+            'plat' => TacticalPlatform::fromAgentPayload($agent['plat'] ?? null, $agent['operating_system'] ?? null),
             'public_ip' => $agent['public_ip'] ?? null,
             'local_ips' => $localIps,
             'last_user' => $agent['logged_username'] ?? null,

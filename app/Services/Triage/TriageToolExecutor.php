@@ -22,6 +22,7 @@ use App\Services\Mesh\MeshClient;
 use App\Services\Ninja\NinjaClient;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalFieldMap;
+use App\Services\Tactical\TacticalPlatform;
 use App\Services\Wiki\HandlesWikiTools;
 use App\Support\ControlDConfig;
 use App\Support\PaginatesTicketLists;
@@ -1020,18 +1021,23 @@ class TriageToolExecutor
 
         // getAgent `checks` is a SUMMARY DICT ({total, passing, failing, …}) —
         // read failing/total off it directly (NOT the getAgentChecks list helper).
-        $checksSummary = null;
+        // Absent dict stays unknown, never clean (psa-0pb9m).
+        $checksTotal = null;
+        $checksFailing = null;
         $checks = $agent['checks'] ?? null;
         if (is_array($checks) && isset($checks['total'])) {
-            $failing = (int) ($checks['failing'] ?? 0);
-            $total = (int) $checks['total'];
-            $checksSummary = "{$failing} failing / {$total} total";
+            $checksTotal = (int) $checks['total'];
+            $checksFailing = (int) ($checks['failing'] ?? 0);
         }
 
         return [
             'hostname' => $agent['hostname'] ?? $hostname,
             'status' => $agent['status'] ?? null,
             'os' => $agent['operating_system'] ?? null,
+            'platform' => TacticalPlatform::fromAgentPayload(
+                is_scalar($agent['plat'] ?? null) ? (string) $agent['plat'] : null,
+                is_scalar($agent['operating_system'] ?? null) ? (string) $agent['operating_system'] : null,
+            ),
             'cpu' => $agent['cpu_model'] ?? null,
             'ram_gb' => TacticalFieldMap::ramGb($agent['total_ram'] ?? null),
             'make_model' => $agent['make_model'] ?? null,
@@ -1044,7 +1050,10 @@ class TriageToolExecutor
                 : $agent['logged_in_username'],
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => $uptime,
-            'checks_summary' => $checksSummary,
+            // psa-0pb9m: coverage answers "is this device actually monitored?"
+            // separately from "is it healthy?" — zero checks reads UNMONITORED.
+            'checks_coverage' => TacticalFieldMap::checksCoverage($checksTotal, $checksFailing),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($checksTotal, $checksFailing),
         ];
     }
 
@@ -1068,12 +1077,34 @@ class TriageToolExecutor
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
-        return array_map(fn ($c) => [
-            'name' => $c['name'] ?? $c['readable_desc'] ?? 'Unknown',
-            'status' => $c['check_result']['status'] ?? $c['status'] ?? 'unknown',
-            'retcode' => $c['check_result']['retcode'] ?? null,
-            'stdout' => mb_substr($c['check_result']['stdout'] ?? '', 0, 500),
-        ], array_slice($checks, 0, 50));
+        // psa-0pb9m: envelope instead of a bare list — same idiom as the MCP
+        // read toolset, so every AI surface sees one coverage vocabulary.
+        $platform = $resolved['tactical_asset']->platform();
+        $rows = array_slice(array_values(array_filter($checks, 'is_array')), 0, 50);
+        $counts = TacticalFieldMap::checksSummary($rows);
+
+        $mapped = array_map(function (array $c) use ($platform): array {
+            $mismatch = TacticalPlatform::checkScriptMismatch($c, $platform);
+
+            return [
+                'name' => $c['name'] ?? $c['readable_desc'] ?? 'Unknown',
+                'check_type' => isset($c['check_type']) && is_scalar($c['check_type'])
+                    ? (string) $c['check_type']
+                    : null,
+                'status' => $c['check_result']['status'] ?? $c['status'] ?? 'unknown',
+                'retcode' => $c['check_result']['retcode'] ?? null,
+                'stdout' => mb_substr($c['check_result']['stdout'] ?? '', 0, 500),
+                'platform_mismatch' => $mismatch['mismatch'],
+                'platform_mismatch_reason' => $mismatch['reason'],
+            ];
+        }, $rows);
+
+        return [
+            'count' => count($mapped),
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
+            'coverage_note' => TacticalFieldMap::COVERAGE_NOTE,
+            'checks' => $mapped,
+        ];
     }
 
     private function tacticalGetDeviceNetwork(array $input): array

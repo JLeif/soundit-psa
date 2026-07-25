@@ -45,6 +45,15 @@ class TacticalReadOnlyToolset
         'tactical_health_check',
     ];
 
+    /**
+     * Checks-coverage semantics (psa-0pb9m), the sibling of the psa-47vxh
+     * freshness envelope: presence in RMM is NOT coverage. Every device payload
+     * carries checks_coverage so "is this device actually monitored?" and "is
+     * it healthy?" are two separately answerable questions. The note copy is
+     * shared with the triage tool loop via TacticalFieldMap::COVERAGE_NOTE.
+     */
+    private const COVERAGE_NOTE = TacticalFieldMap::COVERAGE_NOTE;
+
     public function __construct(
         private readonly ChetDataSurfaceTextSanitizer $textSanitizer,
     ) {}
@@ -135,7 +144,7 @@ class TacticalReadOnlyToolset
         return [
             [
                 'name' => 'tactical_list_devices',
-                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. No live Tactical call is made.',
+                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. No live Tactical call is made. Each device carries platform plus checks_coverage (verified/unverified/none/unknown) and the payload carries coverage_summary + coverage_note: a device that is VISIBLE in RMM but has zero checks ("none") or only-failing checks ("unverified") is NOT monitored — never read it as healthy. "Is it monitored?" (checks_coverage) and "is it healthy?" (checks_failing) are separate questions.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -172,7 +181,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_get_endpoint_insight',
-                'description' => 'Read endpoint insight for a Tactical-linked device: snapshot health, bounded live status/checks, alerts, patches, and recent actions.',
+                'description' => 'Read endpoint insight for a Tactical-linked device: snapshot health, bounded live status/checks, alerts, patches, and recent actions. insight.checks_coverage distinguishes monitored-and-passing ("verified") from all-checks-failing ("unverified"), zero-checks/UNMONITORED ("none"), and unread ("unknown") — a clean-looking device with no passing check is unverified, not healthy.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -273,7 +282,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_diagnose_device',
-                'description' => 'Compose read-only Tactical diagnostics for one client-scoped device: endpoint insight, patches, tasks, and recent local actions. Does not run scripts or commands.',
+                'description' => 'Compose read-only Tactical diagnostics for one client-scoped device: endpoint insight, patches, tasks, and recent local actions. Does not run scripts or commands. insight.checks_coverage says whether anything actually monitors this device (none/unverified = unmonitored, regardless of how clean it looks).',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -352,9 +361,23 @@ class TacticalReadOnlyToolset
             ->values()
             ->all();
 
+        // Fleet-scan support (psa-0pb9m): per-state tallies so "how many of
+        // these devices are actually monitored?" is one read, not a row walk.
+        $coverageSummary = [
+            TacticalFieldMap::COVERAGE_VERIFIED => 0,
+            TacticalFieldMap::COVERAGE_UNVERIFIED => 0,
+            TacticalFieldMap::COVERAGE_NONE => 0,
+            TacticalFieldMap::COVERAGE_UNKNOWN => 0,
+        ];
+        foreach ($devices as $device) {
+            $coverageSummary[$device['checks_coverage']]++;
+        }
+
         return [
             'count' => count($devices),
             'devices' => $devices,
+            'coverage_summary' => $coverageSummary,
+            'coverage_note' => self::COVERAGE_NOTE,
         ];
     }
 
@@ -731,17 +754,12 @@ class TacticalReadOnlyToolset
      */
     private function mapDeviceSnapshot(TacticalAsset $asset): array
     {
-        $checksSummary = null;
-        if ($asset->checks_total !== null) {
-            $failing = (int) ($asset->checks_failing ?? 0);
-            $checksSummary = "{$failing} failing / {$asset->checks_total} total";
-        }
-
         return [
             'asset_id' => $asset->asset_id,
             'hostname' => $asset->hostname ?? $asset->asset?->hostname,
             'status' => $asset->status,
             'os' => $asset->os,
+            'platform' => $asset->platform(),
             'os_version' => $asset->os_version,
             'public_ip' => $asset->public_ip,
             'local_ips' => $asset->local_ips,
@@ -763,7 +781,10 @@ class TacticalReadOnlyToolset
             'has_patches_pending' => (bool) $asset->has_patches_pending,
             'checks_failing' => $asset->checks_failing,
             'checks_total' => $asset->checks_total,
-            'checks_summary' => $checksSummary,
+            // psa-0pb9m: zero checks must read UNMONITORED and all-failing must
+            // read unverified — never a clean-looking count.
+            'checks_coverage' => TacticalFieldMap::checksCoverage($asset->checks_total, $asset->checks_failing),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($asset->checks_total, $asset->checks_failing),
             'last_seen_at' => $asset->last_seen_at?->toIso8601String(),
             'synced_at' => $asset->synced_at?->toIso8601String(),
         ];
@@ -812,6 +833,10 @@ class TacticalReadOnlyToolset
             'checks_state' => $insight->checksState->value,
             'checks_failing' => $insight->checksFailing,
             'checks_total' => $insight->checksTotal,
+            // psa-0pb9m: coverage travels with the counts so zero-checks reads
+            // UNMONITORED and all-failing reads unverified at this boundary too.
+            'checks_coverage' => TacticalFieldMap::checksCoverage($insight->checksTotal, $insight->checksFailing),
+            'coverage_note' => self::COVERAGE_NOTE,
             'open_alerts' => $insight->openAlerts,
             'open_alerts_list' => array_map(fn (array $alert): array => [
                 'title' => $this->textSanitizer->sanitizeNullable('Tactical alert title', $alert['title'] ?? null, 300),
@@ -927,18 +952,24 @@ class TacticalReadOnlyToolset
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
-        $checksSummary = null;
+        // getAgent `checks` is a SUMMARY DICT ({total, passing, failing, …}).
+        // Read defensively; absent dict stays unknown, never clean (psa-0pb9m).
+        $checksTotal = null;
+        $checksFailing = null;
         $checks = $agent['checks'] ?? null;
         if (is_array($checks) && isset($checks['total'])) {
-            $failing = (int) ($checks['failing'] ?? 0);
-            $total = (int) $checks['total'];
-            $checksSummary = "{$failing} failing / {$total} total";
+            $checksTotal = (int) $checks['total'];
+            $checksFailing = (int) ($checks['failing'] ?? 0);
         }
 
         return [
             'hostname' => $agent['hostname'] ?? $hostname,
             'status' => $agent['status'] ?? null,
             'os' => $agent['operating_system'] ?? null,
+            'platform' => TacticalPlatform::fromAgentPayload(
+                is_scalar($agent['plat'] ?? null) ? (string) $agent['plat'] : null,
+                is_scalar($agent['operating_system'] ?? null) ? (string) $agent['operating_system'] : null,
+            ),
             'cpu' => $agent['cpu_model'] ?? null,
             'ram_gb' => TacticalFieldMap::ramGb($agent['total_ram'] ?? null),
             'make_model' => $agent['make_model'] ?? null,
@@ -952,7 +983,8 @@ class TacticalReadOnlyToolset
             ),
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => TacticalFieldMap::uptimeFromBootTime($agent['boot_time'] ?? null),
-            'checks_summary' => $checksSummary,
+            'checks_coverage' => TacticalFieldMap::checksCoverage($checksTotal, $checksFailing),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($checksTotal, $checksFailing),
         ];
     }
 
@@ -973,12 +1005,35 @@ class TacticalReadOnlyToolset
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
-        return array_map(fn ($check) => [
-            'name' => $check['name'] ?? $check['readable_desc'] ?? 'Unknown',
-            'status' => $check['check_result']['status'] ?? $check['status'] ?? 'unknown',
-            'retcode' => $check['check_result']['retcode'] ?? null,
-            'stdout' => $this->textSanitizer->sanitize('Tactical check stdout', $check['check_result']['stdout'] ?? '', 500),
-        ], array_slice($checks, 0, 50));
+        // psa-0pb9m: envelope instead of a bare list — the coverage verdict and
+        // per-check platform-mismatch reason travel WITH the rows, so a check
+        // that can never pass on this platform is identifiable at this surface.
+        $platform = $resolved['tactical_asset']->platform();
+        $rows = array_slice(array_values(array_filter($checks, 'is_array')), 0, 50);
+        $counts = TacticalFieldMap::checksSummary($rows);
+
+        $mapped = array_map(function (array $check) use ($platform): array {
+            $mismatch = TacticalPlatform::checkScriptMismatch($check, $platform);
+
+            return [
+                'name' => $check['name'] ?? $check['readable_desc'] ?? 'Unknown',
+                'check_type' => isset($check['check_type']) && is_scalar($check['check_type'])
+                    ? (string) $check['check_type']
+                    : null,
+                'status' => $check['check_result']['status'] ?? $check['status'] ?? 'unknown',
+                'retcode' => $check['check_result']['retcode'] ?? null,
+                'stdout' => $this->textSanitizer->sanitize('Tactical check stdout', $check['check_result']['stdout'] ?? '', 500),
+                'platform_mismatch' => $mismatch['mismatch'],
+                'platform_mismatch_reason' => $mismatch['reason'],
+            ];
+        }, $rows);
+
+        return [
+            'count' => count($mapped),
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
+            'coverage_note' => self::COVERAGE_NOTE,
+            'checks' => $mapped,
+        ];
     }
 
     private function getDeviceNetwork(array $input, int $clientId): array

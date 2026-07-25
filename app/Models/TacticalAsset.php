@@ -12,6 +12,7 @@ class TacticalAsset extends Model
         'agent_id',
         'hostname',
         'os',
+        'plat',
         'os_version',
         'public_ip',
         'local_ips',
@@ -52,6 +53,16 @@ class TacticalAsset extends Model
     public function asset(): BelongsTo
     {
         return $this->belongsTo(Asset::class);
+    }
+
+    /**
+     * The agent's platform (windows|darwin|linux), or null when unknown.
+     * Prefers Tactical's own `plat` field; rows synced before the plat column
+     * existed fall back to an operating_system sniff. (psa-0pb9m)
+     */
+    public function platform(): ?string
+    {
+        return \App\Services\Tactical\TacticalPlatform::fromAgentPayload($this->plat, $this->os);
     }
 
     public function statusBadgeClass(): string
