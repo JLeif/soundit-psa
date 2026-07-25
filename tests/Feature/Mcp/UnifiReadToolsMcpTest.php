@@ -7,6 +7,10 @@ use App\Models\Setting;
 use App\Services\Unifi\UnifiClient;
 use App\Support\McpConfig;
 use App\Support\McpToolRegistry;
+use GuzzleHttp\Client as GuzzleClient;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use Mockery;
@@ -68,6 +72,24 @@ class UnifiReadToolsMcpTest extends TestCase
     private function decodedResult(TestResponse $response): array
     {
         return json_decode((string) $response->json('result.content.0.text'), true) ?? [];
+    }
+
+    /**
+     * Bind a real UnifiClient over a mocked HTTP transport (like the toolset test)
+     * so a live tools/call exercises the true projection — including freshness.
+     *
+     * @param  array<int, Response>  $queue
+     */
+    private function bindClientReturning(array $queue): void
+    {
+        $stack = HandlerStack::create(new MockHandler($queue));
+        $http = new GuzzleClient(['base_uri' => 'https://api.ui.com/', 'handler' => $stack]);
+        $this->app->instance(UnifiClient::class, new UnifiClient(['api_key' => 'k'], $http));
+    }
+
+    private function jsonResponse(array $payload): Response
+    {
+        return new Response(200, ['Content-Type' => 'application/json'], json_encode($payload));
     }
 
     public function test_unifi_reads_are_registry_grantable_and_explicit_grant_only(): void
@@ -167,5 +189,48 @@ class UnifiReadToolsMcpTest extends TestCase
         $this->assertSame(88, $site['wan_uptime_percent']);
         $this->assertSame(2, $site['counts']['offlineDevice']);
         $this->assertStringContainsString('Comcast', $site['isp_name']);
+
+        // Freshness contract over the boundary (psa-47vxh): site stats carry no
+        // vendor last-contact, so freshness is unverifiable and the note routes to
+        // the device read — never presented as confidently current.
+        $this->assertNull($result['data_as_of']);
+        $this->assertNull($result['data_stale']);
+        $this->assertStringContainsStringIgnoringCase('unverifiable', $result['freshness_note']);
+        $this->assertStringContainsString('unifi_list_devices', $result['freshness_note']);
+    }
+
+    public function test_list_devices_carries_the_freshness_contract_over_the_boundary(): void
+    {
+        $this->configureUnifi();
+        $client = Client::factory()->create(['name' => 'Acme']);
+        \App\Models\ClientUnifiSite::create(['client_id' => $client->id, 'unifi_site_id' => self::SITE_A, 'unifi_host_id' => 'host-1']);
+
+        $staleAt = now()->subHours(72)->toIso8601ZuluString();
+        $this->bindClientReturning([
+            // site-uniqueness proof: host-1 serves exactly SITE_A (this client's).
+            $this->jsonResponse(['data' => [['siteId' => self::SITE_A, 'hostId' => 'host-1', 'meta' => ['name' => 'n'], 'statistics' => []]], 'httpStatusCode' => 200]),
+            // devices for host-1, last reported 72h ago.
+            $this->jsonResponse(['data' => [['hostId' => 'host-1', 'hostName' => 'hq', 'updatedAt' => $staleAt, 'devices' => [
+                ['id' => 'A1', 'mac' => 'AA', 'name' => 'AP', 'status' => 'online'],
+            ]]], 'httpStatusCode' => 200]),
+        ]);
+
+        $token = $this->token(['unifi_list_devices']);
+        $response = $this->callTool($token, 'unifi_list_devices', ['client_id' => $client->id]);
+
+        $response->assertOk();
+        $this->assertFalse($response->json('result.isError'));
+
+        $result = $this->decodedResult($response);
+        // Payload envelope.
+        $this->assertSame($staleAt, $result['data_as_of']);
+        $this->assertTrue($result['data_stale']);
+        $this->assertArrayHasKey('freshness_note', $result);
+        // Per-console.
+        $this->assertSame($staleAt, $result['consoles'][0]['reported_at']);
+        $this->assertTrue($result['consoles'][0]['stale']);
+        // Per-device (self-describing).
+        $this->assertSame($staleAt, $result['devices'][0]['reported_at']);
+        $this->assertTrue($result['devices'][0]['stale']);
     }
 }

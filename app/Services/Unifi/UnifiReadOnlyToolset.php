@@ -85,7 +85,7 @@ class UnifiReadOnlyToolset
      */
     private const STALE_AFTER_HOURS = 24;
 
-    private const DEVICE_FRESHNESS_NOTE = 'reported_at is the UniFi Site Manager updatedAt for a console\'s device data; it stops advancing when the console goes offline, so a stale reading means the console may be dark and these device states are last-known, not live. data_as_of is the oldest console\'s report across this result; data_stale is true when it is older than '.self::STALE_AFTER_HOURS.'h or unknown.';
+    private const DEVICE_FRESHNESS_NOTE = 'Each device and console row carries reported_at + stale. reported_at is the UniFi Site Manager updatedAt for that console\'s device data; it stops advancing when the console goes offline, so a stale row means the device state is last-known, NOT live. data_as_of is the OLDEST KNOWN console report across this result; data_stale is true when that is older than '.self::STALE_AFTER_HOURS.'h OR any console\'s report time is unknown/malformed.';
 
     /**
      * Site health has no last-report of its own: the Site Manager /sites
@@ -142,7 +142,7 @@ class UnifiReadOnlyToolset
         return [
             [
                 'name' => 'unifi_get_site_health',
-                'description' => 'Get current network health for every UniFi site mapped to a PSA client — a client with several locations returns one entry per site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem. Results are a per-site array (site_count + sites[]). NOTE: these are cached figures with NO vendor freshness stamp (data_stale is null = unverifiable) — a dark console still reads as healthy here, so confirm the site is actually reporting via unifi_list_devices (its reported_at/stale) before trusting an "up" reading.',
+                'description' => 'Get the LAST-KNOWN (cached) network health for every UniFi site mapped to a PSA client — a client with several locations returns one entry per site: ISP name, WAN uptime percentage, any open internet issues, gateway model, and device counts including how many are offline or awaiting a firmware update. Start here when a client reports an internet or site-wide network problem. Results are a per-site array (site_count + sites[]). IMPORTANT: these are cached figures with NO vendor freshness stamp (data_stale is null = unverifiable) — a dark console still reads as healthy here, so confirm the site is actually reporting via unifi_list_devices (its per-console reported_at/stale) before trusting an "up" reading.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -445,9 +445,12 @@ class UnifiReadOnlyToolset
 
                 // Freshness (psa-47vxh): the console's last report to UniFi's cloud
                 // is the /devices host-group updatedAt (the only last-report signal
-                // the API exposes). It governs every device on the console.
-                $reportedAt = $this->latestReportedAt($groups);
+                // the API exposes). It governs every device on the console — each
+                // device row carries the console's reported_at + stale so a row is
+                // self-describing without joining back to the console entry.
+                $reportedAt = $this->consoleReportedAt($groups);
                 $reportedAtIso = $reportedAt?->toIso8601ZuluString();
+                $consoleStale = $this->isStale($reportedAt);
                 $reportedAts[] = $reportedAt;
 
                 $hostCount = 0;
@@ -482,6 +485,7 @@ class UnifiReadOnlyToolset
                         // The console's last report — a stale value means this status
                         // is last-known, not live (freshness note on the payload).
                         'reported_at' => $reportedAtIso,
+                        'stale' => $consoleStale,
                     ];
                     $hostCount++;
                 }
@@ -492,7 +496,7 @@ class UnifiReadOnlyToolset
                     'count' => $hostCount,
                     'offline_count' => $hostOffline,
                     'reported_at' => $reportedAtIso,
-                    'stale' => $this->isStale($reportedAt),
+                    'stale' => $consoleStale,
                 ];
             }
         } catch (\Throwable $e) {
@@ -942,43 +946,61 @@ class UnifiReadOnlyToolset
 
     // ── freshness (psa-47vxh) ──────────────────────────────────────────────────
 
-    /** Parse a vendor ISO8601 timestamp, or null when absent/unparseable. */
+    /**
+     * Parse a vendor last-report timestamp, or null when it is not a trustworthy
+     * past time. STRICT and fail-to-unknown: only the vendor's RFC3339 shape is
+     * accepted (reusing isRfc3339, which also rejects impossible dates), and a
+     * time in the FUTURE is rejected too. Carbon::parse on its own would read
+     * "tomorrow" or a bare "2026" as a real date and mark a dark console fresh —
+     * the fail-open the review caught.
+     */
     private function parseTimestamp(mixed $value): ?\Illuminate\Support\Carbon
     {
-        if (! is_string($value) || trim($value) === '') {
-            return null;
+        if (! is_string($value) || ! $this->isRfc3339($value)) {
+            return null; // missing, malformed, or relative ("tomorrow") — unknown
         }
 
-        try {
-            return \Illuminate\Support\Carbon::parse($value);
-        } catch (\Throwable) {
-            return null; // an unreadable time is unknown, not fresh
-        }
+        $ts = \Illuminate\Support\Carbon::parse($value);
+
+        // A report dated in the future cannot be a real last-report (bad data or
+        // clock skew); treat it as unknown, never fresh.
+        return $ts->gt(now()) ? null : $ts;
     }
 
-    /** A report time is stale when it is missing or older than the threshold. */
+    /** A report time is stale when it is missing/unknown or older than the threshold. */
     private function isStale(?\Illuminate\Support\Carbon $reportedAt): bool
     {
         return $reportedAt === null || $reportedAt->lt(now()->subHours(self::STALE_AFTER_HOURS));
     }
 
     /**
-     * The newest updatedAt across a host's device groups (a host normally maps to
-     * one group, but pagination can split it), or null if none is parseable.
+     * A console's last report, from its device groups (normally one; pagination
+     * can split a host across several). ANY group with a missing/malformed/future
+     * updatedAt makes the WHOLE console unknown — a fresh sibling group must never
+     * hide an unknown one (the fail-open the data-safety lane caught). Otherwise
+     * the newest valid time (the console's most recent report). null = unknown,
+     * which isStale() treats as stale.
      *
      * @param  array<int, array<string, mixed>>  $groups
      */
-    private function latestReportedAt(array $groups): ?\Illuminate\Support\Carbon
+    private function consoleReportedAt(array $groups): ?\Illuminate\Support\Carbon
     {
-        $latest = null;
+        if ($groups === []) {
+            return null; // no report at all → unknown
+        }
+
+        $newest = null;
         foreach ($groups as $group) {
             $ts = $this->parseTimestamp($group['updatedAt'] ?? null);
-            if ($ts !== null && ($latest === null || $ts->gt($latest))) {
-                $latest = $ts;
+            if ($ts === null) {
+                return null; // any unknown group ⇒ whole console unknown
+            }
+            if ($newest === null || $ts->gt($newest)) {
+                $newest = $ts;
             }
         }
 
-        return $latest;
+        return $newest;
     }
 
     /**
