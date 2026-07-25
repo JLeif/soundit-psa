@@ -17,11 +17,14 @@
             </div>
         </div>
 
-        <p class="text-muted mb-3">
+        <p class="text-muted mb-2">
             Map UniFi sites to local clients. This scopes network telemetry (WAN/ISP health, devices) to the right client.
             Saving a mapping stores both the site ID and its console (host) ID &mdash; the console is resolved automatically
-            from the UniFi site listing and is required for device reads. A client with several locations can map to
-            several sites &mdash; just choose the same client on each of its site rows.
+            from the UniFi site listing and is required for device reads.
+        </p>
+        <p class="text-muted mb-3">
+            <i class="bi bi-info-circle me-1"></i><strong>A client with several locations can map to several UniFi sites</strong>
+            &mdash; just choose the same client on each of its site rows.
         </p>
 
         {{-- success/error flashes are rendered globally by the layout; info is not --}}
@@ -71,7 +74,7 @@
                                 <td class="text-end d-none d-md-table-cell fw-semibold">{{ $site['device_count'] ?? '—' }}</td>
                                 <td class="d-none d-lg-table-cell">{{ $site['isp_name'] ?? '—' }}</td>
                                 <td>
-                                    <select name="mappings[{{ $site['site_id'] }}]" class="form-select form-select-sm client-select" data-selected="{{ $mapped?->id }}">
+                                    <select name="mappings[{{ $site['site_id'] }}]" class="form-select form-select-sm client-select" data-selected="{{ $mapped?->id }}" aria-label="Mapped client for {{ $site['label'] }}">
                                         <option value="">&mdash; Not mapped &mdash;</option>
                                     </select>
                                 </td>

@@ -409,7 +409,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/huntress/cw', [IntegrationsController::class, 'updateHuntressCw'])->name('settings.integrations.huntress-cw.update');
     Route::post('/settings/integrations/huntress/cw/generate-key', [IntegrationsController::class, 'generateHuntressCwKey'])->name('settings.integrations.huntress-cw.generate-key');
 
-    // UniFi credentials + Site Mapping (writes clients.unifi_site_id + unifi_host_id as a pair)
+    // UniFi credentials + Site Mapping (writes the client_unifi_sites pivot — a client may map to several sites)
     Route::get('/settings/integrations/unifi/sites', [\App\Http\Controllers\Web\UnifiSiteController::class, 'index'])->name('settings.unifi-sites.index');
     Route::post('/settings/integrations/unifi/sites', [\App\Http\Controllers\Web\UnifiSiteController::class, 'update'])->name('settings.unifi-sites.update');
     Route::get('/settings/integrations/unifi/sites/auto-match', [\App\Http\Controllers\Web\UnifiSiteController::class, 'autoMatch'])->name('settings.unifi-sites.auto-match');

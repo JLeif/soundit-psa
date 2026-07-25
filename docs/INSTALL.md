@@ -1027,12 +1027,15 @@ console the UI account administers, so no per-site VPN or network reachability i
 2. Settings > Integrations > UniFi (RMM tab) — paste the **API Key**, click **Test
    Connection**, and switch UniFi **on** (`unifi_enabled`, off by default). An optional
    **Base URL** override is available for non-default endpoints; blank means the default.
-3. Click **Site Mapping** to map each UniFi site to its PSA client (**Auto-Match by
-   Name** matches sites whose UniFi display name equals a client name). Saving a mapping
-   stores the pair `unifi_site_id` + `unifi_host_id` — the owning console, which device
-   reads require; the console id is resolved server-side from the vendor's site listing,
-   never from the form. The `unifi_list_sites` MCP tool shows the same list agent-side,
-   annotated with each site's mapped PSA client.
+3. Click **Site Mapping** to map UniFi sites to PSA clients (**Auto-Match by Name**
+   matches sites whose UniFi display name equals a client name). The page is one row per
+   UniFi site with a client dropdown; **a client with several locations can map to several
+   UniFi sites** — choose the same client on each of its site rows (a site still maps to at
+   most one client). Mappings live in the `client_unifi_sites` table as the site +
+   console (`unifi_host_id`) pair; the console id — which device reads require — is
+   resolved server-side from the vendor's site listing, never from the form. The
+   `unifi_list_sites` MCP tool shows the same list agent-side, annotated with each site's
+   mapped PSA client.
 
 **Settings keys:** `unifi_api_key` (encrypted), `unifi_enabled`, `unifi_base_url`
 (optional override, defaults to `https://api.ui.com`).
@@ -1043,8 +1046,8 @@ Settings > MCP Tokens):
 | Tool | Scope | Returns |
 |------|-------|---------|
 | `unifi_list_sites` | Account-wide | Site metadata + mapped PSA client (or null). Metadata only — no telemetry |
-| `unifi_get_site_health` | Mapped client | ISP name, WAN uptime %, open internet issues, gateway model, device counts |
-| `unifi_list_devices` | Mapped client | Gateways/switches/APs with up-down status, model, IP, firmware |
+| `unifi_get_site_health` | Mapped client | Per-site array (`site_count` + `sites[]`) — for each of the client's sites: ISP name, WAN uptime %, open internet issues, gateway model, device counts |
+| `unifi_list_devices` | Mapped client | Gateways/switches/APs (up/down status, model, IP, firmware), each tagged with its console (`host_id`); plus `consoles[]` and `skipped[]` (consoles that can't be attributed to this client alone, with a reason) |
 | `unifi_get_isp_metrics` | Mapped client | WAN latency, packet loss, downtime and throughput per 5m or 1h period |
 
 **Notes:**
@@ -1056,8 +1059,11 @@ Settings > MCP Tokens):
   clients mapped to a UniFi site; site *metadata* is account-wide so unmapped sites can
   be discovered and mapped.
 - Device state is reported per **console**, not per site — UniFi does not tag devices with
-  a site. If one console is mapped to more than one PSA client, `unifi_list_devices`
-  refuses rather than attributing another client's hardware.
+  a site. Devices are attributed to a client only from a console serving **only that
+  client's** sites; a console shared with another PSA client (or serving an unmapped site)
+  is **skipped** for that client — listed under `skipped[]` with a reason — while the
+  client's other consoles still return their devices. A client with several locations
+  aggregates devices across all its consoles.
 - ISP metric retention is set by the vendor: 5-minute samples for at least 24 hours,
   1-hour samples for at least 30 days.
 
