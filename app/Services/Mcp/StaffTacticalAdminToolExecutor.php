@@ -16,6 +16,7 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalClientException;
 use App\Services\Tactical\TacticalDeviceSyncService;
+use App\Services\Tactical\TacticalPlatform;
 use App\Services\Tactical\TacticalProvisioningService;
 use App\Services\Tactical\TacticalScriptSyncService;
 use App\Services\Technician\TechnicianApprovalResult;
@@ -1626,6 +1627,44 @@ class StaffTacticalAdminToolExecutor
             return ['error' => $resolvedScript['error']];
         }
 
+        // psa-0pb9m platform guard: a script check whose script cannot run on
+        // the target platform fails on 100% of executions forever — it
+        // manufactures broken coverage, not monitoring. Agent targets with a
+        // provably incompatible script are refused BEFORE any upstream call;
+        // policy targets (mixed fleets, platform unknowable here) succeed with
+        // an explicit warning when the script is Windows-bound.
+        $scriptRow = is_array($resolvedScript['script'] ?? null) ? $resolvedScript['script'] : [];
+        $scriptShell = is_scalar($scriptRow['shell'] ?? null) ? (string) $scriptRow['shell'] : null;
+        $scriptPlatforms = is_array($scriptRow['supported_platforms'] ?? null) ? $scriptRow['supported_platforms'] : null;
+        $platformWarning = null;
+
+        if (($target['target_type'] ?? null) === 'agent') {
+            $incompatibility = TacticalPlatform::scriptIncompatibility(
+                $target['platform'] ?? null,
+                $scriptShell,
+                $scriptPlatforms,
+            );
+
+            if ($incompatibility !== null) {
+                $message = "Refusing to create this check: {$incompatibility}. "
+                    ."It would fail on every run on '{$target['hostname']}' and register as broken coverage "
+                    .'(an always-failing check reads as monitored while verifying nothing — psa-0pb9m). '
+                    .'Use a script compatible with the agent platform instead.';
+                $this->auditAttempt($tool, 'rejected', $clientId, $contentHash, $message, $actorLabel);
+
+                return ['error' => $message];
+            }
+        } elseif (($target['target_type'] ?? null) === 'policy') {
+            $windowsBound = TacticalPlatform::scriptIncompatibility(TacticalPlatform::DARWIN, $scriptShell, $scriptPlatforms) !== null
+                && TacticalPlatform::scriptIncompatibility(TacticalPlatform::LINUX, $scriptShell, $scriptPlatforms) !== null;
+
+            if ($windowsBound) {
+                $platformWarning = "This script cannot run on non-Windows agents. If policy '{$target['policy_name']}' "
+                    .'covers any macOS/Linux agents, this check will fail on every run there — broken-coverage noise, '
+                    .'not monitoring (psa-0pb9m).';
+            }
+        }
+
         $payload = $target['body'];
         $payload['check_type'] = $body['body']['check_type'];
         $payload['script'] = (int) $resolvedScript['script_id'];
@@ -1662,7 +1701,7 @@ class StaffTacticalAdminToolExecutor
         $checkName = (string) ($payload['name'] ?? $resolvedScript['script_name']);
         $this->auditAttempt($tool, 'executed', $targetClientId, $contentHash, "Created Tactical script check '{$checkName}' for {$target['label']} using script '{$resolvedScript['script_name']}'.", $actorLabel);
 
-        return [
+        $response = [
             'success' => true,
             'check_id' => $checkId,
             'target_type' => $target['target_type'],
@@ -1670,6 +1709,12 @@ class StaffTacticalAdminToolExecutor
             'script_name' => $resolvedScript['script_name'],
             'message' => is_scalar($result) ? (string) $result : 'Tactical check created.',
         ];
+
+        if ($platformWarning !== null) {
+            $response['platform_warning'] = $platformWarning;
+        }
+
+        return $response;
     }
 
     /** @return array<string, mixed> */
@@ -3538,6 +3583,9 @@ class StaffTacticalAdminToolExecutor
             'target_key' => 'agent-'.$asset->id.'-check',
             'label' => 'agent '.$this->targetHostname($asset),
             'hostname' => $this->targetHostname($asset),
+            // psa-0pb9m: the agent's platform (null when unknown) so the
+            // create path can refuse scripts that cannot run on it.
+            'platform' => $asset->tacticalAsset->platform(),
             'body' => ['agent' => $agentId],
         ];
     }
