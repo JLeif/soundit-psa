@@ -100,7 +100,15 @@ class TacticalClientTaskCrudTest extends TestCase
             'warning_return_codes' => [7],
             'fails_b4_alert' => 2,
         ];
-        $this->assertSame('Script Check: Detector was added!', $client->createCheck($checkBody));
+        // createCheck sits behind the mandatory platform gate (psa-0pb9m):
+        // this transport-shape test passes a cross-platform scriptMeta claim
+        // so the guard clears without a DB, keeping the HTTP contract the
+        // subject under test. Guard refusals are covered in
+        // TacticalCheckPlatformGuardTest.
+        $this->assertSame('Script Check: Detector was added!', $client->createCheck(
+            $checkBody,
+            scriptMeta: ['shell' => 'shell', 'supported_platforms' => []],
+        ));
         $this->assertSame('POST', $this->lastRequest()->getMethod());
         $this->assertSame('/checks/', $this->lastRequest()->getUri()->getPath());
         $this->assertSame($checkBody, $this->lastBody());

@@ -62,7 +62,10 @@ final readonly class EndpointInsight
      * @param  ?int  $pendingPatchCount  PRECISE pending-update count, or null when unknown. The snapshot path knows only the boolean (see $hasPendingPatches); the exact count is a live/panel read. NEVER fabricate a count from the boolean (§11.3): "1 pending" for a box 47 behind would lie to the P5 snapshot. Mirrors the $checksFailing-null precedent (Unavailable ≠ "0 clean").
      * @param  bool  $hasPendingPatches  The honest snapshot boolean ("updates pending" vs "up to date") the eager card chip uses — true even when the exact $pendingPatchCount is null/unknown.
      * @param  array<int, array{action: string, actor: string, result_status: string, ticket_id: ?int, when: ?string}>  $recentActions  Newest-first, capped
-     * @param  ?Carbon  $freshAsOf  The FRESHEST-SIGNAL stamp only (synced_at for an all-snapshot read; now() once ANY signal refreshes live). On a MIXED read (status Live, checks Snapshot) it reads now() while checks are stale — so it is NOT a per-signal freshness oracle. Consumers MUST gate a given signal's freshness on its own SignalState ($statusState / $checksState), never on freshAsOf alone (§11.7).
+     * @param  ?int  $checksPassing  EXPLICIT passing-check count (live list count, or the synced summary-dict `passing`). Null = no passing evidence (pre-migration snapshot / malformed payload) — coverage classifies "unknown", NEVER verified-by-subtraction (psa-0pb9m revise).
+     * @param  ?Carbon  $checksAsOf  When the CHECKS signal itself was read: now() on a live read, the snapshot's synced_at on a snapshot read, null when Unavailable. This is the per-signal stamp freshAsOf cannot provide on a mixed read — consumers wanting checks freshness use THIS + $checksStale, never freshAsOf.
+     * @param  ?bool  $checksStale  Whether the checks signal is stale: false on a live read; on a snapshot read, true when $checksAsOf is older than STALE_AFTER_MINUTES; null when the signal is Unavailable (no read to age).
+     * @param  ?Carbon  $freshAsOf  The FRESHEST-SIGNAL stamp only (synced_at for an all-snapshot read; now() once ANY signal refreshes live). On a MIXED read (status Live, checks Snapshot) it reads now() while checks are stale — so it is NOT a per-signal freshness oracle. Consumers MUST gate a given signal's freshness on its own SignalState ($statusState / $checksState) and per-signal stamps ($checksAsOf/$checksStale), never on freshAsOf alone (§11.7).
      */
     public function __construct(
         public bool $linked,
@@ -86,6 +89,9 @@ final readonly class EndpointInsight
         public SignalState $checksState,
         public ?int $checksFailing,
         public ?int $checksTotal,
+        public ?int $checksPassing,
+        public ?Carbon $checksAsOf,
+        public ?bool $checksStale,
         public int $openAlerts,
         public array $openAlertList,
         public ?int $pendingPatchCount,
@@ -122,6 +128,9 @@ final readonly class EndpointInsight
             checksState: SignalState::Unavailable,
             checksFailing: null,
             checksTotal: null,
+            checksPassing: null,
+            checksAsOf: null,
+            checksStale: null,
             openAlerts: 0,
             openAlertList: [],
             pendingPatchCount: null,
@@ -133,28 +142,32 @@ final readonly class EndpointInsight
 
     /**
      * True only when the checks signal was actually READ (Live or Snapshot),
-     * at least one check EXISTS, and zero are failing. An Unavailable checks
-     * state is NOT clean — we simply don't know (§11.7) — and ZERO configured
-     * checks is the ABSENCE of monitoring, not a clean result (psa-0pb9m):
-     * "0 of 0 passing" must never render as "✓ all checks passing".
+     * at least one check EXISTS, and EVERY configured check is EXPLICITLY
+     * passing. An Unavailable checks state is NOT clean — we simply don't know
+     * (§11.7); ZERO configured checks is the ABSENCE of monitoring, not a
+     * clean result; and "0 failing" alone is NOT clean either — the gap can be
+     * pending / never-reporting checks (psa-0pb9m revise): "all checks
+     * passing" must mean every check demonstrably passed, never a subtraction.
      */
     public function checksKnownClean(): bool
     {
         return $this->checksState !== SignalState::Unavailable
             && $this->checksTotal !== null
             && $this->checksTotal > 0
-            && $this->checksFailing === 0;
+            && $this->checksPassing !== null
+            && $this->checksPassing === $this->checksTotal;
     }
 
     /**
      * The coverage verdict for this endpoint's checks signal (psa-0pb9m):
-     * verified / unverified / none / unknown, per the shared classifier.
+     * verified / unverified / none / unknown, per the shared classifier —
+     * verified requires explicit passing evidence (checksPassing > 0).
      * "Is this device actually monitored?" — answered separately from
      * "is it healthy?" (checksFailing).
      */
     public function checksCoverage(): string
     {
-        return TacticalFieldMap::checksCoverage($this->checksTotal, $this->checksFailing);
+        return TacticalFieldMap::checksCoverage($this->checksTotal, $this->checksFailing, $this->checksPassing);
     }
 
     /**

@@ -148,88 +148,153 @@ class AssetTacticalCardRenderTest extends TestCase
         return $asset->refresh();
     }
 
-    public function test_fresh_snapshot_with_zero_failing_shows_a_clean_checks_chip(): void
+    public function test_fresh_snapshot_with_every_check_explicitly_passing_shows_the_clean_chip(): void
     {
-        // A FRESH (non-stale) snapshot that actually read 0 failing checks may show
-        // the positive "all passing" chip.
+        // A FRESH (non-stale) snapshot where every check EXPLICITLY passed may
+        // show the positive clean chip. (revise: passing === total, never a
+        // zero-failing subtraction.)
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 0,
             'checks_total' => 5,
+            'checks_passing' => 5,
             'synced_at' => now()->subMinutes(2), // fresh
         ]);
 
         $resp = $this->actingAs($user)->get(route('assets.show', $asset));
 
-        $resp->assertOk()->assertSee('all passing');
+        $resp->assertOk()->assertSeeText('all 5 passing');
     }
 
-    public function test_stale_snapshot_does_not_render_checks_as_all_passing(): void
+    public function test_zero_failing_without_passing_evidence_renders_coverage_unknown_not_clean(): void
     {
-        // A STALE clean snapshot must NOT render a confident green "all passing"
-        // (the amendment-H misread). It degrades to an "as of last sync" qualifier.
+        // psa-0pb9m revise: a pre-upgrade snapshot (no passing count) with 0
+        // failing must NOT read clean — whether any check passes is unknown.
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 0,
             'checks_total' => 5,
-            'synced_at' => now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES + 5), // stale
-        ]);
-
-        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
-
-        $resp->assertOk()
-            ->assertDontSee('all passing')
-            ->assertSee('as of last sync');
-    }
-
-    public function test_unavailable_checks_does_not_render_as_all_passing(): void
-    {
-        // No snapshot checks count at all (Unavailable) — never "all passing".
-        $user = User::factory()->create();
-        $asset = $this->healthLineAsset([
-            'checks_failing' => null,
-            'checks_total' => null,
-            'synced_at' => now()->subMinutes(2),
-        ]);
-
-        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
-
-        $resp->assertOk()->assertDontSee('all passing');
-    }
-
-    public function test_zero_checks_renders_unmonitored_not_all_passing(): void
-    {
-        // psa-0pb9m: ZERO configured checks is the ABSENCE of monitoring — the
-        // delete-the-broken-check trap. A fresh 0-of-0 snapshot must render the
-        // explicit unmonitored chip, never the green "all passing".
-        $user = User::factory()->create();
-        $asset = $this->healthLineAsset([
-            'checks_failing' => 0,
-            'checks_total' => 0,
+            'checks_passing' => null,
             'synced_at' => now()->subMinutes(2), // fresh — freshness must not rescue it
         ]);
 
         $resp = $this->actingAs($user)->get(route('assets.show', $asset));
 
         $resp->assertOk()
-            ->assertDontSee('all passing')
+            ->assertDontSeeText('all 5 passing')
+            ->assertSeeText('coverage unknown');
+    }
+
+    public function test_zero_failing_with_a_never_reporting_gap_renders_partial_not_clean(): void
+    {
+        // 4 of 5 explicitly passing, 1 never reporting: an honest partial
+        // line, never the blanket clean chip.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 0,
+            'checks_total' => 5,
+            'checks_passing' => 4,
+            'synced_at' => now()->subMinutes(2),
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertDontSeeText('all 5 passing')
+            ->assertSeeText('4 of 5 passing — rest not reporting');
+    }
+
+    public function test_stale_snapshot_does_not_render_checks_as_all_passing(): void
+    {
+        // A STALE clean snapshot must NOT render the confident green clean chip
+        // (the amendment-H misread). It degrades to an "as of last sync" qualifier.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 0,
+            'checks_total' => 5,
+            'checks_passing' => 5,
+            'synced_at' => now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES + 5), // stale
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertDontSeeText('all 5 passing')
+            ->assertSee('as of last sync');
+    }
+
+    public function test_unavailable_checks_renders_health_not_verified_never_clean(): void
+    {
+        // No snapshot checks count at all (Unavailable) — a first-class
+        // unknown state in words (revise: never a bare muted dash, never green).
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => null,
+            'checks_total' => null,
+            'checks_passing' => null,
+            'synced_at' => now()->subMinutes(2),
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertDontSeeText('all 5 passing')
+            ->assertSeeText('checks unknown — health not verified');
+    }
+
+    public function test_zero_checks_renders_unmonitored_not_all_passing(): void
+    {
+        // psa-0pb9m: ZERO configured checks is the ABSENCE of monitoring — the
+        // delete-the-broken-check trap. A fresh 0-of-0 snapshot must render the
+        // explicit unmonitored chip, never the green clean chip.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 0,
+            'checks_total' => 0,
+            'checks_passing' => 0,
+            'synced_at' => now()->subMinutes(2), // fresh — freshness must not rescue it
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertDontSeeText('all 0 passing')
             ->assertSee('no checks — unmonitored');
     }
 
     public function test_failing_checks_chip_still_shows_the_count_when_stale(): void
     {
         // Staleness gates only the POSITIVE claim; a known-failing count is still a
-        // real, useful signal and must keep showing.
+        // real, useful signal and must keep showing (even without a passing count).
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 3,
             'checks_total' => 5,
+            'checks_passing' => null,
             'synced_at' => now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES + 5),
         ]);
 
         $resp = $this->actingAs($user)->get(route('assets.show', $asset));
 
-        $resp->assertOk()->assertSee('3 checks failing');
+        $resp->assertOk()->assertSeeText('3 of 5 checks failing');
+    }
+
+    public function test_all_failing_renders_monitoring_unverified_before_the_count(): void
+    {
+        // The production trap (revise): "1 of 1 failing" must not read as a
+        // monitored-but-unhealthy count — the decisive limitation comes first,
+        // in words.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 1,
+            'checks_total' => 1,
+            'checks_passing' => 0,
+            'synced_at' => now()->subMinutes(2),
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()->assertSeeText('all checks failing — monitoring unverified (1 of 1)');
     }
 
     public function test_stale_snapshot_does_not_render_patches_as_up_to_date(): void

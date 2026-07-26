@@ -1019,16 +1019,13 @@ class TriageToolExecutor
         // Format uptime from boot_time (shared mapper — amendment E)
         $uptime = TacticalFieldMap::uptimeFromBootTime($agent['boot_time'] ?? null);
 
-        // getAgent `checks` is a SUMMARY DICT ({total, passing, failing, …}) —
-        // read failing/total off it directly (NOT the getAgentChecks list helper).
-        // Absent dict stays unknown, never clean (psa-0pb9m).
-        $checksTotal = null;
-        $checksFailing = null;
-        $checks = $agent['checks'] ?? null;
-        if (is_array($checks) && isset($checks['total'])) {
-            $checksTotal = (int) $checks['total'];
-            $checksFailing = (int) ($checks['failing'] ?? 0);
-        }
+        // getAgent `checks` is a SUMMARY DICT ({total, passing, failing,
+        // warning, info, …}) — TacticalFieldMap::checksFromAgentSummary owns
+        // the shape (failing = failing+warning+info; vendor passing caveats
+        // documented there). Absent dict stays unknown, never clean (psa-0pb9m).
+        $checks = TacticalFieldMap::checksFromAgentSummary(
+            is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
+        );
 
         return [
             'hostname' => $agent['hostname'] ?? $hostname,
@@ -1051,9 +1048,13 @@ class TriageToolExecutor
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => $uptime,
             // psa-0pb9m: coverage answers "is this device actually monitored?"
-            // separately from "is it healthy?" — zero checks reads UNMONITORED.
-            'checks_coverage' => TacticalFieldMap::checksCoverage($checksTotal, $checksFailing),
-            'checks_summary' => TacticalFieldMap::checksSummaryLine($checksTotal, $checksFailing),
+            // separately from "is it healthy?" — zero checks reads UNMONITORED
+            // and verified requires explicit passing evidence.
+            'checks_total' => $checks['total'],
+            'checks_failing' => $checks['failing'],
+            'checks_passing' => $checks['passing'],
+            'checks_coverage' => TacticalFieldMap::checksCoverage($checks['total'], $checks['failing'], $checks['passing']),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($checks['total'], $checks['failing'], $checks['passing']),
         ];
     }
 
@@ -1079,9 +1080,12 @@ class TriageToolExecutor
 
         // psa-0pb9m: envelope instead of a bare list — same idiom as the MCP
         // read toolset, so every AI surface sees one coverage vocabulary.
+        // Counts and coverage cover the FULL check set BEFORE the 50-row
+        // display slice (revise: truncation must not misstate coverage).
         $platform = $resolved['tactical_asset']->platform();
-        $rows = array_slice(array_values(array_filter($checks, 'is_array')), 0, 50);
-        $counts = TacticalFieldMap::checksSummary($rows);
+        $allRows = array_values(array_filter($checks, 'is_array'));
+        $counts = TacticalFieldMap::checksSummary($allRows);
+        $rows = array_slice($allRows, 0, 50);
 
         $mapped = array_map(function (array $c) use ($platform): array {
             $mismatch = TacticalPlatform::checkScriptMismatch($c, $platform);
@@ -1093,6 +1097,11 @@ class TriageToolExecutor
                     : null,
                 'status' => $c['check_result']['status'] ?? $c['status'] ?? 'unknown',
                 'retcode' => $c['check_result']['retcode'] ?? null,
+                // Vendor CheckResult.last_run — null means NEVER reported
+                // (the per-check "checked-at" stamp, psa-47vxh idiom).
+                'last_run' => isset($c['check_result']['last_run']) && is_scalar($c['check_result']['last_run'])
+                    ? (string) $c['check_result']['last_run']
+                    : null,
                 'stdout' => mb_substr($c['check_result']['stdout'] ?? '', 0, 500),
                 'platform_mismatch' => $mismatch['mismatch'],
                 'platform_mismatch_reason' => $mismatch['reason'],
@@ -1101,7 +1110,13 @@ class TriageToolExecutor
 
         return [
             'count' => count($mapped),
-            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
+            'checks_total' => $counts['total'],
+            'checks_failing' => $counts['failing'],
+            'checks_passing' => $counts['passing'],
+            'checks_not_reporting' => $counts['pending'] + $counts['unknown'],
+            'truncated' => $counts['total'] > count($mapped),
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing'], $counts['passing']),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($counts['total'], $counts['failing'], $counts['passing']),
             'coverage_note' => TacticalFieldMap::COVERAGE_NOTE,
             'checks' => $mapped,
         ];

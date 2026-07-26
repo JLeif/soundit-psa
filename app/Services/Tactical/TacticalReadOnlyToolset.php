@@ -11,6 +11,7 @@ use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Services\Triage\TriageToolDefinitions;
 use App\Support\TacticalConfig;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 class TacticalReadOnlyToolset
@@ -47,12 +48,24 @@ class TacticalReadOnlyToolset
 
     /**
      * Checks-coverage semantics (psa-0pb9m), the sibling of the psa-47vxh
-     * freshness envelope: presence in RMM is NOT coverage. Every device payload
-     * carries checks_coverage so "is this device actually monitored?" and "is
-     * it healthy?" are two separately answerable questions. The note copy is
-     * shared with the triage tool loop via TacticalFieldMap::COVERAGE_NOTE.
+     * freshness envelope: presence in RMM is NOT coverage, and "verified"
+     * requires an EXPLICITLY passing check (never failing < total). Every
+     * device payload carries checks_coverage so "is this device actually
+     * monitored?" and "is it healthy?" are two separately answerable
+     * questions. The note copy is shared with the triage tool loop via
+     * TacticalFieldMap::COVERAGE_NOTE.
      */
     private const COVERAGE_NOTE = TacticalFieldMap::COVERAGE_NOTE;
+
+    /**
+     * Snapshot freshness threshold (psa-47vxh idiom). tactical:sync-devices is
+     * a DAILY schedule (routes/console.php, 05:32), so a snapshot older than
+     * 48h means at least one sync cycle was missed — mirrors the Zorus
+     * daily-sync precedent. Live reads carry their own stamps.
+     */
+    private const SNAPSHOT_STALE_AFTER_HOURS = 48;
+
+    private const SNAPSHOT_FRESHNESS_NOTE = 'Rows come from the PSA tactical_assets snapshot (refreshed by the daily tactical:sync-devices), NOT a live Tactical query. data_as_of is the newest row sync stamp in this result; data_stale is true when that is older than '.self::SNAPSHOT_STALE_AFTER_HOURS.'h or unknown. Each row carries synced_at + stale — do not treat a stale row\'s status, counts, or checks_coverage as current truth; use the live per-device tools to confirm.';
 
     public function __construct(
         private readonly ChetDataSurfaceTextSanitizer $textSanitizer,
@@ -144,7 +157,7 @@ class TacticalReadOnlyToolset
         return [
             [
                 'name' => 'tactical_list_devices',
-                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. No live Tactical call is made. Each device carries platform plus checks_coverage (verified/unverified/none/unknown) and the payload carries coverage_summary + coverage_note: a device that is VISIBLE in RMM but has zero checks ("none") or only-failing checks ("unverified") is NOT monitored — never read it as healthy. "Is it monitored?" (checks_coverage) and "is it healthy?" (checks_failing) are separate questions.',
+                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. No live Tactical call is made; the payload carries data_as_of/data_stale/freshness_note and each row carries synced_at + stale. Each device carries platform plus checks_coverage (verified/unverified/none/unknown) and the payload carries coverage_summary + coverage_note: "none" = zero checks, the device is UNMONITORED; "unverified" = checks exist but NONE currently passes (all failing or none reporting — coverage cannot be demonstrated); only "verified" (an explicitly passing check) is coverage — never read a clean-looking count as healthy. "Is it monitored?" (checks_coverage) and "is it healthy?" (checks_failing) are separate questions.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -181,7 +194,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_get_endpoint_insight',
-                'description' => 'Read endpoint insight for a Tactical-linked device: snapshot health, bounded live status/checks, alerts, patches, and recent actions. insight.checks_coverage distinguishes monitored-and-passing ("verified") from all-checks-failing ("unverified"), zero-checks/UNMONITORED ("none"), and unread ("unknown") — a clean-looking device with no passing check is unverified, not healthy.',
+                'description' => 'Read endpoint insight for a Tactical-linked device: snapshot health, bounded live status/checks, alerts, patches, and recent actions. insight.checks_coverage distinguishes explicitly-passing coverage ("verified") from nothing-currently-passing ("unverified" — all failing or none reporting), zero-checks/UNMONITORED ("none"), and no-passing-evidence ("unknown") — a clean-looking device with no passing check is unverified or unknown, not healthy. checks_as_of/checks_stale stamp the checks signal itself (fresh_as_of alone can read newer than the checks actually are).',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -282,7 +295,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_diagnose_device',
-                'description' => 'Compose read-only Tactical diagnostics for one client-scoped device: endpoint insight, patches, tasks, and recent local actions. Does not run scripts or commands. insight.checks_coverage says whether anything actually monitors this device (none/unverified = unmonitored, regardless of how clean it looks).',
+                'description' => 'Compose read-only Tactical diagnostics for one client-scoped device: endpoint insight, patches, tasks, and recent local actions. Does not run scripts or commands. insight.checks_coverage says whether anything actually monitors this device: "none" = unmonitored (zero checks); "unverified" = coverage cannot currently be demonstrated (nothing passing — inspect the checks); only "verified" means monitoring demonstrably works, regardless of how clean the device looks.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -373,11 +386,27 @@ class TacticalReadOnlyToolset
             $coverageSummary[$device['checks_coverage']]++;
         }
 
+        // Snapshot freshness envelope (psa-47vxh idiom): data_as_of is the
+        // NEWEST row stamp — the freshest this snapshot read can honestly
+        // claim; stale/unknown means the sync has missed at least a cycle.
+        $newestSync = null;
+        foreach ($devices as $device) {
+            $syncedAt = $device['synced_at'] ?? null;
+            if ($syncedAt !== null && ($newestSync === null || $syncedAt > $newestSync)) {
+                $newestSync = $syncedAt;
+            }
+        }
+        $dataStale = $newestSync === null
+            || Carbon::parse($newestSync)->lt(now()->subHours(self::SNAPSHOT_STALE_AFTER_HOURS));
+
         return [
             'count' => count($devices),
             'devices' => $devices,
             'coverage_summary' => $coverageSummary,
             'coverage_note' => self::COVERAGE_NOTE,
+            'data_as_of' => $newestSync,
+            'data_stale' => $dataStale,
+            'freshness_note' => self::SNAPSHOT_FRESHNESS_NOTE,
         ];
     }
 
@@ -780,13 +809,21 @@ class TacticalReadOnlyToolset
             'needs_reboot' => (bool) $asset->needs_reboot,
             'has_patches_pending' => (bool) $asset->has_patches_pending,
             'checks_failing' => $asset->checks_failing,
+            'checks_passing' => $asset->checks_passing,
             'checks_total' => $asset->checks_total,
-            // psa-0pb9m: zero checks must read UNMONITORED and all-failing must
-            // read unverified — never a clean-looking count.
-            'checks_coverage' => TacticalFieldMap::checksCoverage($asset->checks_total, $asset->checks_failing),
-            'checks_summary' => TacticalFieldMap::checksSummaryLine($asset->checks_total, $asset->checks_failing),
+            // psa-0pb9m: zero checks must read UNMONITORED, all-failing must
+            // read unverified, and verified requires EXPLICIT passing evidence
+            // (a pre-migration row with no passing count reads unknown) —
+            // never a clean-looking count.
+            'checks_coverage' => TacticalFieldMap::checksCoverage($asset->checks_total, $asset->checks_failing, $asset->checks_passing),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($asset->checks_total, $asset->checks_failing, $asset->checks_passing),
             'last_seen_at' => $asset->last_seen_at?->toIso8601String(),
             'synced_at' => $asset->synced_at?->toIso8601String(),
+            // Per-row staleness (psa-47vxh idiom): the daily sync missed a
+            // cycle (or never stamped this row) — snapshot state is last-known,
+            // not current truth.
+            'stale' => $asset->synced_at === null
+                || $asset->synced_at->lt(now()->subHours(self::SNAPSHOT_STALE_AFTER_HOURS)),
         ];
     }
 
@@ -832,10 +869,17 @@ class TacticalReadOnlyToolset
             'user_logged_in' => $insight->userLoggedIn,
             'checks_state' => $insight->checksState->value,
             'checks_failing' => $insight->checksFailing,
+            'checks_passing' => $insight->checksPassing,
             'checks_total' => $insight->checksTotal,
+            // Per-signal freshness for CHECKS (psa-47vxh idiom): fresh_as_of is
+            // the freshest signal overall and can read now() while the checks
+            // are only a snapshot — these stamp the checks signal itself.
+            'checks_as_of' => $insight->checksAsOf?->toIso8601String(),
+            'checks_stale' => $insight->checksStale,
             // psa-0pb9m: coverage travels with the counts so zero-checks reads
-            // UNMONITORED and all-failing reads unverified at this boundary too.
-            'checks_coverage' => TacticalFieldMap::checksCoverage($insight->checksTotal, $insight->checksFailing),
+            // UNMONITORED, all-failing reads unverified, and verified requires
+            // explicit passing evidence at this boundary too.
+            'checks_coverage' => $insight->checksCoverage(),
             'coverage_note' => self::COVERAGE_NOTE,
             'open_alerts' => $insight->openAlerts,
             'open_alerts_list' => array_map(fn (array $alert): array => [
@@ -952,15 +996,15 @@ class TacticalReadOnlyToolset
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
-        // getAgent `checks` is a SUMMARY DICT ({total, passing, failing, …}).
-        // Read defensively; absent dict stays unknown, never clean (psa-0pb9m).
-        $checksTotal = null;
-        $checksFailing = null;
-        $checks = $agent['checks'] ?? null;
-        if (is_array($checks) && isset($checks['total'])) {
-            $checksTotal = (int) $checks['total'];
-            $checksFailing = (int) ($checks['failing'] ?? 0);
-        }
+        // getAgent `checks` is a SUMMARY DICT ({total, passing, failing,
+        // warning, info, …}) — TacticalFieldMap::checksFromAgentSummary owns
+        // the shape (failing = failing+warning+info; vendor passing caveats
+        // documented there). Absent dict stays unknown, never clean
+        // (psa-0pb9m). tactical_get_device_checks is the authoritative
+        // per-check read.
+        $checks = TacticalFieldMap::checksFromAgentSummary(
+            is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
+        );
 
         return [
             'hostname' => $agent['hostname'] ?? $hostname,
@@ -983,8 +1027,11 @@ class TacticalReadOnlyToolset
             ),
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => TacticalFieldMap::uptimeFromBootTime($agent['boot_time'] ?? null),
-            'checks_coverage' => TacticalFieldMap::checksCoverage($checksTotal, $checksFailing),
-            'checks_summary' => TacticalFieldMap::checksSummaryLine($checksTotal, $checksFailing),
+            'checks_total' => $checks['total'],
+            'checks_failing' => $checks['failing'],
+            'checks_passing' => $checks['passing'],
+            'checks_coverage' => TacticalFieldMap::checksCoverage($checks['total'], $checks['failing'], $checks['passing']),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($checks['total'], $checks['failing'], $checks['passing']),
         ];
     }
 
@@ -1008,9 +1055,13 @@ class TacticalReadOnlyToolset
         // psa-0pb9m: envelope instead of a bare list — the coverage verdict and
         // per-check platform-mismatch reason travel WITH the rows, so a check
         // that can never pass on this platform is identifiable at this surface.
+        // Counts and coverage are computed over the FULL check set BEFORE the
+        // 50-row display slice, so the envelope always describes the whole
+        // device (revise: a truncated read must not misstate coverage).
         $platform = $resolved['tactical_asset']->platform();
-        $rows = array_slice(array_values(array_filter($checks, 'is_array')), 0, 50);
-        $counts = TacticalFieldMap::checksSummary($rows);
+        $allRows = array_values(array_filter($checks, 'is_array'));
+        $counts = TacticalFieldMap::checksSummary($allRows);
+        $rows = array_slice($allRows, 0, 50);
 
         $mapped = array_map(function (array $check) use ($platform): array {
             $mismatch = TacticalPlatform::checkScriptMismatch($check, $platform);
@@ -1022,6 +1073,12 @@ class TacticalReadOnlyToolset
                     : null,
                 'status' => $check['check_result']['status'] ?? $check['status'] ?? 'unknown',
                 'retcode' => $check['check_result']['retcode'] ?? null,
+                // When this check last actually ran (vendor CheckResult.last_run,
+                // checks/models.py) — null means it has NEVER reported. The
+                // per-check "checked-at" stamp for live reads (psa-47vxh idiom).
+                'last_run' => isset($check['check_result']['last_run']) && is_scalar($check['check_result']['last_run'])
+                    ? (string) $check['check_result']['last_run']
+                    : null,
                 'stdout' => $this->textSanitizer->sanitize('Tactical check stdout', $check['check_result']['stdout'] ?? '', 500),
                 'platform_mismatch' => $mismatch['mismatch'],
                 'platform_mismatch_reason' => $mismatch['reason'],
@@ -1030,7 +1087,13 @@ class TacticalReadOnlyToolset
 
         return [
             'count' => count($mapped),
-            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
+            'checks_total' => $counts['total'],
+            'checks_failing' => $counts['failing'],
+            'checks_passing' => $counts['passing'],
+            'checks_not_reporting' => $counts['pending'] + $counts['unknown'],
+            'truncated' => $counts['total'] > count($mapped),
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing'], $counts['passing']),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($counts['total'], $counts['failing'], $counts['passing']),
             'coverage_note' => self::COVERAGE_NOTE,
             'checks' => $mapped,
         ];

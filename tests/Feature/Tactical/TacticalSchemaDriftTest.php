@@ -30,6 +30,7 @@ class TacticalSchemaDriftTest extends TestCase
         'site_name',
         'logged_username',
         'operating_system',
+        'plat',
         'public_ip',
         'local_ips',
         'cpu_model',
@@ -43,6 +44,49 @@ class TacticalSchemaDriftTest extends TestCase
         'needs_reboot',
         'has_patches_pending',
         'monitoring_type',
+        'checks',
+    ];
+
+    /**
+     * Checks summary-dict keys the coverage classifier depends on
+     * (TacticalFieldMap::checksFromAgentSummary — psa-0pb9m).
+     *
+     * @var string[]
+     */
+    private const EXPECTED_CHECKS_SUMMARY_FIELDS = [
+        'total',
+        'passing',
+        'failing',
+        'warning',
+        'info',
+    ];
+
+    /**
+     * Per-check-result fields the checks-list surfaces depend on
+     * (TacticalFieldMap::checksSummary / checkStatus, the per-check last_run
+     * stamp — psa-0pb9m).
+     *
+     * @var string[]
+     */
+    private const EXPECTED_CHECK_RESULT_FIELDS = [
+        'status',
+        'retcode',
+        'stdout',
+        'last_run',
+    ];
+
+    /**
+     * Script-catalog fields the platform guard depends on
+     * (TacticalPlatform::scriptIncompatibility, TacticalCheckPlatformGuard —
+     * psa-0pb9m).
+     *
+     * @var string[]
+     */
+    private const EXPECTED_SCRIPT_FIELDS = [
+        'id',
+        'name',
+        'shell',
+        'supported_platforms',
     ];
 
     /**
@@ -105,6 +149,52 @@ class TacticalSchemaDriftTest extends TestCase
                 $field,
                 $present,
                 "Tactical alert schema no longer exposes `{$field}` (used by TacticalReconcileAlerts). ".self::REFRESH_HINT,
+            );
+        }
+    }
+
+    public function test_checks_summary_schema_contains_every_field_the_coverage_classifier_depends_on(): void
+    {
+        $present = $this->propertyNames($this->schema(), 'AgentChecksSummary');
+
+        foreach (self::EXPECTED_CHECKS_SUMMARY_FIELDS as $field) {
+            $this->assertContains(
+                $field,
+                $present,
+                "Tactical agent checks summary no longer exposes `{$field}` (used by TacticalFieldMap::checksFromAgentSummary — coverage truth would silently weaken). ".self::REFRESH_HINT,
+            );
+        }
+    }
+
+    public function test_check_result_schema_contains_every_field_the_check_reads_depend_on(): void
+    {
+        $present = $this->propertyNames($this->schema(), 'CheckResult');
+
+        foreach (self::EXPECTED_CHECK_RESULT_FIELDS as $field) {
+            $this->assertContains(
+                $field,
+                $present,
+                "Tactical check result no longer exposes `{$field}` (used by TacticalFieldMap::checksSummary and the per-check reads). ".self::REFRESH_HINT,
+            );
+        }
+
+        $status = $this->schema()['components']['schemas']['CheckResult']['properties']['status'] ?? [];
+        $this->assertSame(
+            ['passing', 'failing', 'pending'],
+            $status['enum'] ?? null,
+            'The pinned CheckResult status vocabulary changed — TacticalFieldMap::checksSummary buckets by these exact values. '.self::REFRESH_HINT,
+        );
+    }
+
+    public function test_script_schema_contains_every_field_the_platform_guard_depends_on(): void
+    {
+        $present = $this->propertyNames($this->schema(), 'Script');
+
+        foreach (self::EXPECTED_SCRIPT_FIELDS as $field) {
+            $this->assertContains(
+                $field,
+                $present,
+                "Tactical script schema no longer exposes `{$field}` (used by TacticalCheckPlatformGuard / TacticalPlatform — losing it silently weakens the wrong-platform guard). ".self::REFRESH_HINT,
             );
         }
     }

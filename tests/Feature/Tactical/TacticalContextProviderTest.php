@@ -128,7 +128,7 @@ class TacticalContextProviderTest extends TestCase
         [$asset] = $this->seedTacticalAssetWithFailingCheck();
         $block = $this->provider($this->liveReads())->forAsset($asset)->text;
 
-        $this->assertStringContainsString('ALL failing (monitoring unverified', $block);
+        $this->assertStringContainsString('ALL failing (coverage unverified', $block);
     }
 
     /**

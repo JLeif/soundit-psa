@@ -279,9 +279,15 @@ class TacticalPanelData
             'tactical' => true,
             'checks_total' => $counts['total'],
             'checks_failing' => $counts['failing'],
-            // psa-0pb9m: self-describing coverage, same vocabulary as the MCP
-            // payloads (zero checks => 'none' => the panel renders unmonitored).
-            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing']),
+            // psa-0pb9m (revise): explicit per-status counts — the renderer
+            // must never call "all passing" from failing===0 alone (the gap
+            // can be pending / never-reporting checks).
+            'checks_passing' => $counts['passing'],
+            'checks_not_reporting' => $counts['pending'] + $counts['unknown'],
+            // Self-describing coverage, same vocabulary as the MCP payloads
+            // (zero checks => 'none' => the panel renders unmonitored;
+            // verified requires an explicitly passing check).
+            'checks_coverage' => TacticalFieldMap::checksCoverage($counts['total'], $counts['failing'], $counts['passing']),
             'failing_checks' => $failing,
         ];
     }

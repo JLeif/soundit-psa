@@ -60,9 +60,17 @@ class TacticalInsightService
 
         $checksFailing = $ta->checks_failing;
         $checksTotal = $ta->checks_total;
+        // Explicit passing evidence from the synced summary dict; null on rows
+        // synced before the checks_passing column existed — coverage then
+        // classifies "unknown", never verified-by-default (psa-0pb9m revise).
+        $checksPassing = $ta->checks_passing;
         $checksState = $checksFailing !== null
             ? SignalState::Snapshot
             : SignalState::Unavailable;
+        // Per-signal freshness for CHECKS (psa-47vxh idiom): freshAsOf reads
+        // now() on a mixed read while checks stay a snapshot, so checks carry
+        // their own stamp. Snapshot => synced_at; Unavailable => null.
+        $checksAsOf = $checksState === SignalState::Snapshot ? $ta->synced_at : null;
         /** @var FailingCheck[] $failingChecks */
         $failingChecks = []; // the detailed list is a live/panel read, not on the snapshot
 
@@ -107,12 +115,17 @@ class TacticalInsightService
                 $counts = TacticalFieldMap::checksSummary($checks);
                 $checksFailing = $counts['failing'];
                 $checksTotal = $counts['total'];
+                // Live per-check statuses: passing is the EXPLICIT count of
+                // status=passing rows (pending/never-reporting are not evidence).
+                $checksPassing = $counts['passing'];
                 $checksState = SignalState::Live;
+                $checksAsOf = now();
                 $freshAsOf = now();
             } elseif ($checksFailing === null) {
                 // Live fetch failed AND no snapshot count => genuinely unavailable
                 // (NOT "0 clean"). Keep Unavailable.
                 $checksState = SignalState::Unavailable;
+                $checksAsOf = null;
             }
         }
 
@@ -138,6 +151,9 @@ class TacticalInsightService
             checksState: $checksState,
             checksFailing: $checksFailing,
             checksTotal: $checksTotal,
+            checksPassing: $checksPassing,
+            checksAsOf: $checksAsOf,
+            checksStale: $this->computeChecksStale($checksState, $checksAsOf),
             openAlerts: $this->openAlertCount($asset),
             openAlertList: $this->openAlertList($asset),
             pendingPatchCount: $this->pendingPatchCount($ta),
@@ -291,6 +307,32 @@ class TacticalInsightService
         }
 
         return $freshAsOf->lt(now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES));
+    }
+
+    /**
+     * Per-signal staleness for CHECKS (psa-0pb9m revise / psa-47vxh idiom).
+     * The top-level `stale` flag is computed from the STATUS signal, so a
+     * mixed read (status live, checks snapshot) reads fresh while the checks
+     * are old — this stamp closes that gap. Live => false; Unavailable =>
+     * null (there is no read to age); Snapshot => aged against the same
+     * STALE_AFTER_MINUTES window.
+     */
+    private function computeChecksStale(SignalState $checksState, ?\Illuminate\Support\Carbon $checksAsOf): ?bool
+    {
+        if ($checksState === SignalState::Unavailable) {
+            return null;
+        }
+
+        if ($checksState === SignalState::Live) {
+            return false;
+        }
+
+        // A snapshot of unknown age is stale (psa-47vxh: unknown => stale).
+        if ($checksAsOf === null) {
+            return true;
+        }
+
+        return $checksAsOf->lt(now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES));
     }
 
     private function snapshotUptime(TacticalAsset $ta): ?string

@@ -510,27 +510,50 @@
                      when unknown, never "0"), open-alerts, pending-patches, last-seen. --}}
                 @if($insight)
                 <div class="d-flex flex-wrap gap-3 mb-3 pb-3 border-bottom small tactical-health-line" id="tacticalHealthLine">
-                    <span title="Failing monitoring checks">
+                    <span title="Monitoring checks">
                         <i class="bi bi-clipboard2-check me-1 {{ ($insight->checksFailing ?? 0) > 0 ? 'text-danger' : 'text-muted' }}"></i>
                         {{-- fix #2: a degraded/STALE clean signal must never read as a
-                             confident green "all passing" (the amendment-H misread the
-                             status badge guards but the chips didn't). Positive copy
-                             only when checks were actually read clean AND are fresh;
-                             otherwise a muted "as of last sync" qualifier. The negative
-                             "N failing" count still shows regardless of staleness. --}}
+                             confident green "all passing". psa-0pb9m (revise): the
+                             decisive coverage limitation is the AT-A-GLANCE signal,
+                             stated in words — never arithmetic the operator must
+                             interpret. Branch order matters: the all-failing trap is
+                             tested BEFORE the generic "N failing" branch, unknown is a
+                             first-class state (never a muted dash, never green), and
+                             green "all passing" requires every check EXPLICITLY
+                             passing (checksKnownClean) AND freshness. --}}
                         @if($insight->checksFailing === null)
-                            checks: <span class="text-muted">—</span>
+                            <span class="text-warning-emphasis" title="The checks signal could not be read — nothing verifies this device's health right now"><i class="bi bi-question-circle me-1"></i>checks unknown — health not verified</span>
                         @elseif($insight->checksTotal === 0)
                             {{-- psa-0pb9m: zero checks is the ABSENCE of monitoring, not a
                                  clean result — a Mac whose broken check was deleted must
                                  read unmonitored, never "all passing". --}}
                             <span class="text-warning-emphasis fw-semibold" title="No Tactical checks are configured on this device — nothing verifies its health">no checks — unmonitored</span>
+                        @elseif($insight->checksCoverage() === \App\Services\Tactical\TacticalFieldMap::COVERAGE_UNVERIFIED)
+                            {{-- The production trap: 1-of-1 failing must NOT read as a
+                                 monitored-but-unhealthy count. Nothing currently
+                                 demonstrates working monitoring — say that first. --}}
+                            <span class="text-danger fw-semibold" title="Checks exist but none is currently passing — a real incident or a broken/wrong-platform check; nothing currently demonstrates working monitoring">
+                                @if(($insight->checksFailing ?? 0) >= ($insight->checksTotal ?? 0))
+                                    all checks failing — monitoring unverified ({{ $insight->checksFailing }} of {{ $insight->checksTotal }})
+                                @else
+                                    no check passing — monitoring unverified ({{ $insight->checksFailing }} failing of {{ $insight->checksTotal }})
+                                @endif
+                            </span>
                         @elseif($insight->checksFailing > 0)
-                            <span class="text-danger fw-semibold">{{ $insight->checksFailing }} checks failing</span>
+                            {{-- A known failing count is real, useful signal even
+                                 when the coverage verdict is unknown — staleness/
+                                 unknowns gate only the POSITIVE claims below. --}}
+                            <span class="text-danger fw-semibold">{{ $insight->checksFailing }} of {{ $insight->checksTotal }} checks failing</span>
+                        @elseif($insight->checksCoverage() === \App\Services\Tactical\TacticalFieldMap::COVERAGE_UNKNOWN)
+                            <span class="text-warning-emphasis" title="Checks exist but whether any passes is unknown (snapshot has no passing count) — re-sync or open the checks panel"><i class="bi bi-question-circle me-1"></i>{{ $insight->checksTotal }} checks — coverage unknown</span>
                         @elseif($insight->checksKnownClean() && !$insight->stale)
-                            <span class="text-success">checks: all passing</span>
-                        @else
+                            <span class="text-success">checks: all {{ $insight->checksTotal }} passing</span>
+                        @elseif($insight->checksKnownClean())
                             checks: <span class="text-muted">clean as of last sync</span>
+                        @else
+                            {{-- Verified (a check passes) but not every check reports —
+                                 honest partial copy, never a blanket "all passing". --}}
+                            <span class="text-warning-emphasis" title="At least one check passes, but not every configured check is currently reporting a pass">{{ $insight->checksPassing }} of {{ $insight->checksTotal }} passing — rest not reporting</span>
                         @endif
                     </span>
                     <span title="Open alerts">
@@ -3448,30 +3471,68 @@ function renderPatches(data) {
     }
 
     function renderChecks(d) {
-        // psa-0pb9m: zero checks is the ABSENCE of monitoring — never render it
-        // as a green "All checks passing (0)".
+        // psa-0pb9m (revise): zero checks is the ABSENCE of monitoring, a
+        // missing/non-numeric count is UNKNOWN (never green), all-failing and
+        // none-currently-passing say "coverage unverified" in words BEFORE
+        // the count, and the green clean state requires every check to have
+        // EXPLICITLY passed (checks_passing === checks_total) — never a
+        // zero-failing subtraction.
         if (d.checks_total === 0) {
             return '<div class="text-warning-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>' +
                    'No checks configured — this device is not monitored. Nothing verifies its health.</div>' +
                    viewInTacticalLink();
         }
-        if (typeof d.checks_failing !== 'number' || d.checks_failing === 0) {
-            return '<div class="text-success"><i class="bi bi-check-circle me-1"></i>All checks passing' +
-                   (typeof d.checks_total === 'number' ? ' (' + d.checks_total + ')' : '') + '.</div>';
+        if (typeof d.checks_failing !== 'number' || typeof d.checks_total !== 'number') {
+            return '<div class="text-warning-emphasis"><i class="bi bi-question-circle me-1"></i>' +
+                   'Checks unavailable — health not verified. The checks signal could not be read; nothing here demonstrates working monitoring.</div>' +
+                   viewInTacticalLink();
         }
-        var html = '<div class="fw-semibold text-danger mb-2"><i class="bi bi-exclamation-triangle me-1"></i>' +
-                   d.checks_failing + ' of ' + d.checks_total + ' check' + (d.checks_failing === 1 ? '' : 's') + ' failing</div>';
+
+        var failingList = '';
         (d.failing_checks || []).forEach(function(c) {
-            html += '<div class="border-start border-danger border-2 ps-2 mb-2">' +
+            failingList += '<div class="border-start border-danger border-2 ps-2 mb-2">' +
                     '<div class="fw-semibold">' + esc(c.name) +
                     (c.retcode !== null && c.retcode !== undefined ? ' <span class="text-muted">(rc=' + esc(String(c.retcode)) + ')</span>' : '') +
                     '</div>';
             if (c.stdout) {
-                html += '<pre class="mb-0 mt-1 small text-muted" style="white-space:pre-wrap;word-break:break-word;">' + esc(c.stdout) + '</pre>';
+                failingList += '<pre class="mb-0 mt-1 small text-muted" style="white-space:pre-wrap;word-break:break-word;">' + esc(c.stdout) + '</pre>';
             }
-            html += '</div>';
+            failingList += '</div>';
         });
-        return html;
+
+        if (d.checks_coverage === 'unverified') {
+            // The production trap: "1 of 1 failing" read as monitored-but-
+            // unhealthy. The decisive limitation comes first, in words.
+            var headline = d.checks_failing >= d.checks_total
+                ? 'All ' + d.checks_total + ' check' + (d.checks_total === 1 ? '' : 's') + ' failing — monitoring coverage unverified'
+                : 'No check currently passing — monitoring coverage unverified (' + d.checks_failing + ' failing, ' +
+                  (typeof d.checks_not_reporting === 'number' ? d.checks_not_reporting : (d.checks_total - d.checks_failing)) + ' not reporting)';
+            return '<div class="fw-semibold text-danger mb-2"><i class="bi bi-exclamation-triangle me-1"></i>' + headline +
+                   '</div><div class="small text-muted mb-2">Nothing currently demonstrates working monitoring: this is a real incident or a broken/wrong-platform/never-running check — inspect it, do not read this device as covered.</div>' +
+                   failingList;
+        }
+
+        if (d.checks_failing > 0) {
+            return '<div class="fw-semibold text-danger mb-2"><i class="bi bi-exclamation-triangle me-1"></i>' +
+                   d.checks_failing + ' of ' + d.checks_total + ' check' + (d.checks_failing === 1 ? '' : 's') + ' failing' +
+                   (typeof d.checks_passing === 'number' ? ' <span class="text-muted">(' + d.checks_passing + ' passing)</span>' : '') +
+                   '</div>' + failingList;
+        }
+
+        if (typeof d.checks_passing === 'number' && d.checks_passing === d.checks_total) {
+            return '<div class="text-success"><i class="bi bi-check-circle me-1"></i>All ' + d.checks_total +
+                   ' check' + (d.checks_total === 1 ? '' : 's') + ' passing.</div>';
+        }
+
+        // Zero failing but not every check demonstrably passing (pending /
+        // never-reporting) — honest partial copy, never a blanket all-clear.
+        var notReporting = typeof d.checks_not_reporting === 'number'
+            ? d.checks_not_reporting
+            : d.checks_total - (typeof d.checks_passing === 'number' ? d.checks_passing : 0);
+        return '<div class="text-warning-emphasis"><i class="bi bi-question-circle me-1"></i>' +
+               (typeof d.checks_passing === 'number' ? d.checks_passing : 0) + ' of ' + d.checks_total + ' passing — ' +
+               notReporting + ' not reporting. A check that never reports verifies nothing.</div>' +
+               viewInTacticalLink();
     }
 
     function renderPatches(d) {

@@ -193,7 +193,11 @@ class DataSurfaceToolsTest extends TestCase
                 'status' => 'online',
                 'operating_system' => 'Windows 11 Pro',
                 'total_ram' => 16,
-                'checks' => ['failing' => 1, 'total' => 8],
+                // The FULL vendor summary dict (calculate_agent_checks —
+                // pinned in tests/Fixtures/tactical/api_schema.json). The old
+                // partial {failing, total} fixture was a shape the vendor
+                // never emits.
+                'checks' => ['total' => 8, 'passing' => 7, 'failing' => 1, 'warning' => 0, 'info' => 0, 'has_failing_checks' => true],
                 'logged_in_username' => 'ACME\\alex',
             ]);
         $this->app->instance(TacticalClient::class, $tactical);
@@ -210,7 +214,7 @@ class DataSurfaceToolsTest extends TestCase
         $result = $this->decodedResult($response);
         $this->assertSame('PC-01', $result['hostname']);
         $this->assertSame('online', $result['status']);
-        $this->assertSame('1 failing / 8 total', $result['checks_summary']);
+        $this->assertSame('1 failing / 8 total (7 passing)', $result['checks_summary']);
 
         $this->assertDatabaseHas('mcp_audit_logs', [
             'method' => 'tools/call',

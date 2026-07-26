@@ -108,31 +108,84 @@ class TacticalFieldMap
     }
 
     /**
-     * Summarize a getAgentChecks LIST to {failing, total} counts.
+     * Summarize a getAgentChecks LIST to explicit per-status counts.
      *
      * This is for the getAgentChecks endpoint, which returns a LIST of checks each
      * carrying a rich `check_result.status` (with a flat `status` fallback). It is
-     * NOT for the getAgent DETAIL `checks` field — that is already a pre-computed
-     * summary dict ({total, passing, failing, …}) read off directly by the caller.
+     * NOT for the getAgent DETAIL `checks` field — that is a pre-computed summary
+     * dict mapped by checksFromAgentSummary() below.
+     *
+     * Status vocabulary is the vendor's own (CheckStatus, tacticalrmm
+     * constants.py:181-184): passing | failing | pending. A check that has NEVER
+     * reported serializes `check_result: {}` (checks/serializers.py:30-34 —
+     * Check.check_result defaults to {} at checks/models.py:160), which resolves
+     * to "unknown" here. Every count is EXPLICIT — `passing` is only ever a
+     * counted status=passing, never inferred by subtraction: a pending or
+     * never-reporting check is evidence of NOTHING (psa-0pb9m revise).
      *
      * @param  array<int, array<string, mixed>>  $checks
-     * @return array{failing: int, total: int}
+     * @return array{failing: int, passing: int, pending: int, unknown: int, total: int}
      */
     public static function checksSummary(array $checks): array
     {
-        $failing = 0;
+        $counts = ['failing' => 0, 'passing' => 0, 'pending' => 0, 'unknown' => 0, 'total' => 0];
 
         foreach ($checks as $check) {
             if (! is_array($check)) {
                 continue;
             }
 
-            if (self::checkStatus($check) === 'failing') {
-                $failing++;
-            }
+            $counts['total']++;
+            $status = self::checkStatus($check);
+            match ($status) {
+                'passing' => $counts['passing']++,
+                'failing' => $counts['failing']++,
+                'pending' => $counts['pending']++,
+                default => $counts['unknown']++,
+            };
         }
 
-        return ['failing' => $failing, 'total' => count($checks)];
+        return $counts;
+    }
+
+    /**
+     * Map the getAgent DETAIL / agents-list `checks` SUMMARY DICT to the same
+     * {total, failing, passing} triple the coverage classifier consumes.
+     *
+     * Producer: calculate_agent_checks (tacticalrmm agents/utils.py:145) emits
+     * {total, passing, failing, warning, info, has_failing_checks} where
+     * `failing`/`warning`/`info` are the SEVERITY SPLIT of status=failing
+     * results — so the list-endpoint "failing" count equals failing+warning+info
+     * here, and we sum them so dict-derived and list-derived counts agree.
+     *
+     * Two documented vendor caveats (verified in source 2026-07-26):
+     *  - `passing` counts a check with NO result row as passing (the
+     *    `not hasattr(check.check_result, "status")` branch) — so dict-derived
+     *    passing is the vendor's claim, not per-check proof. The authoritative
+     *    per-check read is getAgentChecks (tactical_get_device_checks).
+     *  - The AGENTS-LIST serializer reads this dict from a periodic-task cache
+     *    (agents/serializers.py:113, populated by core/tasks.py:431); a cold
+     *    cache yields an all-zeros dict, which classifies as "none"/UNMONITORED
+     *    — over-alarming, never false-clean.
+     *
+     * @param  array<string, mixed>|null  $dict
+     * @return array{total: ?int, failing: ?int, passing: ?int}
+     */
+    public static function checksFromAgentSummary(?array $dict): array
+    {
+        if (! is_array($dict) || ! isset($dict['total']) || ! is_numeric($dict['total'])) {
+            return ['total' => null, 'failing' => null, 'passing' => null];
+        }
+
+        $failing = (int) ($dict['failing'] ?? 0)
+            + (int) ($dict['warning'] ?? 0)
+            + (int) ($dict['info'] ?? 0);
+
+        return [
+            'total' => (int) $dict['total'],
+            'failing' => $failing,
+            'passing' => isset($dict['passing']) && is_numeric($dict['passing']) ? (int) $dict['passing'] : null,
+        ];
     }
 
     /**
@@ -152,34 +205,48 @@ class TacticalFieldMap
     /**
      * The one coverage-semantics note, shared by every AI-facing Tactical
      * surface (MCP read toolset + triage tool loop) — the sibling of the
-     * psa-47vxh freshness_note. Presence in RMM is NOT coverage.
+     * psa-47vxh freshness_note. Presence in RMM is NOT coverage, and coverage
+     * is never inferred by subtraction: "verified" requires an explicitly
+     * counted passing check.
      */
-    public const COVERAGE_NOTE = 'checks_coverage semantics: "verified" = at least one check is currently passing (monitoring demonstrably works); "unverified" = checks exist but ALL are failing (a real incident or a broken/wrong-platform check — nothing currently demonstrates working monitoring); "none" = ZERO checks configured, the device is UNMONITORED (do not read it as healthy); "unknown" = the checks signal was never read. A device that is visible in RMM but "none"/"unverified" is NOT covered — use tactical_get_device_checks to see each check and its platform_mismatch reason.';
+    public const COVERAGE_NOTE = 'checks_coverage semantics: "verified" = at least one check is EXPLICITLY passing right now (monitoring demonstrably works); "unverified" = checks exist but NONE is currently passing (all failing, or none reporting — a real incident or a broken/wrong-platform/never-running check; needs inspection); "none" = ZERO checks configured, the device is UNMONITORED (do not read it as healthy); "unknown" = a passing check can neither be demonstrated nor ruled out (checks never read, or the snapshot predates passing-count sync). "none" means unmonitored; "unverified" means coverage cannot currently be demonstrated — they are different facts. Only "verified" is coverage. Use tactical_get_device_checks for the authoritative per-check view (status, last_run, platform_mismatch reason).';
 
-    /** At least one check is currently passing — monitoring demonstrably works. */
+    /** At least one check is EXPLICITLY passing — monitoring demonstrably works. */
     public const COVERAGE_VERIFIED = 'verified';
 
     /**
-     * Checks exist but NONE passes — indistinguishable from a broken or
-     * wrong-platform check. Nothing currently demonstrates working monitoring.
+     * Checks exist but NONE is currently passing (all failing, or nothing
+     * reporting) — indistinguishable from a broken or wrong-platform check.
+     * Nothing currently demonstrates working monitoring.
      */
     public const COVERAGE_UNVERIFIED = 'unverified';
 
     /** Zero checks configured — nothing verifies this device at all. */
     public const COVERAGE_NONE = 'none';
 
-    /** The checks signal was never read (no snapshot, no live) — we don't know. */
+    /**
+     * A passing check can neither be demonstrated nor ruled out — the checks
+     * signal was never read, or the read carries no passing evidence (e.g. a
+     * snapshot from before passing-count sync). NOT coverage.
+     */
     public const COVERAGE_UNKNOWN = 'unknown';
 
     /**
      * Classify check counts into a coverage state (psa-0pb9m). The point:
      * "RMM shows the device" must never be readable as "something verifies the
-     * device". A Mac whose ONE check always fails is UNVERIFIED, not unhealthy-
-     * but-covered; a Mac with zero checks is UNMONITORED, not clean. Single
-     * source of truth for the MCP payloads, EndpointInsight, the AI context
-     * provider, and the asset-page panels.
+     * device". VERIFIED requires an explicitly counted passing check —
+     * failing < total is NOT evidence (the gap can be pending / never-reporting
+     * / warning-severity failures, per the vendor shapes in checksSummary()).
+     * A Mac whose ONE check always fails is UNVERIFIED, not unhealthy-but-
+     * covered; a Mac with zero checks is UNMONITORED, not clean. Single source
+     * of truth for the MCP payloads, EndpointInsight, the AI context provider,
+     * and the asset-page panels.
+     *
+     * $passing null means "no passing evidence available" (legacy snapshot,
+     * malformed payload): classified UNKNOWN — except when every check is
+     * failing, which PROVES nothing passes → UNVERIFIED.
      */
-    public static function checksCoverage(?int $total, ?int $failing): string
+    public static function checksCoverage(?int $total, ?int $failing, ?int $passing = null): string
     {
         if ($total === null) {
             return self::COVERAGE_UNKNOWN;
@@ -189,29 +256,61 @@ class TacticalFieldMap
             return self::COVERAGE_NONE;
         }
 
-        // A missing failing count on a positive total cannot demonstrate a
-        // passing check — unverified, never verified-by-default.
-        if ($failing === null || $failing >= $total) {
+        if ($passing !== null) {
+            return $passing > 0 ? self::COVERAGE_VERIFIED : self::COVERAGE_UNVERIFIED;
+        }
+
+        // No passing evidence. All-failing still proves nothing passes;
+        // anything else is honestly unknown — never verified-by-subtraction.
+        if ($failing !== null && $failing >= $total) {
             return self::COVERAGE_UNVERIFIED;
         }
 
-        return self::COVERAGE_VERIFIED;
+        return self::COVERAGE_UNKNOWN;
     }
 
     /**
-     * Human/AI-facing one-line summary for a checks count pair. Keeps the exact
-     * legacy "{failing} failing / {total} total" wording for verified coverage;
-     * makes the two dangerous shapes explicit instead of clean-looking:
-     * zero checks → UNMONITORED, all failing → coverage unverified.
+     * Human/AI-facing one-line summary for a checks count triple. Keeps the
+     * legacy "{failing} failing / {total} total" spine for verified coverage
+     * (now annotated with the explicit passing count); makes every dangerous
+     * shape explicit instead of clean-looking: zero checks → UNMONITORED,
+     * all failing → coverage unverified, none passing → coverage unverified,
+     * no passing evidence → coverage unknown.
      */
-    public static function checksSummaryLine(?int $total, ?int $failing): ?string
+    public static function checksSummaryLine(?int $total, ?int $failing, ?int $passing = null): ?string
     {
-        return match (self::checksCoverage($total, $failing)) {
-            self::COVERAGE_UNKNOWN => null,
-            self::COVERAGE_NONE => 'no checks configured - UNMONITORED (nothing verifies this device)',
-            self::COVERAGE_UNVERIFIED => ($failing ?? $total).' failing / '.$total.' total - ALL checks failing (monitoring unverified: real incident or broken/wrong-platform check)',
-            default => "{$failing} failing / {$total} total",
-        };
+        $coverage = self::checksCoverage($total, $failing, $passing);
+
+        if ($coverage === self::COVERAGE_UNKNOWN) {
+            if ($total === null || $total <= 0) {
+                return null;
+            }
+
+            // Read the signal, but no passing evidence — say so rather than
+            // rendering a clean-looking count.
+            return "{$total} configured - passing count unavailable (coverage unknown: re-sync or read checks live)";
+        }
+
+        if ($coverage === self::COVERAGE_NONE) {
+            return 'no checks configured - UNMONITORED (nothing verifies this device)';
+        }
+
+        if ($coverage === self::COVERAGE_UNVERIFIED) {
+            if ($failing !== null && $failing >= $total) {
+                return "{$failing} failing / {$total} total - ALL checks failing (coverage unverified: real incident or broken/wrong-platform check)";
+            }
+
+            $notReporting = max(0, $total - (int) $failing - (int) $passing);
+
+            return "0 passing / {$total} total ({$failing} failing, {$notReporting} not reporting) - NO check currently passing (coverage unverified)";
+        }
+
+        $line = "{$failing} failing / {$total} total";
+        if ($passing !== null) {
+            $line .= " ({$passing} passing)";
+        }
+
+        return $line;
     }
 
     /**

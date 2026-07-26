@@ -56,16 +56,14 @@ final class TacticalContextProvider
             .', stale: '.$this->yn($i->stale)
             .', maintenance: '.$this->yn($i->maintenance)
             .', user logged in: '.$this->yn($i->userLoggedIn);   // G6: boolean, never the username
-        // G7: distinguish unavailable from clean. psa-0pb9m: distinguish
-        // UNMONITORED (zero checks) and unverified (all failing) from both —
-        // an endpoint that is merely VISIBLE in RMM must never read as covered.
-        $lines[] = 'Checks: '.match (true) {
-            $i->checksState === SignalState::Unavailable => 'unavailable (could not read)',
-            $i->checksCoverage() === TacticalFieldMap::COVERAGE_NONE => 'no checks configured - UNMONITORED (nothing verifies this endpoint)',
-            $i->checksKnownClean() => 'all passing',
-            $i->checksCoverage() === TacticalFieldMap::COVERAGE_UNVERIFIED => "{$i->checksFailing} failing of {$i->checksTotal} - ALL failing (monitoring unverified: real incident or broken/wrong-platform check)",
-            default => "{$i->checksFailing} failing of {$i->checksTotal}",
-        };
+        // G7: distinguish unavailable from clean. psa-0pb9m (revise):
+        // distinguish UNMONITORED (zero checks), unverified (NOTHING currently
+        // passing — all failing or none reporting), and unknown (no passing
+        // evidence) from clean — an endpoint that is merely VISIBLE in RMM
+        // must never read as covered, and "all passing" requires every check
+        // to have EXPLICITLY passed. The checks line carries its own signal
+        // marker: freshAsOf can read now() while checks are a stale snapshot.
+        $lines[] = 'Checks: '.$this->checksLine($i);
         $lines[] = 'Patches: '.($i->pendingPatchCount !== null
             ? "{$i->pendingPatchCount} pending"
             : ($i->hasPendingPatches ? 'updates pending (count unknown)' : 'up to date'));
@@ -124,6 +122,54 @@ final class TacticalContextProvider
         }
 
         return $kept."\n… (truncated to budget)";
+    }
+
+    /**
+     * The one-line checks verdict for the AI context (psa-0pb9m revise).
+     * Coverage states come from the shared classifier (verified requires
+     * explicit passing evidence); the trailing marker is the CHECKS signal's
+     * own freshness ([live] / [snapshot] / [snapshot, stale]) — never inferred
+     * from the block-level freshAsOf stamp.
+     */
+    private function checksLine(EndpointInsight $i): string
+    {
+        if ($i->checksState === SignalState::Unavailable) {
+            return 'unavailable (could not read — health not verified)';
+        }
+
+        $marker = ' ['.strtolower($i->checksState->name).($i->checksStale === true ? ', stale' : '').']';
+
+        if ($i->checksCoverage() === TacticalFieldMap::COVERAGE_NONE) {
+            return 'no checks configured - UNMONITORED (nothing verifies this endpoint)'.$marker;
+        }
+
+        if ($i->checksKnownClean()) {
+            return "all {$i->checksTotal} passing".$marker;
+        }
+
+        if ($i->checksCoverage() === TacticalFieldMap::COVERAGE_UNVERIFIED) {
+            if ($i->checksFailing !== null && $i->checksTotal !== null && $i->checksFailing >= $i->checksTotal) {
+                return "{$i->checksFailing} failing of {$i->checksTotal} - ALL failing (coverage unverified: real incident or broken/wrong-platform check)".$marker;
+            }
+
+            $notReporting = max(0, (int) $i->checksTotal - (int) $i->checksFailing - (int) $i->checksPassing);
+
+            return "0 passing of {$i->checksTotal} ({$i->checksFailing} failing, {$notReporting} not reporting) - NO check currently passing (coverage unverified)".$marker;
+        }
+
+        if ($i->checksCoverage() === TacticalFieldMap::COVERAGE_UNKNOWN) {
+            return "{$i->checksTotal} configured, passing count unknown - coverage unknown (not evidence of monitoring)".$marker;
+        }
+
+        // Verified (at least one explicit pass) but not fully clean: name the
+        // failing count and any silent not-reporting gap.
+        $notReporting = max(0, (int) $i->checksTotal - (int) $i->checksFailing - (int) $i->checksPassing);
+        $line = "{$i->checksFailing} failing of {$i->checksTotal} ({$i->checksPassing} passing";
+        if ($notReporting > 0) {
+            $line .= ", {$notReporting} not reporting";
+        }
+
+        return $line.')'.$marker;
     }
 
     /** Render a boolean flag as explicit "yes" or "no" text. */

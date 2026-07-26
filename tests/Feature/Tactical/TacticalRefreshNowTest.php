@@ -187,21 +187,22 @@ class TacticalRefreshNowTest extends TestCase
         $resp->assertOk();
         // The eager health summary (failing-checks / patches) is present from the snapshot.
         $resp->assertSee('tactical-health-line', false);
-        $resp->assertSeeText('3 checks failing');
+        $resp->assertSeeText('3 of 8 checks failing');
     }
 
-    public function test_eager_health_line_shows_dash_when_checks_count_unknown(): void
+    public function test_eager_health_line_says_unknown_when_checks_count_unknown(): void
     {
-        // checks_failing null (never refreshed) must render "—", NOT "0 failing"
-        // (Unavailable != clean).
+        // checks_failing null (never refreshed) must render the explicit
+        // unknown state in words, NOT "0 failing" (Unavailable != clean) and
+        // not a bare muted dash (psa-0pb9m revise: unknown is a first-class
+        // human state).
         $asset = $this->linkedAsset(['checks_failing' => null, 'checks_total' => null]);
 
         $resp = $this->actingAs(User::factory()->create())->get(route('assets.show', $asset));
 
         $resp->assertOk();
         $resp->assertSee('tactical-health-line', false);
-        // The dash marker for an unknown checks count.
-        $resp->assertSeeText('checks: —');
+        $resp->assertSeeText('checks unknown — health not verified');
     }
 
     public function test_stale_online_renders_freshness_in_a_warning_treatment(): void

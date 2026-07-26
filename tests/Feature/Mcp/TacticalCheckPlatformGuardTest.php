@@ -19,17 +19,22 @@ use Mockery;
 use Tests\TestCase;
 
 /**
- * psa-0pb9m — the create-check platform guard.
+ * psa-0pb9m — the create-check platform guard (revise: FAIL CLOSED).
  *
  * Root-cause-class prevention: tactical_create_check could attach a script
  * check whose script cannot run on the target agent's platform (e.g. a
  * PowerShell/Windows-only script on a Mac). Tactical runs it anyway and it
  * fails on 100% of executions forever — manufacturing exactly the
- * "one check on every Mac, fails on all of them" defect. Agent-target creates
- * with a provably incompatible script are REJECTED before any upstream call;
- * policy-target creates with a Windows-bound script succeed but carry an
- * explicit platform_warning (policies can cover mixed fleets). Unknown
- * platform makes no claim and does not block.
+ * "one check on every Mac, fails on all of them" defect. The guard fails
+ * CLOSED before any upstream call: an agent whose platform is unknown is
+ * refused (remedy: sync devices), a provably incompatible agent create is
+ * refused outright, and a platform-bound script on a POLICY is refused
+ * pre-write unless the caller passes the explicit acknowledge_platform_risk
+ * confirmation (policy membership is unknowable here; the old post-write
+ * warning was diagnosis, not prevention). The same invariant is enforced
+ * again at the shared TacticalClient::createCheck boundary
+ * (TacticalCheckPlatformGuard) so no caller path can bypass it — covered by
+ * the client-boundary tests at the bottom of this file.
  */
 class TacticalCheckPlatformGuardTest extends TestCase
 {
@@ -207,21 +212,20 @@ class TacticalCheckPlatformGuardTest extends TestCase
         $this->assertArrayNotHasKey('platform_warning', $payload);
     }
 
-    public function test_unknown_agent_platform_makes_no_claim_and_does_not_block(): void
+    public function test_unknown_agent_platform_is_refused_before_any_upstream_create(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
-        // No plat, unrecognizable os — the guard must not guess.
+        // No plat, unrecognizable os — FAIL CLOSED (revise): an unknown
+        // platform is precisely the state the original wrong-platform
+        // always-failing check shipped in. The remedy is a device sync.
         $fixture = $this->macFixture(plat: null, os: null);
         $this->seedLocalScript();
 
         $tactical = Mockery::mock(TacticalClient::class);
         $tactical->shouldReceive('getScripts')->once()->with(true, true)
             ->andReturn($this->upstreamScripts('powershell', ['windows']));
-        $tactical->shouldReceive('createCheck')->once()->andReturn('Script Check was added!');
-        $tactical->shouldReceive('getAgentChecks')->once()->with('agent-mac')->andReturn([
-            ['id' => 311, 'check_type' => 'script', 'script' => 102],
-        ]);
+        $tactical->shouldNotReceive('createCheck');
         $this->app->instance(TacticalClient::class, $tactical);
 
         $response = $this->callTool($this->token(), [
@@ -232,10 +236,50 @@ class TacticalCheckPlatformGuardTest extends TestCase
             'script_name' => 'Fleet Health Detector',
         ]);
 
-        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $text = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('unknown', $text);
+        $this->assertStringContainsString('tactical:sync-devices', $text);
+
+        $rejected = TechnicianActionLog::query()
+            ->where('action_type', 'tactical_create_check')
+            ->where('result_status', 'rejected')
+            ->exists();
+        $this->assertTrue($rejected, 'unknown-platform refusal must be audited');
     }
 
-    public function test_policy_target_with_windows_bound_script_succeeds_with_platform_warning(): void
+    public function test_policy_target_with_windows_bound_script_is_refused_pre_write_without_acknowledgement(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getPolicies')->once()->andReturn([['id' => 7, 'name' => 'Workstations']]);
+        $tactical->shouldReceive('getScripts')->once()->with(true, true)
+            ->andReturn($this->upstreamScripts('powershell', ['windows']));
+        // The whole point (revise): NO write happens — a post-write warning is
+        // not a safety control on a mixed-fleet policy.
+        $tactical->shouldNotReceive('createCheck');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $this->seedLocalScript();
+
+        $response = $this->callTool($this->token(), [
+            'reason' => 'Policy-wide detector.',
+            'policy_id' => 7,
+            'confirm_policy_name' => 'Workstations',
+            'script_name' => 'Fleet Health Detector',
+        ]);
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $text = (string) $response->json('result.content.0.text');
+        // The refusal is an informed affordance: it names the platforms the
+        // script cannot run on and the exact acknowledgement to retry with.
+        $this->assertStringContainsString('darwin', $text);
+        $this->assertStringContainsString('acknowledge_platform_risk', $text);
+    }
+
+    public function test_policy_target_with_acknowledged_platform_risk_creates_with_an_explicit_note(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -253,16 +297,17 @@ class TacticalCheckPlatformGuardTest extends TestCase
         $this->seedLocalScript();
 
         $response = $this->callTool($this->token(), [
-            'reason' => 'Policy-wide detector.',
+            'reason' => 'Policy-wide detector; policy is Windows-only.',
             'policy_id' => 7,
             'confirm_policy_name' => 'Workstations',
             'script_name' => 'Fleet Health Detector',
+            'acknowledge_platform_risk' => true,
         ]);
 
         $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
         $payload = json_decode((string) $response->json('result.content.0.text'), true, flags: JSON_THROW_ON_ERROR);
-        $this->assertArrayHasKey('platform_warning', $payload);
-        $this->assertStringContainsStringIgnoringCase('macos/linux', $payload['platform_warning']);
+        $this->assertArrayHasKey('platform_note', $payload);
+        $this->assertStringContainsStringIgnoringCase('acknowledge_platform_risk', $payload['platform_note']);
     }
 
     public function test_policy_target_with_cross_platform_script_has_no_warning(): void
@@ -291,6 +336,108 @@ class TacticalCheckPlatformGuardTest extends TestCase
 
         $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
         $payload = json_decode((string) $response->json('result.content.0.text'), true, flags: JSON_THROW_ON_ERROR);
-        $this->assertArrayNotHasKey('platform_warning', $payload);
+        $this->assertArrayNotHasKey('platform_note', $payload);
+    }
+
+    // ── Client-boundary enforcement (TacticalCheckPlatformGuard) ─────────────
+    // The MCP pre-checks above are defence in depth; the MANDATORY gate lives
+    // where every check creation converges: TacticalClient::createCheck. These
+    // tests drive a REAL client over a mock transport with an EMPTY response
+    // queue — if the guard let the call through, Guzzle's MockHandler would
+    // throw "queue is empty", so a passing refusal proves NOTHING was sent.
+
+    private function realClient(array $responses = []): TacticalClient
+    {
+        $stack = \GuzzleHttp\HandlerStack::create(new \GuzzleHttp\Handler\MockHandler($responses));
+
+        return new TacticalClient(new \GuzzleHttp\Client([
+            'base_uri' => 'https://tactical.example.test/',
+            'handler' => $stack,
+            'headers' => ['X-API-KEY' => 'k', 'Content-Type' => 'application/json'],
+        ]));
+    }
+
+    public function test_client_boundary_refuses_wrong_platform_agent_create_with_no_http_sent(): void
+    {
+        $this->macFixture(); // darwin agent 'agent-mac'
+        $this->seedLocalScript(); // powershell, tactical_script_id 102
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/powershell/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Wrong platform',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_unknown_agent_platform_with_no_http_sent(): void
+    {
+        $this->macFixture(plat: null, os: null);
+        $this->seedLocalScript();
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/tactical:sync-devices/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Unknown platform',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_script_missing_from_catalog_and_claim(): void
+    {
+        $this->macFixture();
+        // Script 999 is in neither the local catalog nor a caller claim —
+        // attaching it blind is refused (fail closed), remedy named.
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/tactical:sync-scripts/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 999,
+            'name' => 'Uncatalogued script',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_platform_bound_policy_create_without_acknowledgement(): void
+    {
+        $this->seedLocalScript(); // powershell → cannot run on darwin/linux
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/acknowledge_platform_risk/');
+
+        $this->realClient()->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Policy check',
+        ]);
+    }
+
+    public function test_client_boundary_allows_compatible_create_and_accepts_caller_script_meta(): void
+    {
+        $this->macFixture(); // darwin agent
+
+        // The script is NOT in the local catalog, but the caller supplies the
+        // vendor-sourced meta claim (the provisioner's exact situation right
+        // after creating its script upstream) — darwin-compatible, so the
+        // create goes through and the queued response is consumed.
+        $result = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ])->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 555,
+            'name' => 'Shipped macOS check',
+        ], scriptMeta: ['shell' => 'shell', 'supported_platforms' => ['darwin']]);
+
+        $this->assertSame('Script Check was added!', $result);
     }
 }

@@ -1,10 +1,10 @@
 {
     "_meta": {
-        "description": "Trimmed, PINNED snapshot of the fields SoundPSA relies on from Tactical RMM's read API (the agent list/detail endpoint and the alerts poll endpoint). This is NOT a live dump — it is a best-effort pinned contract assembled from the field usage in app/Services/Tactical/* and the amidaware/tacticalrmm source, because this deployment has no live Tactical instance yet. It MUST be refreshed from a real `/api/schema/` (enable SWAGGER_ENABLED in Tactical, then GET <tactical>/api/schema/) before relying on it as an upstream-drift detector. See docs/INSTALL.md §9.",
+        "description": "Trimmed, PINNED snapshot of the fields SoundPSA relies on from Tactical RMM's read API (the agent list/detail endpoints, the checks list endpoint, the script catalog, and the alerts poll endpoint). This is NOT a live dump — it is a pinned contract assembled from the field usage in app/Services/Tactical/* and verified against the amidaware/tacticalrmm source. It SHOULD be refreshed from a real `/api/schema/` (enable SWAGGER_ENABLED in Tactical, then GET <tactical>/api/schema/) when a live instance is available. See docs/INSTALL.md §9.",
         "pinned_tactical_version": "1.5.0",
-        "source": "amidaware/tacticalrmm api/tacticalrmm (v1.5.0) + SoundPSA field usage",
-        "refreshed_at": "2026-06-15 (best-effort, never validated against a live instance)",
-        "refresh_command": "Enable SWAGGER_ENABLED in Tactical, then: curl -s https://<tactical-host>/api/schema/ > tests/Fixtures/tactical/api_schema.json (then trim to the agent + alert schemas)"
+        "source": "amidaware/tacticalrmm api/tacticalrmm — field-by-field against a fresh clone of master, 2026-07-26 (psa-0pb9m revise); earlier fields originally pinned against v1.5.0 + live VM 105",
+        "refreshed_at": "2026-07-26 (source-verified; still never validated against a live /api/schema/ dump)",
+        "refresh_command": "Enable SWAGGER_ENABLED in Tactical, then: curl -s https://<tactical-host>/api/schema/ > tests/Fixtures/tactical/api_schema.json (then trim to the agent + check + script + alert schemas)"
     },
     "openapi": "3.0.3",
     "info": {
@@ -15,7 +15,7 @@
         "schemas": {
             "AgentTable": {
                 "type": "object",
-                "description": "Fields returned by GET /agents/ (the list endpoint the daily sync consumes).",
+                "description": "Fields returned by GET /agents/ (the list endpoint the daily sync consumes). Producer: AgentTableSerializer, agents/serializers.py (Meta.fields includes plat and checks; verified 2026-07-26).",
                 "properties": {
                     "agent_id": { "type": "string" },
                     "hostname": { "type": "string" },
@@ -23,6 +23,11 @@
                     "site_name": { "type": "string" },
                     "logged_username": { "type": "string", "nullable": true },
                     "operating_system": { "type": "string", "nullable": true },
+                    "plat": {
+                        "type": "string",
+                        "enum": ["windows", "darwin", "linux"],
+                        "description": "Agent platform, the anchor for the checks-coverage truth and the create-check platform guard (psa-0pb9m). Model field on Agent; serialized on both the list (AgentTableSerializer) and detail (AgentSerializer, Meta.exclude=['id']) endpoints."
+                    },
                     "public_ip": { "type": "string", "nullable": true },
                     "local_ips": { "type": "string", "nullable": true },
                     "cpu_model": { "type": "array", "items": { "type": "string" } },
@@ -35,7 +40,66 @@
                     "last_seen": { "type": "string", "format": "date-time", "nullable": true },
                     "needs_reboot": { "type": "boolean" },
                     "has_patches_pending": { "type": "boolean" },
-                    "monitoring_type": { "type": "string" }
+                    "monitoring_type": { "type": "string" },
+                    "checks": { "$ref": "#/components/schemas/AgentChecksSummary" }
+                }
+            },
+            "AgentChecksSummary": {
+                "type": "object",
+                "description": "The per-agent checks SUMMARY DICT on both the list and detail agent endpoints. Producer: calculate_agent_checks, agents/utils.py:145 (verified 2026-07-26). TWO PINNED CAVEATS SoundPSA's mapping (TacticalFieldMap::checksFromAgentSummary) depends on: (1) `failing`/`warning`/`info` are the ALERT-SEVERITY SPLIT of status=failing results — the checks-list failing count equals failing+warning+info here; a check with a PENDING result (or counted-as-passing no-result) sits in `total` but in no severity bucket. (2) `passing` counts a check with NO CheckResult row at all as passing (the `not hasattr(check.check_result, \"status\")` branch) — dict passing is the vendor's claim, not per-check proof; the authoritative per-check read is GET /checks/{agent}/. ALSO: the LIST endpoint serves this dict from a periodic-task cache (AgentTableSerializer.get_checks, agents/serializers.py:113; populated by core/tasks.py:431 cache_db_fields_task) and a COLD cache yields all-zeros — which SoundPSA classifies as none/UNMONITORED, i.e. over-alarming, never false-clean.",
+                "properties": {
+                    "total": { "type": "integer" },
+                    "passing": { "type": "integer" },
+                    "failing": { "type": "integer" },
+                    "warning": { "type": "integer" },
+                    "info": { "type": "integer" },
+                    "has_failing_checks": { "type": "boolean" }
+                }
+            },
+            "Check": {
+                "type": "object",
+                "description": "Fields returned per row by GET /checks/{agent_id}/ (the checks list every per-check read consumes). Producer: CheckSerializer (checks/serializers.py, Meta.fields='__all__' plus declared extras; verified 2026-07-26). `script` is the Tactical script pk for script checks. `success_return_codes`/`info_return_codes`/`warning_return_codes` are real Check model ArrayFields (checks/models.py:96-126) used by the check-create payload.",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string", "nullable": true },
+                    "readable_desc": { "type": "string" },
+                    "check_type": { "type": "string", "enum": ["diskspace", "cpuload", "memory", "winsvc", "script", "ping", "eventlog"] },
+                    "script": { "type": "integer", "nullable": true },
+                    "success_return_codes": { "type": "array", "items": { "type": "integer" } },
+                    "info_return_codes": { "type": "array", "items": { "type": "integer" } },
+                    "warning_return_codes": { "type": "array", "items": { "type": "integer" } },
+                    "timeout": { "type": "integer", "nullable": true },
+                    "fails_b4_alert": { "type": "integer" },
+                    "check_result": { "$ref": "#/components/schemas/CheckResult" }
+                }
+            },
+            "CheckResult": {
+                "type": "object",
+                "description": "The nested per-check result on the checks list. Producers: CheckResultSerializer over the CheckResult model (checks/models.py:289+), attached via CheckSerializer.get_check_result (checks/serializers.py:30-34; verified 2026-07-26). PINNED CAVEAT: a check that has NEVER reported serializes check_result as an EMPTY OBJECT {} (Check.check_result class default {}, checks/models.py:160) — status is then absent, and SoundPSA classifies it as not-reporting, never passing. status choices: CheckStatus, tacticalrmm/constants.py:181-184.",
+                "properties": {
+                    "status": { "type": "string", "enum": ["passing", "failing", "pending"] },
+                    "retcode": { "type": "integer", "nullable": true },
+                    "stdout": { "type": "string", "nullable": true },
+                    "stderr": { "type": "string", "nullable": true },
+                    "last_run": { "type": "string", "format": "date-time", "nullable": true, "description": "When the check last actually ran — null means never. The per-check checked-at stamp SoundPSA surfaces (psa-47vxh freshness idiom)." },
+                    "alert_severity": { "type": "string", "nullable": true }
+                }
+            },
+            "Script": {
+                "type": "object",
+                "description": "Fields returned per row by GET /scripts/ (the catalog the script sync and the platform guard consume). Producer: Script model (scripts/models.py; supported_platforms is an ArrayField at scripts/models.py:46) via the scripts list serializer (verified 2026-07-26). GET /scripts/{pk}/download/ returns {filename, code} (scripts/views.py `download`); with_snippets=false yields the raw stored body — what the provisioner's drift comparison reads.",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string", "nullable": true },
+                    "shell": { "type": "string", "enum": ["powershell", "cmd", "python", "shell", "nushell", "deno"] },
+                    "category": { "type": "string", "nullable": true },
+                    "default_timeout": { "type": "integer" },
+                    "supported_platforms": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["windows", "darwin", "linux"] },
+                        "description": "The vendor's own platform declaration — authoritative in BOTH directions for the platform guard (TacticalPlatform::scriptIncompatibility). Empty array = no declaration (shell heuristics apply)."
+                    }
                 }
             },
             "Alert": {

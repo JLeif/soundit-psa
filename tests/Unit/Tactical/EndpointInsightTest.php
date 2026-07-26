@@ -41,6 +41,9 @@ class EndpointInsightTest extends TestCase
             'checksState' => SignalState::Snapshot,
             'checksFailing' => 0,
             'checksTotal' => 3,
+            'checksPassing' => 3,
+            'checksAsOf' => Carbon::now()->subMinutes(5),
+            'checksStale' => false,
             'openAlerts' => 0,
             'openAlertList' => [],
             'pendingPatchCount' => null,
@@ -121,6 +124,9 @@ class EndpointInsightTest extends TestCase
             'checksState' => SignalState::Unavailable,
             'checksFailing' => null,
             'checksTotal' => null,
+            'checksPassing' => null,
+            'checksAsOf' => null,
+            'checksStale' => null,
         ]);
 
         $this->assertSame(SignalState::Unavailable, $insight->checksState);
@@ -128,12 +134,13 @@ class EndpointInsightTest extends TestCase
         $this->assertFalse($insight->checksKnownClean());
     }
 
-    public function test_checks_known_clean_only_when_loaded_and_zero(): void
+    public function test_checks_known_clean_requires_every_check_explicitly_passing(): void
     {
         $clean = $this->insight([
             'checksState' => SignalState::Live,
             'checksFailing' => 0,
             'checksTotal' => 5,
+            'checksPassing' => 5,
         ]);
         $this->assertTrue($clean->checksKnownClean());
 
@@ -141,8 +148,29 @@ class EndpointInsightTest extends TestCase
             'checksState' => SignalState::Live,
             'checksFailing' => 2,
             'checksTotal' => 5,
+            'checksPassing' => 3,
         ]);
         $this->assertFalse($failing->checksKnownClean());
+
+        // psa-0pb9m revise: zero failing is NOT clean when a check has never
+        // reported — the gap is pending/never-reporting, not passing. "All
+        // passing" is an explicit per-check claim, never a subtraction.
+        $pendingGap = $this->insight([
+            'checksState' => SignalState::Live,
+            'checksFailing' => 0,
+            'checksTotal' => 5,
+            'checksPassing' => 4,
+        ]);
+        $this->assertFalse($pendingGap->checksKnownClean());
+
+        // A legacy snapshot with no passing evidence cannot claim clean.
+        $noEvidence = $this->insight([
+            'checksState' => SignalState::Snapshot,
+            'checksFailing' => 0,
+            'checksTotal' => 5,
+            'checksPassing' => null,
+        ]);
+        $this->assertFalse($noEvidence->checksKnownClean());
     }
 
     public function test_zero_checks_is_unmonitored_never_clean(): void
@@ -154,6 +182,7 @@ class EndpointInsightTest extends TestCase
             'checksState' => SignalState::Live,
             'checksFailing' => 0,
             'checksTotal' => 0,
+            'checksPassing' => 0,
         ]);
 
         $this->assertFalse($unmonitored->checksKnownClean());
@@ -166,18 +195,72 @@ class EndpointInsightTest extends TestCase
         $this->assertSame('unverified', $this->insight([
             'checksFailing' => 1,
             'checksTotal' => 1,
+            'checksPassing' => 0,
         ])->checksCoverage());
 
+        // Verified requires EXPLICIT passing evidence.
         $this->assertSame('verified', $this->insight([
             'checksFailing' => 0,
             'checksTotal' => 3,
+            'checksPassing' => 3,
+        ])->checksCoverage());
+
+        // Never-reporting checks are not evidence: 0 failing / 0 passing of 1
+        // is unverified, not verified-by-subtraction (the product reviewer's
+        // exact repro at 276c20e).
+        $this->assertSame('unverified', $this->insight([
+            'checksFailing' => 0,
+            'checksTotal' => 1,
+            'checksPassing' => 0,
+        ])->checksCoverage());
+
+        // A legacy snapshot (no passing count) with a non-all-failing shape is
+        // honestly unknown — never verified.
+        $this->assertSame('unknown', $this->insight([
+            'checksFailing' => 0,
+            'checksTotal' => 3,
+            'checksPassing' => null,
+        ])->checksCoverage());
+
+        // …but a legacy all-failing snapshot still PROVES nothing passes.
+        $this->assertSame('unverified', $this->insight([
+            'checksFailing' => 3,
+            'checksTotal' => 3,
+            'checksPassing' => null,
         ])->checksCoverage());
 
         $this->assertSame('unknown', $this->insight([
             'checksState' => SignalState::Unavailable,
             'checksFailing' => null,
             'checksTotal' => null,
+            'checksPassing' => null,
         ])->checksCoverage());
+    }
+
+    public function test_checks_signal_carries_its_own_freshness_stamp(): void
+    {
+        // psa-47vxh idiom: freshAsOf is the freshest signal overall and can
+        // read now() while checks are only a stale snapshot — the checks
+        // signal carries its own as-of + stale pair.
+        $mixed = $this->insight([
+            'checksAsOf' => Carbon::now()->subHours(3),
+            'checksStale' => true,
+            'freshAsOf' => Carbon::now(),
+        ]);
+
+        $this->assertTrue($mixed->checksStale);
+        $this->assertTrue($mixed->checksAsOf->lt($mixed->freshAsOf));
+
+        $unavailable = $this->insight([
+            'checksState' => SignalState::Unavailable,
+            'checksFailing' => null,
+            'checksTotal' => null,
+            'checksPassing' => null,
+            'checksAsOf' => null,
+            'checksStale' => null,
+        ]);
+        $this->assertNull($unavailable->checksAsOf);
+        $this->assertNull($unavailable->checksStale);
     }
 
     public function test_deterministic_flags_are_plain_booleans(): void

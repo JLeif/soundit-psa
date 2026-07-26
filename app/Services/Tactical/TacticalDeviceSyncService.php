@@ -82,11 +82,17 @@ class TacticalDeviceSyncService
 
         // getAgent `checks` is a SUMMARY DICT
         // ({total, passing, failing, warning, info, has_failing_checks}), NOT a
-        // list of checks — read failing/total off it directly. (The DETAILED
-        // failing-check list is a separate getAgentChecks read.)
-        if (isset($agent['checks']) && is_array($agent['checks']) && isset($agent['checks']['total'])) {
-            $update['checks_failing'] = (int) ($agent['checks']['failing'] ?? 0);
-            $update['checks_total'] = (int) $agent['checks']['total'];
+        // list of checks — TacticalFieldMap::checksFromAgentSummary owns the
+        // shape (failing = failing+warning+info; passing caveats documented
+        // there). (The DETAILED failing-check list is a separate getAgentChecks
+        // read.)
+        $checks = TacticalFieldMap::checksFromAgentSummary(
+            is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
+        );
+        if ($checks['total'] !== null) {
+            $update['checks_total'] = $checks['total'];
+            $update['checks_failing'] = $checks['failing'];
+            $update['checks_passing'] = $checks['passing'];
         }
 
         $wasOnline = $ta->status === 'online';
@@ -272,13 +278,21 @@ class TacticalDeviceSyncService
         // embeds a `checks` SUMMARY DICT
         // ({total, passing, failing, warning, info, has_failing_checks}) per agent
         // in the LIST payload too (confirmed against source v1.5.0 + live VM 105).
-        // Persist failing/total so the card health line is snapshot-fresh from the
-        // DAILY sync (zero per-agent fan-out) — not detail-only. Read defensively:
-        // leave the columns untouched if a payload ever omits the dict.
-        $checks = $agent['checks'] ?? null;
-        if (is_array($checks) && isset($checks['total'])) {
-            $mapped['checks_total'] = (int) $checks['total'];
-            $mapped['checks_failing'] = (int) ($checks['failing'] ?? 0);
+        // Persist failing/passing/total so the card health line AND the coverage
+        // verdict are snapshot-fresh from the DAILY sync (zero per-agent
+        // fan-out) — not detail-only. TacticalFieldMap::checksFromAgentSummary
+        // owns the dict shape: failing = failing+warning+info (the severity
+        // split of status=failing, so snapshot and live-list counts agree) and
+        // documents the vendor caveats (never-run counts as passing; the list
+        // serializer reads a periodic-task cache). Read defensively: leave the
+        // columns untouched if a payload ever omits the dict.
+        $checks = TacticalFieldMap::checksFromAgentSummary(
+            is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
+        );
+        if ($checks['total'] !== null) {
+            $mapped['checks_total'] = $checks['total'];
+            $mapped['checks_failing'] = $checks['failing'];
+            $mapped['checks_passing'] = $checks['passing'];
         }
 
         return $mapped;
