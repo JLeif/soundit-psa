@@ -125,6 +125,13 @@ class TacticalPlatform
      * assessable and compatible; null when we cannot honestly tell (non-script
      * check, unknown platform, or script not in the synced catalog).
      *
+     * The null verdict is not always silent: a synced catalog row that
+     * carries NO platform signal (honest NULL shell, no supported_platforms —
+     * psa-0pb9m R4 U5) keeps mismatch=null (unknown is not a mismatch claim)
+     * but returns a reason naming the script, saying compatibility could not
+     * be verified, and pointing at the recovery — so the AI/operator surfaces
+     * that pass this pair through are never silently unexplained.
+     *
      * @param  array<string, mixed>  $check
      * @return array{mismatch: ?bool, reason: ?string}
      */
@@ -155,7 +162,9 @@ class TacticalPlatform
         // non-blank supported_platforms entry — e.g. upstream omitted `shell`
         // and the sync stored the honest NULL, psa-0pb9m R3 A5) is NOT
         // assessable: mismatch=false would claim "assessed and compatible"
-        // from absence.
+        // from absence. The unknown is EXPLAINED, not silent (R4 U5): the
+        // reason names the script, says compatibility could not be verified,
+        // and gives the recovery — same dialect as the write-side refusal.
         $declaredAny = false;
         foreach ($platforms ?? [] as $p) {
             if (is_scalar($p) && trim((string) $p) !== '') {
@@ -164,7 +173,14 @@ class TacticalPlatform
             }
         }
         if ($shell === null && ! $declaredAny) {
-            return ['mismatch' => null, 'reason' => null];
+            $scriptName = is_string($local->name) && trim($local->name) !== '' ? $local->name : 'script '.(int) $scriptId;
+
+            return [
+                'mismatch' => null,
+                'reason' => "script '{$scriptName}' (id ".(int) $scriptId.') carries neither a shell nor any supported_platforms '
+                    .'in the synced catalog, so its platform compatibility could not be verified — '
+                    .'re-run tactical:sync-scripts, or verify the script in Tactical',
+            ];
         }
 
         $reason = self::scriptIncompatibility($platform, $shell, $platforms);

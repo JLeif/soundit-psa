@@ -1640,6 +1640,23 @@ class StaffTacticalAdminToolExecutor
         $scriptPlatforms = is_array($scriptRow['supported_platforms'] ?? null) ? $scriptRow['supported_platforms'] : null;
         $platformNote = null;
 
+        // A vendor row with NO usable platform signal (no shell, no
+        // supported_platforms) is UNKNOWN, not unconstrained — refused here,
+        // before any compatibility math or membership read (psa-0pb9m R4
+        // A4/S6: scriptIncompatibility() answers null and
+        // incompatiblePlatforms() would otherwise have widened to [] — "no
+        // membership proof required" — turning absent metadata back into
+        // proof one layer below the boundary that just removed it).
+        if (! TacticalCheckPlatformGuard::hasUsablePlatformSignal($scriptShell, $scriptPlatforms)) {
+            $message = "Refusing to create this check: the Tactical getScripts row for script '{$resolvedScript['script_name']}' "
+                ."(id {$resolvedScript['script_id']}) carries neither a shell nor any supported_platforms, so its platform "
+                .'compatibility could not be verified — absence of metadata is not compatibility (psa-0pb9m). '
+                .'Re-run tactical:sync-scripts, or verify the script in Tactical.';
+            $this->auditAttempt($tool, 'rejected', $clientId, $contentHash, $message, $actorLabel);
+
+            return ['error' => $message];
+        }
+
         if (($target['target_type'] ?? null) === 'agent') {
             // Unknown platform fails CLOSED: guessing here is how the original
             // wrong-platform always-failing check shipped. The remedy is a

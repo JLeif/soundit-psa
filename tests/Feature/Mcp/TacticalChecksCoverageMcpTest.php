@@ -325,6 +325,67 @@ class TacticalChecksCoverageMcpTest extends TestCase
         $this->assertNull($payload['checks'][1]['last_run']);
     }
 
+    public function test_get_device_checks_signal_less_catalog_script_reads_unknown_with_explanatory_reason(): void
+    {
+        // psa-0pb9m R4 U5: a synced catalog row with the honest NULL shell
+        // and no supported_platforms is UNKNOWN — mismatch must stay null
+        // (tri-state preserved, no mismatch claim from absence), but the
+        // unknown must be EXPLAINED at the delivered boundary: Chet gets a
+        // reason naming the script, saying compatibility could not be
+        // verified, and pointing at the recovery — never two silent nulls.
+        $this->configureTactical();
+
+        $client = Client::factory()->create(['name' => 'Acme']);
+        $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-07']);
+        TacticalAsset::create([
+            'asset_id' => $asset->id,
+            'agent_id' => 'agent-mac7',
+            'hostname' => 'MAC-07',
+            'os' => 'Darwin 23.6.0 arm64',
+            'plat' => 'darwin',
+            'status' => 'online',
+            'synced_at' => now(),
+        ]);
+
+        TacticalScript::create([
+            'tactical_script_id' => 701,
+            'name' => 'Mystery Maintenance Script',
+            'shell' => null,
+            'supported_platforms' => null,
+            'hidden' => false,
+            'synced_at' => now(),
+        ]);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getAgentChecks')
+            ->once()
+            ->with('agent-mac7')
+            ->andReturn([
+                [
+                    'id' => 9007,
+                    'check_type' => 'script',
+                    'script' => 701,
+                    'readable_desc' => 'Script check: Mystery Maintenance Script',
+                    'check_result' => ['status' => 'failing', 'retcode' => 1, 'stdout' => 'fail'],
+                ],
+            ]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $token = $this->token(['tactical_get_device_checks']);
+        $payload = $this->decodedResult($this->callTool($token, 'tactical_get_device_checks', [
+            'client_id' => $client->id,
+            'hostname' => 'MAC-07',
+        ]));
+
+        $check = $payload['checks'][0];
+        $this->assertNull($check['platform_mismatch'], 'signal-less is unknown — neither a mismatch claim nor a compatibility claim');
+        $this->assertIsString($check['platform_mismatch_reason'], 'the unknown must be explained, not silent (R4 U5)');
+        $this->assertStringContainsString('Mystery Maintenance Script', $check['platform_mismatch_reason']);
+        $this->assertStringContainsString('could not be verified', $check['platform_mismatch_reason']);
+        $this->assertStringContainsString('tactical:sync-scripts', $check['platform_mismatch_reason']);
+        $this->assertStringContainsString('verify the script in Tactical', $check['platform_mismatch_reason']);
+    }
+
     public function test_get_device_checks_compatible_script_is_not_flagged_and_mix_is_verified(): void
     {
         $this->configureTactical();

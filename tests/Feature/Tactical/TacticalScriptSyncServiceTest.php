@@ -51,8 +51,15 @@ class TacticalScriptSyncServiceTest extends TestCase
         $row = TacticalScript::where('tactical_script_id', 7)->firstOrFail();
         $this->assertNull($row->shell, 'absence must be stored as unknown, never manufactured into powershell');
 
+        // One degradation dialect everywhere (R4 U5): the warning names the
+        // script, says compatibility could not be verified, and gives the
+        // recovery — the same wording as the guard refusal and the
+        // read-surface annotation, not a parallel "stored as unknown" idiom.
         Log::shouldHaveReceived('warning')->once()->withArgs(
             fn (string $message, array $context = []): bool => str_contains($message, 'no shell')
+                && str_contains($message, "'Driftling' (id 7)")
+                && str_contains($message, 'could not be verified')
+                && str_contains($message, 'verify the script in Tactical')
                 && ($context['tactical_script_id'] ?? null) === 7
         );
     }

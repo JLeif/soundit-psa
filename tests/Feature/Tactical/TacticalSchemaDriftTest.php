@@ -242,6 +242,43 @@ class TacticalSchemaDriftTest extends TestCase
         }
     }
 
+    public function test_script_schema_pins_the_shell_and_platform_vocabulary_the_guard_reasons_over(): void
+    {
+        // `shell` is COMPATIBILITY EVIDENCE (psa-0pb9m R4): the pinned vendor
+        // contract declares it a NON-NULL string from a closed enum, which is
+        // exactly why a runtime row without one is DRIFT — stored as the
+        // honest NULL by the sync and refused by the guard, never defaulted.
+        // Presence alone (the test above) would not notice the contract
+        // loosening (shell going nullable, the enum changing), so pin it.
+        $shell = $this->schema()['components']['schemas']['Script']['properties']['shell'] ?? [];
+
+        $this->assertSame('string', $shell['type'] ?? null, 'The pinned Script.shell type changed. '.self::REFRESH_HINT);
+        $this->assertArrayNotHasKey(
+            'nullable',
+            $shell,
+            'The pinned vendor contract declares Script.shell NOT NULL — if a refresh makes it nullable, the "missing shell is drift" premise behind the honest-NULL storage and the guard refusal must be re-verified, not silently absorbed. '.self::REFRESH_HINT,
+        );
+        $this->assertSame(
+            ['powershell', 'cmd', 'python', 'shell', 'nushell', 'deno'],
+            $shell['enum'] ?? null,
+            'The pinned Script.shell vocabulary changed — TacticalPlatform::scriptIncompatibility applies shell heuristics by these exact values (cmd/powershell are the platform-bound ones). '.self::REFRESH_HINT,
+        );
+
+        // supported_platforms is the vendor's own declaration, authoritative
+        // in BOTH directions for the guard — its vocabulary must match the
+        // TacticalPlatform constants the membership proof compares against.
+        $platformItems = $this->schema()['components']['schemas']['Script']['properties']['supported_platforms']['items'] ?? [];
+        $this->assertSame(
+            [
+                \App\Services\Tactical\TacticalPlatform::WINDOWS,
+                \App\Services\Tactical\TacticalPlatform::DARWIN,
+                \App\Services\Tactical\TacticalPlatform::LINUX,
+            ],
+            $platformItems['enum'] ?? null,
+            'The pinned Script.supported_platforms vocabulary no longer matches the TacticalPlatform constants the guard compares against. '.self::REFRESH_HINT,
+        );
+    }
+
     public function test_snapshot_records_its_pinned_version_and_provenance(): void
     {
         $meta = $this->schema()['_meta'] ?? [];

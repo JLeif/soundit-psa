@@ -22,11 +22,12 @@ return new class extends Migration
 
     public function down(): void
     {
-        // No data rewrite: rows with a NULL shell would need a value to
-        // restore NOT NULL, and inventing one ('powershell') is exactly the
-        // manufactured-signal defect this migration removes.
-        Schema::table('tactical_scripts', function (Blueprint $table) {
-            $table->string('shell', 20)->nullable()->change();
-        });
+        // IRREVERSIBLE BY DESIGN — this is an explicit no-op, not a revert
+        // (psa-0pb9m R4). Restoring NOT NULL would need a value for every row
+        // whose upstream getScripts entry carries no shell, and inventing one
+        // ('powershell') is exactly the manufactured-signal defect this
+        // migration removes. Rolling back therefore leaves the column
+        // nullable; stated here so the rollback does not merely LOOK
+        // reversible while restoring nothing.
     }
 };

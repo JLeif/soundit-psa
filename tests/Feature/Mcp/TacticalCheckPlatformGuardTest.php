@@ -811,6 +811,179 @@ class TacticalCheckPlatformGuardTest extends TestCase
         ]);
     }
 
+    public function test_client_boundary_refuses_policy_create_when_a_client_assignment_name_is_blank(): void
+    {
+        $this->seedLocalScript(); // powershell → darwin/linux blocked, proof required
+
+        // The R4 A5 reproducer: a STRUCTURALLY COMPLETE related payload whose
+        // workstation-client assignment carries name:"" — present-but-blank
+        // join evidence. It matches no fleet row, so the assignment's members
+        // (here a Darwin Acme workstation) silently fell out of the proven
+        // set and the guard previously answered proven=true,
+        // members_checked=0. Blank join values now refuse before any write:
+        // both queued reads are consumed, no POST remains in the queue.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Acme workstations',
+                'agents' => [],
+                'workstation_clients' => [['id' => 3, 'name' => '']], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-mac', 'hostname' => 'MAC-01', 'plat' => 'darwin', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/workstation-client assignment .* no usable `name`/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Blank client join',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_policy_create_when_a_site_assignment_join_value_is_blank(): void
+    {
+        $this->seedLocalScript();
+
+        // Same A5 shape one join deeper: the site assignment's `name` is
+        // present but its `client_name` is blank, so the two-key site join
+        // can never match a fleet row — the proven member set silently
+        // shrinks. Blank site join values refuse identically.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Acme main site',
+                'agents' => [],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [['id' => 9, 'name' => 'Main', 'client_name' => '  ']], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-mac', 'hostname' => 'MAC-01', 'plat' => 'darwin', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/workstation-site assignment .* no usable `name`\/`client_name`/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Blank site join',
+        ]);
+    }
+
+    public function test_incompatible_platforms_helper_refuses_signal_less_metadata_instead_of_widening_to_empty(): void
+    {
+        // R4 A4/S6: incompatiblePlatforms(null, null) returned [] — and every
+        // write-side caller reads [] as "no platform blocked, no membership
+        // proof required", i.e. absence of metadata promoted to a claim of
+        // universal compatibility. The helper now refuses signal-less input
+        // outright, in every blank shape.
+        foreach ([
+            'null shell, null platforms' => [null, null],
+            'blank shell, empty platforms' => ['   ', []],
+            'null shell, blank platform entries' => [null, ['', '  ']],
+        ] as $label => [$shell, $platforms]) {
+            try {
+                \App\Services\Tactical\TacticalCheckPlatformGuard::incompatiblePlatforms($shell, $platforms);
+                $this->fail("incompatiblePlatforms must refuse signal-less metadata ({$label}), never answer [].");
+            } catch (\App\Services\Tactical\TacticalClientException $e) {
+                $this->assertStringContainsString('cannot be verified', $e->getMessage());
+                $this->assertStringContainsString('tactical:sync-scripts', $e->getMessage());
+            }
+        }
+
+        // With a usable signal the helper still answers the honest list —
+        // [] now MEANS "no platform is provably blocked", never "unknown".
+        $this->assertSame(
+            ['darwin', 'linux'],
+            \App\Services\Tactical\TacticalCheckPlatformGuard::incompatiblePlatforms('cmd', null),
+        );
+        $this->assertSame(
+            [],
+            \App\Services\Tactical\TacticalCheckPlatformGuard::incompatiblePlatforms('shell', null),
+        );
+    }
+
+    public function test_policy_target_with_signal_less_live_script_row_is_refused_at_the_precheck_before_any_membership_read(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+
+        // R4 A4/S6 MCP regression: the live getScripts row carries NO
+        // platform signal (no shell key, empty supported_platforms).
+        // Previously incompatiblePlatforms() widened to [] and the precheck
+        // skipped the membership proof entirely — "no proof required" from
+        // absent metadata; only the later client boundary saved the write.
+        // The precheck itself now refuses, with the audited surface copy,
+        // BEFORE any membership read: no related/agents read, no create.
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getPolicies')->once()->andReturn([['id' => 7, 'name' => 'Workstations']]);
+        $tactical->shouldReceive('getScripts')->once()->with(true, true)->andReturn([
+            ['id' => 102, 'name' => 'Fleet Health Detector', 'script_type' => 'userdefined', 'args' => [], 'env_vars' => [], 'supported_platforms' => []],
+        ]);
+        $tactical->shouldNotReceive('getAutomationPolicyRelated');
+        $tactical->shouldNotReceive('getAgents');
+        $tactical->shouldNotReceive('createCheck');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $response = $this->callTool($this->token(), [
+            'reason' => 'Policy-wide detector.',
+            'policy_id' => 7,
+            'confirm_policy_name' => 'Workstations',
+            'script_name' => 'Fleet Health Detector',
+        ]);
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $text = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('could not be verified', $text);
+        $this->assertStringContainsString('tactical:sync-scripts', $text);
+        $this->assertStringContainsString('Fleet Health Detector', $text);
+
+        $rejected = TechnicianActionLog::query()
+            ->where('action_type', 'tactical_create_check')
+            ->where('result_status', 'rejected')
+            ->exists();
+        $this->assertTrue($rejected, 'signal-less precheck refusal must be audited');
+    }
+
+    public function test_agent_target_with_signal_less_live_script_row_is_refused_at_the_precheck(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->macFixture();
+
+        // Same seam, agent target: scriptIncompatibility(darwin, null, null)
+        // answers null (no claim on missing data), so before R4 the precheck
+        // fell through to the boundary. The shared signal-less refusal now
+        // lands first, as an audited rejection.
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getScripts')->once()->with(true, true)->andReturn([
+            ['id' => 102, 'name' => 'Fleet Health Detector', 'script_type' => 'userdefined', 'args' => [], 'env_vars' => [], 'supported_platforms' => []],
+        ]);
+        $tactical->shouldNotReceive('createCheck');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $response = $this->callTool($this->token(), [
+            'client_id' => $fixture['client']->id,
+            'reason' => 'Add a health check to this Mac.',
+            'hostname' => 'MAC-01',
+            'confirm_hostname' => 'MAC-01',
+            'script_name' => 'Fleet Health Detector',
+        ]);
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $text = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('could not be verified', $text);
+        $this->assertStringContainsString('tactical:sync-scripts', $text);
+    }
+
     public function test_client_boundary_allows_zero_member_policy_from_a_structurally_complete_response(): void
     {
         $this->seedLocalScript(); // powershell → policy proof required

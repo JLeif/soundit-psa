@@ -40,10 +40,19 @@ class TacticalScriptSyncService
                 ? (string) $script['shell']
                 : null;
             if ($shell === null) {
-                Log::warning('[TacticalSync] Script has no shell in getScripts — stored as unknown; the platform guard will refuse it unless supported_platforms says otherwise (upstream drift?)', [
-                    'tactical_script_id' => $scriptId,
-                    'name' => $script['name'] ?? null,
-                ]);
+                // One degradation dialect everywhere (psa-0pb9m R4 U5): name
+                // the script, say compatibility could not be verified, give
+                // the recovery — the same wording the guard refusal and the
+                // read-surface annotation use.
+                $scriptName = isset($script['name']) && is_scalar($script['name']) && trim((string) $script['name']) !== ''
+                    ? (string) $script['name']
+                    : 'script '.$scriptId;
+                Log::warning("[TacticalSync] Script '{$scriptName}' (id {$scriptId}) has no shell in getScripts, so its platform "
+                    .'compatibility could not be verified — stored as NULL (unknown); check creation will refuse it unless '
+                    .'supported_platforms carries a signal. Re-run tactical:sync-scripts, or verify the script in Tactical (upstream drift?).', [
+                        'tactical_script_id' => $scriptId,
+                        'name' => $script['name'] ?? null,
+                    ]);
             }
 
             $tacticalScript = TacticalScript::updateOrCreate(

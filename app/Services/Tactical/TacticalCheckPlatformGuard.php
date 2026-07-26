@@ -522,11 +522,20 @@ class TacticalCheckPlatformGuard
         // the join key the vendor exposes on both sides (client_name/site_name
         // on AgentTableSerializer; name/client_name on the minimum
         // serializers).
+        // Join values must be NON-BLANK scalars, exactly as fleetShapeError
+        // demands of the fleet side (psa-0pb9m R4 A5): a blank assignment
+        // `name` is present-but-empty evidence — it matches no fleet row, so
+        // the assignment's members silently fall out of the proven set and a
+        // blocked-platform fleet "proves" zero-member compatibility.
         foreach (['workstation_clients' => 'workstation', 'server_clients' => 'server'] as $key => $monType) {
             foreach ($related[$key] as $clientRow) {
-                $clientName = is_scalar($clientRow['name'] ?? null) ? (string) $clientRow['name'] : null;
+                $clientName = is_scalar($clientRow['name'] ?? null) && trim((string) $clientRow['name']) !== ''
+                    ? (string) $clientRow['name']
+                    : null;
                 if ($clientName === null) {
-                    return ['error' => "a {$monType}-client assignment of this policy carries no name, so its member agents cannot be resolved."];
+                    return ['error' => "a {$monType}-client assignment of this policy carries no usable `name` (missing or blank), so its member agents "
+                        .'cannot be resolved — a blank join value matches nothing and would silently shrink the proven member set; '
+                        .'absent or blank keys are never evidence.'];
                 }
                 foreach ($fleetRows as $row) {
                     if (($row['client_name'] ?? null) === $clientName && ($row['monitoring_type'] ?? null) === $monType) {
@@ -537,10 +546,16 @@ class TacticalCheckPlatformGuard
         }
         foreach (['workstation_sites' => 'workstation', 'server_sites' => 'server'] as $key => $monType) {
             foreach ($related[$key] as $siteRow) {
-                $siteName = is_scalar($siteRow['name'] ?? null) ? (string) $siteRow['name'] : null;
-                $siteClient = is_scalar($siteRow['client_name'] ?? null) ? (string) $siteRow['client_name'] : null;
+                $siteName = is_scalar($siteRow['name'] ?? null) && trim((string) $siteRow['name']) !== ''
+                    ? (string) $siteRow['name']
+                    : null;
+                $siteClient = is_scalar($siteRow['client_name'] ?? null) && trim((string) $siteRow['client_name']) !== ''
+                    ? (string) $siteRow['client_name']
+                    : null;
                 if ($siteName === null || $siteClient === null) {
-                    return ['error' => "a {$monType}-site assignment of this policy carries no name/client_name, so its member agents cannot be resolved."];
+                    return ['error' => "a {$monType}-site assignment of this policy carries no usable `name`/`client_name` (missing or blank), so its member agents "
+                        .'cannot be resolved — a blank join value matches nothing and would silently shrink the proven member set; '
+                        .'absent or blank keys are never evidence.'];
                 }
                 foreach ($fleetRows as $row) {
                     if (($row['site_name'] ?? null) === $siteName
@@ -585,11 +600,32 @@ class TacticalCheckPlatformGuard
      * on, per the shared TacticalPlatform rules (vendor supported_platforms
      * metadata first, definitive shell heuristics second).
      *
+     * WRITE-ORIENTED, so signal-less input REFUSES instead of widening to []
+     * (psa-0pb9m R4 A4/S6): every caller treats the returned [] as "no
+     * platform is blocked — no membership proof required", which is a claim
+     * of UNIVERSAL compatibility. Metadata that says nothing cannot make that
+     * claim; mapping NULL shell + no supported_platforms to [] would readmit
+     * absent-data-as-proof one layer below the boundary that just removed it.
+     * Callers must establish a usable signal first (hasUsablePlatformSignal)
+     * or catch the refusal; the read-side annotation that may honestly answer
+     * "unknown" is TacticalPlatform::checkScriptMismatch, not this.
+     *
      * @param  array<int, mixed>|null  $supportedPlatforms
      * @return array<int, string>
+     *
+     * @throws TacticalClientException when the metadata carries no usable platform signal.
      */
     public static function incompatiblePlatforms(?string $shell, ?array $supportedPlatforms): array
     {
+        if (! self::hasUsablePlatformSignal($shell, $supportedPlatforms)) {
+            throw new TacticalClientException(
+                'Refusing to assess platform compatibility: this script carries neither a shell nor any supported_platforms, '
+                .'so its platform constraints cannot be verified — absence of metadata is not compatibility, and an empty '
+                .'blocked-platform list here would read as "compatible with everything" (psa-0pb9m). '
+                .'Re-run tactical:sync-scripts, or verify the script in Tactical.'
+            );
+        }
+
         return array_values(array_filter(
             [TacticalPlatform::WINDOWS, TacticalPlatform::DARWIN, TacticalPlatform::LINUX],
             fn (string $platform): bool => TacticalPlatform::scriptIncompatibility($platform, $shell, $supportedPlatforms) !== null,
@@ -689,8 +725,16 @@ class TacticalCheckPlatformGuard
         return $resolved;
     }
 
-    /** @param array<int, mixed>|null $supportedPlatforms */
-    private static function hasUsablePlatformSignal(?string $shell, ?array $supportedPlatforms): bool
+    /**
+     * Whether script metadata carries any usable platform signal — a
+     * non-blank shell or at least one non-blank supported_platforms entry.
+     * Public because write-side pre-checks (StaffTacticalAdminToolExecutor)
+     * must refuse a signal-less row BEFORE consulting the compatibility
+     * helpers, with their own audited copy (psa-0pb9m R4 A4/S6).
+     *
+     * @param  array<int, mixed>|null  $supportedPlatforms
+     */
+    public static function hasUsablePlatformSignal(?string $shell, ?array $supportedPlatforms): bool
     {
         if (is_string($shell) && trim($shell) !== '') {
             return true;

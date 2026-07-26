@@ -5,6 +5,7 @@ namespace Tests\Feature\Triage;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\TacticalAsset;
+use App\Models\TacticalScript;
 use App\Models\Ticket;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Triage\TriageToolExecutor;
@@ -103,5 +104,63 @@ class TriageTacticalToolExecutorTest extends TestCase
             ['name' => '7-Zip', 'version' => '24.07', 'publisher' => 'Igor Pavlov'],
             ['name' => 'Mozilla Firefox', 'version' => '128.0.3', 'publisher' => 'Mozilla'],
         ], $result);
+    }
+
+    public function test_tactical_device_checks_signal_less_catalog_script_reads_unknown_with_explanatory_reason(): void
+    {
+        // psa-0pb9m R4 U5, triage boundary (the second delivered read
+        // surface): a synced catalog row with the honest NULL shell and no
+        // supported_platforms keeps platform_mismatch=null — tri-state
+        // preserved, unknown is not a mismatch claim — but the reason must
+        // name the script, say compatibility could not be verified, and give
+        // the recovery. Two silent nulls are indistinguishable from
+        // "assessed, nothing to say".
+        $client = Client::factory()->create();
+        $asset = Asset::factory()->create([
+            'client_id' => $client->id,
+            'hostname' => 'MAC-09',
+        ]);
+        TacticalAsset::create([
+            'asset_id' => $asset->id,
+            'agent_id' => 'agent-mac9',
+            'hostname' => 'MAC-09',
+            'plat' => 'darwin',
+            'os' => 'Darwin 23.6.0 arm64',
+        ]);
+        TacticalScript::create([
+            'tactical_script_id' => 702,
+            'name' => 'Mystery Maintenance Script',
+            'shell' => null,
+            'supported_platforms' => null,
+            'synced_at' => now(),
+        ]);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getAgentChecks')
+            ->once()
+            ->with('agent-mac9')
+            ->andReturn([
+                [
+                    'id' => 9009,
+                    'check_type' => 'script',
+                    'script' => 702,
+                    'readable_desc' => 'Script check: Mystery Maintenance Script',
+                    'check_result' => ['status' => 'failing', 'retcode' => 1, 'stdout' => 'fail'],
+                ],
+            ]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $result = (new TriageToolExecutor($ticket))->execute('tactical_get_device_checks', [
+            'hostname' => 'mac-09',
+        ]);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $check = $result['checks'][0];
+        $this->assertNull($check['platform_mismatch'], 'signal-less is unknown — neither a mismatch claim nor a compatibility claim');
+        $this->assertIsString($check['platform_mismatch_reason'], 'the unknown must be explained, not silent (R4 U5)');
+        $this->assertStringContainsString('Mystery Maintenance Script', $check['platform_mismatch_reason']);
+        $this->assertStringContainsString('could not be verified', $check['platform_mismatch_reason']);
+        $this->assertStringContainsString('tactical:sync-scripts', $check['platform_mismatch_reason']);
     }
 }
