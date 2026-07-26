@@ -139,11 +139,12 @@ For more details, see README.md and docs/QUICKSTART.md.
    `git push` carries only the branch ref, and `refs/dolt/data` exists neither
    locally nor on origin here.
 
-   **Your bead work is already durable without any push step.** This rig is
-   local-solo: bead writes land immediately in the shared local DoltLite store
-   at `rigs/psa/.beads/doltlite/psa.db`, which every agent on this box reads and
+   **Your bead work is already durable without any push step.** Bead writes land
+   immediately in the shared local DoltLite store at
+   `$GC_RIG_ROOT/.beads/doltlite/psa.db` (note this resolves under the Gas City
+   root, NOT under this repository), which every agent in the PSA rig reads and
    writes directly. There is no separate Beads push to run, and none is needed
-   for your work to persist and be visible to other agents.
+   for your work to persist and be visible to the other PSA-rig agents.
 
    **Do NOT run `bd dolt push`.** This store's configured remote is a `git+https`
    URL, which that command does not accept (`URL must start with file:// or
@@ -151,12 +152,15 @@ For more details, see README.md and docs/QUICKSTART.md.
    store — if you hit it, ignore it and finish. Six reviewers have stopped
    mid-task to escalate it as a phantom storage incident.
 
-   > **Known gap, deliberately stated rather than implied:** because this rig is
-   > local-solo, Beads data has **no off-box copy** — losing this box loses it.
-   > Cross-box durability would require infra to provision a supported Dolt
-   > destination and document an explicit sync step. Do not infer from the
-   > general Beads architecture in `CLAUDE.md` (which describes `refs/dolt/data`
-   > on a git remote) that this rig has remote Beads sync configured. It does not.
+   > **Known gap, stated at the boundary of what is checkable from here:** this
+   > rig configures **no Beads remote and no guest-managed off-box backup** —
+   > verified inside this machine (no Beads remote, backups disabled, no backup
+   > timer/cron/mount). So losing this box **can** lose the Beads data. Whether
+   > any host-side or hypervisor-level backup exists is **not observable from
+   > inside the guest**, so do not rely on off-box recovery unless infra
+   > confirms one. Do not infer from the general Beads architecture in
+   > `CLAUDE.md` (which describes `refs/dolt/data` on a git remote) that this rig
+   > has remote Beads sync configured. It does not.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
