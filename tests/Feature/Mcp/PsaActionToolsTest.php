@@ -1637,4 +1637,178 @@ class PsaActionToolsTest extends TestCase
             'actor_label' => 'mcp-staff:chet',
         ]);
     }
+
+    // psa-eu5la R2 (.6 product) + psa-iahn6 fold-in: active-only is the safe DEFAULT for
+    // every contact-write, but offboarding/billing/audit legitimately reference a
+    // historical (deactivated) contact — one explicit, audited allow_inactive_contact
+    // opt-in (a REAL boolean) permits it, applied uniformly to set_ticket_contact,
+    // set_primary_contact, and move_ticket_to_client.
+
+    public function test_set_ticket_contact_allows_a_deactivated_contact_with_explicit_opt_in(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['set_ticket_contact'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $offboarded = Person::create([
+            'client_id' => $ticket->client_id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Historical',
+            'last_name' => 'Contact',
+            'email' => 'historical-eu5la@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'set_ticket_contact', [
+            'ticket_id' => $ticket->id,
+            'contact_id' => $offboarded->id,
+            'allow_inactive_contact' => true,
+        ]);
+
+        $response->assertOk();
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $ticket->refresh();
+        $this->assertSame($offboarded->id, $ticket->contact_id, 'the deactivated contact must be set when explicitly opted in');
+        $this->assertDatabaseHas('technician_action_logs', [
+            'action_type' => 'set_ticket_contact',
+            'result_status' => 'executed',
+            'ticket_id' => $ticket->id,
+        ]);
+    }
+
+    public function test_set_ticket_contact_opt_in_requires_a_real_boolean(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['set_ticket_contact'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $before = $ticket->contact_id;
+        $offboarded = Person::create([
+            'client_id' => $ticket->client_id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Historical',
+            'last_name' => 'Two',
+            'email' => 'historical2-eu5la@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'set_ticket_contact', [
+            'ticket_id' => $ticket->id,
+            'contact_id' => $offboarded->id,
+            'allow_inactive_contact' => 'true',
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'allow_inactive_contact="true" (string) must NOT opt in — a real boolean is required');
+        $ticket->refresh();
+        $this->assertSame($before, $ticket->contact_id);
+    }
+
+    public function test_set_primary_contact_refuses_a_deactivated_contact_without_opt_in(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['set_primary_contact'], 'chet');
+        $client = Client::factory()->create();
+        $offboarded = Person::create([
+            'client_id' => $client->id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Former',
+            'last_name' => 'Primary',
+            'email' => 'former-primary@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'set_primary_contact', ['contact_id' => $offboarded->id]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'promoting a deactivated contact to primary must be refused by default');
+        $this->assertStringContainsString('deactivated', strtolower((string) $response->json('result.content.0.text')));
+        $offboarded->refresh();
+        $this->assertFalse((bool) $offboarded->is_primary);
+    }
+
+    public function test_set_primary_contact_allows_a_deactivated_contact_with_opt_in(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['set_primary_contact'], 'chet');
+        $client = Client::factory()->create();
+        $offboarded = Person::create([
+            'client_id' => $client->id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Former',
+            'last_name' => 'PrimaryOptIn',
+            'email' => 'former-primary-optin@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'set_primary_contact', [
+            'contact_id' => $offboarded->id,
+            'allow_inactive_contact' => true,
+        ]);
+
+        $response->assertOk();
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $offboarded->refresh();
+        $this->assertTrue((bool) $offboarded->is_primary);
+    }
+
+    public function test_move_ticket_to_client_refuses_a_deactivated_new_contact_without_opt_in(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['move_ticket_to_client'], 'chet');
+        [$ticket] = $this->ticketWithAsset();
+        $originalClientId = $ticket->client_id;
+        $newClient = Client::factory()->create();
+        $offboarded = Person::create([
+            'client_id' => $newClient->id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Move',
+            'last_name' => 'Offboarded',
+            'email' => 'move-offboarded@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'move_ticket_to_client', [
+            'ticket_id' => $ticket->id,
+            'new_client_id' => $newClient->id,
+            'new_contact_id' => $offboarded->id,
+            'confirm_client_name' => $newClient->name,
+            'reason' => 'Move after client merger to the target account.',
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'moving a ticket onto a deactivated new contact must be refused by default');
+        $this->assertStringContainsString('deactivated', strtolower((string) $response->json('result.content.0.text')));
+        $ticket->refresh();
+        $this->assertSame($originalClientId, $ticket->client_id, 'the move must not proceed when the new contact is refused');
+    }
+
+    public function test_move_ticket_to_client_allows_a_deactivated_new_contact_with_opt_in(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['move_ticket_to_client'], 'chet');
+        [$ticket] = $this->ticketWithAsset();
+        $newClient = Client::factory()->create();
+        $offboarded = Person::create([
+            'client_id' => $newClient->id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Move',
+            'last_name' => 'OffboardedOptIn',
+            'email' => 'move-offboarded-optin@example.test',
+            'is_active' => false,
+        ]);
+
+        $response = $this->callTool($token, 'move_ticket_to_client', [
+            'ticket_id' => $ticket->id,
+            'new_client_id' => $newClient->id,
+            'new_contact_id' => $offboarded->id,
+            'confirm_client_name' => $newClient->name,
+            'allow_inactive_contact' => true,
+            'reason' => 'Historical move retaining the offboarded contact deliberately.',
+        ]);
+
+        $response->assertOk();
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $ticket->refresh();
+        $this->assertSame($newClient->id, $ticket->client_id);
+        $this->assertSame($offboarded->id, $ticket->contact_id);
+    }
 }

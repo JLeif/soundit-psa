@@ -686,7 +686,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'set_ticket_contact',
-            'description' => 'Set the ticket contact immediately. The server derives the ticket client from ticket_id and enforces that the contact belongs to that client before writing the change and audit row. Requires an explicit token grant.',
+            'description' => 'Set the ticket contact immediately. The server derives the ticket client from ticket_id and enforces that the contact belongs to that client before writing the change and audit row. A DEACTIVATED/offboarded contact is refused by default — pass allow_inactive_contact=true to deliberately set a historical contact (e.g. offboarding, billing, or audit); the opt-in is recorded in the audit. Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -702,6 +702,10 @@ class McpToolRegistry
                         'type' => 'string',
                         'description' => 'Optional ticket-specific reason for the contact change.',
                     ],
+                    'allow_inactive_contact' => [
+                        'type' => 'boolean',
+                        'description' => 'Deliberately allow a deactivated/offboarded contact (audited). Defaults to false — active contacts only.',
+                    ],
                 ],
                 'required' => ['ticket_id', 'contact_id'],
             ],
@@ -713,7 +717,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'move_ticket_to_client',
-            'description' => 'Move the ticket to another client immediately. The server derives the source client from ticket_id, requires typed confirmation of the target client name, revalidates the target contact, detaches the old client assets through TicketService, and writes an action audit row. Requires an explicit token grant.',
+            'description' => 'Move the ticket to another client immediately. The server derives the source client from ticket_id, requires typed confirmation of the target client name, revalidates the target contact, detaches the old client assets through TicketService, and writes an action audit row. A DEACTIVATED target contact is refused by default — pass allow_inactive_contact=true to deliberately retain a historical contact (audited). Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -736,6 +740,10 @@ class McpToolRegistry
                     'reason' => [
                         'type' => 'string',
                         'description' => 'Specific reason for moving the ticket to another client.',
+                    ],
+                    'allow_inactive_contact' => [
+                        'type' => 'boolean',
+                        'description' => 'Deliberately allow a deactivated/offboarded new_contact_id (audited). Defaults to false — active contacts only.',
                     ],
                 ],
                 'required' => ['ticket_id', 'new_client_id', 'confirm_client_name', 'reason'],
@@ -1391,11 +1399,12 @@ class McpToolRegistry
     {
         return [
             'name' => 'set_primary_contact',
-            'description' => 'Mark a contact as the primary contact for its client immediately. The server derives the client scope from contact_id and demotes the prior primary, then writes an action audit row. Requires an explicit token grant.',
+            'description' => 'Mark a contact as the primary contact for its client immediately. The server derives the client scope from contact_id and demotes the prior primary, then writes an action audit row. A DEACTIVATED/offboarded contact is refused by default — pass allow_inactive_contact=true to deliberately promote a historical contact (audited). Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
                     'contact_id' => ['type' => 'integer', 'description' => 'The contact (person) ID to set as primary. The server derives the client from this contact.'],
+                    'allow_inactive_contact' => ['type' => 'boolean', 'description' => 'Deliberately allow a deactivated/offboarded contact (audited). Defaults to false — active contacts only.'],
                 ],
                 'required' => ['contact_id'],
             ],

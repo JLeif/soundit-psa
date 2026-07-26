@@ -1026,20 +1026,21 @@ class AssistantToolExecutor
     }
 
     /**
-     * Resolve the include_inactive opt-in as a REAL boolean.
+     * Resolve the include_inactive opt-in — a REAL boolean, strictly.
      *
-     * These read tools are dispatched straight from raw tool input — neither
-     * McpStaffController nor AiClient runs the published argument schema — so a naive
-     * (bool) cast reads the STRING "false" (which a JSON-ish caller can send) as TRUE,
-     * opting INTO inactive records, the exact inverse of the guard. filter_var maps
-     * "false"/"0"/"no"/"off"/false/0 → false and only "true"/"1"/"yes"/"on"/true → true;
-     * absent/null/garbage → false, failing safe to active-only (psa-eu5la review).
+     * These read tools are dispatched straight from raw tool input (neither
+     * McpStaffController nor AiClient runs the published argument schema), so client
+     * input is unvalidated. include_inactive gates whether OFFBOARDED/deactivated
+     * records surface, so it is a safety opt-in and must FAIL CLOSED: only a literal
+     * boolean true opts in. Every other value — absent, null, "true"/"yes"/"1"/1/"on",
+     * "false", garbage — resolves to active-only. (filter_var(FILTER_VALIDATE_BOOLEAN)
+     * was too loose: it coerced "yes"/"1"/1 into an opt-in — psa-eu5la R2 .4/.5.)
      *
      * @param  array<string, mixed>  $input
      */
     private static function wantsInactive(array $input): bool
     {
-        return filter_var($input['include_inactive'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        return ($input['include_inactive'] ?? false) === true;
     }
 
     private function findPersons(array $input): array

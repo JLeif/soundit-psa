@@ -125,6 +125,44 @@ class FindToolsActiveRecordFenceTest extends TestCase
         );
     }
 
+    public function test_include_inactive_requires_a_real_boolean_truthy_non_booleans_do_not_opt_in(): void
+    {
+        // psa-eu5la R2 (.4 security + .5 architecture): a SAFETY opt-in must require a
+        // real boolean — filter_var coercion still let "true"/"yes"/"1"/1/"on" surface
+        // offboarded records. Only literal boolean true may opt in; everything else
+        // fails closed to active-only.
+        $client = Client::factory()->create(['is_active' => true]);
+        $offboarded = $this->person($client->id, self::PROBE.'gone', false, 'strict-'.self::PROBE);
+
+        foreach (['true', 'yes', 'on', '1', 1] as $truthy) {
+            $result = (new AssistantToolExecutor)->execute('find_persons', [
+                'query' => self::PROBE,
+                'include_inactive' => $truthy,
+                'limit' => 25,
+            ]);
+            $ids = array_column($result['persons'], 'id');
+
+            $this->assertNotContains(
+                $offboarded->id,
+                $ids,
+                'include_inactive='.var_export($truthy, true).' (non-boolean) must NOT opt into inactive records — only a real boolean true may',
+            );
+        }
+    }
+
+    public function test_get_person_string_yes_does_not_opt_into_inactive(): void
+    {
+        // The exact security-lane repro: get_person(..., include_inactive="yes").
+        $client = Client::factory()->create(['is_active' => true]);
+        $inactive = $this->person($client->id, self::PROBE.'y', false, 'gpy-'.self::PROBE);
+
+        $result = (new AssistantToolExecutor(clientId: $client->id))
+            ->execute('get_person', ['person_id' => $inactive->id, 'include_inactive' => 'yes']);
+
+        $this->assertArrayHasKey('error', $result, 'get_person include_inactive="yes" must NOT resolve a deactivated contact');
+        $this->assertArrayNotHasKey('email', $result);
+    }
+
     // ── find_assets ──────────────────────────────────────────────────────────
 
     public function test_find_assets_excludes_deactivated_asset_by_default(): void
@@ -309,5 +347,17 @@ class FindToolsActiveRecordFenceTest extends TestCase
             ->execute('get_asset', ['asset_id' => $inactive->id, 'include_inactive' => true]);
 
         $this->assertSame($inactive->id, $result['id'] ?? null, 'include_inactive=true must resolve a deactivated asset for a deliberate lookup');
+    }
+
+    public function test_get_asset_integer_one_does_not_opt_into_inactive(): void
+    {
+        // The exact architecture-lane repro: get_asset(..., include_inactive=1).
+        $client = Client::factory()->create(['is_active' => true]);
+        $inactive = Asset::factory()->create(['client_id' => $client->id, 'hostname' => self::PROBE.'-gi1', 'is_active' => false]);
+
+        $result = (new AssistantToolExecutor(clientId: $client->id))
+            ->execute('get_asset', ['asset_id' => $inactive->id, 'include_inactive' => 1]);
+
+        $this->assertArrayHasKey('error', $result, 'get_asset include_inactive=1 (integer) must NOT resolve a deactivated asset');
     }
 }

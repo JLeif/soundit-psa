@@ -589,13 +589,11 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Contact does not belong to this client; different client boundary enforced.'];
         }
 
-        // psa-eu5la: the read surface (find_persons/get_person) is now active-by-default,
-        // but this is the write CHOKE POINT where the routing harm actually lands — refuse
-        // to set a ticket's contact to a DEACTIVATED/offboarded person so the two-call
-        // bypass (discover-then-route) can never reach a terminated employee. Purely
-        // restrictive; pick an active contact or reactivate the person to proceed.
-        if (! $contact->is_active) {
-            return ['error' => 'Contact '.$contact->id.' is deactivated/offboarded; a ticket cannot be routed to a deactivated contact. Choose an active contact, or reactivate this person first.'];
+        // psa-eu5la R2: the write choke point where routing harm actually lands. Refuse a
+        // DEACTIVATED contact by default; allow_inactive_contact=true is the audited
+        // opt-in for legitimate historical (offboarding/billing/audit) references.
+        if ($guard = $this->guardInactiveContact($contact, $arguments)) {
+            return $guard;
         }
 
         $reason = $this->optionalString($arguments, 'reason');
@@ -607,7 +605,7 @@ class StaffPsaActionToolExecutor
             $ticket,
             $actorLabel,
             $this->mutationContentHash('set_ticket_contact', $ticket->id, ['contact_id' => $contact->id, 'reason' => $reason]),
-            'Contact changed from '.($before ?? 'none').' to '.$contact->id.($reason ? ': '.$reason : '.'),
+            'Contact changed from '.($before ?? 'none').' to '.$contact->id.($contact->is_active ? '' : ' [inactive contact — allow_inactive_contact opt-in]').($reason ? ': '.$reason : '.'),
             TechnicianConfig::requiredAiActorUserId(),
         );
 
@@ -652,6 +650,14 @@ class StaffPsaActionToolExecutor
             return ['error' => 'new_contact_id must be a positive integer or null'];
         }
 
+        // psa-eu5la R2 / psa-iahn6: don't move a ticket onto a DEACTIVATED new contact by
+        // default (moveToClient revalidates client ownership; this adds the active guard).
+        // allow_inactive_contact=true is the audited opt-in for a deliberate historical move.
+        $newContact = $newContactId !== null ? Person::find($newContactId) : null;
+        if ($newContact !== null && ($guard = $this->guardInactiveContact($newContact, $arguments))) {
+            return $guard;
+        }
+
         $reason = $this->optionalString($arguments, 'reason');
         $detachedAssets = $ticket->assets()->where('assets.client_id', $ticket->client_id)->pluck('assets.id')->all();
 
@@ -676,7 +682,7 @@ class StaffPsaActionToolExecutor
                 'new_contact_id' => $newContactId,
                 'reason' => $reason,
             ]),
-            'Ticket moved to client #'.$newClient->id.'. Detached assets: '.count($detachedAssets).($reason ? ': '.$reason : '.'),
+            'Ticket moved to client #'.$newClient->id.'. Detached assets: '.count($detachedAssets).($newContact && ! $newContact->is_active ? ' [inactive contact — allow_inactive_contact opt-in]' : '').($reason ? ': '.$reason : '.'),
             TechnicianConfig::requiredAiActorUserId(),
         );
 
@@ -1059,9 +1065,15 @@ class StaffPsaActionToolExecutor
             return $person;
         }
 
-        $unexpected = array_values(array_diff(array_keys($arguments), ['contact_id']));
+        $unexpected = array_values(array_diff(array_keys($arguments), ['contact_id', 'allow_inactive_contact']));
         if ($unexpected !== []) {
-            return ['error' => 'set_primary_contact accepts only contact_id.'];
+            return ['error' => 'set_primary_contact accepts only contact_id and allow_inactive_contact.'];
+        }
+
+        // psa-eu5la R2 / psa-iahn6: promoting a DEACTIVATED person to primary is refused
+        // by default; the audited allow_inactive_contact opt-in permits it deliberately.
+        if ($guard = $this->guardInactiveContact($person, $arguments)) {
+            return $guard;
         }
 
         $updated = $this->personService->updatePerson($person, ['is_primary' => true]);
@@ -1073,7 +1085,7 @@ class StaffPsaActionToolExecutor
             (int) $updated->client_id,
             $actorLabel,
             $this->mutationContentHash('set_primary_contact', (int) $updated->id, ['is_primary' => true]),
-            'Contact set as primary: '.$this->contactDisplayName($updated).'.',
+            'Contact set as primary: '.$this->contactDisplayName($updated).($updated->is_active ? '' : ' [inactive contact — allow_inactive_contact opt-in]').'.',
             TechnicianConfig::requiredAiActorUserId(),
         );
 
@@ -1222,6 +1234,37 @@ class StaffPsaActionToolExecutor
     }
 
     /** @return Person|array<string, string> */
+    /**
+     * Strict opt-in for referencing a DEACTIVATED contact on a write (psa-eu5la R2).
+     * A safety opt-in must require a REAL boolean — "yes"/"1"/1 must not permit routing
+     * to an offboarded contact — so only a literal boolean true opts in.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    private static function allowsInactiveContact(array $arguments): bool
+    {
+        return ($arguments['allow_inactive_contact'] ?? false) === true;
+    }
+
+    /**
+     * The uniform active-contact write contract (psa-eu5la R2 / psa-iahn6): refuse a
+     * deactivated/offboarded contact on any contact-write UNLESS the caller passes an
+     * explicit, audited allow_inactive_contact=true — offboarding/billing/audit
+     * legitimately reference a historical contact. Returns an error array to short-
+     * circuit, or null to proceed.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>|null
+     */
+    private function guardInactiveContact(Person $contact, array $arguments): ?array
+    {
+        if ($contact->is_active || self::allowsInactiveContact($arguments)) {
+            return null;
+        }
+
+        return ['error' => 'Contact '.$contact->id.' is deactivated/offboarded; routing to a deactivated contact is refused by default. Pass allow_inactive_contact=true to deliberately reference this historical contact (e.g. offboarding, billing, or audit).'];
+    }
+
     private function personForContact(array $arguments): Person|array
     {
         $contactId = $this->positiveInteger($arguments['contact_id'] ?? null);
