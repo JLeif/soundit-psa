@@ -16,7 +16,19 @@ use App\Models\TacticalScript;
  * friendlier audited refusals; THIS gate is what makes bypass impossible for
  * any future caller.
  *
+ * EVIDENCE, NEVER ASSERTION (psa-0pb9m R3): every input to the safety
+ * decision is resolved INSIDE this boundary from server-derived state — the
+ * synced local snapshot/catalog or a live read over the same client. There is
+ * deliberately NO parameter through which a caller can supply script metadata,
+ * platform claims, or membership facts: R2/R3 proved that any caller-assertable
+ * claim (acknowledge_platform_risk, a scriptMeta array) is retried or
+ * fabricated by an AI caller and reopens the original defect.
+ *
  * Fail-closed rules (each refusal names its remedy):
+ *  - Payload targeting BOTH an agent and a policy → refused. The upstream
+ *    Check model holds both nullable FKs with no XOR validation (checks/
+ *    models.py @ 632a37a4), so such a row lands in BOTH the agent's and the
+ *    policy's check lists while safety was proven for only one target.
  *  - AGENT target with an UNKNOWN platform → refused. An agent's platform is
  *    knowable — sync it (tactical:sync-devices). No override: guessing here
  *    recreates the original bug.
@@ -24,13 +36,14 @@ use App\Models\TacticalScript;
  *    Tactical macOS/Linux agents run SCRIPT checks only (vendor constraint,
  *    also documented on the provisioner) — a non-script check there never
  *    reports and reads as broken coverage.
- *  - Script whose metadata cannot be resolved OR carries no usable platform
- *    signal (no shell AND no supported_platforms) → refused. Metadata comes
- *    from the caller's vendor-sourced claim (an upstream getScripts row, the
- *    provisioner's shipped definition) or the local synced catalog
- *    (tactical:sync-scripts). Absence of constraints is NOT compatibility:
- *    treating an empty claim as "runs anywhere" is exactly how a
- *    wrong-platform always-failing check ships (psa-0pb9m R2).
+ *  - Script whose metadata cannot be resolved from a server-derived source,
+ *    OR carries no usable platform signal (no shell AND no
+ *    supported_platforms) → refused. Resolution order: the local synced
+ *    catalog (tactical:sync-scripts / the provisioner's post-create upsert),
+ *    then a live getScripts read over this client for a not-yet-synced
+ *    script. Caller claims are not a source. Absence of constraints is NOT
+ *    compatibility: treating an empty claim as "runs anywhere" is exactly how
+ *    a wrong-platform always-failing check ships (psa-0pb9m R2).
  *  - AGENT target with a provably incompatible script → refused, no override.
  *  - POLICY target whose check could not run on some platform (a
  *    platform-bound script, or ANY non-script check — those are Windows-only
@@ -39,13 +52,15 @@ use App\Models\TacticalScript;
  *    Tactical (GET automation/policies/{pk}/related/ + the fleet agents
  *    list) and every member agent must be on a provably compatible platform.
  *    Any member on a blocked platform, any member whose platform cannot be
- *    resolved, or any failure to enumerate membership → refused. There is NO
- *    caller-assertable override (psa-0pb9m R2: the old
- *    acknowledge_platform_risk boolean was an AI-settable claim, not
- *    evidence, and reopened the original defect).
+ *    resolved, any failure to enumerate membership, or any STRUCTURALLY
+ *    INCOMPLETE membership payload → refused. A 200 response missing the
+ *    serializer's fields is drift/degradation, and absence of proof is never
+ *    zero members (psa-0pb9m R3: related={} previously proved true with
+ *    members_checked=0).
  *
  * Membership resolution (producers read at amidaware/tacticalrmm 632a37a4,
- * 2026-07-24 — cite, don't guess):
+ * 2026-07-24 — cite, don't guess; captured in
+ * tests/Fixtures/tactical/upstream_producers.json):
  *  - GET automation/policies/{pk}/related/ → PolicyRelatedSerializer
  *    (automation/serializers.py:41-89): direct `agents`
  *    ({id, hostname, agent_id, client, site} per AgentHostnameSerializer,
@@ -53,9 +68,19 @@ use App\Models\TacticalScript;
  *    (ClientMinimumSerializer — all Client fields incl. `name`),
  *    `workstation_sites`/`server_sites` (SiteMinimumSerializer — all Site
  *    fields incl. `name` + `client_name`), plus `is_default_server_policy` /
- *    `is_default_workstation_policy`.
+ *    `is_default_workstation_policy` (SerializerMethodFields returning real
+ *    booleans). All seven fields are emitted on EVERY healthy response — the
+ *    five collections as JSON lists, the two flags as JSON booleans — so this
+ *    guard REQUIRES that exact runtime shape and refuses anything less
+ *    (see REQUIRED_RELATED_LIST_FIELDS / REQUIRED_RELATED_FLAG_FIELDS, which
+ *    TacticalSchemaDriftTest proves against the captured producer).
  *  - GET agents/ → AgentTableSerializer rows carrying `agent_id`, `plat`,
  *    `operating_system`, `monitoring_type`, `client_name`, `site_name`.
+ *    When the related payload contains a client/site/default assignment, the
+ *    fleet rows are the ONLY join evidence, so every row must carry the join
+ *    keys that assignment needs (FLEET_JOIN_FIELDS subset) — a row missing
+ *    them could belong to the policy invisibly, which means membership cannot
+ *    be completely enumerated → refused.
  *  - Composition OVER-approximates Policy.related_agents()
  *    (automation/models.py:91+): upstream subtracts excluded agents/sites/
  *    clients and block_policy_inheritance; we do not, so our member set is a
@@ -72,21 +97,66 @@ class TacticalCheckPlatformGuard
     private const MAX_NAMED_MEMBERS = 5;
 
     /**
+     * PolicyRelatedSerializer fields the membership proof REQUIRES at runtime
+     * as JSON lists. Proven against the captured vendor producer by
+     * TacticalSchemaDriftTest — one list, enforced here, pinned there.
+     *
+     * @var string[]
+     */
+    public const REQUIRED_RELATED_LIST_FIELDS = [
+        'agents',
+        'workstation_clients',
+        'server_clients',
+        'workstation_sites',
+        'server_sites',
+    ];
+
+    /**
+     * PolicyRelatedSerializer fields the membership proof REQUIRES at runtime
+     * as JSON booleans. Same drift-test binding as the list fields.
+     *
+     * @var string[]
+     */
+    public const REQUIRED_RELATED_FLAG_FIELDS = [
+        'is_default_server_policy',
+        'is_default_workstation_policy',
+    ];
+
+    /**
+     * Fleet (agents-list) keys the client/site/default membership joins read.
+     * When such an assignment exists, every fleet row must carry the keys that
+     * join needs, or membership cannot be completely enumerated.
+     *
+     * @var string[]
+     */
+    public const FLEET_JOIN_FIELDS = [
+        'monitoring_type',
+        'client_name',
+        'site_name',
+    ];
+
+    /**
      * @param  array<string, mixed>  $payload  The POST checks/ body about to be sent.
-     * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
-     *                                                                                             Optional vendor-sourced script metadata claim from the caller
-     *                                                                                             (e.g. the upstream getScripts row the MCP executor already
-     *                                                                                             resolved, or the provisioner's shipped definition). When null,
-     *                                                                                             metadata is resolved from the local synced script catalog.
-     * @param  TacticalClient  $client  Used ONLY for read calls (policy
-     *                                  membership proof); never to write.
+     * @param  TacticalClient  $client  Used ONLY for read calls (script
+     *                                  metadata for a not-yet-synced script;
+     *                                  policy membership proof); never to
+     *                                  write.
      *
      * @throws TacticalClientException on refusal — nothing was sent upstream.
      */
-    public static function assertSafe(array $payload, ?array $scriptMeta, TacticalClient $client): void
+    public static function assertSafe(array $payload, TacticalClient $client): void
     {
         $agentId = isset($payload['agent']) && is_scalar($payload['agent']) ? trim((string) $payload['agent']) : '';
         $policyId = isset($payload['policy']) && is_numeric($payload['policy']) ? (int) $payload['policy'] : null;
+
+        if ($agentId !== '' && $policyId !== null) {
+            throw new TacticalClientException(
+                'Refusing to create this check: the payload targets BOTH an agent and a policy. The upstream Check model '
+                .'accepts either foreign key with no exactly-one validation, so such a row would appear in both the '
+                ."agent's and the policy's check lists while platform safety was proven for only one of them (psa-0pb9m). "
+                .'Create two separate checks, one per target.'
+            );
+        }
 
         if ($agentId === '' && $policyId === null) {
             throw new TacticalClientException(
@@ -100,19 +170,18 @@ class TacticalCheckPlatformGuard
         $isScriptCheck = $checkType === 'script' || isset($payload['script']);
 
         if ($agentId !== '') {
-            self::assertAgentTargetSafe($agentId, $isScriptCheck, $payload, $scriptMeta);
+            self::assertAgentTargetSafe($agentId, $isScriptCheck, $payload, $client);
 
             return;
         }
 
-        self::assertPolicyTargetSafe((int) $policyId, $isScriptCheck, $payload, $scriptMeta, $client);
+        self::assertPolicyTargetSafe((int) $policyId, $isScriptCheck, $payload, $client);
     }
 
     /**
      * @param  array<string, mixed>  $payload
-     * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
      */
-    private static function assertAgentTargetSafe(string $agentId, bool $isScriptCheck, array $payload, ?array $scriptMeta): void
+    private static function assertAgentTargetSafe(string $agentId, bool $isScriptCheck, array $payload, TacticalClient $client): void
     {
         $platform = TacticalAsset::where('agent_id', $agentId)->first()?->platform();
 
@@ -137,7 +206,7 @@ class TacticalCheckPlatformGuard
             return;
         }
 
-        $meta = self::resolveScriptMeta($payload, $scriptMeta);
+        $meta = self::resolveScriptMeta($payload, $client);
 
         $incompatibility = TacticalPlatform::scriptIncompatibility(
             $platform,
@@ -159,12 +228,11 @@ class TacticalCheckPlatformGuard
      * caller-asserted).
      *
      * @param  array<string, mixed>  $payload
-     * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
      */
-    private static function assertPolicyTargetSafe(int $policyId, bool $isScriptCheck, array $payload, ?array $scriptMeta, TacticalClient $client): void
+    private static function assertPolicyTargetSafe(int $policyId, bool $isScriptCheck, array $payload, TacticalClient $client): void
     {
         if ($isScriptCheck) {
-            $meta = self::resolveScriptMeta($payload, $scriptMeta);
+            $meta = self::resolveScriptMeta($payload, $client);
             $blocked = self::incompatiblePlatforms($meta['shell'], $meta['supported_platforms']);
         } else {
             // Non-script checks exist on WINDOWS agents only (vendor
@@ -195,12 +263,20 @@ class TacticalCheckPlatformGuard
      * MCP executor can pre-check with audited, surface-friendly copy; the
      * client-boundary guard re-asserts the same proof (defence in depth).
      *
-     * Never trusts caller claims: membership comes from
-     * GET automation/policies/{pk}/related/ and platforms from the fleet
-     * agents list (producers cited in the class docblock). A member whose
-     * platform cannot be resolved — absent from the fleet list, or a row
-     * without a usable `plat` — fails the proof (runtime absent-key refusal;
-     * unknown is never compatible).
+     * Never trusts caller claims, and never treats ABSENT response data as
+     * evidence (psa-0pb9m R3): the related payload must carry the vendor
+     * serializer's full runtime shape (REQUIRED_RELATED_LIST_FIELDS as lists,
+     * REQUIRED_RELATED_FLAG_FIELDS as booleans), assignment rows must carry
+     * the keys their join needs, and — when a client/site/default assignment
+     * exists — every fleet row must carry that join's keys. Anything less is
+     * a drifted or degraded response, and proving "zero members" from it
+     * would authorize the exact wrong-platform write this guard exists to
+     * stop. Zero members is accepted ONLY from a structurally complete
+     * response whose collections are genuinely empty.
+     *
+     * A member whose platform cannot be resolved — absent from the fleet
+     * list, or a row without a usable `plat`/`operating_system` — fails the
+     * proof (unknown is never compatible).
      *
      * @param  array<int, string>  $blockedPlatforms
      * @return array{proven: bool, reason: ?string, members_checked: int}
@@ -216,6 +292,11 @@ class TacticalCheckPlatformGuard
                 'reason' => "the membership of policy {$policyId} could not be read from Tactical (".$e::class.'), so platform compatibility cannot be verified.',
                 'members_checked' => 0,
             ];
+        }
+
+        $shapeError = self::relatedShapeError($related, $policyId) ?? self::fleetShapeError($related, $fleet, $policyId);
+        if ($shapeError !== null) {
+            return ['proven' => false, 'reason' => $shapeError, 'members_checked' => 0];
         }
 
         $members = self::resolveMembers($related, $fleet);
@@ -260,9 +341,131 @@ class TacticalCheckPlatformGuard
     }
 
     /**
-     * Compose the policy's current member agents from the related payload +
-     * the fleet list. Over-approximates upstream related_agents() (exclusions
-     * and block_policy_inheritance are ignored — a superset is fail-closed).
+     * Structural validation of the policies/{pk}/related/ payload against the
+     * vendor serializer's runtime shape. A healthy PolicyRelatedSerializer
+     * response ALWAYS carries the five collections as lists (of objects) and
+     * the two default-policy flags as booleans; a 200 missing any of them is
+     * drift or degradation, and absence of proof is never zero members
+     * (psa-0pb9m R3: related={} previously proved true, members_checked=0).
+     *
+     * @param  array<string, mixed>  $related
+     */
+    private static function relatedShapeError(array $related, int $policyId): ?string
+    {
+        foreach (self::REQUIRED_RELATED_LIST_FIELDS as $field) {
+            if (! array_key_exists($field, $related)) {
+                return "the membership payload of policy {$policyId} (GET automation/policies/{$policyId}/related/) is missing `{$field}`, "
+                    .'which the vendor serializer always emits — a drifted or degraded response proves nothing about membership, and absence of proof is never zero members.';
+            }
+            if (! is_array($related[$field])) {
+                return "the membership payload of policy {$policyId} carries `{$field}` as ".get_debug_type($related[$field])
+                    .' where the vendor serializer emits a list — a drifted or degraded response; membership cannot be proven.';
+            }
+            foreach ($related[$field] as $row) {
+                if (! is_array($row)) {
+                    return "a `{$field}` assignment row of policy {$policyId} is not an object (".get_debug_type($row)
+                        .') — a drifted or degraded response; membership cannot be completely enumerated.';
+                }
+            }
+        }
+
+        foreach (self::REQUIRED_RELATED_FLAG_FIELDS as $field) {
+            if (! array_key_exists($field, $related)) {
+                return "the membership payload of policy {$policyId} is missing `{$field}`, which the vendor serializer always emits "
+                    .'as a boolean — a drifted or degraded response; whether this is a fleet-default policy cannot be determined.';
+            }
+            if (! is_bool($related[$field])) {
+                return "the membership payload of policy {$policyId} carries `{$field}` as ".get_debug_type($related[$field])
+                    .' where the vendor serializer emits a boolean — a drifted or degraded response; whether this is a fleet-default policy cannot be determined.';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Structural validation of the fleet list AS JOIN EVIDENCE. Runs after
+     * relatedShapeError, so $related is known well-formed. Every fleet row
+     * must be an object; and when the policy has client/site/default
+     * assignments, every fleet row must carry the join keys those assignments
+     * enumerate through — a row missing them could belong to the policy
+     * invisibly. An EMPTY fleet is accepted as evidence only when the local
+     * synced snapshot agrees the fleet is empty; zero rows while the snapshot
+     * knows agents is a degraded read wearing a 200.
+     *
+     * @param  array<string, mixed>  $related
+     * @param  array<int, mixed>  $fleet
+     */
+    private static function fleetShapeError(array $related, array $fleet, int $policyId): ?string
+    {
+        foreach ($fleet as $row) {
+            if (! is_array($row)) {
+                return 'a row of the Tactical fleet list (GET agents/) is not an object ('.get_debug_type($row)
+                    .") — a drifted or degraded response; policy {$policyId}'s membership cannot be completely enumerated.";
+            }
+        }
+
+        $requiredKeys = [];
+        if ($related['is_default_server_policy'] === true || $related['is_default_workstation_policy'] === true) {
+            $requiredKeys['monitoring_type'] = 'default-policy';
+        }
+        if ($related['workstation_clients'] !== [] || $related['server_clients'] !== []) {
+            $requiredKeys['monitoring_type'] = $requiredKeys['monitoring_type'] ?? 'client';
+            $requiredKeys['client_name'] = 'client';
+        }
+        if ($related['workstation_sites'] !== [] || $related['server_sites'] !== []) {
+            $requiredKeys['monitoring_type'] = $requiredKeys['monitoring_type'] ?? 'site';
+            $requiredKeys['client_name'] = $requiredKeys['client_name'] ?? 'site';
+            $requiredKeys['site_name'] = 'site';
+        }
+
+        if ($requiredKeys === []) {
+            return null; // only direct-agent assignments (or none) — no fleet join needed
+        }
+
+        if ($fleet === []) {
+            $known = TacticalAsset::query()->count();
+            if ($known > 0) {
+                return "the Tactical fleet list (GET agents/) returned zero agents while the local synced snapshot knows {$known} — "
+                    ."a degraded or drifted read, not an empty fleet, so policy {$policyId}'s "
+                    .implode('/', array_unique(array_values($requiredKeys))).' assignment(s) cannot be enumerated. '
+                    .'If agents were genuinely removed, run tactical:sync-devices and retry.';
+            }
+
+            return null; // fleet genuinely empty on both live and synced evidence — the assignments reach nobody
+        }
+
+        foreach ($fleet as $row) {
+            foreach ($requiredKeys as $key => $assignmentKind) {
+                $value = $row[$key] ?? null;
+                if (! is_scalar($value) || trim((string) $value) === '') {
+                    $who = is_scalar($row['hostname'] ?? null) ? (string) $row['hostname'] : 'unknown hostname';
+
+                    return "a Tactical fleet row ({$who}) is missing `{$key}`, so policy {$policyId}'s {$assignmentKind} assignment(s) "
+                        .'cannot be completely enumerated — an agent could belong to this policy invisibly, and absent keys are never evidence.';
+                }
+                // EXACT vendor vocabulary, because the membership joins compare
+                // raw (===): a 'Server'/' server' row would pass a folded
+                // validation yet silently escape every join — the precise
+                // invisible-member hole this validation exists to close.
+                if ($key === 'monitoring_type' && ! in_array($value, ['server', 'workstation'], true)) {
+                    $who = is_scalar($row['hostname'] ?? null) ? (string) $row['hostname'] : 'unknown hostname';
+
+                    return "a Tactical fleet row ({$who}) carries monitoring_type '".trim((string) $value)
+                        ."' where the vendor emits exactly server|workstation — such a row would silently escape policy {$policyId}'s "
+                        .'membership joins, so membership cannot be completely enumerated.';
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Compose the policy's current member agents from the (shape-validated)
+     * related payload + fleet list. Over-approximates upstream
+     * related_agents() (exclusions and block_policy_inheritance are ignored —
+     * a superset is fail-closed).
      *
      * @param  array<string, mixed>  $related
      * @param  array<int, mixed>  $fleet
@@ -270,7 +473,8 @@ class TacticalCheckPlatformGuard
      */
     private static function resolveMembers(array $related, array $fleet): array
     {
-        $fleetRows = array_values(array_filter($fleet, 'is_array'));
+        /** @var array<int, array<string, mixed>> $fleetRows (shape-validated: every row is an array) */
+        $fleetRows = array_values($fleet);
         $byAgentId = [];
         foreach ($fleetRows as $row) {
             if (is_scalar($row['agent_id'] ?? null)) {
@@ -282,14 +486,14 @@ class TacticalCheckPlatformGuard
         $fallbackKey = 0;
 
         // Default policies reach the whole fleet of that monitoring type.
-        if (($related['is_default_server_policy'] ?? false) === true) {
+        if ($related['is_default_server_policy'] === true) {
             foreach ($fleetRows as $row) {
                 if (($row['monitoring_type'] ?? null) === 'server') {
                     $members[self::memberKey($row, $fallbackKey)] = $row;
                 }
             }
         }
-        if (($related['is_default_workstation_policy'] ?? false) === true) {
+        if ($related['is_default_workstation_policy'] === true) {
             foreach ($fleetRows as $row) {
                 if (($row['monitoring_type'] ?? null) === 'workstation') {
                     $members[self::memberKey($row, $fallbackKey)] = $row;
@@ -298,12 +502,18 @@ class TacticalCheckPlatformGuard
         }
 
         // Directly-assigned agents ({agent_id, hostname, …}).
-        foreach (self::rows($related['agents'] ?? null) as $direct) {
-            $directId = is_scalar($direct['agent_id'] ?? null) ? (string) $direct['agent_id'] : null;
-            if ($directId === null || ! isset($byAgentId[$directId])) {
-                return ['error' => 'a directly-assigned member agent of this policy ('
-                    .(is_scalar($direct['hostname'] ?? null) ? (string) $direct['hostname'] : 'unknown hostname')
-                    .') is missing from the Tactical fleet list, so its platform cannot be resolved — unknown is never compatible.'];
+        foreach ($related['agents'] as $direct) {
+            $directId = is_scalar($direct['agent_id'] ?? null) && trim((string) $direct['agent_id']) !== ''
+                ? (string) $direct['agent_id']
+                : null;
+            $directName = is_scalar($direct['hostname'] ?? null) ? (string) $direct['hostname'] : 'unknown hostname';
+            if ($directId === null) {
+                return ['error' => "a directly-assigned member agent of this policy ({$directName}) carries no agent_id — "
+                    .'a drifted or degraded row; it cannot be resolved against the fleet list, and absent keys are never evidence.'];
+            }
+            if (! isset($byAgentId[$directId])) {
+                return ['error' => "a directly-assigned member agent of this policy ({$directName}) is missing from the "
+                    .'Tactical fleet list, so its platform cannot be resolved — unknown is never compatible.'];
             }
             $members[$directId] = $byAgentId[$directId];
         }
@@ -313,7 +523,7 @@ class TacticalCheckPlatformGuard
         // on AgentTableSerializer; name/client_name on the minimum
         // serializers).
         foreach (['workstation_clients' => 'workstation', 'server_clients' => 'server'] as $key => $monType) {
-            foreach (self::rows($related[$key] ?? null) as $clientRow) {
+            foreach ($related[$key] as $clientRow) {
                 $clientName = is_scalar($clientRow['name'] ?? null) ? (string) $clientRow['name'] : null;
                 if ($clientName === null) {
                     return ['error' => "a {$monType}-client assignment of this policy carries no name, so its member agents cannot be resolved."];
@@ -326,7 +536,7 @@ class TacticalCheckPlatformGuard
             }
         }
         foreach (['workstation_sites' => 'workstation', 'server_sites' => 'server'] as $key => $monType) {
-            foreach (self::rows($related[$key] ?? null) as $siteRow) {
+            foreach ($related[$key] as $siteRow) {
                 $siteName = is_scalar($siteRow['name'] ?? null) ? (string) $siteRow['name'] : null;
                 $siteClient = is_scalar($siteRow['client_name'] ?? null) ? (string) $siteRow['client_name'] : null;
                 if ($siteName === null || $siteClient === null) {
@@ -361,12 +571,6 @@ class TacticalCheckPlatformGuard
         return 'keyless-'.(++$fallbackKey);
     }
 
-    /** @return array<int, array<string, mixed>> */
-    private static function rows(mixed $value): array
-    {
-        return is_array($value) ? array_values(array_filter($value, 'is_array')) : [];
-    }
-
     /** @param array<int, string> $names */
     private static function nameSome(array $names): string
     {
@@ -393,62 +597,92 @@ class TacticalCheckPlatformGuard
     }
 
     /**
-     * Script metadata for the payload's script id: the caller's vendor-sourced
-     * claim wins (it is fresher than the daily catalog sync); otherwise the
-     * local synced catalog; otherwise REFUSE. In EVERY case the resolved
-     * metadata must carry a usable platform signal — a non-empty shell or a
-     * non-empty supported_platforms list. Metadata that says nothing is not
-     * "no constraints": treating absence as compatibility is how a
-     * wrong-platform always-failing check ships (psa-0pb9m R2 — a caller
-     * passing scriptMeta=[] previously sailed straight to HTTP).
+     * Script metadata for the payload's script id, resolved INSIDE the
+     * boundary from server-derived sources only — the local synced catalog
+     * first (tactical:sync-scripts, or the provisioner's post-create upsert),
+     * then a live getScripts read over this client for a script the catalog
+     * has not synced yet. There is deliberately no way for a caller to supply
+     * this: R3 proved a caller-supplied metadata array is an assertion, not
+     * evidence — a fabricated cross-platform claim for a Windows-only script
+     * sailed straight to POST (psa-0pb9m R3 A3/S3).
+     *
+     * In EVERY case the resolved metadata must carry a usable platform
+     * signal — a non-empty shell or a non-empty supported_platforms list.
+     * Metadata that says nothing is not "no constraints": treating absence as
+     * compatibility is how a wrong-platform always-failing check ships.
      *
      * @param  array<string, mixed>  $payload
-     * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
      * @return array{shell: ?string, supported_platforms: ?array<int, mixed>}
      */
-    private static function resolveScriptMeta(array $payload, ?array $scriptMeta): array
+    private static function resolveScriptMeta(array $payload, TacticalClient $client): array
     {
-        if ($scriptMeta !== null) {
-            $claim = [
-                'shell' => isset($scriptMeta['shell']) && is_scalar($scriptMeta['shell']) ? (string) $scriptMeta['shell'] : null,
-                'supported_platforms' => is_array($scriptMeta['supported_platforms'] ?? null) ? $scriptMeta['supported_platforms'] : null,
+        $scriptId = isset($payload['script']) && is_numeric($payload['script']) ? (int) $payload['script'] : null;
+        if ($scriptId === null || $scriptId <= 0) {
+            throw new TacticalClientException(
+                'Refusing to create this script check: the payload carries no numeric script id, so the script\'s platform '
+                .'constraints cannot be verified (psa-0pb9m).'
+            );
+        }
+
+        $local = TacticalScript::where('tactical_script_id', $scriptId)->first();
+        if ($local !== null) {
+            $resolved = [
+                'shell' => is_string($local->shell) && trim($local->shell) !== '' ? $local->shell : null,
+                'supported_platforms' => is_array($local->supported_platforms) ? $local->supported_platforms : null,
             ];
 
-            if (! self::hasUsablePlatformSignal($claim['shell'], $claim['supported_platforms'])) {
+            if (! self::hasUsablePlatformSignal($resolved['shell'], $resolved['supported_platforms'])) {
                 throw new TacticalClientException(
-                    'Refusing to create this script check: the supplied script metadata carries neither a shell nor any '
-                    .'supported_platforms, so its platform constraints cannot be verified — absence of metadata is not '
-                    .'compatibility (psa-0pb9m). Pass the script\'s real vendor metadata (its getScripts row), or omit the '
-                    .'claim so the local synced catalog is consulted.'
+                    "Refusing to create this script check: the synced catalog row for script {$scriptId} carries neither "
+                    .'a shell nor any supported_platforms, so its platform constraints cannot be verified — absence of metadata is '
+                    .'not compatibility (psa-0pb9m). Re-run tactical:sync-scripts, or verify the script in Tactical.'
                 );
             }
 
-            return $claim;
+            return $resolved;
         }
 
-        $scriptId = isset($payload['script']) && is_numeric($payload['script']) ? (int) $payload['script'] : null;
-        $local = $scriptId !== null && $scriptId > 0
-            ? TacticalScript::where('tactical_script_id', $scriptId)->first()
-            : null;
-
-        if ($local === null) {
+        // Not in the catalog yet (e.g. created upstream since the last sync):
+        // read the vendor's own getScripts row live over the same client. A
+        // failed or empty read REFUSES — never degrades to a caller claim.
+        try {
+            $upstream = $client->getScripts(true, true);
+        } catch (\Throwable $e) {
             throw new TacticalClientException(
-                'Refusing to create this script check: the script ('.($scriptId ?? 'unknown id').') is not in the local synced '
-                .'script catalog and no script metadata was supplied, so its platform constraints cannot be verified. '
+                "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog, and its "
+                .'metadata could not be read live from Tactical ('.$e::class.'), so its platform constraints cannot be verified. '
+                .'Run tactical:sync-scripts, then retry — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
+            );
+        }
+
+        $row = null;
+        foreach ($upstream as $candidate) {
+            if (is_array($candidate) && is_numeric($candidate['id'] ?? null) && (int) $candidate['id'] === $scriptId) {
+                $row = $candidate;
+                break;
+            }
+        }
+
+        if ($row === null) {
+            throw new TacticalClientException(
+                "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog and is not "
+                .'visible in Tactical getScripts, so its platform constraints cannot be verified. '
                 .'Run tactical:sync-scripts first — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
             );
         }
 
         $resolved = [
-            'shell' => $local->shell,
-            'supported_platforms' => is_array($local->supported_platforms) ? $local->supported_platforms : null,
+            'shell' => isset($row['shell']) && is_scalar($row['shell']) && trim((string) $row['shell']) !== ''
+                ? (string) $row['shell']
+                : null,
+            'supported_platforms' => is_array($row['supported_platforms'] ?? null) ? $row['supported_platforms'] : null,
         ];
 
         if (! self::hasUsablePlatformSignal($resolved['shell'], $resolved['supported_platforms'])) {
             throw new TacticalClientException(
-                'Refusing to create this script check: the synced catalog row for script '.($scriptId ?? '?').' carries neither '
-                .'a shell nor any supported_platforms, so its platform constraints cannot be verified — absence of metadata is '
-                .'not compatibility (psa-0pb9m). Re-run tactical:sync-scripts, or verify the script in Tactical.'
+                "Refusing to create this script check: the Tactical getScripts row for script {$scriptId} carries neither a "
+                .'shell nor any supported_platforms, so its platform constraints cannot be verified — absence of metadata is '
+                .'not compatibility (psa-0pb9m). Verify the script in Tactical.'
             );
         }
 

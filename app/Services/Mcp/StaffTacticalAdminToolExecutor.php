@@ -1638,7 +1638,6 @@ class StaffTacticalAdminToolExecutor
         $scriptRow = is_array($resolvedScript['script'] ?? null) ? $resolvedScript['script'] : [];
         $scriptShell = is_scalar($scriptRow['shell'] ?? null) ? (string) $scriptRow['shell'] : null;
         $scriptPlatforms = is_array($scriptRow['supported_platforms'] ?? null) ? $scriptRow['supported_platforms'] : null;
-        $scriptMeta = ['shell' => $scriptShell, 'supported_platforms' => $scriptPlatforms];
         $platformNote = null;
 
         if (($target['target_type'] ?? null) === 'agent') {
@@ -1722,10 +1721,11 @@ class StaffTacticalAdminToolExecutor
         }
 
         try {
-            // The script-meta claim is the upstream getScripts row this call
-            // already verified — fresher than the daily catalog sync, so the
-            // client-boundary guard assesses the same vendor truth we did.
-            $result = $this->client->createCheck($payload, $scriptMeta);
+            // The client-boundary guard resolves script metadata itself
+            // (synced catalog, then a live getScripts read) — this call passes
+            // no claim, and none is acceptable (psa-0pb9m R3: a caller-supplied
+            // metadata array is assertion, not evidence).
+            $result = $this->client->createCheck($payload);
             $checkId = $this->createdCheckId($target, $payload);
         } catch (TacticalClientException $e) {
             $message = $this->tacticalFailureMessage($e, 'Tactical check create');

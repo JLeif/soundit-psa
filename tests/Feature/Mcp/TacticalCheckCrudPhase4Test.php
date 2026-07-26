@@ -180,8 +180,9 @@ class TacticalCheckCrudPhase4Test extends TestCase
         $tactical = Mockery::mock(TacticalClient::class);
         $tactical->shouldReceive('getPolicies')->once()->andReturn($this->policies());
         $tactical->shouldReceive('getScripts')->once()->with(true, true)->andReturn($this->scripts());
-        // createCheck now carries the scriptMeta claim + the acknowledgement
-        // through to the guarded client boundary (psa-0pb9m revise).
+        // createCheck receives the payload ONLY — no scriptMeta claim exists
+        // any more (psa-0pb9m R3): the guarded client boundary resolves script
+        // metadata itself from server-derived sources.
         $tactical->shouldReceive('createCheck')->once()->with([
             'policy' => 7,
             'check_type' => 'script',
@@ -194,7 +195,7 @@ class TacticalCheckCrudPhase4Test extends TestCase
             'success_return_codes' => [0],
             'info_return_codes' => [10],
             'warning_return_codes' => [7],
-        ], Mockery::type('array'))->andReturn('Script Check: HelpDesk Buttons Detector was added!');
+        ])->andReturn('Script Check: HelpDesk Buttons Detector was added!');
         // The fixture script is Windows-bound, so the policy create requires
         // SERVER-DERIVED membership proof (psa-0pb9m R2): the executor reads
         // the policy's related payload + the fleet list and every member must
@@ -293,7 +294,7 @@ class TacticalCheckCrudPhase4Test extends TestCase
             'success_return_codes' => [0],
             'info_return_codes' => [],
             'warning_return_codes' => [],
-        ], Mockery::type('array'))->andReturn('Script Check: HelpDesk Buttons Detector was added!');
+        ])->andReturn('Script Check: HelpDesk Buttons Detector was added!');
         $tactical->shouldReceive('getAgentChecks')->once()->with('agent-1')->andReturn([
             ['id' => 310, 'agent' => 55, 'check_type' => 'script', 'script' => 102],
         ]);

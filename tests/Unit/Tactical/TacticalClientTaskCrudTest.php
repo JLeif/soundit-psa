@@ -2,6 +2,7 @@
 
 namespace Tests\Unit\Tactical;
 
+use App\Models\TacticalScript;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalClientException;
 use GuzzleHttp\Client as GuzzleClient;
@@ -11,11 +12,14 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Psr\Http\Message\RequestInterface;
 use Tests\TestCase;
 
 class TacticalClientTaskCrudTest extends TestCase
 {
+    use RefreshDatabase;
+
     /** @var array<int, array{request: RequestInterface}> */
     private array $history = [];
 
@@ -100,15 +104,20 @@ class TacticalClientTaskCrudTest extends TestCase
             'warning_return_codes' => [7],
             'fails_b4_alert' => 2,
         ];
-        // createCheck sits behind the mandatory platform gate (psa-0pb9m):
-        // this transport-shape test passes a cross-platform scriptMeta claim
-        // so the guard clears without a DB, keeping the HTTP contract the
-        // subject under test. Guard refusals are covered in
-        // TacticalCheckPlatformGuardTest.
-        $this->assertSame('Script Check: Detector was added!', $client->createCheck(
-            $checkBody,
-            scriptMeta: ['shell' => 'shell', 'supported_platforms' => []],
-        ));
+        // createCheck sits behind the mandatory platform gate (psa-0pb9m R3):
+        // the guard resolves script metadata ITSELF (there is no caller
+        // parameter), so the synced catalog carries a cross-platform row for
+        // script 102 — no platform is blocked, no membership read happens,
+        // and the HTTP contract stays the subject under test. Guard refusals
+        // are covered in TacticalCheckPlatformGuardTest.
+        TacticalScript::create([
+            'tactical_script_id' => 102,
+            'name' => 'Detector',
+            'shell' => 'shell',
+            'supported_platforms' => [],
+            'synced_at' => now(),
+        ]);
+        $this->assertSame('Script Check: Detector was added!', $client->createCheck($checkBody));
         $this->assertSame('POST', $this->lastRequest()->getMethod());
         $this->assertSame('/checks/', $this->lastRequest()->getUri()->getPath());
         $this->assertSame($checkBody, $this->lastBody());

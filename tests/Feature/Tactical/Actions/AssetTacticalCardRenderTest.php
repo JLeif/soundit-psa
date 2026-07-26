@@ -274,6 +274,9 @@ class AssetTacticalCardRenderTest extends TestCase
     {
         // Staleness gates only the POSITIVE claim; a known-failing count is still a
         // real, useful signal and must keep showing (even without a passing count).
+        // psa-0pb9m R3 (P1): but never ALONE — without passing evidence the
+        // independent coverage fact leads, so the count cannot read as a
+        // normal monitored-but-unhealthy rollup.
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 3,
@@ -284,7 +287,57 @@ class AssetTacticalCardRenderTest extends TestCase
 
         $resp = $this->actingAs($user)->get(route('assets.show', $asset));
 
-        $resp->assertOk()->assertSeeText('3 of 5 checks failing');
+        $resp->assertOk()
+            ->assertSeeText('3 of 5 checks failing')
+            ->assertSeeText('monitoring coverage unknown');
+    }
+
+    public function test_partial_failing_snapshot_states_coverage_unknown_with_the_count(): void
+    {
+        // psa-0pb9m R3 (P1, the blocking card seam): a summary-only snapshot
+        // with SOME but not all checks failing (total=8, failing=1,
+        // passing=null) classifies coverage=unknown, and the card previously
+        // rendered only "1 of 8 checks failing" — a normal health rollup that
+        // never told the operator no passing check has been proven. Both
+        // independent facts must show: the coverage limitation FIRST, the
+        // failing count preserved, and a pointer to the live per-check read.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 1,
+            'checks_total' => 8,
+            'checks_passing' => null,
+            'synced_at' => now()->subMinutes(2), // fresh — freshness must not rescue the coverage claim
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertSeeText('monitoring coverage unknown')
+            ->assertSeeText('1 of 8 checks failing')
+            ->assertSeeText('open Checks for the live per-check result');
+    }
+
+    public function test_partial_failing_with_passing_residue_still_states_coverage_unknown(): void
+    {
+        // psa-0pb9m R3 (P1): same seam with pre-R2 aggregate residue in the
+        // passing column (total=8, failing=1, passing=7). The stored count is
+        // a vendor claim, not evidence — the insight ignores the snapshot
+        // column, so the card must still lead with coverage unknown, never
+        // render a counted pass.
+        $user = User::factory()->create();
+        $asset = $this->healthLineAsset([
+            'checks_failing' => 1,
+            'checks_total' => 8,
+            'checks_passing' => 7, // residue — not evidence
+            'synced_at' => now()->subMinutes(2),
+        ]);
+
+        $resp = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $resp->assertOk()
+            ->assertSeeText('monitoring coverage unknown')
+            ->assertSeeText('1 of 8 checks failing')
+            ->assertDontSeeText('7 of 8 passing');
     }
 
     public function test_all_failing_renders_monitoring_unverified_before_the_count(): void

@@ -148,11 +148,26 @@ class TacticalPlatform
             return ['mismatch' => null, 'reason' => null];
         }
 
-        $reason = self::scriptIncompatibility(
-            $platform,
-            $local->shell,
-            is_array($local->supported_platforms) ? $local->supported_platforms : null,
-        );
+        $shell = is_string($local->shell) && trim($local->shell) !== '' ? $local->shell : null;
+        $platforms = is_array($local->supported_platforms) ? $local->supported_platforms : null;
+
+        // A catalog row carrying NO platform signal (null/blank shell, no
+        // non-blank supported_platforms entry — e.g. upstream omitted `shell`
+        // and the sync stored the honest NULL, psa-0pb9m R3 A5) is NOT
+        // assessable: mismatch=false would claim "assessed and compatible"
+        // from absence.
+        $declaredAny = false;
+        foreach ($platforms ?? [] as $p) {
+            if (is_scalar($p) && trim((string) $p) !== '') {
+                $declaredAny = true;
+                break;
+            }
+        }
+        if ($shell === null && ! $declaredAny) {
+            return ['mismatch' => null, 'reason' => null];
+        }
+
+        $reason = self::scriptIncompatibility($platform, $shell, $platforms);
 
         return ['mismatch' => $reason !== null, 'reason' => $reason];
     }

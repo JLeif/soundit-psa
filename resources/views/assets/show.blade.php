@@ -539,10 +539,18 @@
                                     no check passing — monitoring unverified ({{ $insight->checksFailing }} failing of {{ $insight->checksTotal }})
                                 @endif
                             </span>
+                        @elseif($insight->checksFailing > 0 && $insight->checksCoverage() === \App\Services\Tactical\TacticalFieldMap::COVERAGE_UNKNOWN)
+                            {{-- psa-0pb9m R3 (P1): partial-failing on a summary-only
+                                 snapshot. The failing count is real signal, but no
+                                 passing check has been PROVEN — the independent
+                                 coverage fact comes first, or "1 of 8 failing" reads
+                                 as a normal monitored-but-unhealthy rollup. --}}
+                            <span class="text-warning-emphasis" title="Some checks are failing, and whether any other check actually passes is unknown (the snapshot carries no passing evidence) — open Checks for the live per-check result"><i class="bi bi-question-circle me-1"></i>monitoring coverage unknown — <span class="text-danger fw-semibold">{{ $insight->checksFailing }} of {{ $insight->checksTotal }} checks failing</span>; open Checks for the live per-check result</span>
                         @elseif($insight->checksFailing > 0)
-                            {{-- A known failing count is real, useful signal even
-                                 when the coverage verdict is unknown — staleness/
-                                 unknowns gate only the POSITIVE claims below. --}}
+                            {{-- A known failing count with VERIFIED coverage (an
+                                 explicit pass exists — live-derived insight only;
+                                 snapshots always classify unknown above): a plain
+                                 monitored-but-unhealthy rollup is honest here. --}}
                             <span class="text-danger fw-semibold">{{ $insight->checksFailing }} of {{ $insight->checksTotal }} checks failing</span>
                         @elseif($insight->checksCoverage() === \App\Services\Tactical\TacticalFieldMap::COVERAGE_UNKNOWN)
                             <span class="text-warning-emphasis" title="Checks exist but whether any passes is unknown (snapshot has no passing count) — re-sync or open the checks panel"><i class="bi bi-question-circle me-1"></i>{{ $insight->checksTotal }} checks — coverage unknown</span>

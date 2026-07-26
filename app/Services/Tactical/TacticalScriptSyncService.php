@@ -29,12 +29,29 @@ class TacticalScriptSyncService
                 continue;
             }
 
+            // `shell` is a PLATFORM-COMPATIBILITY SIGNAL consumed by the
+            // check-creation guard and the platform_mismatch annotations — a
+            // missing upstream key must be stored as NULL (unknown) and
+            // logged, never silently defaulted (psa-0pb9m R3 A5: defaulting
+            // absence to 'powershell' turned a drifted response into a usable
+            // compatibility verdict). The guard fails closed on a null-shell,
+            // no-platforms row.
+            $shell = isset($script['shell']) && is_scalar($script['shell']) && trim((string) $script['shell']) !== ''
+                ? (string) $script['shell']
+                : null;
+            if ($shell === null) {
+                Log::warning('[TacticalSync] Script has no shell in getScripts — stored as unknown; the platform guard will refuse it unless supported_platforms says otherwise (upstream drift?)', [
+                    'tactical_script_id' => $scriptId,
+                    'name' => $script['name'] ?? null,
+                ]);
+            }
+
             $tacticalScript = TacticalScript::updateOrCreate(
                 ['tactical_script_id' => $scriptId],
                 [
                     'name' => $script['name'] ?? 'Unknown',
                     'description' => $script['description'] ?? null,
-                    'shell' => $script['shell'] ?? 'powershell',
+                    'shell' => $shell,
                     'category' => $category ?: null,
                     'default_timeout' => $script['default_timeout'] ?? 90,
                     'supported_platforms' => $script['supported_platforms'] ?? null,

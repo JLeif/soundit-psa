@@ -451,20 +451,45 @@ class TacticalCheckPlatformGuardTest extends TestCase
         ]);
     }
 
-    public function test_client_boundary_refuses_script_missing_from_catalog_and_claim(): void
+    public function test_client_boundary_refuses_script_absent_from_catalog_and_live_getscripts(): void
     {
         $this->macFixture();
-        // Script 999 is in neither the local catalog nor a caller claim —
-        // attaching it blind is refused (fail closed), remedy named.
+        // Script 999 is in neither the local catalog nor the vendor's own
+        // getScripts (the guard's live fallback — queued here as an empty
+        // list) — attaching it blind is refused (fail closed), remedy named.
+        // Only the one queued GET is consumed; a POST would blow up the empty
+        // remainder of the mock queue with a different exception.
+
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([])),
+        ]);
 
         $this->expectException(\App\Services\Tactical\TacticalClientException::class);
         $this->expectExceptionMessageMatches('/tactical:sync-scripts/');
+
+        $client->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 999,
+            'name' => 'Uncatalogued script',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_when_uncatalogued_script_metadata_cannot_be_read_live(): void
+    {
+        $this->macFixture();
+        // Script 999 is not in the local catalog and the live getScripts
+        // fallback FAILS (empty mock queue → transport error). A failed read
+        // refuses — it never degrades into "no constraints".
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/could not be read live from Tactical/');
 
         $this->realClient()->createCheck([
             'agent' => 'agent-mac',
             'check_type' => 'script',
             'script' => 999,
-            'name' => 'Uncatalogued script',
+            'name' => 'Unreadable script metadata',
         ]);
     }
 
@@ -530,33 +555,17 @@ class TacticalCheckPlatformGuardTest extends TestCase
         ]);
     }
 
-    public function test_client_boundary_refuses_an_empty_script_meta_claim_with_no_http_sent(): void
-    {
-        // The R2 security drive: scriptMeta=[] previously resolved to
-        // shell=null/supported_platforms=null, an empty blocked set, and
-        // HTTP_SENT. Absence of metadata is not compatibility.
-        $this->macFixture(); // darwin agent
-
-        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
-        $this->expectExceptionMessageMatches('/neither a shell nor any/');
-
-        $this->realClient()->createCheck([
-            'agent' => 'agent-mac',
-            'check_type' => 'script',
-            'script' => 555,
-            'name' => 'Empty meta claim',
-        ], scriptMeta: []);
-    }
-
     public function test_client_boundary_refuses_a_catalog_row_without_platform_signal(): void
     {
         $this->macFixture();
-        // The schema requires a shell string, so the no-signal shape a sync
-        // can actually produce is an EMPTY one — same refusal semantics.
+        // A row whose upstream getScripts entry carried no shell is stored
+        // with the honest NULL (psa-0pb9m R3 A5 — never defaulted to
+        // 'powershell'); with no supported_platforms either, it carries no
+        // usable platform signal and the create refuses.
         TacticalScript::create([
             'tactical_script_id' => 103,
             'name' => 'Signal-less script',
-            'shell' => '',
+            'shell' => null,
             'supported_platforms' => null,
             'synced_at' => now(),
         ]);
@@ -589,22 +598,246 @@ class TacticalCheckPlatformGuardTest extends TestCase
         ]);
     }
 
-    public function test_client_boundary_allows_compatible_create_and_accepts_caller_script_meta(): void
+    public function test_client_boundary_resolves_uncatalogued_script_live_and_allows_compatible_create(): void
     {
         $this->macFixture(); // darwin agent
 
-        // The script is NOT in the local catalog, but the caller supplies the
-        // vendor-sourced meta claim (the provisioner's exact situation right
-        // after creating its script upstream) — darwin-compatible, so the
-        // create goes through and the queued response is consumed.
+        // The script is NOT in the local catalog (e.g. created upstream since
+        // the last sync). The guard resolves its metadata ITSELF from the
+        // vendor's own getScripts row over the same client — never from a
+        // caller claim; createCheck no longer even has a parameter to carry
+        // one (psa-0pb9m R3 A3/S3: a fabricated cross-platform claim for an
+        // uncatalogued script previously sailed straight to POST). The live
+        // row is darwin-compatible, so the create goes through: first queued
+        // response is the getScripts read, second is the POST.
         $result = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['id' => 555, 'name' => 'Shipped macOS check script', 'shell' => 'shell', 'supported_platforms' => ['darwin']],
+            ])),
             new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
         ])->createCheck([
             'agent' => 'agent-mac',
             'check_type' => 'script',
             'script' => 555,
             'name' => 'Shipped macOS check',
-        ], scriptMeta: ['shell' => 'shell', 'supported_platforms' => ['darwin']]);
+        ]);
+
+        $this->assertSame('Script Check was added!', $result);
+    }
+
+    public function test_client_boundary_refuses_uncatalogued_script_whose_live_row_is_incompatible(): void
+    {
+        $this->macFixture(); // darwin agent
+
+        // The R3 A3/S3 drive, closed: for an uncatalogued script the ONLY
+        // metadata source is the vendor's own getScripts row, and that row
+        // says Windows-only — refused. Under the removed scriptMeta parameter
+        // a caller could fabricate {shell: shell, supported_platforms: [all]}
+        // here and reach POST; now there is nothing to fabricate through.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['id' => 555, 'name' => 'Windows-only tool', 'shell' => 'powershell', 'supported_platforms' => ['windows']],
+            ])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/does not include darwin/');
+
+        $client->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 555,
+            'name' => 'Fabrication-proof',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_a_dual_agent_and_policy_target(): void
+    {
+        $this->macFixture();
+        $this->seedLocalScript();
+
+        // The upstream Check model accepts both FKs with no exactly-one
+        // validation — such a row lands in BOTH agentchecks and policychecks,
+        // so a compatible decoy agent must never smuggle an unproven policy
+        // attachment past the guard (psa-0pb9m R3 A3). Refused before any
+        // read or write: the empty mock queue proves no HTTP left the client.
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/BOTH an agent and a policy/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Dual target',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_policy_create_when_related_payload_is_structurally_empty(): void
+    {
+        $this->seedLocalScript(); // powershell → policy proof required
+
+        // The exact R3 S2 reproducer: GET related/ returns 200 {} and GET
+        // agents/ returns 200 [] — previously proven=true, members_checked=0,
+        // then POST. A 200 missing the serializer's fields is drift, and
+        // absence of proof is never zero members: both queued reads are
+        // consumed, then the refusal lands before any write.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode((object) [])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/missing `agents`/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Empty-proof policy check',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_non_script_policy_check_on_the_same_empty_proof_shape(): void
+    {
+        // R3 S3's second probe: a direct NON-SCRIPT policy check with
+        // related={} and agents=[] also reached HTTP_SENT. Same fix, no
+        // script resolution involved.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode((object) [])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/missing `agents`/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'ping',
+            'name' => 'Empty-proof ping check',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_policy_create_when_default_flags_are_not_booleans(): void
+    {
+        $this->seedLocalScript();
+
+        // Type drift on the default-policy flags: the vendor serializer emits
+        // real booleans; a string 'false' is a drifted response, and reading
+        // it loosely could hide a whole-fleet default membership.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Workstations',
+                'agents' => [],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => 'false', 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/`is_default_server_policy` as string/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Drifted flag types',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_policy_create_when_fleet_rows_lack_the_join_keys(): void
+    {
+        $this->seedLocalScript();
+
+        // The policy assigns a server CLIENT, so membership is enumerated by
+        // joining fleet rows on client_name + monitoring_type. A fleet row
+        // missing monitoring_type could belong to the policy invisibly —
+        // membership cannot be COMPLETELY enumerated, so the proof refuses
+        // (psa-0pb9m R3 S2: these rows previously just fell out of the join).
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Acme servers',
+                'agents' => [],
+                'workstation_clients' => [], 'server_clients' => [['id' => 3, 'name' => 'Acme']],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-9', 'hostname' => 'SRV-9', 'plat' => 'windows', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/missing `monitoring_type`/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Unenumerable membership',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_empty_fleet_when_the_synced_snapshot_knows_agents(): void
+    {
+        $this->macFixture(); // the synced snapshot knows one Tactical agent
+        $this->seedLocalScript();
+
+        // The policy has a client assignment but GET agents/ returns zero
+        // rows while the local snapshot knows agents exist — a degraded read
+        // wearing a 200, not an empty fleet. Zero members from missing
+        // evidence must not prove compatibility (psa-0pb9m R3 S2).
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Acme workstations',
+                'agents' => [],
+                'workstation_clients' => [['id' => 3, 'name' => 'Acme']], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/zero agents while the local synced snapshot knows 1/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Degraded fleet read',
+        ]);
+    }
+
+    public function test_client_boundary_allows_zero_member_policy_from_a_structurally_complete_response(): void
+    {
+        $this->seedLocalScript(); // powershell → policy proof required
+
+        // Zero members is acceptable ONLY from an explicitly valid, complete
+        // response: all seven serializer fields present with their runtime
+        // types, collections genuinely empty, flags false. The one fleet row
+        // is not a member (no assignment reaches it), so the Windows-bound
+        // script is safe on this empty policy — the POST goes through.
+        $result = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Empty policy',
+                'agents' => [],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-pc1', 'hostname' => 'PC-01', 'plat' => 'windows', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ])->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Empty-policy check',
+        ]);
 
         $this->assertSame('Script Check was added!', $result);
     }

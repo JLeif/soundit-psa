@@ -330,22 +330,22 @@ class TacticalClient
      * guard (psa-0pb9m revise). This is the one boundary every check creation
      * converges on (MCP executor, provisioner, any future caller), so the
      * wrong-platform invariant lives HERE, not in selected callers: unknown
-     * agent platforms, scripts without verifiable platform metadata, and
-     * provably incompatible scripts are refused before anything is sent
-     * upstream. A platform-bound check on a POLICY target is allowed only on
-     * server-derived membership proof (every current member agent on a
-     * compatible platform) — there is no caller-assertable override.
-     *
-     * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
-     *                                                                                             Optional vendor-sourced script metadata claim (e.g. an upstream
-     *                                                                                             getScripts row) — used when the local catalog has not synced the
-     *                                                                                             script yet. Null resolves from the local catalog, failing closed.
+     * agent platforms, scripts without verifiable platform metadata, dual
+     * agent+policy targets, and provably incompatible scripts are refused
+     * before anything is sent upstream. A platform-bound check on a POLICY
+     * target is allowed only on server-derived membership proof (every
+     * current member agent on a compatible platform, from a structurally
+     * complete membership read) — there is no caller-assertable override, and
+     * deliberately no parameter through which a caller can supply script
+     * metadata: the guard resolves it itself from the synced catalog or a
+     * live getScripts read (psa-0pb9m R3 — a caller claim is assertion, not
+     * evidence).
      *
      * @throws TacticalClientException when the guard refuses (nothing sent).
      */
-    public function createCheck(array $body, ?array $scriptMeta = null): mixed
+    public function createCheck(array $body): mixed
     {
-        TacticalCheckPlatformGuard::assertSafe($body, $scriptMeta, $this);
+        TacticalCheckPlatformGuard::assertSafe($body, $this);
 
         return $this->post('checks/', $body);
     }

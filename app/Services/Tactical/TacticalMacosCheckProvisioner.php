@@ -138,9 +138,11 @@ class TacticalMacosCheckProvisioner
 
             if ($apply) {
                 try {
-                    // The scriptMeta claim mirrors the shipped definition, so
-                    // the client-boundary platform guard assesses the same
-                    // vendor truth we just provisioned.
+                    // The client-boundary platform guard resolves the script's
+                    // constraints itself from the local synced catalog — the
+                    // step-3 upsertLocalCatalogRow() above ran before this
+                    // loop, so the just-provisioned script is already there
+                    // (no caller claim exists, or is accepted — psa-0pb9m R3).
                     $this->client->createCheck([
                         'agent' => (string) $agent->agent_id,
                         'check_type' => 'script',
@@ -151,9 +153,6 @@ class TacticalMacosCheckProvisioner
                         'success_return_codes' => [0],
                         'info_return_codes' => [],
                         'warning_return_codes' => [],
-                    ], scriptMeta: [
-                        'shell' => self::SCRIPT_SHELL,
-                        'supported_platforms' => self::SCRIPT_PLATFORMS,
                     ]);
                 } catch (\Throwable $e) {
                     $errors[] = "Check create failed for '{$agent->hostname}': ".mb_substr($e->getMessage(), 0, 150);

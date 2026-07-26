@@ -145,14 +145,15 @@ class TacticalMacosCheckProvisionerTest extends TestCase
             ['check_type' => 'script', 'script' => 900, 'id' => 55],
         ]);
         $tactical->shouldReceive('getAgentChecks')->once()->with('agent-mac-2')->andReturn([]);
-        $tactical->shouldReceive('createCheck')->once()->withArgs(function (array $body, ?array $scriptMeta = null): bool {
-            // The guarded client call carries the vendor-meta claim so the
-            // platform gate assesses the just-created script correctly.
+        $tactical->shouldReceive('createCheck')->once()->withArgs(function (array $body): bool {
+            // No metadata claim travels with the call (psa-0pb9m R3): the
+            // client-boundary guard resolves the just-provisioned script from
+            // the local catalog row upserted before this create (asserted
+            // below).
             return $body['agent'] === 'agent-mac-2'
                 && $body['check_type'] === 'script'
                 && $body['script'] === 900
-                && $body['success_return_codes'] === [0]
-                && $scriptMeta === ['shell' => 'shell', 'supported_platforms' => ['darwin']];
+                && $body['success_return_codes'] === [0];
         })->andReturn('added');
 
         $result = $this->provisioner($tactical)->provision(apply: true);

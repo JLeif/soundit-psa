@@ -38,21 +38,12 @@ class TacticalSchemaDriftTest extends TestCase
      */
     private const IMPLICIT_PK = 'id';
 
-    /**
-     * The policies/{pk}/related/ fields the policy-membership proof consumes
-     * (TacticalCheckPlatformGuard::provePolicyMembership — psa-0pb9m R2).
-     *
-     * @var string[]
-     */
-    private const EXPECTED_POLICY_RELATED_FIELDS = [
-        'agents',
-        'workstation_clients',
-        'server_clients',
-        'workstation_sites',
-        'server_sites',
-        'is_default_server_policy',
-        'is_default_workstation_policy',
-    ];
+    // The policies/{pk}/related/ fields the policy-membership proof consumes
+    // are NOT re-listed here: the guard's own runtime-REQUIRED contract
+    // (TacticalCheckPlatformGuard::REQUIRED_RELATED_LIST_FIELDS /
+    // REQUIRED_RELATED_FLAG_FIELDS — psa-0pb9m R3) is asserted against the
+    // captured producer directly, so the list the guard refuses on and the
+    // list proven against the vendor cannot drift apart.
 
     /**
      * The agents-list fields the membership proof resolves platforms and
@@ -340,12 +331,22 @@ class TacticalSchemaDriftTest extends TestCase
 
     public function test_policy_membership_proof_fields_exist_in_the_vendors_producers(): void
     {
+        // The lists asserted here are the guard's own RUNTIME-REQUIRED
+        // contract (psa-0pb9m R3): provePolicyMembership refuses a related
+        // payload missing any of these fields (or carrying them mistyped), so
+        // proving the same constants against the captured vendor producer
+        // guarantees the refusal never fires on a healthy upstream — and that
+        // upstream dropping a field turns up HERE, not as a silent [].
         $related = $this->producerFields('policy_related_serializer_fields');
-        foreach (self::EXPECTED_POLICY_RELATED_FIELDS as $field) {
+        $required = array_merge(
+            \App\Services\Tactical\TacticalCheckPlatformGuard::REQUIRED_RELATED_LIST_FIELDS,
+            \App\Services\Tactical\TacticalCheckPlatformGuard::REQUIRED_RELATED_FLAG_FIELDS,
+        );
+        foreach ($required as $field) {
             $this->assertContains(
                 $field,
                 $related,
-                "`{$field}` is not in the vendor's PolicyRelatedSerializer Meta.fields — the policy membership proof (TacticalCheckPlatformGuard) would silently weaken.",
+                "`{$field}` is not in the vendor's PolicyRelatedSerializer Meta.fields — the guard REQUIRES it at runtime and would refuse every healthy policy create.",
             );
         }
 
@@ -357,6 +358,12 @@ class TacticalSchemaDriftTest extends TestCase
         $fleet = $this->producerFields('agent_table_serializer_fields');
         foreach (self::EXPECTED_MEMBERSHIP_AGENT_FIELDS as $field) {
             $this->assertContains($field, $fleet, "`{$field}` is not in the vendor's agents-list serializer — membership platform resolution would silently weaken.");
+        }
+
+        // The fleet join keys the guard demands on every row when a
+        // client/site/default assignment exists — same runtime↔vendor binding.
+        foreach (\App\Services\Tactical\TacticalCheckPlatformGuard::FLEET_JOIN_FIELDS as $field) {
+            $this->assertContains($field, $fleet, "`{$field}` is not in the vendor's agents-list serializer — the guard requires it on every fleet row for membership joins and would refuse every healthy policy create.");
         }
     }
 }
