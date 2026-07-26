@@ -1632,9 +1632,10 @@ class StaffTacticalAdminToolExecutor
         // check whose script cannot run on the target platform fails on 100%
         // of executions forever — it manufactures broken coverage, not
         // monitoring. These pre-checks produce the audited, surface-friendly
-        // refusals; TacticalClient::createCheck() enforces the same invariant
-        // as the mandatory boundary (TacticalCheckPlatformGuard), so no caller
-        // path can bypass it.
+        // refusals; the mandatory boundary (TacticalCheckPlatformGuard) is
+        // enforced at the TacticalClient transport seam — every POST that
+        // resolves to checks/, not just createCheck() — so no caller path
+        // can bypass it (psa-0pb9m R5).
         $scriptRow = is_array($resolvedScript['script'] ?? null) ? $resolvedScript['script'] : [];
         $scriptShell = is_scalar($scriptRow['shell'] ?? null) ? (string) $scriptRow['shell'] : null;
         $scriptPlatforms = is_array($scriptRow['supported_platforms'] ?? null) ? $scriptRow['supported_platforms'] : null;

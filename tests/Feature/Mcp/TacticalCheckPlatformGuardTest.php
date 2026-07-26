@@ -36,9 +36,12 @@ use Tests\TestCase;
  * compatible platform. The R1 acknowledge_platform_risk boolean is GONE
  * (psa-0pb9m R2 HIGH): a caller-assertable claim was not evidence, and an AI
  * caller could simply retry with it set. The same invariant is enforced again
- * at the shared TacticalClient::createCheck boundary
- * (TacticalCheckPlatformGuard) so no caller path can bypass it — covered by
- * the client-boundary tests at the bottom of this file.
+ * at the shared TacticalClient TRANSPORT seam — post() asserts the guard on
+ * every request that resolves to checks/, with createCheck() as the named
+ * front door (psa-0pb9m R5: guarding only createCheck() left raw post() as a
+ * bypass) — so no caller path can reach the upstream create unguarded.
+ * Covered by the client-boundary and raw-transport tests at the bottom of
+ * this file.
  */
 class TacticalCheckPlatformGuardTest extends TestCase
 {
@@ -403,10 +406,15 @@ class TacticalCheckPlatformGuardTest extends TestCase
 
     // ── Client-boundary enforcement (TacticalCheckPlatformGuard) ─────────────
     // The MCP pre-checks above are defence in depth; the MANDATORY gate lives
-    // where every check creation converges: TacticalClient::createCheck. These
-    // tests drive a REAL client over a mock transport with an EMPTY response
-    // queue — if the guard let the call through, Guzzle's MockHandler would
-    // throw "queue is empty", so a passing refusal proves NOTHING was sent.
+    // where every check creation converges: the TacticalClient TRANSPORT —
+    // post() asserts the guard on every request that resolves to checks/,
+    // and createCheck() is the named front door that delegates there
+    // (psa-0pb9m R5: guarding only createCheck() left raw post() as a
+    // bypass). These tests drive a REAL client over a mock transport with an
+    // EMPTY response queue — if the guard let the call through, Guzzle's
+    // MockHandler would throw "queue is empty", so a passing refusal proves
+    // NOTHING was sent. The raw-transport tests further down keep a handle on
+    // the MockHandler and assert the queued write response is NEVER consumed.
 
     private function realClient(array $responses = []): TacticalClient
     {
@@ -1010,6 +1018,186 @@ class TacticalCheckPlatformGuardTest extends TestCase
             'check_type' => 'script',
             'script' => 102,
             'name' => 'Empty-policy check',
+        ]);
+
+        $this->assertSame('Script Check was added!', $result);
+    }
+
+    // ── Raw-transport seam enforcement (psa-0pb9m R5) ────────────────────────
+    // R5 proved the guard-inside-createCheck() arrangement left the generic
+    // public post() as a second write seam: a raw post('checks/', …) reached
+    // HTTP with no catalog/platform evidence. The guard now runs inside the
+    // transport itself for every POST that resolves to checks/, so the
+    // "future caller cannot bypass" claim is mechanical, not conventional.
+    // These tests keep a handle on the MockHandler and assert the queued
+    // would-be write response is NEVER consumed on refusal.
+
+    /** @return array{0: TacticalClient, 1: \GuzzleHttp\Handler\MockHandler} */
+    private function realClientWithMock(array $responses): array
+    {
+        $mock = new \GuzzleHttp\Handler\MockHandler($responses);
+
+        $client = new TacticalClient(new \GuzzleHttp\Client([
+            'base_uri' => 'https://tactical.example.test/',
+            'handler' => \GuzzleHttp\HandlerStack::create($mock),
+            'headers' => ['X-API-KEY' => 'k', 'Content-Type' => 'application/json'],
+        ]));
+
+        return [$client, $mock];
+    }
+
+    public function test_raw_transport_post_to_checks_with_no_evidence_is_refused_before_any_write(): void
+    {
+        // The exact R5 architecture repro, closed: a real client's public
+        // post('checks/', …) — around createCheck() entirely — with a policy
+        // target and NO catalog/platform evidence (script 102 is in neither
+        // the local catalog nor a readable live getScripts; the empty queue
+        // fails the live read). Previously this sent HTTP; the transport-seam
+        // guard now refuses with ITS message ("could not be read live"), not
+        // a POST transport error — the write never went out.
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/could not be read live from Tactical/');
+
+        $this->realClient()->post('checks/', [
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Raw transport bypass',
+        ]);
+    }
+
+    public function test_raw_transport_post_to_checks_never_consumes_the_write_when_membership_proof_fails(): void
+    {
+        $this->seedLocalScript(); // powershell → darwin/linux blocked, proof required
+
+        // Raw post('checks/', …) with the would-be write response queued
+        // LAST: the transport-seam guard consumes exactly the two membership
+        // reads, meets the darwin member, and refuses — the write response is
+        // still sitting in the mock queue, machine proof that no HTTP write
+        // was consumed through the raw route.
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Workstations',
+                'agents' => [['id' => 2, 'hostname' => 'MAC-01', 'agent_id' => 'agent-mac', 'client' => 'Acme', 'site' => 'Main']],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-mac', 'hostname' => 'MAC-01', 'plat' => 'darwin', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ]);
+
+        try {
+            $client->post('checks/', [
+                'policy' => 7,
+                'check_type' => 'script',
+                'script' => 102,
+                'name' => 'Raw policy check',
+            ]);
+            $this->fail('raw post(checks/) must be refused by the transport-seam guard');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('MAC-01', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write response must never be consumed through the raw route');
+    }
+
+    public function test_raw_transport_post_to_checks_refuses_on_local_evidence_with_zero_http(): void
+    {
+        $this->macFixture();      // darwin agent in the synced snapshot
+        $this->seedLocalScript(); // powershell script 102 in the synced catalog
+
+        // Agent-target raw post: the guard resolves the platform and the
+        // script's constraints entirely from local server-derived state and
+        // refuses before ANY request — the single queued response (the
+        // would-be write) survives untouched: zero HTTP consumed.
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ]);
+
+        try {
+            $client->post('checks/', [
+                'agent' => 'agent-mac',
+                'check_type' => 'script',
+                'script' => 102,
+                'name' => 'Raw agent check',
+            ]);
+            $this->fail('raw post(checks/) must be refused by the transport-seam guard');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('powershell', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'no HTTP at all may be consumed when the refusal resolves locally');
+    }
+
+    public function test_raw_transport_guard_covers_check_endpoint_spelling_variants(): void
+    {
+        // The matcher normalizes the endpoint the same way PSR-7 does when
+        // the request URI is built — query stripped, dot segments removed,
+        // slashes trimmed — so no spelling of the checks collection slips an
+        // unguarded creation past the seam. The dual-target payload refuses
+        // before any read, so each variant proves itself with an untouched
+        // one-response queue.
+        foreach (['checks', '/checks/', 'checks/?dry_run=1', 'foo/../checks/'] as $endpoint) {
+            [$client, $mock] = $this->realClientWithMock([
+                new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+            ]);
+
+            try {
+                $client->post($endpoint, [
+                    'agent' => 'agent-mac',
+                    'policy' => 7,
+                    'check_type' => 'script',
+                    'script' => 102,
+                    'name' => 'Variant probe',
+                ]);
+                $this->fail("post('{$endpoint}', …) must be guarded");
+            } catch (\App\Services\Tactical\TacticalClientException $e) {
+                $this->assertStringContainsString('BOTH an agent and a policy', $e->getMessage(), $endpoint);
+            }
+
+            $this->assertSame(1, $mock->count(), "no HTTP may be consumed for '{$endpoint}'");
+        }
+    }
+
+    public function test_raw_transport_post_to_non_check_endpoints_is_not_guarded(): void
+    {
+        // The seam guards exactly the checks collection. Other collections
+        // and checks/{id}/ sub-paths are not check creation — they pass
+        // through the generic transport unchanged, each consuming its queued
+        // response.
+        foreach (['tasks/', 'checks/123/reset/'] as $endpoint) {
+            [$client, $mock] = $this->realClientWithMock([
+                new \GuzzleHttp\Psr7\Response(200, [], json_encode('ok')),
+            ]);
+
+            $this->assertSame('ok', $client->post($endpoint, ['anything' => true]), $endpoint);
+            $this->assertSame(0, $mock->count(), $endpoint);
+        }
+    }
+
+    public function test_raw_transport_post_to_checks_with_full_evidence_still_creates(): void
+    {
+        $this->macFixture(); // darwin agent
+        TacticalScript::create([
+            'tactical_script_id' => 555,
+            'name' => 'Mac health',
+            'shell' => 'shell',
+            'synced_at' => now(),
+        ]);
+
+        // Enforcement, not prohibition: a raw post('checks/', …) whose
+        // evidence proves compatibility passes the seam guard and creates —
+        // identical semantics to createCheck(), because it IS the same seam.
+        $result = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ])->post('checks/', [
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 555,
+            'name' => 'Guarded raw create',
         ]);
 
         $this->assertSame('Script Check was added!', $result);

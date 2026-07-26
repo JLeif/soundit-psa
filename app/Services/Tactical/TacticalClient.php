@@ -7,6 +7,7 @@ use App\Support\TacticalConfig;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\UriResolver;
 use Illuminate\Support\Facades\Log;
 use Psr\Http\Message\RequestInterface;
 
@@ -155,8 +156,28 @@ class TacticalClient
         return json_decode((string) $response->getBody(), true) ?? [];
     }
 
+    /**
+     * POST a Tactical endpoint.
+     *
+     * THE MANDATORY CHECK-CREATION PLATFORM GUARD IS ENFORCED HERE (psa-0pb9m
+     * R5). Every POST whose endpoint resolves to the checks/ collection passes
+     * TacticalCheckPlatformGuard::assertSafe() before any HTTP is attempted —
+     * whichever wrapper, subclass, or future caller composed the request. R5
+     * proved that guarding only the named createCheck() wrapper left this
+     * generic transport as a second public write seam: a raw
+     * post('checks/', …) reached HTTP with no catalog/platform evidence. The
+     * transport is where every check-creating write CONVERGES (the psa-mocr
+     * choke-point rule), so enforcing the invariant here is what makes
+     * "a future caller cannot bypass it" mechanically true instead of a
+     * caller convention. The guard call sits OUTSIDE the try block: a refusal
+     * is a refusal, never re-wrapped as an HTTP failure.
+     */
     public function post(string $endpoint, array $body = []): mixed
     {
+        if (self::targetsCheckCreation($endpoint)) {
+            TacticalCheckPlatformGuard::assertSafe($body, $this);
+        }
+
         try {
             $response = $this->http->request('POST', $endpoint, [
                 'json' => $body,
@@ -171,6 +192,29 @@ class TacticalClient
         }
 
         return json_decode((string) $response->getBody(), true) ?? [];
+    }
+
+    /**
+     * Whether $endpoint resolves to Tactical's check-creation collection
+     * endpoint (POST checks/), for the transport-seam platform guard above.
+     *
+     * Matches on the NORMALIZED path — query/fragment stripped, dot segments
+     * removed exactly as the PSR-7 resolver removes them when Guzzle builds
+     * the request URI, surrounding slashes trimmed — so spelling variants
+     * ('checks', '/checks/', 'checks/?dry=1', 'foo/../checks/') cannot carry
+     * an unguarded creation past the seam. Sub-paths (checks/{id}/…) are not
+     * creation and do not match. An endpoint with no parseable path cannot
+     * resolve to checks/ at all (PSR-7's own Uri parse refuses what parse_url
+     * refuses, so no request is buildable from it either).
+     */
+    private static function targetsCheckCreation(string $endpoint): bool
+    {
+        $path = parse_url($endpoint, PHP_URL_PATH);
+        if (! is_string($path) || $path === '') {
+            return false;
+        }
+
+        return trim(UriResolver::removeDotSegments($path), '/') === 'checks';
     }
 
     /**
@@ -326,27 +370,28 @@ class TacticalClient
     }
 
     /**
-     * Create a Tactical check (POST checks/) — behind the MANDATORY platform
-     * guard (psa-0pb9m revise). This is the one boundary every check creation
-     * converges on (MCP executor, provisioner, any future caller), so the
-     * wrong-platform invariant lives HERE, not in selected callers: unknown
-     * agent platforms, scripts without verifiable platform metadata, dual
-     * agent+policy targets, and provably incompatible scripts are refused
-     * before anything is sent upstream. A platform-bound check on a POLICY
-     * target is allowed only on server-derived membership proof (every
-     * current member agent on a compatible platform, from a structurally
-     * complete membership read) — there is no caller-assertable override, and
-     * deliberately no parameter through which a caller can supply script
-     * metadata: the guard resolves it itself from the synced catalog or a
-     * live getScripts read (psa-0pb9m R3 — a caller claim is assertion, not
-     * evidence).
+     * Create a Tactical check (POST checks/) — the named front door for the
+     * MANDATORY platform guard (psa-0pb9m revise). Enforcement itself lives
+     * one seam below, in post(): every POST that resolves to checks/ passes
+     * TacticalCheckPlatformGuard::assertSafe() before any HTTP, so no route —
+     * this wrapper, a future wrapper, or a raw post('checks/', …) — reaches
+     * the upstream create without server-derived platform evidence (psa-0pb9m
+     * R5: guarding only this wrapper left the generic transport as a second,
+     * unguarded public write seam). What the guard refuses: unknown agent
+     * platforms, scripts without verifiable platform metadata, dual
+     * agent+policy targets, and provably incompatible scripts. A
+     * platform-bound check on a POLICY target is allowed only on
+     * server-derived membership proof (every current member agent on a
+     * compatible platform, from a structurally complete membership read) —
+     * there is no caller-assertable override, and deliberately no parameter
+     * through which a caller can supply script metadata: the guard resolves
+     * it itself from the synced catalog or a live getScripts read (psa-0pb9m
+     * R3 — a caller claim is assertion, not evidence).
      *
      * @throws TacticalClientException when the guard refuses (nothing sent).
      */
     public function createCheck(array $body): mixed
     {
-        TacticalCheckPlatformGuard::assertSafe($body, $this);
-
         return $this->post('checks/', $body);
     }
 

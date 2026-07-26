@@ -9,9 +9,13 @@ use App\Models\TacticalScript;
  * The MANDATORY platform-safety gate for Tactical check creation (psa-0pb9m
  * revise). A wrong-platform check fails on 100% of runs forever and
  * manufactures broken coverage — the exact defect this bead removes — so the
- * invariant is enforced where every check creation converges
- * (TacticalClient::createCheck, the psa-mocr choke-point rule), not in
- * selected callers. Per-surface pre-checks (StaffTacticalAdminToolExecutor,
+ * invariant is enforced where every check creation converges: the
+ * TacticalClient TRANSPORT itself (post() asserts this guard on every
+ * request that resolves to checks/ — the psa-mocr choke-point rule;
+ * createCheck() is the named front door that delegates there). R5 proved
+ * that enforcing only inside createCheck() left the generic public post()
+ * as a second write seam a raw caller could drive with no evidence.
+ * Per-surface pre-checks (StaffTacticalAdminToolExecutor,
  * TacticalMacosCheckProvisioner) remain as defence in depth and produce the
  * friendlier audited refusals; THIS gate is what makes bypass impossible for
  * any future caller.
