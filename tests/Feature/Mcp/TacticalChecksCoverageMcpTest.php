@@ -125,11 +125,14 @@ class TacticalChecksCoverageMcpTest extends TestCase
         $this->assertSame('none', $mac2['checks_coverage']);
         $this->assertStringContainsStringIgnoringCase('unmonitored', $mac2['checks_summary']);
 
-        // Healthy device: verified via EXPLICIT passing evidence, annotated.
+        // A residual checks_passing value on the row is NOT evidence (R2: the
+        // column's only historical producer was the vendor aggregate that
+        // counts never-reporting checks as passing) — the snapshot can never
+        // read verified; only the live per-check read can.
         $pc1 = $byHost['PC-01'];
-        $this->assertSame('verified', $pc1['checks_coverage']);
-        $this->assertSame(7, $pc1['checks_passing']);
-        $this->assertSame('1 failing / 8 total (7 passing)', $pc1['checks_summary']);
+        $this->assertSame('unknown', $pc1['checks_coverage']);
+        $this->assertNull($pc1['checks_passing'], 'summary-derived residue must not be echoed as evidence');
+        $this->assertStringContainsStringIgnoringCase('passing count unavailable', $pc1['checks_summary']);
 
         // Unknown counts stay unknown (null summary), never default-clean.
         $pc2 = $byHost['PC-02'];
@@ -148,16 +151,53 @@ class TacticalChecksCoverageMcpTest extends TestCase
         $this->assertFalse($mac1['stale']);
 
         // Payload-level envelope: note + per-state tallies (fleet scan
-        // support) + the snapshot freshness envelope.
+        // support) + the snapshot freshness envelope. The stale PC-03 row is
+        // QUARANTINED into the 'stale' bucket — its last-known coverage does
+        // not count as current (R2: stale data must not pass as a tally
+        // entry) — and the envelope fails CLOSED: data_as_of is the OLDEST
+        // row stamp and data_stale propagates any-stale, so PC-03 cannot hide
+        // under its siblings' fresh stamps.
         $this->assertIsString($payload['coverage_note']);
         $this->assertStringContainsStringIgnoringCase('unmonitored', $payload['coverage_note']);
         $this->assertSame(
-            ['verified' => 1, 'unverified' => 1, 'none' => 1, 'unknown' => 2],
+            ['verified' => 0, 'unverified' => 1, 'none' => 1, 'unknown' => 2, 'stale' => 1],
             $payload['coverage_summary'],
         );
-        $this->assertNotNull($payload['data_as_of']);
-        $this->assertFalse($payload['data_stale']);
+        $this->assertSame($pc3['synced_at'], $payload['data_as_of'], 'data_as_of is the OLDEST row stamp, never the newest');
+        $this->assertTrue($payload['data_stale'], 'one stale row fails the whole envelope closed');
         $this->assertStringContainsStringIgnoringCase('snapshot', $payload['freshness_note']);
+        $this->assertStringContainsStringIgnoringCase('oldest', $payload['freshness_note']);
+    }
+
+    public function test_list_devices_envelope_is_fresh_only_when_every_row_is_fresh(): void
+    {
+        $this->configureTactical();
+        $client = Client::factory()->create(['name' => 'Acme']);
+        foreach ([['PC-10', now()->subHours(2)], ['PC-11', now()->subHours(4)]] as [$host, $syncedAt]) {
+            $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => $host]);
+            TacticalAsset::create([
+                'asset_id' => $asset->id, 'agent_id' => 'agent-'.$host, 'hostname' => $host,
+                'os' => 'Windows 11 Pro', 'plat' => 'windows', 'status' => 'online',
+                'checks_total' => 2, 'checks_failing' => 0, 'synced_at' => $syncedAt,
+            ]);
+        }
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldNotReceive('getAgents');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $token = $this->token(['tactical_list_devices']);
+        $payload = $this->decodedResult($this->callTool($token, 'tactical_list_devices', [
+            'client_id' => $client->id,
+        ]));
+
+        $this->assertFalse($payload['data_stale']);
+        // Oldest of the two fresh rows — the freshest the WHOLE reading can claim.
+        $this->assertSame(
+            collect($payload['devices'])->firstWhere('hostname', 'PC-11')['synced_at'],
+            $payload['data_as_of'],
+        );
+        $this->assertSame(0, $payload['coverage_summary']['stale']);
     }
 
     public function test_get_device_checks_envelope_flags_platform_mismatch_for_wrong_platform_script(): void
@@ -456,7 +496,126 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $this->assertSame('darwin', $payload['platform']);
         $this->assertSame('unverified', $payload['checks_coverage']);
+        $this->assertNull($payload['checks_passing'], 'the summary dict never yields passing evidence');
         $this->assertStringContainsStringIgnoringCase('all checks failing', $payload['checks_summary']);
+    }
+
+    public function test_the_vendors_never_run_passing_claim_is_unknown_on_the_live_dict_read(): void
+    {
+        // The producer's documented never-run shape (calculate_agent_checks,
+        // agents/utils.py @ the pinned commit: a check with NO CheckResult row
+        // counts as passing): {total: 1, passing: 1, failing: 0}. The vendor
+        // CLAIMS a pass the check never produced — the dict read must classify
+        // UNKNOWN, never verified (psa-0pb9m R2, all four lenses).
+        $this->configureTactical();
+
+        $client = Client::factory()->create(['name' => 'Acme']);
+        $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-08']);
+        TacticalAsset::create([
+            'asset_id' => $asset->id,
+            'agent_id' => 'agent-mac8',
+            'hostname' => 'MAC-08',
+            'os' => 'Darwin 23.6.0 arm64',
+            'plat' => 'darwin',
+            'status' => 'online',
+            'synced_at' => now(),
+        ]);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getAgent')->once()->andReturn([
+            'hostname' => 'MAC-08',
+            'status' => 'online',
+            'plat' => 'darwin',
+            'operating_system' => 'Darwin 23.6.0 arm64',
+            'checks' => ['total' => 1, 'passing' => 1, 'failing' => 0, 'warning' => 0, 'info' => 0, 'has_failing_checks' => false],
+            'logged_in_username' => 'None',
+            'needs_reboot' => false,
+        ]);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $token = $this->token(['tactical_get_device']);
+        $payload = $this->decodedResult($this->callTool($token, 'tactical_get_device', [
+            'client_id' => $client->id,
+            'hostname' => 'MAC-08',
+        ]));
+
+        $this->assertSame('unknown', $payload['checks_coverage']);
+        $this->assertNull($payload['checks_passing']);
+        $this->assertStringContainsStringIgnoringCase('passing count unavailable', $payload['checks_summary']);
+    }
+
+    public function test_the_vendors_never_run_passing_claim_cannot_render_verified_anywhere_after_sync(): void
+    {
+        // The product reviewer's required end-to-end regression (psa-0pb9m
+        // R2): start from the vendor's documented never-run summary shape,
+        // carry it through the REAL device sync, and prove the snapshot
+        // consumers — the MCP list, the insight snapshot fallback, the triage
+        // context fallback, and the asset card — cannot render verified or
+        // all-passing.
+        $this->configureTactical();
+
+        $client = Client::factory()->create(['name' => 'Acme', 'tactical_site_id' => 'Acme|Main']);
+        $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-09']);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getAgents')->once()->andReturn([
+            [
+                'agent_id' => 'agent-mac9',
+                'hostname' => 'MAC-09',
+                'client_name' => 'Acme',
+                'site_name' => 'Main',
+                'plat' => 'darwin',
+                'operating_system' => 'Darwin 23.6.0 arm64',
+                'monitoring_type' => 'workstation',
+                'status' => 'online',
+                'last_seen' => now()->toIso8601String(),
+                // The vendor's never-run shape: the ONE check has no result
+                // row, and calculate_agent_checks counts it as passing.
+                'checks' => ['total' => 1, 'passing' => 1, 'failing' => 0, 'warning' => 0, 'info' => 0, 'has_failing_checks' => false],
+            ],
+        ]);
+        // Every LIVE per-device read fails — the surfaces below must answer
+        // from the snapshot, where no passing evidence can exist.
+        $tactical->shouldReceive('getAgent')->andThrow(new \App\Services\Tactical\TacticalClientException('unreachable'));
+        $tactical->shouldReceive('getAgentChecks')->andThrow(new \App\Services\Tactical\TacticalClientException('unreachable'));
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        app(\App\Services\Tactical\TacticalDeviceSyncService::class)->syncDevices();
+
+        // The sync persisted NO passing evidence from the vendor claim.
+        $row = \App\Models\TacticalAsset::where('agent_id', 'agent-mac9')->firstOrFail();
+        $this->assertSame(1, $row->checks_total);
+        $this->assertSame(0, $row->checks_failing);
+        $this->assertNull($row->checks_passing, 'the vendor aggregate must never persist as passing evidence');
+
+        // 1. The MCP fleet list: unknown, never verified/all-passing.
+        $token = $this->token(['tactical_list_devices', 'tactical_get_endpoint_insight']);
+        $list = $this->decodedResult($this->callTool($token, 'tactical_list_devices', ['client_id' => $client->id]));
+        $this->assertSame('unknown', $list['devices'][0]['checks_coverage']);
+        $this->assertNull($list['devices'][0]['checks_passing']);
+        $this->assertSame(0, $list['coverage_summary']['verified']);
+
+        // 2. Endpoint insight, snapshot fallback (live reads unreachable).
+        $insight = $this->decodedResult($this->callTool($token, 'tactical_get_endpoint_insight', [
+            'client_id' => $client->id,
+            'hostname' => 'MAC-09',
+        ]))['insight'];
+        $this->assertSame('unknown', $insight['checks_coverage']);
+        $this->assertNull($insight['checks_passing']);
+
+        // 3. The triage context fallback speaks the same truth in prose: no
+        // numeric passing claim, coverage stated unknown.
+        $block = app(\App\Services\Tactical\TacticalContextProvider::class)->forAsset($asset->fresh());
+        $this->assertNotNull($block);
+        $this->assertDoesNotMatchRegularExpression('/\d+ passing/i', $block->text, 'the vendor claim must not surface as a counted pass');
+        $this->assertStringContainsStringIgnoringCase('coverage unknown', $block->text);
+
+        // 4. The asset card renders the unknown line, never an all-clear.
+        $user = \App\Models\User::factory()->create();
+        $page = $this->actingAs($user)->get(route('assets.show', $asset));
+        $page->assertOk();
+        $page->assertSeeText('health not verified');
+        $page->assertDontSeeText('all passing');
     }
 
     public function test_get_device_dict_counts_warning_severity_failures_and_requires_passing_evidence(): void
@@ -500,8 +659,8 @@ class TacticalChecksCoverageMcpTest extends TestCase
         ]));
 
         $this->assertSame(2, $payload['checks_failing']);
-        $this->assertSame(0, $payload['checks_passing']);
-        $this->assertSame('unverified', $payload['checks_coverage']);
+        $this->assertNull($payload['checks_passing'], 'the summary dict never yields passing evidence');
+        $this->assertSame('unverified', $payload['checks_coverage'], 'all-failing still proves nothing passes');
         $this->assertStringContainsStringIgnoringCase('all checks failing', $payload['checks_summary']);
     }
 }

@@ -194,7 +194,21 @@ class TacticalCheckCrudPhase4Test extends TestCase
             'success_return_codes' => [0],
             'info_return_codes' => [10],
             'warning_return_codes' => [7],
-        ], Mockery::type('array'), true)->andReturn('Script Check: HelpDesk Buttons Detector was added!');
+        ], Mockery::type('array'))->andReturn('Script Check: HelpDesk Buttons Detector was added!');
+        // The fixture script is Windows-bound, so the policy create requires
+        // SERVER-DERIVED membership proof (psa-0pb9m R2): the executor reads
+        // the policy's related payload + the fleet list and every member must
+        // be provably Windows before createCheck fires.
+        $tactical->shouldReceive('getAutomationPolicyRelated')->with(7)->andReturn([
+            'pk' => 7, 'name' => 'Workstations',
+            'agents' => [['id' => 1, 'hostname' => 'PC-01', 'agent_id' => 'agent-pc1', 'client' => 'Acme', 'site' => 'Main']],
+            'workstation_clients' => [], 'server_clients' => [],
+            'workstation_sites' => [], 'server_sites' => [],
+            'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+        ]);
+        $tactical->shouldReceive('getAgents')->andReturn([
+            ['agent_id' => 'agent-pc1', 'hostname' => 'PC-01', 'plat' => 'windows', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+        ]);
         $tactical->shouldReceive('getPolicyChecks')->once()->with(7)->andReturn([
             [
                 'id' => 212,
@@ -222,10 +236,6 @@ class TacticalCheckCrudPhase4Test extends TestCase
             'success_return_codes' => [0],
             'info_return_codes' => [10],
             'warning_return_codes' => [7],
-            // The fixture script is Windows-bound, so the policy create needs
-            // the explicit pre-write acknowledgement (psa-0pb9m revise) — the
-            // refusal path is pinned in TacticalCheckPlatformGuardTest.
-            'acknowledge_platform_risk' => true,
         ]);
 
         $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
@@ -283,7 +293,7 @@ class TacticalCheckCrudPhase4Test extends TestCase
             'success_return_codes' => [0],
             'info_return_codes' => [],
             'warning_return_codes' => [],
-        ], Mockery::type('array'), false)->andReturn('Script Check: HelpDesk Buttons Detector was added!');
+        ], Mockery::type('array'))->andReturn('Script Check: HelpDesk Buttons Detector was added!');
         $tactical->shouldReceive('getAgentChecks')->once()->with('agent-1')->andReturn([
             ['id' => 310, 'agent' => 55, 'check_type' => 'script', 'script' => 102],
         ]);

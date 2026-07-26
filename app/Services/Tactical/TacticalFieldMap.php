@@ -152,24 +152,34 @@ class TacticalFieldMap
      * Map the getAgent DETAIL / agents-list `checks` SUMMARY DICT to the same
      * {total, failing, passing} triple the coverage classifier consumes.
      *
-     * Producer: calculate_agent_checks (tacticalrmm agents/utils.py:145) emits
+     * Producer: calculate_agent_checks (amidaware/tacticalrmm
+     * api/tacticalrmm/agents/utils.py:146-184 @ 632a37a4, 2026-07-24) emits
      * {total, passing, failing, warning, info, has_failing_checks} where
      * `failing`/`warning`/`info` are the SEVERITY SPLIT of status=failing
      * results — so the list-endpoint "failing" count equals failing+warning+info
      * here, and we sum them so dict-derived and list-derived counts agree.
      *
-     * Two documented vendor caveats (verified in source 2026-07-26):
-     *  - `passing` counts a check with NO result row as passing (the
-     *    `not hasattr(check.check_result, "status")` branch) — so dict-derived
-     *    passing is the vendor's claim, not per-check proof. The authoritative
-     *    per-check read is getAgentChecks (tactical_get_device_checks).
-     *  - The AGENTS-LIST serializer reads this dict from a periodic-task cache
-     *    (agents/serializers.py:113, populated by core/tasks.py:431); a cold
-     *    cache yields an all-zeros dict, which classifies as "none"/UNMONITORED
-     *    — over-alarming, never false-clean.
+     * `passing` is NEVER mapped — it is always null (psa-0pb9m R2, all four
+     * review lenses). The producer counts a check with NO CheckResult row at
+     * all as passing (`not hasattr(check.check_result, "status")`,
+     * utils.py:150-155), so the vendor aggregate MANUFACTURES a pass for a
+     * never-reporting check — the exact device this bead exists for (a Mac
+     * whose one check never runs) arrives as {total: 1, passing: 1, failing: 0}
+     * and would classify VERIFIED. A vendor claim that cannot distinguish
+     * "passed" from "never ran" is not passing evidence; dict-derived reads
+     * classify UNKNOWN (or unverified when failing >= total proves nothing
+     * passes), and VERIFIED stays reserved for per-check reads
+     * (checksSummary() over getAgentChecks, where every count is an explicit
+     * status).
+     *
+     * Also documented (verified in source @ 632a37a4): the AGENTS-LIST
+     * serializer reads this dict from a periodic-task cache
+     * (agents/serializers.py AgentTableSerializer.get_checks); a cold cache
+     * yields an all-zeros dict, which classifies as "none"/UNMONITORED —
+     * over-alarming, never false-clean.
      *
      * @param  array<string, mixed>|null  $dict
-     * @return array{total: ?int, failing: ?int, passing: ?int}
+     * @return array{total: ?int, failing: ?int, passing: null}
      */
     public static function checksFromAgentSummary(?array $dict): array
     {
@@ -184,7 +194,7 @@ class TacticalFieldMap
         return [
             'total' => (int) $dict['total'],
             'failing' => $failing,
-            'passing' => isset($dict['passing']) && is_numeric($dict['passing']) ? (int) $dict['passing'] : null,
+            'passing' => null,
         ];
     }
 
@@ -209,7 +219,7 @@ class TacticalFieldMap
      * is never inferred by subtraction: "verified" requires an explicitly
      * counted passing check.
      */
-    public const COVERAGE_NOTE = 'checks_coverage semantics: "verified" = at least one check is EXPLICITLY passing right now (monitoring demonstrably works); "unverified" = checks exist but NONE is currently passing (all failing, or none reporting — a real incident or a broken/wrong-platform/never-running check; needs inspection); "none" = ZERO checks configured, the device is UNMONITORED (do not read it as healthy); "unknown" = a passing check can neither be demonstrated nor ruled out (checks never read, or the snapshot predates passing-count sync). "none" means unmonitored; "unverified" means coverage cannot currently be demonstrated — they are different facts. Only "verified" is coverage. Use tactical_get_device_checks for the authoritative per-check view (status, last_run, platform_mismatch reason).';
+    public const COVERAGE_NOTE = 'checks_coverage semantics: "verified" = at least one check is EXPLICITLY passing right now (monitoring demonstrably works) — only the live per-check read can prove this; "unverified" = checks exist but NONE is currently passing (all failing, or none reporting — a real incident or a broken/wrong-platform/never-running check; needs inspection); "none" = ZERO checks configured, the device is UNMONITORED (do not read it as healthy); "unknown" = a passing check can neither be demonstrated nor ruled out — snapshot and agent-summary reads are ALWAYS at best unknown, because Tactical\'s aggregate counts a never-reporting check as passing and so carries no passing evidence. "none" means unmonitored; "unverified" means coverage cannot currently be demonstrated — they are different facts. Only "verified" is coverage. Use tactical_get_device_checks for the authoritative per-check view (status, last_run, platform_mismatch reason).';
 
     /** At least one check is EXPLICITLY passing — monitoring demonstrably works. */
     public const COVERAGE_VERIFIED = 'verified';
@@ -288,7 +298,7 @@ class TacticalFieldMap
 
             // Read the signal, but no passing evidence — say so rather than
             // rendering a clean-looking count.
-            return "{$total} configured - passing count unavailable (coverage unknown: re-sync or read checks live)";
+            return "{$total} configured - passing count unavailable (coverage unknown: only the live per-check read proves a pass)";
         }
 
         if ($coverage === self::COVERAGE_NONE) {
@@ -307,7 +317,14 @@ class TacticalFieldMap
 
         $line = "{$failing} failing / {$total} total";
         if ($passing !== null) {
-            $line .= " ({$passing} passing)";
+            // A partial read must name its gap: checks that are neither
+            // failing nor explicitly passing are NOT reporting, and "1 failing
+            // / 8 total (5 passing)" silently hiding 2 such checks is the
+            // false-clean lead psa-0pb9m R2 blocked.
+            $notReporting = max(0, $total - (int) $failing - $passing);
+            $line .= $notReporting > 0
+                ? " ({$passing} passing, {$notReporting} not reporting)"
+                : " ({$passing} passing)";
         }
 
         return $line;

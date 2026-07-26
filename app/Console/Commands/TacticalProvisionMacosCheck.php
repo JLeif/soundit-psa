@@ -11,10 +11,11 @@ use Illuminate\Console\Command;
  * psa-0pb9m — install the shipped macOS disk-capacity check on darwin
  * Tactical agents. Dry-run by default (prints the plan); --apply executes.
  * Plan-first and no-clobber: ambiguous scopes and any drift on an existing
- * same-name script ABORT before anything is written (--update-script is the
- * explicit overwrite path). Idempotent: agents already carrying the check are
- * skipped. Operator-run only — never scheduled; re-run it after enrolling new
- * Macs.
+ * same-name script ABORT before anything is written — there is deliberately
+ * no overwrite flag (the script object is global; reconcile a drifted
+ * same-name script in Tactical by renaming or editing it there). Idempotent:
+ * agents already carrying the check are skipped. Operator-run only — never
+ * scheduled; re-run it after enrolling new Macs.
  */
 class TacticalProvisionMacosCheck extends Command
 {
@@ -22,7 +23,6 @@ class TacticalProvisionMacosCheck extends Command
         {--client-id= : Limit to one PSA client id}
         {--hostname= : Limit to one agent hostname (must resolve to exactly one macOS agent; combine with --client-id when hostnames repeat across clients)}
         {--agent-id= : Limit to exactly one agent by Tactical agent id (the unambiguous form of --hostname)}
-        {--update-script : Overwrite an existing same-name Tactical script whose body/metadata drifted from the shipped definition (default: refuse and abort)}
         {--apply : Execute the plan (default is dry-run)}';
 
     protected $description = 'Provision the PSA macOS Disk Capacity Check script + per-agent script checks on darwin Tactical agents (dry-run by default; plan-first, no-clobber)';
@@ -39,7 +39,6 @@ class TacticalProvisionMacosCheck extends Command
         $hostname = $this->option('hostname') !== null ? (string) $this->option('hostname') : null;
         $agentId = $this->option('agent-id') !== null ? (string) $this->option('agent-id') : null;
         $apply = (bool) $this->option('apply');
-        $updateScript = (bool) $this->option('update-script');
 
         $provisioner = new TacticalMacosCheckProvisioner(app(TacticalClient::class));
 
@@ -49,7 +48,6 @@ class TacticalProvisionMacosCheck extends Command
                 clientId: $clientId,
                 hostname: $hostname,
                 agentId: $agentId,
-                updateScript: $updateScript,
             );
         } catch (\Throwable $e) {
             $this->error('Provisioning failed: '.$e->getMessage());

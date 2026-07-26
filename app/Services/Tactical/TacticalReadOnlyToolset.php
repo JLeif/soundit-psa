@@ -11,7 +11,6 @@ use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Services\Triage\TriageToolDefinitions;
 use App\Support\TacticalConfig;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 class TacticalReadOnlyToolset
@@ -65,7 +64,7 @@ class TacticalReadOnlyToolset
      */
     private const SNAPSHOT_STALE_AFTER_HOURS = 48;
 
-    private const SNAPSHOT_FRESHNESS_NOTE = 'Rows come from the PSA tactical_assets snapshot (refreshed by the daily tactical:sync-devices), NOT a live Tactical query. data_as_of is the newest row sync stamp in this result; data_stale is true when that is older than '.self::SNAPSHOT_STALE_AFTER_HOURS.'h or unknown. Each row carries synced_at + stale — do not treat a stale row\'s status, counts, or checks_coverage as current truth; use the live per-device tools to confirm.';
+    private const SNAPSHOT_FRESHNESS_NOTE = 'Rows come from the PSA tactical_assets snapshot (refreshed by the daily tactical:sync-devices), NOT a live Tactical query. data_as_of is the OLDEST row sync stamp in this result — the freshest the whole reading can honestly claim; data_stale is true when ANY row is stale (older than '.self::SNAPSHOT_STALE_AFTER_HOURS.'h) or missing its stamp, so one stale device can never hide under a sibling\'s fresh stamp. Each row carries synced_at + stale, and coverage_summary tallies a stale row under \'stale\' instead of its last-known coverage — do not treat a stale row\'s status, counts, or checks_coverage as current truth; use the live per-device tools to confirm.';
 
     public function __construct(
         private readonly ChetDataSurfaceTextSanitizer $textSanitizer,
@@ -376,36 +375,49 @@ class TacticalReadOnlyToolset
 
         // Fleet-scan support (psa-0pb9m): per-state tallies so "how many of
         // these devices are actually monitored?" is one read, not a row walk.
+        // Freshness-separated (psa-0pb9m R2): a STALE row's last-known coverage
+        // is quarantined into its own 'stale' bucket instead of counting as
+        // current — stale check data must not pass as a current tally entry.
         $coverageSummary = [
             TacticalFieldMap::COVERAGE_VERIFIED => 0,
             TacticalFieldMap::COVERAGE_UNVERIFIED => 0,
             TacticalFieldMap::COVERAGE_NONE => 0,
             TacticalFieldMap::COVERAGE_UNKNOWN => 0,
+            'stale' => 0,
         ];
         foreach ($devices as $device) {
+            if ($device['stale'] === true) {
+                $coverageSummary['stale']++;
+
+                continue;
+            }
             $coverageSummary[$device['checks_coverage']]++;
         }
 
-        // Snapshot freshness envelope (psa-47vxh idiom): data_as_of is the
-        // NEWEST row stamp — the freshest this snapshot read can honestly
-        // claim; stale/unknown means the sync has missed at least a cycle.
-        $newestSync = null;
+        // Snapshot freshness envelope (psa-47vxh idiom, R2 fail-closed):
+        // data_as_of is the OLDEST known row stamp — the freshest the WHOLE
+        // reading can honestly claim — and data_stale propagates any-stale/
+        // any-missing, so one three-day-old row can never hide under a
+        // sibling's fresh stamp.
+        $oldestSync = null;
+        $anyStale = $devices === [];
         foreach ($devices as $device) {
+            if ($device['stale'] === true || ($device['synced_at'] ?? null) === null) {
+                $anyStale = true;
+            }
             $syncedAt = $device['synced_at'] ?? null;
-            if ($syncedAt !== null && ($newestSync === null || $syncedAt > $newestSync)) {
-                $newestSync = $syncedAt;
+            if ($syncedAt !== null && ($oldestSync === null || $syncedAt < $oldestSync)) {
+                $oldestSync = $syncedAt;
             }
         }
-        $dataStale = $newestSync === null
-            || Carbon::parse($newestSync)->lt(now()->subHours(self::SNAPSHOT_STALE_AFTER_HOURS));
 
         return [
             'count' => count($devices),
             'devices' => $devices,
             'coverage_summary' => $coverageSummary,
             'coverage_note' => self::COVERAGE_NOTE,
-            'data_as_of' => $newestSync,
-            'data_stale' => $dataStale,
+            'data_as_of' => $oldestSync,
+            'data_stale' => $anyStale,
             'freshness_note' => self::SNAPSHOT_FRESHNESS_NOTE,
         ];
     }
@@ -809,14 +821,18 @@ class TacticalReadOnlyToolset
             'needs_reboot' => (bool) $asset->needs_reboot,
             'has_patches_pending' => (bool) $asset->has_patches_pending,
             'checks_failing' => $asset->checks_failing,
-            'checks_passing' => $asset->checks_passing,
+            // Snapshot passing is ALWAYS null (psa-0pb9m R2): the column's only
+            // historical producer was Tactical's summary aggregate, which counts
+            // a never-reporting check as passing — never evidence. Emitting null
+            // (not the stored residue) makes the snapshot structurally unable to
+            // claim verified/all-passing; only the live per-check read can.
+            'checks_passing' => null,
             'checks_total' => $asset->checks_total,
             // psa-0pb9m: zero checks must read UNMONITORED, all-failing must
-            // read unverified, and verified requires EXPLICIT passing evidence
-            // (a pre-migration row with no passing count reads unknown) —
+            // read unverified, and a snapshot can never read verified —
             // never a clean-looking count.
-            'checks_coverage' => TacticalFieldMap::checksCoverage($asset->checks_total, $asset->checks_failing, $asset->checks_passing),
-            'checks_summary' => TacticalFieldMap::checksSummaryLine($asset->checks_total, $asset->checks_failing, $asset->checks_passing),
+            'checks_coverage' => TacticalFieldMap::checksCoverage($asset->checks_total, $asset->checks_failing, null),
+            'checks_summary' => TacticalFieldMap::checksSummaryLine($asset->checks_total, $asset->checks_failing, null),
             'last_seen_at' => $asset->last_seen_at?->toIso8601String(),
             'synced_at' => $asset->synced_at?->toIso8601String(),
             // Per-row staleness (psa-47vxh idiom): the daily sync missed a

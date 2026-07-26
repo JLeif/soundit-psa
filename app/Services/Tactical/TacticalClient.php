@@ -330,9 +330,11 @@ class TacticalClient
      * guard (psa-0pb9m revise). This is the one boundary every check creation
      * converges on (MCP executor, provisioner, any future caller), so the
      * wrong-platform invariant lives HERE, not in selected callers: unknown
-     * agent platforms and provably incompatible scripts are refused before
-     * anything is sent upstream, and platform-bound scripts on policy targets
-     * require the caller's explicit pre-write acknowledgement.
+     * agent platforms, scripts without verifiable platform metadata, and
+     * provably incompatible scripts are refused before anything is sent
+     * upstream. A platform-bound check on a POLICY target is allowed only on
+     * server-derived membership proof (every current member agent on a
+     * compatible platform) — there is no caller-assertable override.
      *
      * @param  array{shell?: ?string, supported_platforms?: ?array<int, mixed>}|null  $scriptMeta
      *                                                                                             Optional vendor-sourced script metadata claim (e.g. an upstream
@@ -341,9 +343,9 @@ class TacticalClient
      *
      * @throws TacticalClientException when the guard refuses (nothing sent).
      */
-    public function createCheck(array $body, ?array $scriptMeta = null, bool $acknowledgePlatformRisk = false): mixed
+    public function createCheck(array $body, ?array $scriptMeta = null): mixed
     {
-        TacticalCheckPlatformGuard::assertSafe($body, $scriptMeta, $acknowledgePlatformRisk);
+        TacticalCheckPlatformGuard::assertSafe($body, $scriptMeta, $this);
 
         return $this->post('checks/', $body);
     }

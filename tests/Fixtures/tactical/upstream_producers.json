@@ -1,0 +1,125 @@
+{
+  "_meta": {
+    "description": "Field tuples captured VERBATIM from the amidaware/tacticalrmm source at the pinned commit below, by scripts/tactical-capture-upstream-producers.py. TacticalSchemaDriftTest proves every field SoundPSA relies on is present in these vendor tuples \u2014 our expectations are checked against the vendor's own producer, not against a fixture we authored (CLAUDE.md vendor-shape rules).",
+    "upstream_repo": "https://github.com/amidaware/tacticalrmm",
+    "upstream_commit": "632a37a4a9759eb881ed0d76d1043e80b824d308",
+    "upstream_commit_date": "2026-07-24",
+    "refresh_command": "python3 scripts/tactical-capture-upstream-producers.py <clone-path>"
+  },
+  "agent_table_serializer_fields": {
+    "source": "api/tacticalrmm/agents/serializers.py class AgentTableSerializer Meta.fields (the GET agents/ list row)",
+    "fields": [
+      "agent_id",
+      "alert_template",
+      "hostname",
+      "site_name",
+      "client_name",
+      "monitoring_type",
+      "description",
+      "needs_reboot",
+      "pending_actions_count",
+      "status",
+      "overdue_text_alert",
+      "overdue_email_alert",
+      "overdue_dashboard_alert",
+      "last_seen",
+      "boot_time",
+      "checks",
+      "maintenance_mode",
+      "logged_username",
+      "italic",
+      "policy",
+      "block_policy_inheritance",
+      "plat",
+      "goarch",
+      "has_patches_pending",
+      "version",
+      "operating_system",
+      "public_ip",
+      "cpu_model",
+      "graphics",
+      "local_ips",
+      "make_model",
+      "physical_disks",
+      "custom_fields",
+      "serial_number"
+    ]
+  },
+  "agent_hostname_serializer_fields": {
+    "source": "api/tacticalrmm/agents/serializers.py class AgentHostnameSerializer Meta.fields (the `agents` rows of GET automation/policies/{pk}/related/)",
+    "fields": [
+      "id",
+      "hostname",
+      "agent_id",
+      "client",
+      "site"
+    ]
+  },
+  "policy_related_serializer_fields": {
+    "source": "api/tacticalrmm/automation/serializers.py class PolicyRelatedSerializer Meta.fields (GET automation/policies/{pk}/related/)",
+    "fields": [
+      "pk",
+      "name",
+      "workstation_clients",
+      "workstation_sites",
+      "server_clients",
+      "server_sites",
+      "agents",
+      "is_default_server_policy",
+      "is_default_workstation_policy"
+    ]
+  },
+  "agent_checks_summary_keys": {
+    "source": "api/tacticalrmm/agents/utils.py calculate_agent_checks() ret dict (the per-agent `checks` summary on both agent endpoints)",
+    "fields": [
+      "total",
+      "passing",
+      "failing",
+      "warning",
+      "info",
+      "has_failing_checks"
+    ]
+  },
+  "check_result_model_columns": {
+    "source": "api/tacticalrmm/checks/models.py class CheckResult (CheckSerializer.get_check_result emits CheckResultSerializer fields=__all__, or {} when no result row exists \u2014 checks/serializers.py)",
+    "fields": [
+      "id",
+      "agent",
+      "assigned_check",
+      "status",
+      "alert_severity",
+      "more_info",
+      "last_run",
+      "fail_count",
+      "outage_history",
+      "extra_details",
+      "stdout",
+      "stderr",
+      "retcode",
+      "execution_time",
+      "history"
+    ]
+  },
+  "script_model_columns": {
+    "source": "api/tacticalrmm/scripts/models.py class Script (script catalog rows; shell + supported_platforms are the platform-guard inputs)",
+    "fields": [
+      "guid",
+      "name",
+      "description",
+      "filename",
+      "shell",
+      "script_type",
+      "args",
+      "env_vars",
+      "favorite",
+      "category",
+      "script_body",
+      "script_hash",
+      "code_base64",
+      "default_timeout",
+      "hidden",
+      "supported_platforms",
+      "run_as_user"
+    ]
+  }
+}

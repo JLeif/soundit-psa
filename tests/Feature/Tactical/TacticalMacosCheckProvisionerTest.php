@@ -20,8 +20,9 @@ use Tests\TestCase;
  * VERIFIED coverage on Macs: a check that genuinely runs, reports real state,
  * and can pass. Revise contract: PLAN-FIRST (ambiguity aborts before any
  * write), NO-CLOBBER (an existing same-name script is reused only on an exact
- * match; drift refuses unless --update-script; duplicates always refuse),
- * SCOPE-SAFE (an ambiguous hostname refuses and lists candidates), per-agent
+ * match; drift ALWAYS refuses — no overwrite switch, psa-0pb9m R2; duplicates
+ * always refuse), SCOPE-SAFE (an ambiguous hostname refuses and lists
+ * candidates), per-agent
  * idempotent, darwin-only, and the local script catalog is upserted on apply
  * so the client-boundary platform guard sees the script immediately.
  */
@@ -200,8 +201,12 @@ class TacticalMacosCheckProvisionerTest extends TestCase
         $this->assertSame(['skip', 'skip'], collect($result['targets'])->pluck('action')->all());
     }
 
-    public function test_drifted_same_name_script_refuses_and_aborts_without_update_script_flag(): void
+    public function test_drifted_same_name_script_always_refuses_and_aborts(): void
     {
+        // psa-0pb9m R2: there is NO overwrite switch. The script object is
+        // global (an overwrite would rewrite every referencing check
+        // fleet-wide) and a drifted body may be operator-owned — the refusal
+        // names the out-of-band remedies (rename or edit/delete in Tactical).
         $this->configureTactical();
         $this->seedFleet();
 
@@ -222,34 +227,9 @@ class TacticalMacosCheckProvisionerTest extends TestCase
         $this->assertTrue($result['aborted']);
         $this->assertSame('drift-refused', $result['script_action']);
         $this->assertSame([], $result['targets']);
-        $this->assertStringContainsString('--update-script', $result['errors'][0]);
-    }
-
-    public function test_update_script_flag_overwrites_a_drifted_script_deliberately(): void
-    {
-        $this->configureTactical();
-        $this->seedFleet();
-
-        $tactical = Mockery::mock(\App\Services\Tactical\TacticalClient::class);
-        $tactical->shouldReceive('getScripts')->once()->with(true, true)->andReturn([$this->matchingScriptRow(900)]);
-        $tactical->shouldReceive('downloadScript')->once()->with(900, false)->andReturn([
-            'filename' => 'x.sh',
-            'code' => "#!/bin/bash\necho operator-owned\n",
-        ]);
-        $tactical->shouldReceive('updateScript')->once()->withArgs(function (int $id, array $body): bool {
-            return $id === 900 && str_contains($body['script_body'], 'PASS: disk capacity within thresholds');
-        })->andReturn('ok');
-        $tactical->shouldNotReceive('createScript');
-
-        $tactical->shouldReceive('getAgentChecks')->twice()->andReturn([
-            ['check_type' => 'script', 'script' => 900],
-        ]);
-        $tactical->shouldNotReceive('createCheck');
-
-        $result = $this->provisioner($tactical)->provision(apply: true, updateScript: true);
-
-        $this->assertFalse($result['aborted']);
-        $this->assertSame('update', $result['script_action']);
+        $this->assertStringContainsString('never overwrites', $result['errors'][0]);
+        $this->assertStringContainsString('RENAME', $result['errors'][0]);
+        $this->assertStringNotContainsString('--update-script', $result['errors'][0], 'the overwrite switch is gone');
     }
 
     public function test_multiple_same_name_scripts_always_refuse_as_an_ownership_collision(): void
@@ -267,7 +247,7 @@ class TacticalMacosCheckProvisionerTest extends TestCase
         $tactical->shouldNotReceive('updateScript');
         $tactical->shouldNotReceive('createCheck');
 
-        $result = $this->provisioner($tactical)->provision(apply: true, updateScript: true);
+        $result = $this->provisioner($tactical)->provision(apply: true);
 
         $this->assertTrue($result['aborted']);
         $this->assertSame('ambiguous', $result['script_action']);

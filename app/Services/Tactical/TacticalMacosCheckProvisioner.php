@@ -28,10 +28,15 @@ use Illuminate\Support\Facades\Log;
  *   - NO-CLOBBER script ownership: the managed script is created only when
  *     absent. An existing same-name script is REUSED only when its body,
  *     shell, and supported_platforms match the shipped definition exactly;
- *     any drift is REFUSED with the reconciliation path named (inspect it in
- *     Tactical, then re-run with --update-script to overwrite deliberately,
- *     or rename the operator's script). More than one same-name script is an
- *     unresolvable ownership collision and always refuses.
+ *     any drift is REFUSED, always — there is deliberately NO overwrite
+ *     switch (psa-0pb9m R2: the script object is global, so an overwrite
+ *     would rewrite every check referencing it fleet-wide, and a same-name
+ *     script without a provable ownership marker may be operator-owned).
+ *     Reconciliation is out-of-band, in Tactical where ownership is visible:
+ *     rename the existing script to release the reserved name (this tool
+ *     then creates the managed one), or edit/delete it there deliberately.
+ *     More than one same-name script is an unresolvable ownership collision
+ *     and always refuses.
  *   - LOCAL CATALOG UPSERT on apply: the synced TacticalScript row is written
  *     alongside the upstream script, so the client-boundary platform guard
  *     and the per-check platform_mismatch annotations see the script's
@@ -81,13 +86,12 @@ class TacticalMacosCheckProvisioner
         ?int $clientId = null,
         ?string $hostname = null,
         ?string $agentId = null,
-        bool $updateScript = false,
     ): array {
         $errors = [];
         $scriptBody = $this->shippedScriptBody();
 
         // ── 1. Script decision (READ-ONLY — nothing is written yet). ──
-        $script = $this->resolveScriptPlan($scriptBody, $updateScript, $errors);
+        $script = $this->resolveScriptPlan($scriptBody, $errors);
         if ($script['abort']) {
             return $this->aborted($apply, $script['action'], $script['id'], $errors);
         }
@@ -195,16 +199,16 @@ class TacticalMacosCheckProvisioner
      *   create         — no script with the reserved name exists.
      *   unchanged      — exactly one exists and matches the shipped body,
      *                    shell, and supported_platforms; it is reused as-is.
-     *   update         — exactly one exists, it DRIFTS from the shipped
-     *                    definition, and --update-script was passed.
-     *   drift-refused  — same drift, no --update-script: ABORT (no-clobber).
+     *   drift-refused  — exactly one exists and it DRIFTS from the shipped
+     *                    definition: ABORT, always (no-clobber — there is no
+     *                    overwrite switch; see the class docblock).
      *   ambiguous      — multiple same-name scripts: ownership cannot be
      *                    claimed; ABORT.
      *
      * @param  array<int, string>  $errors
      * @return array{action: string, id: ?int, abort: bool}
      */
-    private function resolveScriptPlan(string $shippedBody, bool $updateScript, array &$errors): array
+    private function resolveScriptPlan(string $shippedBody, array &$errors): array
     {
         $matches = $this->scriptsNamed(self::SCRIPT_NAME);
 
@@ -227,16 +231,19 @@ class TacticalMacosCheckProvisioner
             return ['action' => 'unchanged', 'id' => $existingId, 'abort' => false];
         }
 
-        if (! $updateScript) {
-            $errors[] = "Refusing to overwrite Tactical script '".self::SCRIPT_NAME."' (id {$existingId}): its body or platform metadata "
-                .'differs from the shipped definition (operator-edited, or from an older PSA version). Inspect it in Tactical, then EITHER '
-                .'re-run with --update-script to overwrite it with the shipped definition, OR rename the existing script to release the reserved name. '
-                .'Nothing was written.';
+        // An ownership collision ALWAYS refuses (psa-0pb9m R2). The script
+        // object is GLOBAL: overwriting it would rewrite every check that
+        // references it fleet-wide — far beyond any --client-id/--hostname
+        // scope on this run — and a drifted same-name body may simply be the
+        // operator's own script. Reconciliation happens in Tactical, where
+        // ownership is visible, never via a provisioner switch.
+        $errors[] = "Refusing to touch Tactical script '".self::SCRIPT_NAME."' (id {$existingId}): its body or platform metadata "
+            .'differs from the shipped definition (operator-edited, or from an older PSA version), so ownership cannot be proven. '
+            .'This tool never overwrites it — the script object is global, and rewriting it would change every check that references it. '
+            .'Reconcile in Tactical instead: RENAME the existing script to release the reserved name (then re-run to create the managed one), '
+            .'or deliberately edit/delete it there. Nothing was written.';
 
-            return ['action' => 'drift-refused', 'id' => $existingId, 'abort' => true];
-        }
-
-        return ['action' => 'update', 'id' => $existingId, 'abort' => false];
+        return ['action' => 'drift-refused', 'id' => $existingId, 'abort' => true];
     }
 
     /**
@@ -288,11 +295,8 @@ class TacticalMacosCheckProvisioner
             return (int) $created[0]['id'];
         }
 
-        if ($action === 'update') {
-            $this->client->updateScript((int) $existingId, $this->scriptUpsertBody($scriptBody));
-        }
-
-        // 'unchanged' writes nothing.
+        // 'unchanged' writes nothing (drift always aborted before this point —
+        // there is no overwrite action; see resolveScriptPlan).
         return (int) $existingId;
     }
 

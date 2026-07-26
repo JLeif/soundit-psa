@@ -19,7 +19,8 @@ use Mockery;
 use Tests\TestCase;
 
 /**
- * psa-0pb9m — the create-check platform guard (revise: FAIL CLOSED).
+ * psa-0pb9m — the create-check platform guard (R2: FAIL CLOSED, evidence not
+ * assertion).
  *
  * Root-cause-class prevention: tactical_create_check could attach a script
  * check whose script cannot run on the target agent's platform (e.g. a
@@ -28,11 +29,14 @@ use Tests\TestCase;
  * "one check on every Mac, fails on all of them" defect. The guard fails
  * CLOSED before any upstream call: an agent whose platform is unknown is
  * refused (remedy: sync devices), a provably incompatible agent create is
- * refused outright, and a platform-bound script on a POLICY is refused
- * pre-write unless the caller passes the explicit acknowledge_platform_risk
- * confirmation (policy membership is unknowable here; the old post-write
- * warning was diagnosis, not prevention). The same invariant is enforced
- * again at the shared TacticalClient::createCheck boundary
+ * refused outright, script metadata without a usable platform signal is
+ * refused (absence is not compatibility), and a platform-bound check on a
+ * POLICY is allowed only on SERVER-DERIVED MEMBERSHIP PROOF — the policy's
+ * current member agents enumerated live from Tactical, every one on a
+ * compatible platform. The R1 acknowledge_platform_risk boolean is GONE
+ * (psa-0pb9m R2 HIGH): a caller-assertable claim was not evidence, and an AI
+ * caller could simply retry with it set. The same invariant is enforced again
+ * at the shared TacticalClient::createCheck boundary
  * (TacticalCheckPlatformGuard) so no caller path can bypass it — covered by
  * the client-boundary tests at the bottom of this file.
  */
@@ -248,7 +252,7 @@ class TacticalCheckPlatformGuardTest extends TestCase
         $this->assertTrue($rejected, 'unknown-platform refusal must be audited');
     }
 
-    public function test_policy_target_with_windows_bound_script_is_refused_pre_write_without_acknowledgement(): void
+    public function test_policy_target_with_a_mac_member_is_refused_pre_write_naming_the_member(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -257,8 +261,25 @@ class TacticalCheckPlatformGuardTest extends TestCase
         $tactical->shouldReceive('getPolicies')->once()->andReturn([['id' => 7, 'name' => 'Workstations']]);
         $tactical->shouldReceive('getScripts')->once()->with(true, true)
             ->andReturn($this->upstreamScripts('powershell', ['windows']));
-        // The whole point (revise): NO write happens — a post-write warning is
-        // not a safety control on a mixed-fleet policy.
+        // SERVER-DERIVED membership proof (R2): the policy's related payload +
+        // the fleet list are read live; the Mac member is discovered here, not
+        // asserted away by a caller boolean.
+        $tactical->shouldReceive('getAutomationPolicyRelated')->once()->with(7)->andReturn([
+            'pk' => 7, 'name' => 'Workstations',
+            'agents' => [
+                ['id' => 1, 'hostname' => 'PC-01', 'agent_id' => 'agent-pc1', 'client' => 'Acme', 'site' => 'Main'],
+                ['id' => 2, 'hostname' => 'MAC-01', 'agent_id' => 'agent-mac', 'client' => 'Acme', 'site' => 'Main'],
+            ],
+            'workstation_clients' => [], 'server_clients' => [],
+            'workstation_sites' => [], 'server_sites' => [],
+            'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+        ]);
+        $tactical->shouldReceive('getAgents')->once()->andReturn([
+            ['agent_id' => 'agent-pc1', 'hostname' => 'PC-01', 'plat' => 'windows', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ['agent_id' => 'agent-mac', 'hostname' => 'MAC-01', 'plat' => 'darwin', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+        ]);
+        // The whole point: NO write happens — a mixed-membership policy is
+        // refused on evidence, with no caller-assertable override.
         $tactical->shouldNotReceive('createCheck');
         $this->app->instance(TacticalClient::class, $tactical);
 
@@ -273,13 +294,14 @@ class TacticalCheckPlatformGuardTest extends TestCase
 
         $this->assertTrue((bool) $response->json('result.isError'));
         $text = (string) $response->json('result.content.0.text');
-        // The refusal is an informed affordance: it names the platforms the
-        // script cannot run on and the exact acknowledgement to retry with.
-        $this->assertStringContainsString('darwin', $text);
-        $this->assertStringContainsString('acknowledge_platform_risk', $text);
+        // The refusal is an informed affordance: it names the incompatible
+        // member and says there is no override.
+        $this->assertStringContainsString('MAC-01', $text);
+        $this->assertStringContainsString('no override', $text);
+        $this->assertStringNotContainsString('acknowledge_platform_risk', $text, 'the caller-assertable escape hatch is gone');
     }
 
-    public function test_policy_target_with_acknowledged_platform_risk_creates_with_an_explicit_note(): void
+    public function test_policy_target_with_all_windows_membership_proven_creates_with_the_proof_note(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -288,6 +310,18 @@ class TacticalCheckPlatformGuardTest extends TestCase
         $tactical->shouldReceive('getPolicies')->once()->andReturn([['id' => 7, 'name' => 'Workstations']]);
         $tactical->shouldReceive('getScripts')->once()->with(true, true)
             ->andReturn($this->upstreamScripts('powershell', ['windows']));
+        $tactical->shouldReceive('getAutomationPolicyRelated')->with(7)->andReturn([
+            'pk' => 7, 'name' => 'Workstations',
+            'agents' => [
+                ['id' => 1, 'hostname' => 'PC-01', 'agent_id' => 'agent-pc1', 'client' => 'Acme', 'site' => 'Main'],
+            ],
+            'workstation_clients' => [], 'server_clients' => [],
+            'workstation_sites' => [], 'server_sites' => [],
+            'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+        ]);
+        $tactical->shouldReceive('getAgents')->andReturn([
+            ['agent_id' => 'agent-pc1', 'hostname' => 'PC-01', 'plat' => 'windows', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+        ]);
         $tactical->shouldReceive('createCheck')->once()->andReturn('Script Check was added!');
         $tactical->shouldReceive('getPolicyChecks')->once()->with(7)->andReturn([
             ['id' => 212, 'check_type' => 'script', 'script' => 102],
@@ -301,13 +335,41 @@ class TacticalCheckPlatformGuardTest extends TestCase
             'policy_id' => 7,
             'confirm_policy_name' => 'Workstations',
             'script_name' => 'Fleet Health Detector',
-            'acknowledge_platform_risk' => true,
         ]);
 
         $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
         $payload = json_decode((string) $response->json('result.content.0.text'), true, flags: JSON_THROW_ON_ERROR);
         $this->assertArrayHasKey('platform_note', $payload);
-        $this->assertStringContainsStringIgnoringCase('acknowledge_platform_risk', $payload['platform_note']);
+        $this->assertStringContainsStringIgnoringCase('membership proof', $payload['platform_note']);
+        $this->assertStringContainsStringIgnoringCase('added to the policy later', $payload['platform_note']);
+    }
+
+    public function test_policy_target_is_refused_when_membership_cannot_be_read(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getPolicies')->once()->andReturn([['id' => 7, 'name' => 'Workstations']]);
+        $tactical->shouldReceive('getScripts')->once()->with(true, true)
+            ->andReturn($this->upstreamScripts('powershell', ['windows']));
+        $tactical->shouldReceive('getAutomationPolicyRelated')->once()->with(7)
+            ->andThrow(new \App\Services\Tactical\TacticalClientException('boom'));
+        // Unverifiable membership is UNKNOWN, and unknown is never compatible.
+        $tactical->shouldNotReceive('createCheck');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $this->seedLocalScript();
+
+        $response = $this->callTool($this->token(), [
+            'reason' => 'Policy-wide detector.',
+            'policy_id' => 7,
+            'confirm_policy_name' => 'Workstations',
+            'script_name' => 'Fleet Health Detector',
+        ]);
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('could not be read', (string) $response->json('result.content.0.text'));
     }
 
     public function test_policy_target_with_cross_platform_script_has_no_warning(): void
@@ -406,12 +468,118 @@ class TacticalCheckPlatformGuardTest extends TestCase
         ]);
     }
 
-    public function test_client_boundary_refuses_platform_bound_policy_create_without_acknowledgement(): void
+    public function test_client_boundary_refuses_policy_create_when_membership_includes_an_incompatible_agent(): void
     {
         $this->seedLocalScript(); // powershell → cannot run on darwin/linux
 
+        // The guard reads membership over the SAME client: exactly two queued
+        // read responses (related, then the fleet list). Refusal must consume
+        // only those — a POST would hit an empty mock queue and blow up with a
+        // different exception, so the expected TacticalClientException proves
+        // no write was sent.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Workstations',
+                'agents' => [['id' => 2, 'hostname' => 'MAC-01', 'agent_id' => 'agent-mac', 'client' => 'Acme', 'site' => 'Main']],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-mac', 'hostname' => 'MAC-01', 'plat' => 'darwin', 'monitoring_type' => 'workstation', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+        ]);
+
         $this->expectException(\App\Services\Tactical\TacticalClientException::class);
-        $this->expectExceptionMessageMatches('/acknowledge_platform_risk/');
+        $this->expectExceptionMessageMatches('/MAC-01/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'script',
+            'script' => 102,
+            'name' => 'Policy check',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_non_script_policy_check_without_all_windows_proof(): void
+    {
+        // The R2 security drive: policy=7/check_type=ping previously bypassed
+        // the guard entirely and returned HTTP_SENT. Non-script checks are
+        // Windows-only (vendor constraint), so a policy with a linux member
+        // refuses before any write.
+        $client = $this->realClient([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'pk' => 7, 'name' => 'Mixed',
+                'agents' => [['id' => 3, 'hostname' => 'LNX-01', 'agent_id' => 'agent-lnx', 'client' => 'Acme', 'site' => 'Main']],
+                'workstation_clients' => [], 'server_clients' => [],
+                'workstation_sites' => [], 'server_sites' => [],
+                'is_default_server_policy' => false, 'is_default_workstation_policy' => false,
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                ['agent_id' => 'agent-lnx', 'hostname' => 'LNX-01', 'plat' => 'linux', 'monitoring_type' => 'server', 'client_name' => 'Acme', 'site_name' => 'Main'],
+            ])),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/LNX-01/');
+
+        $client->createCheck([
+            'policy' => 7,
+            'check_type' => 'ping',
+            'name' => 'Ping check',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_an_empty_script_meta_claim_with_no_http_sent(): void
+    {
+        // The R2 security drive: scriptMeta=[] previously resolved to
+        // shell=null/supported_platforms=null, an empty blocked set, and
+        // HTTP_SENT. Absence of metadata is not compatibility.
+        $this->macFixture(); // darwin agent
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/neither a shell nor any/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 555,
+            'name' => 'Empty meta claim',
+        ], scriptMeta: []);
+    }
+
+    public function test_client_boundary_refuses_a_catalog_row_without_platform_signal(): void
+    {
+        $this->macFixture();
+        // The schema requires a shell string, so the no-signal shape a sync
+        // can actually produce is an EMPTY one — same refusal semantics.
+        TacticalScript::create([
+            'tactical_script_id' => 103,
+            'name' => 'Signal-less script',
+            'shell' => '',
+            'supported_platforms' => null,
+            'synced_at' => now(),
+        ]);
+
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/neither/');
+
+        $this->realClient()->createCheck([
+            'agent' => 'agent-mac',
+            'check_type' => 'script',
+            'script' => 103,
+            'name' => 'Uncheckable catalog row',
+        ]);
+    }
+
+    public function test_client_boundary_refuses_policy_create_when_membership_read_fails(): void
+    {
+        $this->seedLocalScript();
+
+        // The related read fails (empty mock queue → transport error). The
+        // guard must convert that into a refusal, never proceed unproven.
+        $this->expectException(\App\Services\Tactical\TacticalClientException::class);
+        $this->expectExceptionMessageMatches('/could not be read/');
 
         $this->realClient()->createCheck([
             'policy' => 7,

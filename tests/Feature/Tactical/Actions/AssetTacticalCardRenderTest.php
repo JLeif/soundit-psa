@@ -148,22 +148,27 @@ class AssetTacticalCardRenderTest extends TestCase
         return $asset->refresh();
     }
 
-    public function test_fresh_snapshot_with_every_check_explicitly_passing_shows_the_clean_chip(): void
+    public function test_a_snapshot_passing_count_never_renders_the_clean_chip(): void
     {
-        // A FRESH (non-stale) snapshot where every check EXPLICITLY passed may
-        // show the positive clean chip. (revise: passing === total, never a
-        // zero-failing subtraction.)
+        // psa-0pb9m R2: the snapshot checks_passing column's only historical
+        // producer was Tactical's summary aggregate, which counts a
+        // never-reporting check as passing — so a stored count is a vendor
+        // claim, not evidence, and the eager (snapshot) health line must
+        // never render "all N passing" from it. The clean chip is reserved
+        // for the LIVE per-check read (the lazy checks panel).
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 0,
             'checks_total' => 5,
-            'checks_passing' => 5,
-            'synced_at' => now()->subMinutes(2), // fresh
+            'checks_passing' => 5, // pre-R2 residue — not evidence
+            'synced_at' => now()->subMinutes(2), // fresh — freshness must not rescue it
         ]);
 
         $resp = $this->actingAs($user)->get(route('assets.show', $asset));
 
-        $resp->assertOk()->assertSeeText('all 5 passing');
+        $resp->assertOk()
+            ->assertDontSeeText('all 5 passing')
+            ->assertSeeText('coverage unknown');
     }
 
     public function test_zero_failing_without_passing_evidence_renders_coverage_unknown_not_clean(): void
@@ -185,15 +190,17 @@ class AssetTacticalCardRenderTest extends TestCase
             ->assertSeeText('coverage unknown');
     }
 
-    public function test_zero_failing_with_a_never_reporting_gap_renders_partial_not_clean(): void
+    public function test_a_partial_snapshot_passing_count_renders_unknown_not_a_counted_pass(): void
     {
-        // 4 of 5 explicitly passing, 1 never reporting: an honest partial
-        // line, never the blanket clean chip.
+        // psa-0pb9m R2: same rule for a partial residue — "4 of 5 passing" off
+        // the snapshot column would relay the vendor's manufactured claim as
+        // counted evidence. Snapshot coverage is unknown; the honest partial
+        // line exists only on the LIVE per-check read.
         $user = User::factory()->create();
         $asset = $this->healthLineAsset([
             'checks_failing' => 0,
             'checks_total' => 5,
-            'checks_passing' => 4,
+            'checks_passing' => 4, // pre-R2 residue — not evidence
             'synced_at' => now()->subMinutes(2),
         ]);
 
@@ -201,7 +208,8 @@ class AssetTacticalCardRenderTest extends TestCase
 
         $resp->assertOk()
             ->assertDontSeeText('all 5 passing')
-            ->assertSeeText('4 of 5 passing — rest not reporting');
+            ->assertDontSeeText('4 of 5 passing')
+            ->assertSeeText('coverage unknown');
     }
 
     public function test_stale_snapshot_does_not_render_checks_as_all_passing(): void

@@ -83,9 +83,11 @@ class TacticalDeviceSyncService
         // getAgent `checks` is a SUMMARY DICT
         // ({total, passing, failing, warning, info, has_failing_checks}), NOT a
         // list of checks — TacticalFieldMap::checksFromAgentSummary owns the
-        // shape (failing = failing+warning+info; passing caveats documented
-        // there). (The DETAILED failing-check list is a separate getAgentChecks
-        // read.)
+        // shape (failing = failing+warning+info). Its `passing` is ALWAYS null
+        // (psa-0pb9m R2: the vendor aggregate counts never-reporting checks as
+        // passing), so this write also scrubs any pre-R2 manufactured value
+        // still on the row. (The DETAILED failing-check list is a separate
+        // getAgentChecks read.)
         $checks = TacticalFieldMap::checksFromAgentSummary(
             is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
         );
@@ -278,14 +280,15 @@ class TacticalDeviceSyncService
         // embeds a `checks` SUMMARY DICT
         // ({total, passing, failing, warning, info, has_failing_checks}) per agent
         // in the LIST payload too (confirmed against source v1.5.0 + live VM 105).
-        // Persist failing/passing/total so the card health line AND the coverage
-        // verdict are snapshot-fresh from the DAILY sync (zero per-agent
-        // fan-out) — not detail-only. TacticalFieldMap::checksFromAgentSummary
-        // owns the dict shape: failing = failing+warning+info (the severity
-        // split of status=failing, so snapshot and live-list counts agree) and
-        // documents the vendor caveats (never-run counts as passing; the list
-        // serializer reads a periodic-task cache). Read defensively: leave the
-        // columns untouched if a payload ever omits the dict.
+        // Persist failing/total so the card health line and the coverage verdict
+        // are snapshot-fresh from the DAILY sync (zero per-agent fan-out).
+        // TacticalFieldMap::checksFromAgentSummary owns the dict shape: failing =
+        // failing+warning+info (the severity split of status=failing, so snapshot
+        // and live-list counts agree), and its passing is ALWAYS null (psa-0pb9m
+        // R2: the vendor aggregate counts never-reporting checks as passing —
+        // never evidence), so this write also scrubs pre-R2 manufactured values.
+        // Read defensively: leave the columns untouched if a payload ever omits
+        // the dict.
         $checks = TacticalFieldMap::checksFromAgentSummary(
             is_array($agent['checks'] ?? null) ? $agent['checks'] : null,
         );

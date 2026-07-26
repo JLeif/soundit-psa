@@ -1639,7 +1639,6 @@ class StaffTacticalAdminToolExecutor
         $scriptShell = is_scalar($scriptRow['shell'] ?? null) ? (string) $scriptRow['shell'] : null;
         $scriptPlatforms = is_array($scriptRow['supported_platforms'] ?? null) ? $scriptRow['supported_platforms'] : null;
         $scriptMeta = ['shell' => $scriptShell, 'supported_platforms' => $scriptPlatforms];
-        $acknowledgePlatformRisk = ($arguments['acknowledge_platform_risk'] ?? false) === true;
         $platformNote = null;
 
         if (($target['target_type'] ?? null) === 'agent') {
@@ -1673,24 +1672,29 @@ class StaffTacticalAdminToolExecutor
         } elseif (($target['target_type'] ?? null) === 'policy') {
             $blockedPlatforms = TacticalCheckPlatformGuard::incompatiblePlatforms($scriptShell, $scriptPlatforms);
 
-            if ($blockedPlatforms !== [] && ! $acknowledgePlatformRisk) {
-                // REFUSE before any write — a post-write warning is not a
-                // safety control. The acknowledgement is the operator's
-                // explicit pre-write confirmation that the policy's fleet is
-                // compatible (the affected platforms are named here so the
-                // second call is an informed one).
-                $message = "Refusing to create this policy check before any write: script '{$resolvedScript['script_name']}' cannot run on "
-                    .implode('/', $blockedPlatforms)." agents, and the membership of policy '{$target['policy_name']}' cannot be verified from here. "
-                    .'If the policy covers any such agent, the check would fail on every run there — broken-coverage noise, the original psa-0pb9m defect. '
-                    .'First confirm in Tactical that this policy applies ONLY to compatible platforms, then retry with acknowledge_platform_risk=true.';
-                $this->auditAttempt($tool, 'rejected', $clientId, $contentHash, $message, $actorLabel);
-
-                return ['error' => $message];
-            }
-
             if ($blockedPlatforms !== []) {
-                $platformNote = 'Created with acknowledge_platform_risk: the script cannot run on '.implode('/', $blockedPlatforms)
-                    ." agents; the caller confirmed policy '{$target['policy_name']}' covers only compatible platforms.";
+                // SERVER-DERIVED membership proof, before any write (psa-0pb9m
+                // R2): a caller-assertable acknowledgement was an AI-settable
+                // claim, not evidence — the policy's CURRENT member agents are
+                // enumerated live from Tactical and every one must be on a
+                // compatible platform. The client-boundary guard re-asserts
+                // the same proof; this pre-check produces the audited,
+                // surface-friendly refusal.
+                $proof = TacticalCheckPlatformGuard::provePolicyMembership($this->client, (int) $target['target_id'], $blockedPlatforms);
+
+                if (! $proof['proven']) {
+                    $message = "Refusing to create this policy check before any write: script '{$resolvedScript['script_name']}' cannot run on "
+                        .implode('/', $blockedPlatforms).' agents, and '.$proof['reason']
+                        .' A check that cannot run on a member fails on every run there — broken-coverage noise, the original psa-0pb9m defect. '
+                        .'There is no override: make the policy cover only compatible platforms, or target the compatible agents directly.';
+                    $this->auditAttempt($tool, 'rejected', $clientId, $contentHash, $message, $actorLabel);
+
+                    return ['error' => $message];
+                }
+
+                $platformNote = 'Platform-bound script allowed by server-derived membership proof: the script cannot run on '
+                    .implode('/', $blockedPlatforms)." agents, and policy '{$target['policy_name']}' currently has {$proof['members_checked']} member agent(s), "
+                    .'every one on a compatible platform (verified against Tactical at write time; agents added to the policy later are not covered by this proof).';
             }
         }
 
@@ -1721,7 +1725,7 @@ class StaffTacticalAdminToolExecutor
             // The script-meta claim is the upstream getScripts row this call
             // already verified — fresher than the daily catalog sync, so the
             // client-boundary guard assesses the same vendor truth we did.
-            $result = $this->client->createCheck($payload, $scriptMeta, $acknowledgePlatformRisk);
+            $result = $this->client->createCheck($payload, $scriptMeta);
             $checkId = $this->createdCheckId($target, $payload);
         } catch (TacticalClientException $e) {
             $message = $this->tacticalFailureMessage($e, 'Tactical check create');
@@ -3651,7 +3655,6 @@ class StaffTacticalAdminToolExecutor
             'confirm_hostname',
             'script_id',
             'script_name',
-            'acknowledge_platform_risk',
         ];
         $unsupported = array_values(array_diff(array_keys($arguments), array_merge($allowed, $nonBody)));
         if ($unsupported !== []) {
@@ -5254,10 +5257,8 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_create_check',
-            'Create one Tactical script check on a verified automation policy or PSA-derived agent using POST checks/. Policy-level checks can affect all policy agents and require typed policy-name confirmation; agent checks require typed hostname confirmation. The tool resolves scripts through getScripts and refuses caller-supplied Tactical agent/script aliases. PLATFORM SAFETY (psa-0pb9m): a wrong-platform script check fails on every run forever and reads as broken coverage, so creation FAILS CLOSED before any write — an agent whose platform is unknown to the PSA is refused (run tactical:sync-devices first), a script provably incompatible with the agent platform is refused outright, and a platform-bound script on a POLICY is refused unless acknowledge_platform_risk=true explicitly confirms the policy covers only compatible platforms (the refusal names the affected platforms).',
-            array_merge(self::reasonProperties(), self::scriptSelectorProperties(), self::checkBodyProperties(), [
-                'acknowledge_platform_risk' => ['type' => 'boolean', 'description' => 'Policy targets only: explicit pre-write confirmation that the policy applies ONLY to platforms this script can run on. Required when the script is platform-bound (e.g. PowerShell/Windows-only) because policy membership cannot be verified here; a mixed-fleet policy is how a wrong-platform always-failing check reaches every Mac. Never required for agent targets — provably incompatible agent creates are refused outright.'],
-            ]),
+            'Create one Tactical script check on a verified automation policy or PSA-derived agent using POST checks/. Policy-level checks can affect all policy agents and require typed policy-name confirmation; agent checks require typed hostname confirmation. The tool resolves scripts through getScripts and refuses caller-supplied Tactical agent/script aliases. PLATFORM SAFETY (psa-0pb9m): a wrong-platform script check fails on every run forever and reads as broken coverage, so creation FAILS CLOSED before any write — an agent whose platform is unknown to the PSA is refused (run tactical:sync-devices first), a script provably incompatible with the agent platform (or without verifiable platform metadata) is refused outright, and a platform-bound script on a POLICY is allowed only on SERVER-DERIVED MEMBERSHIP PROOF: the policy\'s current member agents are enumerated live from Tactical and every one must be on a compatible platform. There is no caller-assertable override; a refusal names the incompatible members — make the policy cover only compatible platforms, or target compatible agents directly.',
+            array_merge(self::reasonProperties(), self::scriptSelectorProperties(), self::checkBodyProperties()),
             ['reason'],
         );
     }

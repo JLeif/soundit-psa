@@ -60,10 +60,13 @@ class TacticalInsightService
 
         $checksFailing = $ta->checks_failing;
         $checksTotal = $ta->checks_total;
-        // Explicit passing evidence from the synced summary dict; null on rows
-        // synced before the checks_passing column existed — coverage then
-        // classifies "unknown", never verified-by-default (psa-0pb9m revise).
-        $checksPassing = $ta->checks_passing;
+        // NEVER read checks_passing off the snapshot (psa-0pb9m R2): the only
+        // producer that ever filled it was Tactical's summary aggregate, which
+        // counts a never-reporting check as passing — a manufactured pass, not
+        // evidence. Snapshot coverage classifies from total/failing alone
+        // (unknown, or unverified when all-failing); explicit passing evidence
+        // exists only on the live per-check read below.
+        $checksPassing = null;
         $checksState = $checksFailing !== null
             ? SignalState::Snapshot
             : SignalState::Unavailable;

@@ -105,10 +105,13 @@ class TacticalFieldMapTest extends TestCase
 
     public function test_checks_from_agent_summary_maps_the_vendor_dict(): void
     {
-        // Producer: calculate_agent_checks (agents/utils.py:145). failing /
-        // warning / info are the SEVERITY SPLIT of status=failing results, so
-        // the mapped failing count sums them — dict-derived and list-derived
-        // counts must agree (a warning-severity failure is still a failure).
+        // Producer: calculate_agent_checks (agents/utils.py:146-184 @ the
+        // pinned upstream commit). failing / warning / info are the SEVERITY
+        // SPLIT of status=failing results, so the mapped failing count sums
+        // them — dict-derived and list-derived counts must agree (a
+        // warning-severity failure is still a failure). `passing` is NEVER
+        // mapped (psa-0pb9m R2): the producer counts a check with NO result
+        // row as passing, so the vendor number is a claim, not evidence.
         $mapped = TacticalFieldMap::checksFromAgentSummary([
             'total' => 6,
             'passing' => 2,
@@ -120,7 +123,7 @@ class TacticalFieldMapTest extends TestCase
 
         $this->assertSame(6, $mapped['total']);
         $this->assertSame(4, $mapped['failing']);
-        $this->assertSame(2, $mapped['passing']);
+        $this->assertNull($mapped['passing'], 'the vendor aggregate is never passing evidence');
 
         // Absent/malformed dict maps to all-null — unknown, never clean.
         $this->assertSame(
@@ -131,12 +134,29 @@ class TacticalFieldMapTest extends TestCase
             ['total' => null, 'failing' => null, 'passing' => null],
             TacticalFieldMap::checksFromAgentSummary(['detail' => 'Not found.']),
         );
+    }
 
-        // A dict without a passing key keeps passing null (no evidence).
-        $legacy = TacticalFieldMap::checksFromAgentSummary(['total' => 3, 'failing' => 1]);
-        $this->assertSame(3, $legacy['total']);
-        $this->assertSame(1, $legacy['failing']);
-        $this->assertNull($legacy['passing']);
+    public function test_checks_from_agent_summary_never_passes_the_never_run_manufactured_claim_through(): void
+    {
+        // The producer's documented never-run shape: ONE check with NO
+        // CheckResult row arrives as {total: 1, passing: 1, failing: 0}
+        // (the `not hasattr(check.check_result, "status")` branch). This is
+        // the exact device psa-0pb9m exists for — it must classify UNKNOWN,
+        // never verified.
+        $mapped = TacticalFieldMap::checksFromAgentSummary([
+            'total' => 1,
+            'passing' => 1,
+            'failing' => 0,
+            'warning' => 0,
+            'info' => 0,
+            'has_failing_checks' => false,
+        ]);
+
+        $this->assertSame(['total' => 1, 'failing' => 0, 'passing' => null], $mapped);
+        $this->assertSame(
+            TacticalFieldMap::COVERAGE_UNKNOWN,
+            TacticalFieldMap::checksCoverage($mapped['total'], $mapped['failing'], $mapped['passing']),
+        );
     }
 
     public function test_disk_volume_mapping_can_include_filesystem_type_for_read_tools(): void

@@ -214,7 +214,11 @@ class DataSurfaceToolsTest extends TestCase
         $result = $this->decodedResult($response);
         $this->assertSame('PC-01', $result['hostname']);
         $this->assertSame('online', $result['status']);
-        $this->assertSame('1 failing / 8 total (7 passing)', $result['checks_summary']);
+        // The dict's `passing` is the vendor's claim, not per-check proof
+        // (psa-0pb9m R2: it counts never-reporting checks as passing), so the
+        // dict-derived summary is honest about that; the explicit line lives
+        // on the per-check read (tactical_get_device_checks).
+        $this->assertSame('8 configured - passing count unavailable (coverage unknown: only the live per-check read proves a pass)', $result['checks_summary']);
 
         $this->assertDatabaseHas('mcp_audit_logs', [
             'method' => 'tools/call',
