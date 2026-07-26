@@ -333,7 +333,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'get_person',
-                'description' => 'Look up a contact at this client by id, email, or name (partial match). Returns job title, department, emails, M365 enrichment, and any free-form notes.',
+                'description' => 'Look up a contact at this client by id, email, or name (partial match). Returns only ACTIVE contacts by default — a deactivated/offboarded person is reported as "not found" unless you set include_inactive, so a routine lookup never surfaces a terminated employee for routing. Returns job title, department, emails, M365 enrichment, and any free-form notes.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -349,13 +349,17 @@ class AssistantToolDefinitions
                             'type' => 'string',
                             'description' => 'First or last name, partial match. Used only if id/email not provided.',
                         ],
+                        'include_inactive' => [
+                            'type' => 'boolean',
+                            'description' => 'Resolve deactivated/offboarded contacts too. Defaults to false (active only).',
+                        ],
                     ],
                     'required' => [],
                 ],
             ],
             [
                 'name' => 'get_asset',
-                'description' => 'Look up a device (asset) at this client by id or hostname. Returns hardware, OS, warranty, RMM IDs, and free-form notes.',
+                'description' => 'Look up a device (asset) at this client by id or hostname. Returns only ACTIVE (in-service) devices by default — a deactivated device is reported as "not found" unless you set include_inactive; retired/soft-deleted assets are never returned. Returns hardware, OS, warranty, RMM IDs, and free-form notes.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -367,13 +371,17 @@ class AssistantToolDefinitions
                             'type' => 'string',
                             'description' => 'Hostname to look up (case-insensitive exact match).',
                         ],
+                        'include_inactive' => [
+                            'type' => 'boolean',
+                            'description' => 'Resolve deactivated devices too. Defaults to false (active only). Retired/soft-deleted assets are never returned.',
+                        ],
                     ],
                     'required' => [],
                 ],
             ],
             [
                 'name' => 'find_persons',
-                'description' => 'Search people by name (partial first/last/full name match) or email substring. If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE contacts by default — deactivated/offboarded people (e.g. former employees) are excluded so you never route a ticket or address mail to a terminated employee; set include_inactive to true for an explicit former-employee lookup (every result carries is_active either way). Use the cross-client form when you only have a person\'s name or email and don\'t yet know what client they belong to.',
+                'description' => 'Search people by first name, last name, or email substring (partial, case-insensitive). If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE contacts by default — deactivated/offboarded people are excluded from routine discovery so they do not surface for routing or contact decisions; set include_inactive to true for a deliberate historical or former-employee lookup (every result carries is_active either way). Use the cross-client form when you only have a person\'s name or email and don\'t yet know what client they belong to.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -395,7 +403,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'find_assets',
-                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive). If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE assets by default; set include_inactive to true to include retired assets (every result carries is_active either way). Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
+                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive). If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE (in-service) assets by default; set include_inactive to true to ALSO include DEACTIVATED (is_active=false) assets — retired/soft-deleted assets are never returned by this tool (every result carries is_active either way). Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -405,7 +413,7 @@ class AssistantToolDefinitions
                         ],
                         'include_inactive' => [
                             'type' => 'boolean',
-                            'description' => 'Include retired assets. Defaults to false (active only).',
+                            'description' => 'Include deactivated (is_active=false) assets. Defaults to false (active only). Retired/soft-deleted assets are never returned.',
                         ],
                         'limit' => [
                             'type' => 'integer',

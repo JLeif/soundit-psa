@@ -589,6 +589,15 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Contact does not belong to this client; different client boundary enforced.'];
         }
 
+        // psa-eu5la: the read surface (find_persons/get_person) is now active-by-default,
+        // but this is the write CHOKE POINT where the routing harm actually lands — refuse
+        // to set a ticket's contact to a DEACTIVATED/offboarded person so the two-call
+        // bypass (discover-then-route) can never reach a terminated employee. Purely
+        // restrictive; pick an active contact or reactivate the person to proceed.
+        if (! $contact->is_active) {
+            return ['error' => 'Contact '.$contact->id.' is deactivated/offboarded; a ticket cannot be routed to a deactivated contact. Choose an active contact, or reactivate this person first.'];
+        }
+
         $reason = $this->optionalString($arguments, 'reason');
         $before = $ticket->contact_id;
         $ticket->update(['contact_id' => $contact->id]);

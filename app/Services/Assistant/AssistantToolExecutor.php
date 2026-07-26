@@ -888,7 +888,18 @@ class AssistantToolExecutor
             return ['error' => 'No client context — cannot look up person'];
         }
 
+        $includeInactive = self::wantsInactive($input);
+
         $query = Person::where('client_id', $this->clientId);
+
+        // Active-by-default on EVERY lookup path (id/email/name). get_person is the
+        // two-call bypass around find_persons' fence: without this an agent could
+        // resolve an OFFBOARDED contact by id or partial name here — email and all —
+        // and route a ticket to a terminated employee (security lane repro, psa-eu5la).
+        // include_inactive (validated boolean) is the deliberate historical override.
+        if (! $includeInactive) {
+            $query->active();
+        }
 
         if (! empty($input['person_id'])) {
             $query->where('id', (int) $input['person_id']);
@@ -905,7 +916,11 @@ class AssistantToolExecutor
 
         $person = $query->first();
         if (! $person) {
-            return ['error' => 'Person not found at this client'];
+            // Do not confirm existence — the same message whether the id is unknown or
+            // merely inactive keeps get_person from leaking an offboarded record.
+            $hint = $includeInactive ? '' : ' (deactivated/offboarded contacts are excluded — set include_inactive to include them)';
+
+            return ['error' => 'Person not found at this client'.$hint];
         }
 
         return [
@@ -932,7 +947,17 @@ class AssistantToolExecutor
             return ['error' => 'No client context — cannot look up asset'];
         }
 
+        $includeInactive = self::wantsInactive($input);
+
         $query = Asset::where('client_id', $this->clientId);
+
+        // Active-by-default on both lookup paths (id/hostname) — the get_asset analogue
+        // of the get_person bypass. include_inactive surfaces DEACTIVATED assets
+        // deliberately; RETIRED (soft-deleted) assets stay out via SoftDeletes
+        // regardless (psa-eu5la review).
+        if (! $includeInactive) {
+            $query->active();
+        }
 
         if (! empty($input['asset_id'])) {
             $query->where('id', (int) $input['asset_id']);
@@ -944,7 +969,9 @@ class AssistantToolExecutor
 
         $asset = $query->first();
         if (! $asset) {
-            return ['error' => 'Asset not found at this client'];
+            $hint = $includeInactive ? '' : ' (deactivated assets are excluded — set include_inactive to include them)';
+
+            return ['error' => 'Asset not found at this client'.$hint];
         }
 
         return [
@@ -998,6 +1025,23 @@ class AssistantToolExecutor
         ];
     }
 
+    /**
+     * Resolve the include_inactive opt-in as a REAL boolean.
+     *
+     * These read tools are dispatched straight from raw tool input — neither
+     * McpStaffController nor AiClient runs the published argument schema — so a naive
+     * (bool) cast reads the STRING "false" (which a JSON-ish caller can send) as TRUE,
+     * opting INTO inactive records, the exact inverse of the guard. filter_var maps
+     * "false"/"0"/"no"/"off"/false/0 → false and only "true"/"1"/"yes"/"on"/true → true;
+     * absent/null/garbage → false, failing safe to active-only (psa-eu5la review).
+     *
+     * @param  array<string, mixed>  $input
+     */
+    private static function wantsInactive(array $input): bool
+    {
+        return filter_var($input['include_inactive'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    }
+
     private function findPersons(array $input): array
     {
         $query = trim((string) ($input['query'] ?? ''));
@@ -1006,7 +1050,7 @@ class AssistantToolExecutor
         }
 
         $limit = min((int) ($input['limit'] ?? 10), 25);
-        $includeInactive = (bool) ($input['include_inactive'] ?? false);
+        $includeInactive = self::wantsInactive($input);
 
         $q = Person::query()
             ->with('client:id,name')
@@ -1015,16 +1059,15 @@ class AssistantToolExecutor
                 ->orWhere('last_name', 'like', "%{$query}%")
                 ->orWhere('email', 'like', "%{$query}%"));
 
-        // Fence on the RECORD's own is_active (mirroring Web\PersonController's
-        // Person::active()), NOT the client's. The former whereHas('client', active())
-        // returned OFFBOARDED contacts — exactly the ones CippContactSyncService
-        // deactivates when accountEnabled flips false — so the agent could address an
-        // email or route a ticket to a terminated employee, while HIDING active
-        // contacts at deactivated clients and contradicting this tool's "across ALL
-        // clients" contract. Staff already see every client on the web, so dropping the
-        // client fence widens no tenant boundary (psa-eu5la; mirrors psa-6usr).
+        // Fence on the RECORD's own is_active via Person::scopeActive (matching
+        // Web\PersonController's Person::active()), NOT the client's. The former
+        // whereHas('client', active()) returned OFFBOARDED contacts — exactly the ones
+        // CippContactSyncService deactivates when accountEnabled flips false — while
+        // HIDING active contacts at deactivated clients and contradicting this tool's
+        // "across ALL clients" contract. Staff already see every client on the web, so
+        // dropping the client fence widens no tenant boundary (psa-eu5la; mirrors psa-6usr).
         if (! $includeInactive) {
-            $q->where('is_active', true);
+            $q->active();
         }
 
         if ($this->clientId) {
@@ -1061,7 +1104,7 @@ class AssistantToolExecutor
         }
 
         $limit = min((int) ($input['limit'] ?? 10), 25);
-        $includeInactive = (bool) ($input['include_inactive'] ?? false);
+        $includeInactive = self::wantsInactive($input);
 
         $q = Asset::query()
             ->with('client:id,name')
@@ -1070,13 +1113,15 @@ class AssistantToolExecutor
                 ->orWhere('hostname', 'like', "%{$query}%")
                 ->orWhere('serial_number', 'like', "%{$query}%"));
 
-        // Fence on the RECORD's own is_active (mirroring AssetService::getAssetList's
-        // is_active default), NOT the client's — same both-directions drift as
-        // find_persons: the old whereHas('client', active()) returned RETIRED assets
-        // and hid active assets at deactivated clients, against the "across ALL
-        // clients" contract. No tenant boundary here (psa-eu5la; mirrors psa-6usr).
+        // Fence on the RECORD's own is_active via Asset::scopeActive (mirroring
+        // AssetService::getAssetList's is_active default), NOT the client's — same
+        // both-directions drift as find_persons: the old whereHas('client', active())
+        // returned DEACTIVATED assets and hid active assets at deactivated clients,
+        // against the "across ALL clients" contract. No tenant boundary here
+        // (psa-eu5la; mirrors psa-6usr). Note: include_inactive flips is_active only —
+        // RETIRED (soft-deleted) assets stay excluded by Asset's SoftDeletes scope.
         if (! $includeInactive) {
-            $q->where('is_active', true);
+            $q->active();
         }
 
         if ($this->clientId) {

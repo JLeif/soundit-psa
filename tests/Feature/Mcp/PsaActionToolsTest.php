@@ -1126,6 +1126,38 @@ class PsaActionToolsTest extends TestCase
         $this->assertSame(mb_strlen('Updated body text.'), $audit->arguments['description_length']);
     }
 
+    public function test_set_ticket_contact_refuses_a_deactivated_contact(): void
+    {
+        // psa-eu5la (REVISE): the read-surface fence is not enough — set_ticket_contact
+        // checked client ownership but NOT active status, so the two-call bypass
+        // (discover an offboarded person, then set them as the ticket contact) could
+        // still route work to a terminated employee. Guard the write choke point.
+        $this->configureAiActor();
+        $token = $this->token(['set_ticket_contact'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $offboarded = Person::create([
+            'client_id' => $ticket->client_id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Terminated',
+            'last_name' => 'Employee',
+            'email' => 'terminated-eu5la@example.test',
+            'is_active' => false,
+        ]);
+        $before = $ticket->contact_id;
+
+        $response = $this->callTool($token, 'set_ticket_contact', [
+            'ticket_id' => $ticket->id,
+            'contact_id' => $offboarded->id,
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'routing a ticket to a deactivated contact must be refused');
+        $this->assertStringContainsString('deactivated', strtolower((string) $response->json('result.content.0.text')));
+
+        $ticket->refresh();
+        $this->assertSame($before, $ticket->contact_id, 'the ticket contact must be unchanged after the refusal');
+    }
+
     public function test_assign_asset_and_unassign_asset_enforce_ticket_client_boundary(): void
     {
         $this->configureAiActor();
