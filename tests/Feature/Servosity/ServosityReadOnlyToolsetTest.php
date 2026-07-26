@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\License;
 use App\Models\LicenseType;
 use App\Models\Setting;
+use App\Services\AssetService;
 use App\Services\Servosity\ServosityClient;
 use App\Services\Servosity\ServosityClientException;
 use App\Services\Servosity\ServosityReadOnlyToolset;
@@ -1021,7 +1022,7 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $client = $this->mappedClient('Acme');
         $this->enabledAsset($client, ['hostname' => 'DONE-HOST', 'servosity_dr_backup_id' => 501]);
         Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST', 'asset_type' => 'Server']);
-        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'RETIRED-HOST', 'is_active' => false]);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'INACTIVE-HOST', 'is_active' => false]);
         $this->mockServosity($this->drfPage($this->companyRow(42)), $this->drfPage($this->drRow(501, 'DONE-HOST')));
 
         $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
@@ -1034,6 +1035,7 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $this->assertSame(1, $coverage['backup_configured_count']);
         $this->assertSame(1, $coverage['backup_not_configured_count']);
         $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertSame(0, $coverage['retired_assets_excluded']);
         $this->assertFalse($coverage['not_configured_truncated']);
 
         $this->assertCount(1, $coverage['not_configured_assets']);
@@ -1047,9 +1049,72 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $this->assertStringContainsString('NOT protection', $coverage['note']);
         $this->assertStringContainsString('Servosity console', $coverage['note']);
         $this->assertStringContainsString('account_counts', $coverage['note'], 'the note must keep the account-level (M365/NAS) nuance');
-        // Retired hardware is excluded from the accounting, but loudly.
+        // An out-of-service asset is excluded from the accounting, but loudly.
         $this->assertStringContainsString('inactive', $coverage['note']);
-        $this->assertStringNotContainsString('RETIRED-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+        $this->assertStringNotContainsString('INACTIVE-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+    }
+
+    public function test_a_configured_inactive_asset_is_excluded_from_device_rows_and_counted_not_contradicted(): void
+    {
+        // R3 (psa-wnnus.3): an enabled is_active=false asset used to stay in
+        // the device rows and enabled/provisioned counts while fleet_coverage
+        // excluded it from the active totals AND claimed inactive assets were
+        // excluded — an internally contradictory payload. ONE lifecycle seam
+        // now scopes rows, counts, and totals alike: the asset appears
+        // NOWHERE and is counted loudly instead.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme');
+        $this->enabledAsset($client, ['hostname' => 'DONE-HOST', 'servosity_dr_backup_id' => 501]);
+        $this->enabledAsset($client, ['hostname' => 'INACTIVE-ENABLED-HOST', 'servosity_dr_backup_id' => 502, 'is_active' => false]);
+        $this->mockServosity($this->drfPage($this->companyRow(42)), $this->drfPage($this->drRow(501, 'DONE-HOST')));
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame(1, $result['enabled_device_count'], 'a configured inactive asset must not appear as a device');
+        $this->assertSame(1, $result['provisioned_count']);
+        $this->assertSame(0, $result['pending_provisioning_count']);
+        $this->assertStringNotContainsString('INACTIVE-ENABLED-HOST', json_encode($result), 'an excluded asset must appear in NO row of the payload');
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(0, $coverage['backup_not_configured_count'], 'an inactive asset is excluded, not unprotected');
+        $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertSame(0, $coverage['retired_assets_excluded']);
+        $this->assertSame($result['enabled_device_count'], $coverage['backup_configured_count'],
+            'device rows and fleet totals must share ONE lifecycle scope — no contradiction between them');
+        $this->assertStringContainsString('inactive', $coverage['note']);
+    }
+
+    public function test_a_retired_asset_is_excluded_and_counted_through_the_sanctioned_soft_delete_path(): void
+    {
+        // R3 (psa-wnnus.3): AssetService::deleteAsset() — the ONLY sanctioned
+        // retirement path — soft-deletes WITHOUT flipping is_active, so a
+        // genuinely retired asset was absent from the active totals AND
+        // invisible to the excluded count, while the note claimed retired
+        // hardware was counted. It must land in retired_assets_excluded; an
+        // asset that is BOTH inactive and soft-deleted counts once (as
+        // retired), never twice.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme');
+        $this->enabledAsset($client, ['hostname' => 'DONE-HOST', 'servosity_dr_backup_id' => 501]);
+        $retired = $this->enabledAsset($client, ['hostname' => 'RETIRED-GONE-HOST', 'servosity_dr_backup_id' => 502]);
+        $inactiveRetired = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'INACTIVE-RETIRED-HOST', 'is_active' => false]);
+        app(AssetService::class)->deleteAsset($retired);
+        app(AssetService::class)->deleteAsset($inactiveRetired);
+        $this->mockServosity($this->drfPage($this->companyRow(42)), $this->drfPage($this->drRow(501, 'DONE-HOST')));
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame(1, $result['enabled_device_count']);
+        $this->assertStringNotContainsString('RETIRED-GONE-HOST', json_encode($result), 'a retired asset must appear in NO row of the payload');
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(2, $coverage['retired_assets_excluded'], 'every soft-deleted asset is counted — silent invisibility is the defect');
+        $this->assertSame(0, $coverage['inactive_assets_excluded'], 'a soft-deleted inactive asset counts ONCE, as retired — never twice');
+        $this->assertStringContainsString('2 retired', $coverage['note']);
     }
 
     public function test_a_fully_covered_fleet_states_no_active_asset_is_missing(): void

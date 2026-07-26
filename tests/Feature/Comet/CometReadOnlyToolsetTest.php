@@ -9,6 +9,7 @@ use App\Models\Alert;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Setting;
+use App\Services\AssetService;
 use App\Services\Comet\CometClient;
 use App\Services\Comet\CometClientException;
 use App\Services\Comet\CometReadOnlyToolset;
@@ -409,7 +410,7 @@ class CometReadOnlyToolsetTest extends TestCase
 
         $this->assertArrayNotHasKey('error', $result);
         $this->assertSame(0, $result['device_count']);
-        $this->assertStringContainsString('no PSA assets carry Comet backup state', $result['note']);
+        $this->assertStringContainsString('no active PSA assets carry Comet backup state', $result['note']);
         $this->assertStringContainsString('Verify in the Comet console', $result['note']);
     }
 
@@ -426,7 +427,7 @@ class CometReadOnlyToolsetTest extends TestCase
         $client = $this->mappedClient('Acme');
         $this->cometAsset($client, ['hostname' => 'PROTECTED-HOST', 'comet_device_id' => 'dev-1']);
         Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST', 'asset_type' => 'Server']);
-        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'RETIRED-HOST', 'is_active' => false]);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'INACTIVE-HOST', 'is_active' => false]);
         $this->mockJobs(['acme-backup' => [$this->job(['device' => 'dev-1'])]]);
 
         $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
@@ -439,6 +440,7 @@ class CometReadOnlyToolsetTest extends TestCase
         $this->assertSame(1, $coverage['backup_configured_count']);
         $this->assertSame(1, $coverage['backup_not_configured_count']);
         $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertSame(0, $coverage['retired_assets_excluded']);
         $this->assertFalse($coverage['not_configured_truncated']);
 
         $this->assertCount(1, $coverage['not_configured_assets']);
@@ -451,9 +453,76 @@ class CometReadOnlyToolsetTest extends TestCase
         $this->assertStringContainsString('NOT PROTECTED', $coverage['note']);
         $this->assertStringContainsString('NOT protection', $coverage['note']);
         $this->assertStringContainsString('Comet console', $coverage['note']);
-        // Retired hardware is excluded from the accounting, but loudly.
+        // An out-of-service asset is excluded from the accounting, but loudly.
         $this->assertStringContainsString('inactive', $coverage['note']);
-        $this->assertStringNotContainsString('RETIRED-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+        $this->assertStringNotContainsString('INACTIVE-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+    }
+
+    public function test_a_configured_inactive_asset_is_excluded_from_device_rows_and_counted_not_contradicted(): void
+    {
+        // R3 (psa-wnnus.3): a configured is_active=false asset used to stay in
+        // the device rows and every summary count while fleet_coverage
+        // excluded it from the active totals AND claimed inactive assets were
+        // excluded — an internally contradictory payload. ONE lifecycle seam
+        // now scopes rows, counts, and totals alike: the asset appears
+        // NOWHERE, is counted loudly instead, and its Comet username is never
+        // even looked up.
+        $this->configureComet();
+        $client = $this->mappedClient('Acme');
+        $this->cometAsset($client, ['hostname' => 'ACTIVE-HOST', 'comet_device_id' => 'dev-1', 'comet_username' => 'acme-backup']);
+        $this->cometAsset($client, ['hostname' => 'INACTIVE-CONFIGURED-HOST', 'comet_device_id' => 'dev-2', 'comet_username' => 'inactive-backup', 'is_active' => false]);
+
+        $mock = $this->mock(CometClient::class);
+        $mock->shouldReceive('getJobsForUser')->once()->with('acme-backup')
+            ->andReturn([$this->job(['device' => 'dev-1'])]);
+
+        $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
+
+        $this->assertSame(1, $result['device_count'], 'a configured inactive asset must not appear as a device');
+        $this->assertSame(1, $result['summary']['devices_total']);
+        $this->assertSame(1024 ** 3, $result['storage_totals']['cloud_bytes'], 'an excluded asset must not contribute storage');
+        $this->assertStringNotContainsString('INACTIVE-CONFIGURED-HOST', json_encode($result), 'an excluded asset must appear in NO row of the payload');
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(0, $coverage['backup_not_configured_count'], 'an inactive asset is excluded, not unprotected');
+        $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertSame(0, $coverage['retired_assets_excluded']);
+        $this->assertSame($result['summary']['devices_total'], $coverage['backup_configured_count'],
+            'device rows and fleet totals must share ONE lifecycle scope — no contradiction between them');
+        $this->assertStringContainsString('inactive', $coverage['note']);
+    }
+
+    public function test_a_retired_asset_is_excluded_and_counted_through_the_sanctioned_soft_delete_path(): void
+    {
+        // R3 (psa-wnnus.3): AssetService::deleteAsset() — the ONLY sanctioned
+        // retirement path — soft-deletes WITHOUT flipping is_active, so a
+        // genuinely retired asset was absent from the active totals AND
+        // invisible to the excluded count, while the note claimed retired
+        // hardware was counted. It must land in retired_assets_excluded; an
+        // asset that is BOTH inactive and soft-deleted counts once (as
+        // retired), never twice.
+        $this->configureComet();
+        $client = $this->mappedClient('Acme');
+        $this->cometAsset($client, ['hostname' => 'ACTIVE-HOST', 'comet_device_id' => 'dev-1']);
+        $retired = $this->cometAsset($client, ['hostname' => 'RETIRED-GONE-HOST', 'comet_device_id' => 'dev-2']);
+        $inactiveRetired = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'INACTIVE-RETIRED-HOST', 'is_active' => false]);
+        app(AssetService::class)->deleteAsset($retired);
+        app(AssetService::class)->deleteAsset($inactiveRetired);
+        $this->mockJobs(['acme-backup' => [$this->job(['device' => 'dev-1'])]]);
+
+        $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
+
+        $this->assertSame(1, $result['device_count']);
+        $this->assertStringNotContainsString('RETIRED-GONE-HOST', json_encode($result), 'a retired asset must appear in NO row of the payload');
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(2, $coverage['retired_assets_excluded'], 'every soft-deleted asset is counted — silent invisibility is the defect');
+        $this->assertSame(0, $coverage['inactive_assets_excluded'], 'a soft-deleted inactive asset counts ONCE, as retired — never twice');
+        $this->assertStringContainsString('2 retired', $coverage['note']);
     }
 
     public function test_a_fully_covered_fleet_states_no_active_asset_is_missing(): void
@@ -485,7 +554,7 @@ class CometReadOnlyToolsetTest extends TestCase
         $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
 
         $this->assertSame(0, $result['device_count']);
-        $this->assertStringContainsString('no PSA assets carry Comet backup state', $result['note']);
+        $this->assertStringContainsString('no active PSA assets carry Comet backup state', $result['note']);
 
         $coverage = $result['fleet_coverage'];
         $this->assertSame(1, $coverage['active_assets_total']);
