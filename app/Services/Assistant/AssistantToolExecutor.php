@@ -1006,14 +1006,26 @@ class AssistantToolExecutor
         }
 
         $limit = min((int) ($input['limit'] ?? 10), 25);
+        $includeInactive = (bool) ($input['include_inactive'] ?? false);
 
         $q = Person::query()
             ->with('client:id,name')
-            ->whereHas('client', fn ($client) => $client->active())
             ->where(fn ($w) => $w
                 ->where('first_name', 'like', "%{$query}%")
                 ->orWhere('last_name', 'like', "%{$query}%")
                 ->orWhere('email', 'like', "%{$query}%"));
+
+        // Fence on the RECORD's own is_active (mirroring Web\PersonController's
+        // Person::active()), NOT the client's. The former whereHas('client', active())
+        // returned OFFBOARDED contacts — exactly the ones CippContactSyncService
+        // deactivates when accountEnabled flips false — so the agent could address an
+        // email or route a ticket to a terminated employee, while HIDING active
+        // contacts at deactivated clients and contradicting this tool's "across ALL
+        // clients" contract. Staff already see every client on the web, so dropping the
+        // client fence widens no tenant boundary (psa-eu5la; mirrors psa-6usr).
+        if (! $includeInactive) {
+            $q->where('is_active', true);
+        }
 
         if ($this->clientId) {
             $q->where('client_id', $this->clientId);
@@ -1027,7 +1039,8 @@ class AssistantToolExecutor
 
         return [
             'count' => $persons->count(),
-            'scope' => $this->clientId ? "client_id={$this->clientId}" : 'cross-client (no client_id provided)',
+            'scope' => ($this->clientId ? "client_id={$this->clientId}" : 'cross-client (no client_id provided)')
+                .($includeInactive ? '; including inactive' : '; active only'),
             'persons' => $persons->map(fn ($p) => [
                 'id' => $p->id,
                 'client_id' => $p->client_id,
@@ -1048,14 +1061,23 @@ class AssistantToolExecutor
         }
 
         $limit = min((int) ($input['limit'] ?? 10), 25);
+        $includeInactive = (bool) ($input['include_inactive'] ?? false);
 
         $q = Asset::query()
             ->with('client:id,name')
-            ->whereHas('client', fn ($client) => $client->active())
             ->where(fn ($w) => $w
                 ->where('name', 'like', "%{$query}%")
                 ->orWhere('hostname', 'like', "%{$query}%")
                 ->orWhere('serial_number', 'like', "%{$query}%"));
+
+        // Fence on the RECORD's own is_active (mirroring AssetService::getAssetList's
+        // is_active default), NOT the client's — same both-directions drift as
+        // find_persons: the old whereHas('client', active()) returned RETIRED assets
+        // and hid active assets at deactivated clients, against the "across ALL
+        // clients" contract. No tenant boundary here (psa-eu5la; mirrors psa-6usr).
+        if (! $includeInactive) {
+            $q->where('is_active', true);
+        }
 
         if ($this->clientId) {
             $q->where('client_id', $this->clientId);
@@ -1068,7 +1090,8 @@ class AssistantToolExecutor
 
         return [
             'count' => $assets->count(),
-            'scope' => $this->clientId ? "client_id={$this->clientId}" : 'cross-client (no client_id provided)',
+            'scope' => ($this->clientId ? "client_id={$this->clientId}" : 'cross-client (no client_id provided)')
+                .($includeInactive ? '; including inactive' : '; active only'),
             'assets' => $assets->map(fn ($a) => [
                 'id' => $a->id,
                 'client_id' => $a->client_id,

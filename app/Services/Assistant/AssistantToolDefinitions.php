@@ -373,13 +373,17 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'find_persons',
-                'description' => 'Search people by name (partial first/last/full name match) or email substring. If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Use the cross-client form when you only have a person\'s name or email and don\'t yet know what client they belong to.',
+                'description' => 'Search people by name (partial first/last/full name match) or email substring. If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE contacts by default — deactivated/offboarded people (e.g. former employees) are excluded so you never route a ticket or address mail to a terminated employee; set include_inactive to true for an explicit former-employee lookup (every result carries is_active either way). Use the cross-client form when you only have a person\'s name or email and don\'t yet know what client they belong to.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
                         'query' => [
                             'type' => 'string',
                             'description' => 'Name or email fragment.',
+                        ],
+                        'include_inactive' => [
+                            'type' => 'boolean',
+                            'description' => 'Include deactivated/offboarded contacts. Defaults to false (active only).',
                         ],
                         'limit' => [
                             'type' => 'integer',
@@ -391,13 +395,17 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'find_assets',
-                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive). If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
+                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive). If client_id is provided the search is scoped to that client; otherwise it searches across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE assets by default; set include_inactive to true to include retired assets (every result carries is_active either way). Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
                         'query' => [
                             'type' => 'string',
                             'description' => 'Hostname / name / serial fragment.',
+                        ],
+                        'include_inactive' => [
+                            'type' => 'boolean',
+                            'description' => 'Include retired assets. Defaults to false (active only).',
                         ],
                         'limit' => [
                             'type' => 'integer',
