@@ -113,6 +113,26 @@ class CockpitLeaveItLaneTest extends TestCase
         $this->assertTrue($this->query()->reassessedLeftAsIs()->isEmpty());
     }
 
+    /**
+     * psa-iy8pm — a null-client (unresolved-sender) ticket's leave-it outcome must
+     * surface too: corrections and re-assessments key on the ticket, not the client,
+     * so the old whereHas('client') fence false-cleared these threads from the lane.
+     */
+    public function test_surfaces_a_null_client_leave_it_outcome(): void
+    {
+        $ticket = Ticket::factory()->create([
+            'client_id' => null,
+            'status' => TicketStatus::InProgress,
+            'subject' => 'Unresolved sender needs help',
+        ]);
+        $this->recordLeaveIt($ticket, 'Keep this open please.', 'Awaiting sender identification.');
+
+        $rows = $this->query()->reassessedLeftAsIs();
+
+        $this->assertCount(1, $rows);
+        $this->assertSame($ticket->id, $rows->first()->ticket->id);
+    }
+
     /** Ordinary correction threads with NO leave-it turn (only user corrections) never surface here. */
     public function test_ignores_correction_threads_with_no_leave_it_turn(): void
     {

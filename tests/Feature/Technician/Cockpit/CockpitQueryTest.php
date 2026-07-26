@@ -348,4 +348,47 @@ class CockpitQueryTest extends TestCase
 
         $this->assertFalse($query->needsAttention()->contains('id', $ticket->id));
     }
+
+    /**
+     * psa-iy8pm — an unresolved-sender ticket (client_id NULL) can carry the full
+     * acked-then-stalled profile: AutoAcknowledge posts its ai_authored Reply note with
+     * no client precondition, so the ack lands even when no client was ever resolved.
+     * The old whereHas('client') fence dropped such tickets from the lane entirely — a
+     * false-clear of the psa-6usr class. They must surface.
+     */
+    public function test_needs_attention_includes_null_client_acked_stalled_ticket(): void
+    {
+        $query = app(\App\Services\Technician\Cockpit\CockpitQuery::class);
+        $ticket = Ticket::factory()->create(['client_id' => null, 'status' => \App\Enums\TicketStatus::New]);
+
+        // The AI acked it (ai_authored Reply note), no held draft, no human reply since.
+        \App\Models\TicketNote::create([
+            'ticket_id' => $ticket->id, 'author_name' => 'Chet', 'who_type' => \App\Enums\WhoType::Agent,
+            'ai_authored' => true, 'body' => 'ack', 'note_type' => \App\Enums\NoteType::Reply,
+            'is_private' => false, 'noted_at' => now(),
+        ]);
+
+        $this->assertTrue($query->needsAttention()->contains('id', $ticket->id),
+            'a null-client acked-then-stalled ticket must surface, not be false-cleared by the client fence');
+    }
+
+    /**
+     * psa-iy8pm regression guard — the null-client relaxation must NOT widen the lane
+     * to inactive clients: a ticket that HAS a client keeps the is_active fence.
+     */
+    public function test_needs_attention_still_excludes_inactive_client_ticket(): void
+    {
+        $query = app(\App\Services\Technician\Cockpit\CockpitQuery::class);
+        $client = Client::factory()->create(['is_active' => false]);
+        $ticket = Ticket::factory()->create(['client_id' => $client->id, 'status' => \App\Enums\TicketStatus::New]);
+
+        \App\Models\TicketNote::create([
+            'ticket_id' => $ticket->id, 'author_name' => 'Chet', 'who_type' => \App\Enums\WhoType::Agent,
+            'ai_authored' => true, 'body' => 'ack', 'note_type' => \App\Enums\NoteType::Reply,
+            'is_private' => false, 'noted_at' => now(),
+        ]);
+
+        $this->assertFalse($query->needsAttention()->contains('id', $ticket->id),
+            'an inactive-client ticket must stay excluded — the relaxation admits only null-client tickets');
+    }
 }

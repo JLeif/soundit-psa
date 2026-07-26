@@ -264,7 +264,17 @@ class CockpitQuery
 
         return Ticket::query()
             ->whereIn('status', $openStatuses)
-            ->whereHas('client', fn ($q) => $q->where('is_active', true))
+            // psa-iy8pm: a null-client (unresolved-sender) ticket can carry the full
+            // acked-then-stalled profile — AutoAcknowledge posts its reply note with no
+            // client precondition — so a bare whereHas('client') would false-clear it
+            // from the lane. Admit client_id NULL; keep the inactive-client exclusion
+            // for tickets that DO have a client. The grouping closure is load-bearing:
+            // without it the orWhereHas leaks OR across the sibling predicates.
+            // NOTE: admitting null-client tickets overlaps the future psa-xcyo intake
+            // front-door lane — dedup the two surfaces when psa-xcyo lands.
+            ->where(fn ($q) => $q
+                ->whereNull('client_id')
+                ->orWhereHas('client', fn ($c) => $c->where('is_active', true)))
             // The AI acked it (an AI-authored reply note exists)...
             ->whereHas('notes', fn ($q) => $q->where('ai_authored', true)->where('note_type', NoteType::Reply->value))
             // ...but there is no LIVE held reply draft for it...
@@ -298,7 +308,7 @@ class CockpitQuery
      *
      * We show a correction thread only when its MOST RECENT turn is an assistant leave-it (a newer
      * operator correction — a user turn — or a new proposal supersedes it), within a recent window,
-     * for a still-open ticket on an active client. One (newest) entry per ticket. Pure query.
+     * for a still-open ticket whose client (if any) is active. One (newest) entry per ticket. Pure query.
      *
      * @return Collection<int, object{ticket: Ticket, note: string, at: \Illuminate\Support\Carbon|null}>
      */
@@ -339,12 +349,21 @@ class CockpitQuery
             return collect();
         }
 
-        // Resolve tickets by the conversation's context_id — only open tickets on active clients.
+        // Resolve tickets by the conversation's context_id — only open tickets, and only
+        // for clients that are still active when the ticket has one.
+        // psa-iy8pm: corrections key on the ticket, not the client, so a null-client
+        // (unresolved-sender) ticket's leave-it outcome must surface too — a bare
+        // whereHas('client') would false-clear it. Same grouped predicate as
+        // needsAttention(); the grouping closure is load-bearing (OR leakage).
+        // NOTE: admitting null-client tickets overlaps the future psa-xcyo intake
+        // front-door lane — dedup the two surfaces when psa-xcyo lands.
         $ticketIds = $messages->pluck('conversation.context_id')->filter()->unique()->values();
         $tickets = Ticket::query()
             ->whereIn('id', $ticketIds)
             ->whereIn('status', $this->openStatuses())
-            ->whereHas('client', fn ($q) => $q->where('is_active', true))
+            ->where(fn ($q) => $q
+                ->whereNull('client_id')
+                ->orWhereHas('client', fn ($c) => $c->where('is_active', true)))
             ->with(['client', 'categoryNode.parent.parent'])
             ->get()
             ->keyBy('id');
