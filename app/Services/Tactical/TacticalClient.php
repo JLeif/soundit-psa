@@ -7,13 +7,26 @@ use App\Support\TacticalConfig;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Uri;
 use GuzzleHttp\Psr7\UriResolver;
+use GuzzleHttp\Psr7\Utils;
 use Illuminate\Support\Facades\Log;
 use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\UriInterface;
 
 class TacticalClient
 {
     private Client $http;
+
+    /**
+     * The Guzzle base_uri this client resolves relative endpoints against
+     * (null when an injected client carries none). Captured ONCE at
+     * construction from the same value Guzzle's own buildUri() consults, so
+     * the check-creation guard below decides from the URL genuinely
+     * requested — never a second derivation that could drift from it
+     * (psa-uw2o's TOCTOU lesson; mirrors ServosityClient::$baseUri).
+     */
+    private readonly ?UriInterface $baseUri;
 
     /**
      * @param  \GuzzleHttp\Client|null  $http  When null (the zero-arg
@@ -33,11 +46,16 @@ class TacticalClient
     {
         if ($http !== null) {
             $this->http = $http;
+            $base = $http->getConfig('base_uri');
+            $this->baseUri = $base instanceof UriInterface
+                ? $base
+                : (is_string($base) && $base !== '' ? Utils::uriFor($base) : null);
 
             return;
         }
 
         $baseUrl = rtrim(TacticalConfig::apiUrl(), '/').'/';
+        $this->baseUri = Utils::uriFor($baseUrl);
 
         // Request-time peer-IP pin (psa-rkf6): validate + pin the target IP on
         // every request, closing the DNS-rebinding TOCTOU the save-time
@@ -174,7 +192,7 @@ class TacticalClient
      */
     public function post(string $endpoint, array $body = []): mixed
     {
-        if (self::targetsCheckCreation($endpoint)) {
+        if ($this->targetsCheckCreation($endpoint)) {
             TacticalCheckPlatformGuard::assertSafe($body, $this);
         }
 
@@ -198,23 +216,92 @@ class TacticalClient
      * Whether $endpoint resolves to Tactical's check-creation collection
      * endpoint (POST checks/), for the transport-seam platform guard above.
      *
-     * Matches on the NORMALIZED path — query/fragment stripped, dot segments
-     * removed exactly as the PSR-7 resolver removes them when Guzzle builds
-     * the request URI, surrounding slashes trimmed — so spelling variants
-     * ('checks', '/checks/', 'checks/?dry=1', 'foo/../checks/') cannot carry
-     * an unguarded creation past the seam. Sub-paths (checks/{id}/…) are not
-     * creation and do not match. An endpoint with no parseable path cannot
-     * resolve to checks/ at all (PSR-7's own Uri parse refuses what parse_url
-     * refuses, so no request is buildable from it either).
+     * TWO match levels, either sufficient (psa-ou9pe fix-forward — the
+     * psa-0pb9m R5 raw-path matcher alone was bypassable):
+     *
+     *  1. SPELLING: the endpoint's own path normalizes to exactly `checks` —
+     *     query/fragment stripped, dot segments removed, percent-encoding
+     *     decoded, duplicate slashes collapsed, surrounding slashes trimmed —
+     *     so relative spellings ('checks', '/checks/', 'checks/?dry=1',
+     *     'foo/../checks/', '%63hecks/') cannot carry an unguarded creation
+     *     past the seam regardless of base_uri.
+     *  2. RESOLUTION: the endpoint resolved against the configured base_uri —
+     *     the EXACT UriResolver::resolve() Guzzle's buildUri() applies when
+     *     it builds the request — lands on the same normalized path as the
+     *     resolved collection (base_uri + 'checks/'). This is what closes the
+     *     psa-ou9pe.1 STILL-PRESENT bypass: with base_uri
+     *     https://host/api/v3/, a fully-resolved
+     *     https://host/api/v3/checks/ (or absolute-path /api/v3/checks/, or
+     *     ../v3/checks/) has raw path api/v3/checks — no spelling match — yet
+     *     Guzzle sends the POST to the checks collection.
+     *
+     * The resolution comparison deliberately ignores scheme/host/port: origin
+     * comparison is the classic allowlist-bypass zoo (host casing, explicit
+     * default ports, trailing-dot FQDNs, IP-literal aliases of the same
+     * server), and every miss there is an unguarded write. Matching the
+     * resolved PATH alone over-guards a same-path request aimed at a foreign
+     * origin — fail-closed the cheap way round: no legitimate caller posts a
+     * checks-collection path anywhere but the configured Tactical.
+     *
+     * The normalization (decode + slash-collapse) mirrors what the upstream
+     * stack does before routing — WSGI PATH_INFO arrives percent-decoded and
+     * fronting proxies merge duplicate slashes — so a spelling the SERVER
+     * would route to the collection cannot read as a different path here.
+     *
+     * Sub-paths (checks/{id}/…) are not creation and do not match. An
+     * endpoint neither parse_url nor PSR-7 can parse cannot resolve to
+     * checks/ at all — and no request is buildable from it either, so
+     * nothing unguarded can be sent.
      */
-    private static function targetsCheckCreation(string $endpoint): bool
+    private function targetsCheckCreation(string $endpoint): bool
     {
-        $path = parse_url($endpoint, PHP_URL_PATH);
-        if (! is_string($path) || $path === '') {
-            return false;
+        $rawPath = parse_url($endpoint, PHP_URL_PATH);
+        if (is_string($rawPath) && $rawPath !== '' && self::normalizedRequestPath($rawPath) === 'checks') {
+            return true;
         }
 
-        return trim(UriResolver::removeDotSegments($path), '/') === 'checks';
+        try {
+            $endpointUri = Utils::uriFor($endpoint);
+        } catch (\InvalidArgumentException) {
+            return false; // unparseable: Guzzle cannot build a request from it either
+        }
+
+        if ($this->baseUri !== null) {
+            $resolved = UriResolver::resolve($this->baseUri, $endpointUri);
+            $collection = UriResolver::resolve($this->baseUri, new Uri('checks/'));
+
+            return self::normalizedRequestPath($resolved->getPath())
+                === self::normalizedRequestPath($collection->getPath());
+        }
+
+        // No configured base: the collection's absolute location is
+        // unknowable, so an absolute endpoint whose path ENDS at the checks
+        // collection segment is guarded (fail closed — only injected
+        // clients can lack a base; the config path always sets one).
+        if ($endpointUri->getHost() !== '') {
+            $path = self::normalizedRequestPath($endpointUri->getPath());
+
+            return $path === 'checks' || str_ends_with($path, '/checks');
+        }
+
+        return false;
+    }
+
+    /**
+     * Normalize a URI path for the collection comparison above: RFC 3986
+     * dot-segment removal (as the PSR-7 resolver applies when Guzzle builds
+     * the request URI), percent-decoding and duplicate-slash collapsing (as
+     * the upstream server stack applies before routing), a second dot-segment
+     * pass (decoding can reveal new ones), then surrounding-slash trimming.
+     */
+    private static function normalizedRequestPath(string $path): string
+    {
+        $path = UriResolver::removeDotSegments($path);
+        $path = rawurldecode($path);
+        $path = preg_replace('#/{2,}#', '/', $path) ?? $path;
+        $path = UriResolver::removeDotSegments($path);
+
+        return trim($path, '/');
     }
 
     /**

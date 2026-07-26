@@ -1162,6 +1162,85 @@ class TacticalCheckPlatformGuardTest extends TestCase
         }
     }
 
+    /** @return array{0: TacticalClient, 1: \GuzzleHttp\Handler\MockHandler} */
+    private function realPrefixedBaseClientWithMock(array $responses): array
+    {
+        $mock = new \GuzzleHttp\Handler\MockHandler($responses);
+
+        $client = new TacticalClient(new \GuzzleHttp\Client([
+            'base_uri' => 'https://tactical.example.test/api/v3/',
+            'handler' => \GuzzleHttp\HandlerStack::create($mock),
+            'headers' => ['X-API-KEY' => 'k', 'Content-Type' => 'application/json'],
+        ]));
+
+        return [$client, $mock];
+    }
+
+    public function test_raw_transport_guard_covers_the_fully_resolved_checks_collection_url(): void
+    {
+        // The psa-ou9pe.1 STILL-PRESENT repro, closed: with the client's
+        // base_uri carrying the real /api/v3/ prefix, the fully resolved
+        // same-origin collection URL previously sailed past the raw-path
+        // matcher ('api/v3/checks' !== 'checks') while Guzzle sent the POST
+        // to the checks collection regardless. The matcher now ALSO resolves
+        // the endpoint against base_uri exactly as Guzzle builds the request
+        // URI and compares the normalized resolved path against the resolved
+        // collection — so no absolute-URL, absolute-path, dot-segment,
+        // percent-encoded, or slash-doubled spelling of the collection can
+        // carry an unguarded creation. The dual-target payload refuses before
+        // any read, so each variant proves itself with an untouched
+        // one-response queue.
+        foreach ([
+            'https://tactical.example.test/api/v3/checks/',
+            'HTTPS://TACTICAL.EXAMPLE.TEST/api/v3/checks/',
+            'https://tactical.example.test:443/api/v3/checks/',
+            '/api/v3/checks/',
+            '../v3/checks/',
+            'https://tactical.example.test/api/v3//checks/',
+            'https://tactical.example.test/api/v3/%63hecks/',
+            'checks/',
+        ] as $endpoint) {
+            [$client, $mock] = $this->realPrefixedBaseClientWithMock([
+                new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+            ]);
+
+            try {
+                $client->post($endpoint, [
+                    'agent' => 'agent-1',
+                    'policy' => 7,
+                    'check_type' => 'script',
+                    'script' => 102,
+                    'name' => 'Resolved-URL probe',
+                ]);
+                $this->fail("post('{$endpoint}', …) must be guarded on a prefixed base_uri");
+            } catch (\App\Services\Tactical\TacticalClientException $e) {
+                $this->assertStringContainsString('BOTH an agent and a policy', $e->getMessage(), $endpoint);
+            }
+
+            $this->assertSame(1, $mock->count(), "no HTTP may be consumed for '{$endpoint}'");
+        }
+    }
+
+    public function test_raw_transport_guard_on_a_prefixed_base_leaves_non_collection_posts_unguarded(): void
+    {
+        // Resolution-level matching must not over-reach: other collections,
+        // checks/{id}/ sub-paths, and absolute URLs that do NOT resolve to
+        // the collection pass through the generic transport unchanged.
+        foreach ([
+            'tasks/',
+            'checks/123/reset/',
+            'https://tactical.example.test/api/v3/tasks/',
+            '/api/v3/checks/123/reset/',
+        ] as $endpoint) {
+            [$client, $mock] = $this->realPrefixedBaseClientWithMock([
+                new \GuzzleHttp\Psr7\Response(200, [], json_encode('ok')),
+            ]);
+
+            $this->assertSame('ok', $client->post($endpoint, ['anything' => true]), $endpoint);
+            $this->assertSame(0, $mock->count(), $endpoint);
+        }
+    }
+
     public function test_raw_transport_post_to_non_check_endpoints_is_not_guarded(): void
     {
         // The seam guards exactly the checks collection. Other collections
