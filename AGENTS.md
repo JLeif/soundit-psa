@@ -135,10 +135,28 @@ For more details, see README.md and docs/QUICKSTART.md.
    git push
    git status  # MUST show "up to date with origin"
    ```
-   Beads data syncs via `refs/dolt/data` on the normal `git push` — there is no
-   separate beads push step (see CLAUDE.md). Do NOT run `bd dolt push`: this
-   store's configured remote is a git URL, which that command does not support,
-   so it always fails — and it is not needed.
+   **This pushes CODE ONLY.** It does not push Beads data — verified: a normal
+   `git push` carries only the branch ref, and `refs/dolt/data` exists neither
+   locally nor on origin here.
+
+   **Your bead work is already durable without any push step.** This rig is
+   local-solo: bead writes land immediately in the shared local DoltLite store
+   at `rigs/psa/.beads/doltlite/psa.db`, which every agent on this box reads and
+   writes directly. There is no separate Beads push to run, and none is needed
+   for your work to persist and be visible to other agents.
+
+   **Do NOT run `bd dolt push`.** This store's configured remote is a `git+https`
+   URL, which that command does not accept (`URL must start with file:// or
+   http://`), so it fails every time. It is a retired instruction, not a broken
+   store — if you hit it, ignore it and finish. Six reviewers have stopped
+   mid-task to escalate it as a phantom storage incident.
+
+   > **Known gap, deliberately stated rather than implied:** because this rig is
+   > local-solo, Beads data has **no off-box copy** — losing this box loses it.
+   > Cross-box durability would require infra to provision a supported Dolt
+   > destination and document an explicit sync step. Do not infer from the
+   > general Beads architecture in `CLAUDE.md` (which describes `refs/dolt/data`
+   > on a git remote) that this rig has remote Beads sync configured. It does not.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
