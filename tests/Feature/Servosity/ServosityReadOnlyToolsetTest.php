@@ -1346,7 +1346,9 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $client = $this->mappedClient('Acme');
         $this->bindRealClientReplaying(
             '{"count":2,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2","previous":null,"results":[{"id":77,"name":"Company 77","account_counts":{},"issue_counts":{}}]}',
-            self::WIRE_SUMMARY_OK,
+            // Page 2 of the SAME walk: DRF re-declares the same total on every
+            // page (the walk-completeness proof requires it — psa-ou9pe).
+            '{"count":2,"next":null,"previous":null,"results":[{"id":42,"name":"Company 42","account_counts":{"DRS":2},"issue_counts":{"Backup":0}}]}',
             '{"count":0,"next":null,"previous":null,"results":[]}',
         );
 
@@ -1354,6 +1356,83 @@ class ServosityReadOnlyToolsetTest extends TestCase
 
         $this->assertSame('ok', $result['live']['status'], 'a proven URI cursor is a documented more-pages answer, not drift');
         $this->assertSame(['DRS' => 2], $result['live']['account_counts']);
+    }
+
+    // ── Walk-completeness proof (psa-ou9pe: count reconciliation) ─────────────
+    // A documented null cursor proves only that the server STOPPED
+    // paginating — not that every company the envelope declared was
+    // delivered. company_not_found is a complete-list claim, so an
+    // early-null short page, a count that changes between pages, and a
+    // duplicate id standing where an unseen company should be must each be
+    // whole-section drift — never a freshly-stamped company_not_found.
+
+    public function test_wire_an_early_null_with_an_undelivered_company_is_drift_not_company_not_found(): void
+    {
+        // The exact psa-ou9pe.1 repro at the MCP seam:
+        // {"count":2,"next":null,"results":[77]} — our company 42 was
+        // declared (count 2) but never delivered. The old walk accepted the
+        // early null as the documented end and minted company_not_found.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme', 42);
+        $this->bindRealClientReplaying(
+            '{"count":2,"next":null,"previous":null,"results":['.self::WIRE_ROW_77.']}',
+            '{"count":1,"next":null,"previous":null,"results":['.self::WIRE_DR_ROW_OK.']}',
+        );
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame('schema_drift', $result['live']['status'], 'an early-null walk left a declared company undelivered — drift, not completeness');
+        $this->assertStringNotContainsString('company_not_found', json_encode($result['live']), 'absence from an unaccounted walk proves nothing');
+        $this->assertArrayNotHasKey('live_checked_at', $result['live'], 'an unaccounted walk is not an observation — no freshness stamp');
+        $this->assertArrayNotHasKey('account_counts', $result['live'], 'no count key may survive an unaccounted walk');
+        $this->assertStringContainsString('Do not read this as zero', $result['live']['note']);
+        $this->assertSame('ok', $result['live_dr_backups']['status'], 'the DR seam answered well-formed and stays independent');
+    }
+
+    public function test_wire_a_count_that_changes_between_pages_is_drift_not_company_not_found(): void
+    {
+        // A consistent walk declares ONE total on every page; a moving total
+        // means the list mutated mid-walk (or the server answered
+        // inconsistently) — no completeness claim can survive it.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme', 42);
+        $this->bindRealClientReplaying(
+            '{"count":3,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2","previous":null,"results":['.self::WIRE_ROW_77.']}',
+            '{"count":2,"next":null,"previous":null,"results":['.self::WIRE_ROW_88.']}',
+            '{"count":1,"next":null,"previous":null,"results":['.self::WIRE_DR_ROW_OK.']}',
+        );
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame('schema_drift', $result['live']['status'], 'a changing declared count can never prove the walk delivered the whole list');
+        $this->assertStringNotContainsString('company_not_found', json_encode($result['live']));
+        $this->assertArrayNotHasKey('live_checked_at', $result['live']);
+        $this->assertArrayNotHasKey('account_counts', $result['live']);
+        $this->assertSame('ok', $result['live_dr_backups']['status'],
+            'exactly two summary requests may be issued — the drift fires at page 2, before a third request');
+    }
+
+    public function test_wire_a_duplicate_company_id_is_drift_not_company_not_found(): void
+    {
+        // The vector a row-count reconciliation alone would miss: two rows
+        // arrive for a declared count of two — but they are the SAME company,
+        // and the duplicate stands exactly where OUR company 42 should be.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme', 42);
+        $this->bindRealClientReplaying(
+            '{"count":2,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2","previous":null,"results":['.self::WIRE_ROW_77.']}',
+            '{"count":2,"next":null,"previous":null,"results":['.self::WIRE_ROW_77.']}',
+            '{"count":1,"next":null,"previous":null,"results":['.self::WIRE_DR_ROW_OK.']}',
+        );
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame('schema_drift', $result['live']['status'], 'a duplicate company id is drift, not a delivered company');
+        $this->assertStringNotContainsString('company_not_found', json_encode($result['live']), 'the company the duplicate displaced must not read as absent');
+        $this->assertArrayNotHasKey('live_checked_at', $result['live']);
+        $this->assertArrayNotHasKey('account_counts', $result['live']);
+        $this->assertSame('ok', $result['live_dr_backups']['status'],
+            'the drift fires at page 2 — a walk still paginating would have swallowed the DR body');
     }
 
     // ── Pagination loops and bound exhaustion (psa-z30dv R8, .23) ─────────────
@@ -1498,8 +1577,11 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $history = [];
         $this->bindRealClientReplayingWithHistory(
             $history,
-            self::wireSummaryPage('"https://api.servosity.example/api/v1/companies/summary-ng/?page=2&page_size=55"', self::WIRE_ROW_77),
-            self::WIRE_SUMMARY_OK,
+            // A consistent two-page walk (stable count, unique ids — the
+            // walk-completeness proof requires both, psa-ou9pe) whose page-1
+            // cursor carries a distinctive page_size.
+            '{"count":2,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2&page_size=55","previous":null,"results":['.self::WIRE_ROW_77.']}',
+            '{"count":2,"next":null,"previous":null,"results":[{"id":42,"name":"Company 42","account_counts":{"DRS":2},"issue_counts":{"Backup":0}}]}',
             '{"count":1,"next":null,"previous":null,"results":['.self::WIRE_DR_ROW_OK.']}',
         );
 

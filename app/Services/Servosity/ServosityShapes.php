@@ -37,7 +37,13 @@ namespace App\Services\Servosity;
  *    null cursor. An undocumented `next` — wrong type, non-URI, a URI that
  *    does not continue THIS request, or one that revisits or never ends the
  *    walk — is drift for the whole read, never "last page", never "more
- *    pages", and never a truncated company_not_found.
+ *    pages", and never a truncated company_not_found. And the null cursor
+ *    alone is still not completeness (psa-ou9pe): the shared
+ *    ServosityCompanyWalkProof requires a count stable across pages, unique
+ *    company ids, and accumulated-unique-rows == declared count at the null
+ *    — an early-null short page, a mid-walk count change, or a duplicate id
+ *    standing where an unseen company should be is drift, never
+ *    company_not_found.
  *    Failure → status schema_drift / unavailable, maps null — never a zero.
  * 2. (a) ServosityReadOnlyToolset::liveDrBackups() — GET dr-backups/?company=N
  *    → MCP live_dr_backups rows, per-device upstream_check (verified_live /
@@ -67,9 +73,13 @@ namespace App\Services\Servosity;
  *    proof as the live seams (provenNextUrl(): the documented URI string or
  *    null, URI format enforced AND origin/path-bound to the resolved
  *    request URL, so a foreign cursor cannot steer the walk — not a
- *    separate weaker check) and a bounded
- *    page walk that THROWS rather than truncating (a truncated list must
- *    never read as "client gone" and zero its licenses). Any violation
+ *    separate weaker check) + the SAME shared walk-completeness proof
+ *    (ServosityCompanyWalkProof, psa-ou9pe: stable count, unique ids,
+ *    accumulated-unique-rows == declared count at the null cursor — an
+ *    early-null, count-shifting, or duplicate-filled walk aborts) and a
+ *    bounded page walk that THROWS rather than truncating (a truncated or
+ *    unaccounted list must never read as "client gone" and zero its
+ *    licenses). Any violation
  *    aborts the sync before any write: no upsert, no deactivation, no
  *    synced_at stamp — the read surface then serves the OLD counts with
  *    their honest staleness, never a freshly-stamped zero.

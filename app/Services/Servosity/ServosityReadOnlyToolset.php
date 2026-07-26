@@ -313,12 +313,15 @@ class ServosityReadOnlyToolset
      */
     private function liveCompanyState(Client $client): array
     {
-        // Cache key versioned: the cached value's shape changed in R8 (a
-        // plain proven-complete row list — the walk now throws instead of
-        // returning a truncated one) and a stale file-cache entry in the old
-        // {rows, list_truncated} shape would misread under this consumer as
-        // an empty list, i.e. a false company_not_found.
-        $fetch = $this->cachedLiveFetch('servosity_reads:companies:v2', fn (): array => $this->fetchAllSummaryRows());
+        // Cache key versioned: v2→v3 when the walk gained the completeness
+        // proof (psa-ou9pe — count reconciliation + unique ids). The value's
+        // SHAPE is unchanged, but its meaning ("proven complete") is
+        // stronger: a pre-proof cached list may have come from an early-null
+        // or duplicate-filled walk the new code refuses, and serving it
+        // could mint the exact company_not_found the proof exists to stop.
+        // (v2 documented the R8 shape change from {rows, list_truncated} to
+        // a plain proven-complete row list.)
+        $fetch = $this->cachedLiveFetch('servosity_reads:companies:v3', fn (): array => $this->fetchAllSummaryRows());
 
         if ($fetch['status'] !== 'ok') {
             return $this->liveFailurePayload($fetch, 'account/issue counts', 'the synced counts above may be out of date');
@@ -549,16 +552,17 @@ class ServosityReadOnlyToolset
         $rows = [];
         $params = ['page' => 1, 'page_size' => self::LIVE_PAGE_SIZE];
         $requested = [];
+        // The SAME walk-completeness proof as getCompanies() (psa-ou9pe —
+        // one shared class, so the proof cannot fork): count stable across
+        // pages, company ids unique, accumulated unique rows == declared
+        // count at the null cursor. Its row check subsumes the previous
+        // inline object/integer-id proof.
+        $proof = new ServosityCompanyWalkProof($endpoint);
         for ($page = 1; $page <= self::MAX_SUMMARY_PAGES; $page++) {
             $requested[self::pageIdentity($params)] = true;
             $response = $client->getJson($endpoint, $params);
             ServosityShapes::assertDrfEnvelope($response, $endpoint, $requestUrl);
-
-            foreach ($response->results as $row) {
-                if (! $row instanceof \stdClass || ! is_int($row->id ?? null)) {
-                    throw new ServosityShapeDriftException('Servosity companies/summary-ng/ returned a row that is not an object with an integer id (documented CompanySummaryNg shape).');
-                }
-            }
+            $proof->absorbPage($response);
 
             $rows = array_merge($rows, array_values($response->results));
 
@@ -569,6 +573,11 @@ class ServosityReadOnlyToolset
             // URI is consumed as the next request.
             $nextUrl = ServosityShapes::provenNextUrl($response, $endpoint, $requestUrl);
             if ($nextUrl === null) {
+                // The documented end — but only an ACCOUNTED end completes
+                // the walk: an early null that leaves declared companies
+                // undelivered is drift, never company_not_found (psa-ou9pe).
+                $proof->assertAccountedComplete();
+
                 return $rows;
             }
             // A proven cursor is same-origin and same-path by construction,

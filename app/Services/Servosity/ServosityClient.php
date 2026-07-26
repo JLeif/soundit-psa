@@ -202,6 +202,16 @@ class ServosityClient
      * Django REST Framework pagination: follow `next` (a full URL) until
      * null, bounded by MAX_COMPANY_PAGES (exceeding it throws — see the
      * constant's note).
+     *
+     * The documented null cursor alone is NOT completeness (psa-ou9pe): the
+     * walk also carries the shared ServosityCompanyWalkProof — count stable
+     * across pages, company ids unique, and at the null cursor accumulated
+     * unique rows == the declared count — so an early-null short page, a
+     * mid-walk count change, or a duplicate id standing where an unseen
+     * company should be each THROW before this method returns. Same
+     * all-or-nothing posture as every other violation here: the caller gets
+     * the fully-proven list or no list, and deactivateMissingClients() can
+     * never zero a client the walk merely failed to deliver.
      */
     public function getCompanies(): array
     {
@@ -209,10 +219,12 @@ class ServosityClient
         $endpoint = 'companies/summary-ng/';
         $requestUrl = $this->resolvedRequestUrl($endpoint);
         $params = [];
+        $proof = new ServosityCompanyWalkProof($endpoint);
 
         for ($page = 1; $page <= self::MAX_COMPANY_PAGES; $page++) {
             $response = $this->getJson($endpoint, $params);
             ServosityShapes::assertDrfEnvelope($response, $endpoint, $requestUrl);
+            $proof->absorbPage($response);
             foreach ($response->results as $row) {
                 ServosityShapes::assertCompanySummaryRow($row);
                 // Proven — the identity-collapsing assoc view is now safe.
@@ -232,6 +244,10 @@ class ServosityClient
             // foreign URL can no longer steer, skip, or complete the walk.
             $nextUrl = ServosityShapes::provenNextUrl($response, $endpoint, $requestUrl);
             if ($nextUrl === null) {
+                // The documented end — but only an ACCOUNTED end completes
+                // the walk (psa-ou9pe).
+                $proof->assertAccountedComplete();
+
                 return $allCompanies;
             }
             // Keep the same relative endpoint; adopt the proven next URL's

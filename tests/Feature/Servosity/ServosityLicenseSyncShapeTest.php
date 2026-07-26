@@ -358,4 +358,88 @@ class ServosityLicenseSyncShapeTest extends TestCase
         $this->assertSame(9, $pro->quantity);
         $this->assertNotNull($drServer->synced_at, 'a PROVEN fetch does stamp');
     }
+
+    // ── Walk-completeness proof (psa-ou9pe: count reconciliation) ─────────────
+    // A documented null cursor proves only that the server STOPPED
+    // paginating — not that every company the envelope declared was
+    // delivered. Before the proof, an early-null short page, a count that
+    // changed between pages, and a duplicate id standing where an unseen
+    // company should be were each accepted as a complete walk — and every
+    // mapped client missing from that hollow "complete" list was zeroed and
+    // suspended with a fresh stamp.
+
+    public function test_wire_an_early_null_count_mismatch_aborts_before_any_zeroing(): void
+    {
+        // The exact psa-ou9pe.1 repro: {"count":2,"next":null,"results":[42]}
+        // — one company delivered, two declared. The old walk returned it as
+        // complete; Beta (77) was then "missing from Servosity" and zeroed.
+        $this->mappedClient('Acme', 42);
+        $beta = $this->mappedClient('Beta LLC', 77);
+        $oldStamp = now()->subDays(3)->startOfSecond();
+        $betaLicense = $this->servosityLicense($beta, 'pro', 9, $oldStamp);
+        $this->bindRealClientReplaying(
+            '{"count":2,"next":null,"previous":null,"results":['.self::WIRE_COMPANY_42.']}',
+        );
+
+        $result = $this->runSync();
+
+        $this->assertGreaterThan(0, $result->errors, 'an unaccounted walk must abort loudly');
+        $this->assertSame(0, $result->deactivated, 'a declared-but-undelivered company must never be zeroed');
+        $this->assertSame(0, $result->created + $result->updated, 'all-or-nothing: nothing from an unaccounted walk may land');
+        $betaLicense->refresh();
+        $this->assertSame(9, $betaLicense->quantity);
+        $this->assertSame('active', $betaLicense->status);
+        $this->assertTrue($oldStamp->equalTo($betaLicense->synced_at), 'no fresh stamp on an unaccounted walk');
+    }
+
+    public function test_wire_a_count_that_changes_between_pages_aborts_the_walk(): void
+    {
+        // A consistent walk declares ONE total on every page. A total that
+        // moves mid-walk means the list mutated (or the server answered
+        // inconsistently) — no completeness claim can survive it.
+        $this->mappedClient('Acme', 42);
+        $beta = $this->mappedClient('Beta LLC', 77);
+        $oldStamp = now()->subDays(3)->startOfSecond();
+        $betaLicense = $this->servosityLicense($beta, 'pro', 9, $oldStamp);
+        $this->bindRealClientReplaying(
+            '{"count":3,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2","previous":null,"results":['.self::WIRE_COMPANY_42.']}',
+            '{"count":2,"next":null,"previous":null,"results":[{"id":88,"name":"Company 88","account_counts":{},"issue_counts":{}}]}',
+        );
+
+        $result = $this->runSync();
+
+        $this->assertGreaterThan(0, $result->errors, 'a changing declared count is drift, not a completed walk');
+        $this->assertSame(0, $result->deactivated);
+        $this->assertSame(0, $result->created + $result->updated, 'all-or-nothing: even the valid page-1 row must not land');
+        $betaLicense->refresh();
+        $this->assertSame(9, $betaLicense->quantity);
+        $this->assertSame('active', $betaLicense->status);
+        $this->assertTrue($oldStamp->equalTo($betaLicense->synced_at));
+    }
+
+    public function test_wire_a_duplicate_company_id_replacing_an_unseen_company_aborts_before_any_zeroing(): void
+    {
+        // The vector a row-count reconciliation alone would miss: two rows
+        // arrive for a declared count of two — but they are the SAME company,
+        // and the duplicate stands exactly where Beta should be. Company ids
+        // must be unique across one walk.
+        $this->mappedClient('Acme', 42);
+        $beta = $this->mappedClient('Beta LLC', 77);
+        $oldStamp = now()->subDays(3)->startOfSecond();
+        $betaLicense = $this->servosityLicense($beta, 'pro', 9, $oldStamp);
+        $this->bindRealClientReplaying(
+            '{"count":2,"next":"https://api.servosity.example/api/v1/companies/summary-ng/?page=2","previous":null,"results":['.self::WIRE_COMPANY_42.']}',
+            '{"count":2,"next":null,"previous":null,"results":['.self::WIRE_COMPANY_42.']}',
+        );
+
+        $result = $this->runSync();
+
+        $this->assertGreaterThan(0, $result->errors, 'a duplicate company id is drift, not a delivered company');
+        $this->assertSame(0, $result->deactivated, 'the company the duplicate displaced must never be zeroed');
+        $this->assertSame(0, $result->created + $result->updated, 'all-or-nothing: nothing from a duplicate-filled walk may land');
+        $betaLicense->refresh();
+        $this->assertSame(9, $betaLicense->quantity);
+        $this->assertSame('active', $betaLicense->status);
+        $this->assertTrue($oldStamp->equalTo($betaLicense->synced_at));
+    }
 }
