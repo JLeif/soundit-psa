@@ -152,15 +152,21 @@ For more details, see README.md and docs/QUICKSTART.md.
    store — if you hit it, ignore it and finish. Six reviewers have stopped
    mid-task to escalate it as a phantom storage incident.
 
-   > **Known gap, stated at the boundary of what is checkable from here:** this
-   > rig configures **no Beads remote and no guest-managed off-box backup** —
-   > verified inside this machine (no Beads remote, backups disabled, no backup
-   > timer/cron/mount). So losing this box **can** lose the Beads data. Whether
-   > any host-side or hypervisor-level backup exists is **not observable from
-   > inside the guest**, so do not rely on off-box recovery unless infra
-   > confirms one. Do not infer from the general Beads architecture in
-   > `CLAUDE.md` (which describes `refs/dolt/data` on a git remote) that this rig
-   > has remote Beads sync configured. It does not.
+   > **Known gap, stated at the boundary of what is checkable from here:** a
+   > remote **is** configured for this store (`origin`, the same `git+https`
+   > URL above), but supported Beads remote replication is **not** configured
+   > or usable here — `bd dolt push` rejects that URL scheme, and no Beads
+   > data has been replicated to the remote (`refs/dolt/data` is absent both
+   > locally and on origin). The rig also has **no guest-managed off-box
+   > backup** — verified inside this machine (backups disabled, no backup
+   > timer/cron/mount). So losing this box **can** lose the Beads data.
+   > Whether any host-side or hypervisor-level backup exists is **not
+   > observable from inside the guest**, so do not rely on off-box recovery
+   > unless infra confirms one. Do not infer from the general Beads
+   > architecture in `CLAUDE.md` (which describes `refs/dolt/data` on a git
+   > remote) that this rig has usable remote Beads sync — the remote is
+   > configured but is not a supported replication target, and no Beads data
+   > has reached it.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
