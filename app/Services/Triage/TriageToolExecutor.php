@@ -1261,28 +1261,29 @@ class TriageToolExecutor
             $daysSinceBackup = (int) \Carbon\Carbon::parse($jobData['last_success']['started'])->diffInDays(now());
         }
 
+        // job_state is the device's backup POSTURE — comet_get_backup_posture's
+        // vocabulary verbatim (CometReadOnlyToolset::devicePosture, psa-z30dv).
+        // It is never 'ok' (psa-enpew.12): a read that worked while the newest
+        // backup FAILED must not be relayable as healthy, and a failed or
+        // impossible read screams 'unavailable' — never a clean all-clear.
         $result = [
             'hostname' => $asset->hostname,
             'comet_username' => $asset->comet_username,
             'cloud_storage_bytes' => $asset->backup_cloud_bytes,
             'local_storage_bytes' => $asset->backup_local_bytes,
             'last_synced' => $asset->backup_synced_at?->toDateTimeString(),
-            'job_state' => $jobData['state'],
+            'job_state' => $jobData['job_state'],
             'jobs_checked_at' => $jobData['jobs_checked_at'],
-            'last_success' => $jobData['last_success']['started'] ?? null,
-            'last_failure' => $jobData['last_failure']['started'] ?? null,
+            'last_backup_at' => $jobData['last_backup']['started'] ?? null,
+            'last_backup_status' => $jobData['last_backup']['status'] ?? null,
+            'last_backup_status_code' => $jobData['last_backup']['status_code'] ?? null,
+            'last_backup_success_at' => $jobData['last_success']['started'] ?? null,
+            'last_backup_failure_at' => $jobData['last_failure']['started'] ?? null,
             'days_since_last_success' => $daysSinceBackup,
         ];
 
-        // A failed/impossible job read must scream, never read as all-clear
-        // (psa-enpew; job_state vocabulary shared with comet_get_backup_posture
-        // / comet_list_backup_jobs, psa-z30dv).
-        if ($jobData['state'] === 'unavailable') {
-            $result['job_history_note'] = 'Backup job history could not be fetched from the Comet server — last_success/last_failure are UNKNOWN, not clean. Treat backup state as unknown, never as passing.';
-        } elseif ($jobData['state'] === 'not_queried') {
-            $result['job_history_note'] = 'Job history was not queried — the asset has no synced Comet username. Backup state is unknown, not passing.';
-        } elseif ($jobData['state'] === 'no_backup_jobs_observed') {
-            $result['job_history_note'] = 'The Comet server returned no backup jobs for this device — backups may never have run. Unknown is not passing.';
+        if ($jobData['job_state_note'] !== null) {
+            $result['job_state_note'] = $jobData['job_state_note'];
         }
 
         return $result;
@@ -1306,41 +1307,54 @@ class TriageToolExecutor
 
         // Distinguish "the server reported no jobs" from "we could not ask" —
         // a job_count of 0 on a failed read is a false all-clear (psa-enpew).
-        // job_state vocabulary is shared with comet_get_backup_posture /
-        // comet_list_backup_jobs (psa-z30dv): unavailable / not_queried /
-        // no_backup_jobs_observed / ok. jobs_checked_at is retained whenever a
-        // lookup was actually attempted (null only when nothing was asked).
+        // job_state carries the device's backup POSTURE in the one shared
+        // dialect (comet_get_backup_status / comet_get_backup_posture,
+        // psa-z30dv): last_backup_succeeded / last_backup_failed /
+        // last_backup_running / last_backup_unknown / no_backup_jobs_observed,
+        // degrading to 'unavailable' when the history could not be read.
+        // jobs_checked_at is retained whenever a lookup was actually attempted
+        // (null only when nothing could be asked).
         if ($jobData['state'] === 'unavailable') {
             return [
                 'hostname' => $asset->hostname,
                 'job_state' => 'unavailable',
+                'job_state_note' => $jobData['job_state_note'],
                 'jobs_checked_at' => $jobData['jobs_checked_at'],
-                'error' => 'Backup job history unavailable — the Comet server could not be reached. Backup state is UNKNOWN, not passing. Retry, or verify in the Comet console.',
-            ];
-        }
-
-        if ($jobData['state'] === 'not_queried') {
-            return [
-                'hostname' => $asset->hostname,
-                'job_state' => 'not_queried',
-                'jobs_checked_at' => null,
-                'error' => 'Job history not queried — the asset has no synced Comet username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.',
+                'error' => $jobData['unavailable_reason'] === 'no_synced_username'
+                    ? 'Job history cannot be looked up — the asset has no synced Comet username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.'
+                    : 'Backup job history unavailable — the Comet server could not be reached. Backup state is UNKNOWN, not passing. Retry, or verify in the Comet console.',
             ];
         }
 
         $result = [
             'hostname' => $asset->hostname,
-            'job_state' => $jobData['state'],
+            'job_state' => $jobData['job_state'],
             'jobs_checked_at' => $jobData['jobs_checked_at'],
             'job_count' => count($jobData['jobs']),
             'jobs' => array_slice($jobData['jobs'], 0, 20),
+            'last_backup_success' => $this->cometJobRow($jobData['last_success']),
+            'last_backup_failure' => $this->cometJobRow($jobData['last_failure']),
         ];
 
-        if ($jobData['state'] === 'no_backup_jobs_observed') {
-            $result['note'] = 'The Comet server returned no backup jobs for this device — backups may never have run. Unknown is not passing. Any rows listed are non-backup activity (restore/retention/…).';
+        if ($jobData['job_state_note'] !== null) {
+            $result['job_state_note'] = $jobData['job_state_note'];
+        }
+        if ($jobData['state'] === 'no_backup_jobs_observed' && $result['jobs'] !== []) {
+            $result['note'] = 'The rows listed are non-backup activity (restore/retention/…) — they prove the device talks to the server, not that backups run.';
         }
 
         return $result;
+    }
+
+    /** Strip the internal sort key before a service job row crosses into a tool payload. */
+    private function cometJobRow(?array $row): ?array
+    {
+        if ($row === null) {
+            return null;
+        }
+        unset($row['started_ts']);
+
+        return $row;
     }
 
     private function tacticalRunDiagnostic(array $input): array

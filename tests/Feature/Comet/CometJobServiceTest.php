@@ -21,12 +21,16 @@ use Tests\TestCase;
  * except 7002; per the psa-enpew honest limit, backup classification is now
  * accepted on BOTH scales (4001 and legacy 4) via CometJobCodes.
  *
- * The service's availability contract is also pinned here: a failed or
- * impossible read returns state=unavailable/not_queried, never the clean
- * empty shape a genuine no-jobs answer has — and a genuine no-backup-jobs
- * answer is its own first-class state (no_backup_jobs_observed, shared
- * vocabulary with CometReadOnlyToolset, psa-z30dv), because "the server has
- * never seen a backup here" must not render as an ok-shaped empty history.
+ * The service's availability + posture contract is also pinned here: a failed
+ * or impossible read returns state=unavailable (with a machine-readable
+ * reason), never the clean empty shape a genuine no-jobs answer has — and a
+ * genuine no-backup-jobs answer is its own first-class state
+ * (no_backup_jobs_observed, shared vocabulary with CometReadOnlyToolset,
+ * psa-z30dv), because "the server has never seen a backup here" must not
+ * render as an ok-shaped empty history. `job_state` is the backup POSTURE in
+ * CometReadOnlyToolset::devicePosture's vocabulary verbatim (psa-enpew.12):
+ * derived from the NEWEST backup-classification job, so a read that worked
+ * while the newest backup failed can never be relayed as healthy.
  */
 class CometJobServiceTest extends TestCase
 {
@@ -220,14 +224,23 @@ class CometJobServiceTest extends TestCase
         $result = (new CometJobService($client))->getRecentJobs($this->asset());
 
         $this->assertSame('unavailable', $result['state']);
+        $this->assertSame('lookup_failed', $result['unavailable_reason']);
+        $this->assertSame('unavailable', $result['job_state'], 'posture degrades loudly with the read');
+        $this->assertStringContainsString('Comet console', $result['job_state_note']);
         $this->assertNotNull($result['jobs_checked_at']);
         $this->assertSame([], $result['jobs']);
         $this->assertNull($result['last_success']);
         $this->assertNull($result['last_failure']);
     }
 
-    public function test_an_asset_without_a_comet_username_is_not_queried(): void
+    public function test_an_asset_without_a_comet_username_is_unavailable_not_a_second_dialect(): void
     {
+        // ONE word for one condition (psa-enpew.12): the psa-z30dv posture
+        // tool reports a registered device with no synced username as
+        // 'unavailable' — this service must not call the same condition
+        // 'not_queried' (that is the fleet tool's deliberate-skip state under
+        // its lookup cap/breaker). The machine-readable reason keeps the two
+        // unavailable causes distinguishable for copy.
         $asset = $this->asset(['comet_username' => null]);
 
         $client = $this->mock(CometClient::class);
@@ -235,8 +248,11 @@ class CometJobServiceTest extends TestCase
 
         $result = (new CometJobService($client))->getRecentJobs($asset);
 
-        $this->assertSame('not_queried', $result['state']);
-        $this->assertNull($result['jobs_checked_at']);
+        $this->assertSame('unavailable', $result['state']);
+        $this->assertSame('no_synced_username', $result['unavailable_reason']);
+        $this->assertSame('unavailable', $result['job_state']);
+        $this->assertStringContainsString('Re-run the Comet backup sync', $result['job_state_note']);
+        $this->assertNull($result['jobs_checked_at'], 'nothing was asked, so no checked-at time exists');
         $this->assertSame([], $result['jobs']);
     }
 
@@ -249,6 +265,8 @@ class CometJobServiceTest extends TestCase
         $result = $this->service([])->getRecentJobs($this->asset());
 
         $this->assertSame('no_backup_jobs_observed', $result['state']);
+        $this->assertSame('no_backup_jobs_observed', $result['job_state']);
+        $this->assertStringContainsString('backups may never have run', $result['job_state_note']);
         $this->assertNotNull($result['jobs_checked_at'], 'a lookup ran, so its time is retained');
         $this->assertSame([], $result['jobs']);
     }
@@ -263,9 +281,75 @@ class CometJobServiceTest extends TestCase
         ])->getRecentJobs($this->asset());
 
         $this->assertSame('no_backup_jobs_observed', $result['state']);
+        $this->assertSame('no_backup_jobs_observed', $result['job_state'], 'non-backup successes never register as backup posture');
         $this->assertCount(2, $result['jobs'], 'non-backup rows still list');
         $this->assertNull($result['last_success']);
         $this->assertNull($result['last_failure']);
+    }
+
+    // ── Posture: job_state is the NEWEST backup job's outcome (psa-enpew.12) ─
+
+    public function test_job_state_is_last_backup_failed_when_the_newest_backup_failed_despite_an_older_success(): void
+    {
+        // THE false-relay case psa-enpew.12 blocked: the read worked ('ok')
+        // but the newest backup FAILED — posture must say so, never 'ok'.
+        $result = $this->service([
+            $this->job(['start' => now()->subDays(2)->timestamp]), // older success
+            $this->job(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('ok', $result['state'], 'the read axis still records a working lookup');
+        $this->assertSame('last_backup_failed', $result['job_state']);
+        $this->assertSame(\Comet\Def::JOB_STATUS_FAILED_ERROR, $result['last_backup']['status_code']);
+        $this->assertNotNull($result['last_success'], 'the older success stays visible alongside the failed posture');
+    }
+
+    public function test_job_state_is_last_backup_succeeded_only_when_the_newest_backup_succeeded(): void
+    {
+        $result = $this->service([
+            $this->job(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'start' => now()->subDays(2)->timestamp]),
+            $this->job(['start' => now()->subHour()->timestamp]), // newest: success
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('last_backup_succeeded', $result['job_state']);
+        $this->assertNull($result['job_state_note'], 'a clean posture needs no caveat note');
+        $this->assertNotNull($result['last_failure'], 'the older failure stays on record');
+    }
+
+    public function test_job_state_is_last_backup_running_while_the_newest_backup_runs(): void
+    {
+        $result = $this->service([
+            $this->job(['start' => now()->subDay()->timestamp]),
+            $this->job(['status' => \Comet\Def::JOB_STATUS_RUNNING_ACTIVE, 'start' => now()->subMinutes(5)->timestamp, 'end' => 0]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('last_backup_running', $result['job_state']);
+    }
+
+    public function test_job_state_is_last_backup_unknown_for_an_unrecognised_newest_status(): void
+    {
+        // An out-of-range vendor code is UNKNOWN — never success, never an
+        // asserted failure (same first-class treatment as psa-z30dv).
+        $result = $this->service([
+            $this->job(['start' => now()->subDay()->timestamp]), // older success
+            $this->job(['status' => 4242, 'start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('last_backup_unknown', $result['job_state']);
+        $this->assertStringContainsString('UNKNOWN', $result['job_state_note']);
+        $this->assertStringContainsString('not a confirmed failure', $result['job_state_note']);
+    }
+
+    public function test_posture_ignores_newer_non_backup_jobs(): void
+    {
+        // A retention success minutes after a failed backup must not flip the
+        // posture — the same masking trap the last_success tracking guards.
+        $result = $this->service([
+            $this->job(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'start' => now()->subHours(2)->timestamp]),
+            $this->job(['classification' => \Comet\Def::JOB_CLASSIFICATION_RETENTION, 'start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('last_backup_failed', $result['job_state']);
     }
 
     public function test_job_timestamps_are_iso8601_utc_for_unambiguous_relay(): void
@@ -320,6 +404,22 @@ class CometJobServiceTest extends TestCase
         $response->assertOk();
         $response->assertSeeText('Backup job history unavailable');
         $response->assertDontSeeText('No backup jobs observed');
+    }
+
+    public function test_asset_detail_page_distinguishes_a_missing_username_from_an_unreachable_server(): void
+    {
+        // Same machine state ('unavailable', one dialect with psa-z30dv), two
+        // operator remedies — the copy must name the right one.
+        $user = \App\Models\User::factory()->create();
+        $asset = $this->asset(['comet_username' => null]);
+        $this->mock(CometClient::class)->shouldNotReceive('getJobsForUser');
+
+        $response = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $response->assertOk();
+        $response->assertSeeText('no synced Comet username');
+        $response->assertSeeText('unknown, not passing');
+        $response->assertDontSeeText('the Comet server could not be reached');
     }
 
     public function test_asset_detail_page_distinguishes_a_genuinely_empty_history(): void

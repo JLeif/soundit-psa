@@ -2166,26 +2166,25 @@
 
             {{-- Comet Backup Jobs --}}
             @if($cometJobData && ($cometJobData['state'] ?? null) === 'unavailable')
-                {{-- A failed live read must never look like a clean empty history (psa-enpew) --}}
+                {{-- A failed or impossible live read must never look like a clean empty
+                     history (psa-enpew). One machine state ('unavailable', shared with
+                     the psa-z30dv backup posture tools); the reason picks the copy. --}}
                 <div class="card mb-3">
                     <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
                     <div class="card-body">
-                        <p class="mb-0 text-danger">
-                            <i class="bi bi-exclamation-triangle-fill me-1"></i>
-                            Backup job history unavailable — the Comet server could not be reached.
-                            Backup state is unknown, not passing. Retry, or verify in the Comet console.
-                        </p>
-                    </div>
-                </div>
-            @elseif($cometJobData && ($cometJobData['state'] ?? null) === 'not_queried')
-                <div class="card mb-3">
-                    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
-                    <div class="card-body">
-                        <p class="mb-0 text-muted">
-                            <i class="bi bi-question-circle me-1"></i>
-                            Job history not queried — this asset has no synced Comet username.
-                            Re-run the Comet backup sync, then reload.
-                        </p>
+                        @if(($cometJobData['unavailable_reason'] ?? null) === 'no_synced_username')
+                            <p class="mb-0 text-muted">
+                                <i class="bi bi-question-circle me-1"></i>
+                                Job history cannot be looked up — this asset has no synced Comet username.
+                                Re-run the Comet backup sync, then reload. Backup state is unknown, not passing.
+                            </p>
+                        @else
+                            <p class="mb-0 text-danger">
+                                <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                                Backup job history unavailable — the Comet server could not be reached.
+                                Backup state is unknown, not passing. Retry, or verify in the Comet console.
+                            </p>
+                        @endif
                     </div>
                 </div>
             @elseif($cometJobData && !empty($cometJobData['jobs']))

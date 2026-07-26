@@ -1235,12 +1235,17 @@
                             advancing while "recognized" stays put means the event streamer is not sending
                             <em>Job completed</em> events. "Recognized" advances only when a job event was
                             fully understood and routed (alert raised, resolved, non-backup deliberately
-                            ignored, or a success with nothing to resolve) — on its own it is <em>not</em>
-                            an all-clear. If "last unmatched" advances, job events are arriving that this
-                            PSA cannot route — backup failures may be going unalerted; check the
-                            <code>[Comet Alert]</code> WARNING lines in the log. No failure alerts with
-                            "recognized" advancing and "unmatched" quiet means no backup failures were
-                            reported. If nothing advances, check the webhook URL and key.
+                            ignored, a success with nothing to resolve, or a stale out-of-order duplicate
+                            deliberately discarded) — on its own it is <em>not</em> an all-clear. If "last
+                            unmatched" advances, job events are arriving that this PSA cannot route —
+                            backup failures may be going unalerted; check the <code>[Comet Alert]</code>
+                            WARNING lines in the log. These stamps prove webhook <strong>delivery and
+                            routing</strong> only — they can never prove backups are healthy: a recognized
+                            event can be a stale failure that deliberately raises nothing, and with alert
+                            creation switched off, successes keep advancing "recognized" while failures
+                            raise no alert at all. For whether a device's backups are actually OK, open its
+                            Recent Backup Jobs card on the asset page (live job history) or use the backup
+                            posture tools. If nothing advances, check the webhook URL and key.
                         </p>
                     </div>
                     @endif

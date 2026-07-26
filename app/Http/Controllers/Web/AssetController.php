@@ -186,7 +186,11 @@ class AssetController extends Controller
                 Log::warning("[AssetController] Comet job history unavailable for asset {$asset->id}: {$e->getMessage()}");
                 $cometJobData = [
                     'state' => 'unavailable',
+                    'unavailable_reason' => 'lookup_failed',
+                    'job_state' => 'unavailable',
+                    'job_state_note' => null,
                     'jobs_checked_at' => null,
+                    'last_backup' => null,
                     'last_success' => null,
                     'last_failure' => null,
                     'jobs' => [],

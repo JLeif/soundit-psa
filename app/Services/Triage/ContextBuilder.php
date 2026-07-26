@@ -723,12 +723,17 @@ class ContextBuilder
                     $cometClient = new CometClient;
                     $jobService = new CometJobService($cometClient);
                     $jobData = $jobService->getRecentJobs($asset, 3);
-                    if ($jobData['state'] === 'no_backup_jobs_observed') {
+                    if ($jobData['job_state'] === 'no_backup_jobs_observed') {
                         // Queried fine, but the server has no backup jobs at all
                         $info .= "\n    ⚠ No backup jobs observed on the Comet server — backups may never have run; not passing";
-                    } elseif ($jobData['state'] !== 'ok') {
-                        // A failed/unqueried read must not read as "no failures" (psa-enpew)
-                        $info .= "\n    ⚠ Backup job history {$jobData['state']} — backup state UNKNOWN, not passing";
+                    } elseif ($jobData['job_state'] === 'unavailable') {
+                        // A failed/impossible read must not read as "no failures" (psa-enpew)
+                        $info .= $jobData['unavailable_reason'] === 'no_synced_username'
+                            ? "\n    ⚠ Backup job history cannot be looked up (no synced Comet username) — backup state UNKNOWN, not passing"
+                            : "\n    ⚠ Backup job history unavailable — backup state UNKNOWN, not passing";
+                    } elseif ($jobData['job_state'] === 'last_backup_unknown') {
+                        // Unrecognised vendor status on the newest backup job (psa-enpew.12)
+                        $info .= "\n    ⚠ Most recent backup job has an unrecognised status — outcome UNKNOWN, not passing";
                     }
                     if ($jobData['last_success']) {
                         $info .= "\n    Last successful backup: ".$jobData['last_success']['started'];
