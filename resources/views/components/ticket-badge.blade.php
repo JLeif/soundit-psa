@@ -1,7 +1,13 @@
 {{-- Expects: ticket with optional eager-loaded client, assignee, categoryNode.parent.parent.
      Category is popover-only on this compact chip (psa-717bn.4 design call: dense
      contexts get the path on hover, not a visible column) and appears only when the
-     caller eager-loaded categoryNode — never lazy-loads. --}}
+     caller eager-loaded categoryNode — never lazy-loads the node itself.
+     ⚠ N+1 CAUTION (psa-717bn.7 hardening): eager-load the FULL chain
+     `categoryNode.parent.parent`, not just `categoryNode`. The gate below only proves
+     the node is loaded; pathString() still walks parent→grandparent, so loading
+     `categoryNode` alone lazy-walks the ancestors once PER ROW (preventLazyLoading is
+     OFF in prod). Every current caller loads the full chain — keep it that way when
+     this compact chip spreads to new callers. --}}
 @props(['ticket' => null, 'link' => true, 'popover' => true, 'fallback' => '—'])
 
 @if($ticket)
