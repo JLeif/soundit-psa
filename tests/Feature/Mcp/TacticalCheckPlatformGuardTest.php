@@ -1281,4 +1281,248 @@ class TacticalCheckPlatformGuardTest extends TestCase
 
         $this->assertSame('Script Check was added!', $result);
     }
+
+    // ── Stale local evidence must not authorize a write (psa-ou9pe) ──────────
+    // The psa-ou9pe.1 finding: the guard read TacticalAsset platform and
+    // TacticalScript metadata from the local rows with NO freshness bound —
+    // an arbitrarily old darwin snapshot plus an arbitrarily old script row
+    // authorized the write with zero live reads, while the real agent had
+    // been reimaged to Windows (or the script edited upstream) since. Local
+    // evidence now authorizes on its own only within
+    // TacticalCheckPlatformGuard::FRESH_EVIDENCE_MAX_HOURS; a staler (or
+    // never-stamped) row is resolved LIVE at this write boundary, and a
+    // failed or unresolvable live read REFUSES with a recovery instruction.
+
+    private function staleAgentRow(string $plat = 'darwin', ?\Carbon\Carbon $syncedAt = null): void
+    {
+        TacticalAsset::create([
+            'agent_id' => 'agent-stale',
+            'hostname' => 'OLD-SNAPSHOT',
+            'plat' => $plat,
+            'os' => $plat === 'darwin' ? 'Darwin 23.6.0 arm64' : 'Windows 11 Pro',
+            'status' => 'online',
+            'synced_at' => $syncedAt ?? now()->subDays(30),
+        ]);
+    }
+
+    private function macCompatibleScript(\Carbon\Carbon $syncedAt): void
+    {
+        TacticalScript::create([
+            'tactical_script_id' => 900,
+            'name' => 'Mac maintenance',
+            'shell' => 'shell',
+            'supported_platforms' => ['darwin'],
+            'synced_at' => $syncedAt,
+        ]);
+    }
+
+    /** @return array<string, mixed> The body of a script-check create against the stale agent. */
+    private function staleAgentCheckBody(): array
+    {
+        return [
+            'agent' => 'agent-stale',
+            'check_type' => 'script',
+            'script' => 900,
+            'name' => 'Stale-evidence probe',
+        ];
+    }
+
+    public function test_a_stale_agent_snapshot_is_not_trusted_the_live_platform_governs(): void
+    {
+        // The exact psa-ou9pe.1 repro, closed: a 30-day-old darwin snapshot
+        // plus a fresh darwin-only script previously authorized the write
+        // with zero live reads — but the real agent was reimaged to Windows
+        // since. The guard now resolves the stale snapshot live, meets the
+        // Windows answer, and refuses the darwin-only script; the queued
+        // write survives untouched.
+        $this->staleAgentRow('darwin');
+        $this->macCompatibleScript(now());
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'agent_id' => 'agent-stale',
+                'plat' => 'windows',
+                'operating_system' => 'Windows 11 Pro',
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', $this->staleAgentCheckBody());
+            $this->fail('a stale snapshot must not authorize the write when the live platform is incompatible');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('fail on every run', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write must never be consumed');
+    }
+
+    public function test_a_stale_agent_snapshot_repaired_by_the_live_read_still_creates(): void
+    {
+        // Enforcement, not prohibition: when the live read confirms a
+        // compatible platform, the stale snapshot is repaired at the boundary
+        // and the create proceeds.
+        $this->staleAgentRow('darwin');
+        $this->macCompatibleScript(now());
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'agent_id' => 'agent-stale',
+                'plat' => 'darwin',
+                'operating_system' => 'Darwin 23.6.0 arm64',
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ]);
+
+        $this->assertSame('Script Check was added!', $client->post('checks/', $this->staleAgentCheckBody()));
+        $this->assertSame(0, $mock->count());
+    }
+
+    public function test_a_stale_agent_snapshot_with_a_failed_live_read_refuses_with_recovery(): void
+    {
+        // Minimum bar from the finding: stale evidence with no live
+        // replacement is REFUSED with a recovery instruction — never sent.
+        $this->staleAgentRow('darwin');
+        $this->macCompatibleScript(now());
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(500, [], 'upstream error'),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', $this->staleAgentCheckBody());
+            $this->fail('a stale snapshot with no live replacement must refuse');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('stale', $e->getMessage());
+            $this->assertStringContainsString('tactical:sync-devices', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write must never be consumed');
+    }
+
+    public function test_a_stale_agent_snapshot_with_an_unresolvable_live_platform_refuses(): void
+    {
+        // Bounded fail-closed validation of the live answer (the same posture
+        // as the membership proof): a 200 whose payload carries no resolvable
+        // plat/operating_system proves nothing — refuse, never guess.
+        $this->staleAgentRow('darwin');
+        $this->macCompatibleScript(now());
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                'agent_id' => 'agent-stale',
+                'plat' => 'amiga',
+            ])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', $this->staleAgentCheckBody());
+            $this->fail('an unresolvable live platform must refuse');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('stale', $e->getMessage());
+            $this->assertStringContainsString('tactical:sync-devices', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write must never be consumed');
+    }
+
+    public function test_a_never_stamped_agent_snapshot_is_stale_evidence(): void
+    {
+        // synced_at NULL is "age unknown", and unknown age is never fresh —
+        // the row goes through the same live resolution as a stale one.
+        $this->staleAgentRow('darwin', syncedAt: null);
+        TacticalAsset::where('agent_id', 'agent-stale')->update(['synced_at' => null]);
+        $this->macCompatibleScript(now());
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(500, [], 'upstream error'),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', $this->staleAgentCheckBody());
+            $this->fail('a never-stamped snapshot must not authorize the write on its own');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('stale', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count());
+    }
+
+    public function test_a_stale_script_catalog_row_is_not_trusted_the_live_catalog_governs(): void
+    {
+        // The script half of the finding: a 30-day-old catalog row still
+        // claiming darwin compatibility must not authorize the write when the
+        // script was edited upstream — the live getScripts row governs.
+        $this->macFixture(); // fresh darwin agent 'agent-mac'
+        $this->macCompatibleScript(now()->subDays(30)); // stale row: shell + [darwin]
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([[
+                'id' => 900,
+                'name' => 'Mac maintenance',
+                'shell' => 'powershell',
+                'supported_platforms' => ['windows'],
+            ]])),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', [
+                'agent' => 'agent-mac',
+                'check_type' => 'script',
+                'script' => 900,
+                'name' => 'Stale-catalog probe',
+            ]);
+            $this->fail('a stale catalog row must not authorize the write when the live metadata is incompatible');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('fail on every run', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write must never be consumed');
+    }
+
+    public function test_a_stale_script_catalog_row_with_a_failed_live_read_refuses_with_recovery(): void
+    {
+        $this->macFixture(); // fresh darwin agent
+        $this->macCompatibleScript(now()->subDays(30));
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(500, [], 'upstream error'),
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+        ]);
+
+        try {
+            $client->post('checks/', [
+                'agent' => 'agent-mac',
+                'check_type' => 'script',
+                'script' => 900,
+                'name' => 'Stale-catalog probe',
+            ]);
+            $this->fail('a stale catalog row with no live replacement must refuse');
+        } catch (\App\Services\Tactical\TacticalClientException $e) {
+            $this->assertStringContainsString('stale', $e->getMessage());
+            $this->assertStringContainsString('tactical:sync-scripts', $e->getMessage());
+        }
+
+        $this->assertSame(1, $mock->count(), 'the queued write must never be consumed');
+    }
+
+    public function test_fresh_local_evidence_still_authorizes_with_zero_live_reads(): void
+    {
+        // The freshness bound must not demote the healthy path: rows synced
+        // within FRESH_EVIDENCE_MAX_HOURS authorize exactly as before, with
+        // no HTTP beyond the write itself.
+        $this->staleAgentRow('darwin', syncedAt: now()->subHours(20));
+        $this->macCompatibleScript(now()->subHours(20));
+
+        [$client, $mock] = $this->realClientWithMock([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode('Script Check was added!')),
+        ]);
+
+        $this->assertSame('Script Check was added!', $client->post('checks/', $this->staleAgentCheckBody()));
+        $this->assertSame(0, $mock->count(), 'fresh evidence resolves locally — only the write itself may consume HTTP');
+    }
 }

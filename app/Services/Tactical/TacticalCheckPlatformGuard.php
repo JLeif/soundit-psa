@@ -35,7 +35,10 @@ use App\Models\TacticalScript;
  *    policy's check lists while safety was proven for only one target.
  *  - AGENT target with an UNKNOWN platform → refused. An agent's platform is
  *    knowable — sync it (tactical:sync-devices). No override: guessing here
- *    recreates the original bug.
+ *    recreates the original bug. A snapshot older than
+ *    FRESH_EVIDENCE_MAX_HOURS (or never stamped) does not count as knowing:
+ *    it is resolved LIVE at this boundary, and a failed or unresolvable live
+ *    read refuses (psa-ou9pe — stale evidence is not evidence).
  *  - AGENT target, non-script check on a darwin/linux agent → refused.
  *    Tactical macOS/Linux agents run SCRIPT checks only (vendor constraint,
  *    also documented on the provisioner) — a non-script check there never
@@ -43,9 +46,11 @@ use App\Models\TacticalScript;
  *  - Script whose metadata cannot be resolved from a server-derived source,
  *    OR carries no usable platform signal (no shell AND no
  *    supported_platforms) → refused. Resolution order: the local synced
- *    catalog (tactical:sync-scripts / the provisioner's post-create upsert),
- *    then a live getScripts read over this client for a not-yet-synced
- *    script. Caller claims are not a source. Absence of constraints is NOT
+ *    catalog (tactical:sync-scripts / the provisioner's post-create upsert)
+ *    when its row is within FRESH_EVIDENCE_MAX_HOURS, then a live getScripts
+ *    read over this client for a not-yet-synced OR stale-cataloged script
+ *    (psa-ou9pe: an unboundedly old row must not outvote an upstream edit).
+ *    Caller claims are not a source. Absence of constraints is NOT
  *    compatibility: treating an empty claim as "runs anywhere" is exactly how
  *    a wrong-platform always-failing check ships (psa-0pb9m R2).
  *  - AGENT target with a provably incompatible script → refused, no override.
@@ -97,6 +102,24 @@ use App\Models\TacticalScript;
  */
 class TacticalCheckPlatformGuard
 {
+    /**
+     * How old locally-synced write evidence — the agent-platform snapshot
+     * and the script-catalog row — may be and still authorize a check write
+     * on its own (psa-ou9pe: the guard previously accepted UNBOUNDEDLY stale
+     * local rows as write authorization, so an arbitrarily old darwin
+     * snapshot authorized a check on an agent long since reimaged to
+     * Windows, and an arbitrarily old catalog row outvoted an upstream
+     * script edit). Both feeds sync DAILY (tactical:sync-devices 05:32,
+     * tactical:sync-scripts 05:35), so 48h — the same one-missed-daily-cycle
+     * threshold the read surfaces use for their staleness flags — keeps the
+     * healthy pipeline on the zero-HTTP local path while a row the pipeline
+     * has demonstrably stopped refreshing is demoted to LIVE resolution at
+     * this boundary: the live answer governs, and a failed or unresolvable
+     * live read REFUSES with a recovery instruction. A never-stamped row
+     * (synced_at null) is age-unknown, and unknown age is never fresh.
+     */
+    public const FRESH_EVIDENCE_MAX_HOURS = 48;
+
     /** Refusals name at most this many offending member hostnames. */
     private const MAX_NAMED_MEMBERS = 5;
 
@@ -187,17 +210,7 @@ class TacticalCheckPlatformGuard
      */
     private static function assertAgentTargetSafe(string $agentId, bool $isScriptCheck, array $payload, TacticalClient $client): void
     {
-        $platform = TacticalAsset::where('agent_id', $agentId)->first()?->platform();
-
-        if ($platform === null) {
-            // Fail CLOSED on the unknown: an unknown platform is precisely the
-            // state in which the original always-failing check was attached.
-            throw new TacticalClientException(
-                "Refusing to create this check: the platform of agent '{$agentId}' is unknown to the PSA "
-                .'(no synced platform on the local snapshot). Run tactical:sync-devices to resolve it, then retry — '
-                .'creating a check against an unknown platform is how a wrong-platform always-failing check ships (psa-0pb9m).'
-            );
-        }
+        $platform = self::resolveAgentPlatform($agentId, $client);
 
         if (! $isScriptCheck) {
             if ($platform !== TacticalPlatform::WINDOWS) {
@@ -224,6 +237,95 @@ class TacticalCheckPlatformGuard
                 .'and register as broken coverage (psa-0pb9m). Use a script compatible with the agent platform instead.'
             );
         }
+    }
+
+    /**
+     * The agent's platform, resolved from evidence that is either FRESH or
+     * LIVE — never from an unboundedly stale snapshot (psa-ou9pe):
+     *
+     *  - No local snapshot at all → refused (unchanged psa-0pb9m behaviour):
+     *    the platform is knowable — sync it.
+     *  - Snapshot synced within FRESH_EVIDENCE_MAX_HOURS → it authorizes
+     *    exactly as before (zero HTTP); a fresh row that still resolves no
+     *    platform keeps the unknown-platform refusal (a live re-read of the
+     *    same vendor fields the sync just wrote would answer no better).
+     *  - Snapshot STALER than the bound (or never stamped) → the platform is
+     *    resolved LIVE from the vendor's own agent detail
+     *    (GET agents/{id}/ — the same plat/operating_system fields
+     *    TacticalDeviceSyncService::syncDeviceDetail() consumes), with
+     *    bounded fail-closed validation: a failed read, or a payload from
+     *    which TacticalPlatform::fromAgentPayload() resolves nothing,
+     *    REFUSES with a recovery instruction. The stale row itself is never
+     *    fallen back to — the agent may have been reimaged since it was
+     *    written, which is exactly the wrong-platform vector this guard
+     *    exists to close.
+     */
+    private static function resolveAgentPlatform(string $agentId, TacticalClient $client): string
+    {
+        $local = TacticalAsset::where('agent_id', $agentId)->first();
+
+        if ($local === null) {
+            // Fail CLOSED on the unknown: an unknown platform is precisely the
+            // state in which the original always-failing check was attached.
+            throw new TacticalClientException(
+                "Refusing to create this check: the platform of agent '{$agentId}' is unknown to the PSA "
+                .'(no synced platform on the local snapshot). Run tactical:sync-devices to resolve it, then retry — '
+                .'creating a check against an unknown platform is how a wrong-platform always-failing check ships (psa-0pb9m).'
+            );
+        }
+
+        if (self::isFreshEvidence($local->synced_at)) {
+            $platform = $local->platform();
+
+            if ($platform === null) {
+                throw new TacticalClientException(
+                    "Refusing to create this check: the platform of agent '{$agentId}' is unknown to the PSA "
+                    .'(no synced platform on the local snapshot). Run tactical:sync-devices to resolve it, then retry — '
+                    .'creating a check against an unknown platform is how a wrong-platform always-failing check ships (psa-0pb9m).'
+                );
+            }
+
+            return $platform;
+        }
+
+        try {
+            $live = $client->getAgent($agentId);
+        } catch (\Throwable $e) {
+            throw new TacticalClientException(
+                "Refusing to create this check: the local platform snapshot for agent '{$agentId}' is stale "
+                .'(last synced more than '.self::FRESH_EVIDENCE_MAX_HOURS.' hours ago, or never), and the live Tactical '
+                .'agent read that would replace it failed ('.$e::class.'), so the agent\'s CURRENT platform cannot be '
+                .'verified. Run tactical:sync-devices, then retry — stale platform evidence must not authorize a check '
+                .'write: the agent may have been reimaged since the snapshot (psa-ou9pe).'
+            );
+        }
+
+        $platform = TacticalPlatform::fromAgentPayload(
+            is_scalar($live['plat'] ?? null) ? (string) $live['plat'] : null,
+            is_scalar($live['operating_system'] ?? null) ? (string) $live['operating_system'] : null,
+        );
+
+        if ($platform === null) {
+            throw new TacticalClientException(
+                "Refusing to create this check: the local platform snapshot for agent '{$agentId}' is stale "
+                .'(last synced more than '.self::FRESH_EVIDENCE_MAX_HOURS.' hours ago, or never), and the live Tactical '
+                .'agent read carries no resolvable platform (no usable plat/operating_system — a drifted or degraded '
+                .'response), so the agent\'s CURRENT platform cannot be verified. Run tactical:sync-devices and verify '
+                .'the agent in Tactical, then retry (psa-ou9pe).'
+            );
+        }
+
+        return $platform;
+    }
+
+    /**
+     * Whether a locally-synced row is recent enough to authorize a check
+     * write on its own (see FRESH_EVIDENCE_MAX_HOURS). Null — never stamped —
+     * is age-unknown, and unknown age is never fresh.
+     */
+    private static function isFreshEvidence(?\Carbon\CarbonInterface $syncedAt): bool
+    {
+        return $syncedAt !== null && $syncedAt->gt(now()->subHours(self::FRESH_EVIDENCE_MAX_HOURS));
     }
 
     /**
@@ -665,7 +767,9 @@ class TacticalCheckPlatformGuard
         }
 
         $local = TacticalScript::where('tactical_script_id', $scriptId)->first();
-        if ($local !== null) {
+        $staleLocal = $local !== null && ! self::isFreshEvidence($local->synced_at);
+
+        if ($local !== null && ! $staleLocal) {
             $resolved = [
                 'shell' => is_string($local->shell) && trim($local->shell) !== '' ? $local->shell : null,
                 'supported_platforms' => is_array($local->supported_platforms) ? $local->supported_platforms : null,
@@ -682,16 +786,24 @@ class TacticalCheckPlatformGuard
             return $resolved;
         }
 
-        // Not in the catalog yet (e.g. created upstream since the last sync):
-        // read the vendor's own getScripts row live over the same client. A
-        // failed or empty read REFUSES — never degrades to a caller claim.
+        // Not in the catalog yet (e.g. created upstream since the last sync),
+        // or in it only as a row too STALE to authorize a write on its own
+        // (psa-ou9pe: an unboundedly old catalog row must not outvote an
+        // upstream script edit): read the vendor's own getScripts row live
+        // over the same client. A failed or empty read REFUSES — never
+        // degrades to a caller claim, and never falls back to the stale row.
         try {
             $upstream = $client->getScripts(true, true);
         } catch (\Throwable $e) {
-            throw new TacticalClientException(
-                "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog, and its "
-                .'metadata could not be read live from Tactical ('.$e::class.'), so its platform constraints cannot be verified. '
-                .'Run tactical:sync-scripts, then retry — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
+            throw new TacticalClientException($staleLocal
+                ? "Refusing to create this script check: the synced catalog row for script {$scriptId} is stale "
+                    .'(last synced more than '.self::FRESH_EVIDENCE_MAX_HOURS.' hours ago, or never — the script may have '
+                    .'been edited upstream since), and its metadata could not be read live from Tactical ('.$e::class.'), '
+                    .'so its platform constraints cannot be verified. Run tactical:sync-scripts, then retry — stale catalog '
+                    .'evidence must not authorize a check write (psa-ou9pe).'
+                : "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog, and its "
+                    .'metadata could not be read live from Tactical ('.$e::class.'), so its platform constraints cannot be verified. '
+                    .'Run tactical:sync-scripts, then retry — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
             );
         }
 
@@ -704,10 +816,14 @@ class TacticalCheckPlatformGuard
         }
 
         if ($row === null) {
-            throw new TacticalClientException(
-                "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog and is not "
-                .'visible in Tactical getScripts, so its platform constraints cannot be verified. '
-                .'Run tactical:sync-scripts first — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
+            throw new TacticalClientException($staleLocal
+                ? "Refusing to create this script check: the synced catalog row for script {$scriptId} is stale "
+                    .'(last synced more than '.self::FRESH_EVIDENCE_MAX_HOURS.' hours ago, or never), and the script is not '
+                    .'visible in a live Tactical getScripts read — it may have been deleted upstream since the last sync, so '
+                    .'its platform constraints cannot be verified. Run tactical:sync-scripts first (psa-ou9pe).'
+                : "Refusing to create this script check: script {$scriptId} is not in the local synced script catalog and is not "
+                    .'visible in Tactical getScripts, so its platform constraints cannot be verified. '
+                    .'Run tactical:sync-scripts first — attaching a script blind is how a wrong-platform always-failing check ships (psa-0pb9m).'
             );
         }
 
