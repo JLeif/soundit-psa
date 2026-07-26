@@ -53,6 +53,15 @@ use Illuminate\Support\Facades\Log;
  * that CometJobService/CometAlertService used historically — they predate this
  * reading of the vendor source (corrected separately under psa-enpew).
  *
+ * MIXED FLEETS — absence is counted, never silent (psa-wnnus must-fix #4):
+ * deviceQuery() deliberately selects only assets carrying Comet state, so the
+ * posture payload additionally reconciles the client's whole ACTIVE PSA asset
+ * fleet in fleet_coverage — exhaustive active/configured/not-configured
+ * totals (reconciling by construction), explicit not_configured_assets rows,
+ * and a loud note. An eligible asset with NO backup configuration is a
+ * first-class "no backup configured" finding; a mixed protected/unprotected
+ * fleet must never read as fully covered by omission.
+ *
  * DATA BOUNDARY: the Comet admin API is server-wide (AdminGetJobsForUser has
  * no per-client scoping), so OUR scoping IS the boundary — usernames are taken
  * only from the resolved client's synced asset rows, and returned jobs are
@@ -122,7 +131,7 @@ class CometReadOnlyToolset
         return [
             [
                 'name' => 'comet_get_backup_posture',
-                'description' => "Get a PSA client's Comet Backup posture, per device: whether backup is enabled and the device is registered with the Comet server, the LIVE outcome and time of each device's most recent backup job (succeeded / failed / running / unknown / no jobs observed), days since last success, storage usage, active backup-failure alerts, and how fresh every part of the answer is. Start here for any 'are this client's backups OK' question. Devices whose job history could not be fetched are reported as unavailable, and an unrecognised vendor status code is reported as last_backup_unknown — treat both as UNKNOWN, never as passing and never as a confirmed failure; absence of a failure here is not evidence of success.",
+                'description' => "Get a PSA client's Comet Backup posture, per device: whether backup is enabled and the device is registered with the Comet server, the LIVE outcome and time of each device's most recent backup job (succeeded / failed / running / unknown / no jobs observed), days since last success, storage usage, active backup-failure alerts, and how fresh every part of the answer is. Start here for any 'are this client's backups OK' question. Devices whose job history could not be fetched are reported as unavailable, and an unrecognised vendor status code is reported as last_backup_unknown — treat both as UNKNOWN, never as passing and never as a confirmed failure; absence of a failure here is not evidence of success. fleet_coverage additionally reconciles the client's whole active PSA asset fleet: assets with NO Comet backup configuration are counted and listed explicitly (not_configured_assets) — the device rows alone are NOT the full fleet, and absence from them is never protection.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -198,6 +207,9 @@ class CometReadOnlyToolset
         $result = $this->header($client);
         $result = array_merge($result, $this->syncedFreshness($devices));
         $result['device_count'] = $devices->count();
+        // Computed BEFORE the empty-devices branch: an all-unconfigured fleet
+        // is the worst mixed-fleet case, not an exempt one.
+        $result['fleet_coverage'] = $this->fleetCoverage($client);
 
         if ($devices->isEmpty()) {
             $result['note'] = "{$client->name} is mapped to a Comet group but no PSA assets carry Comet backup state (no device is registered or flagged backup-enabled). "
@@ -687,6 +699,80 @@ class CometReadOnlyToolset
                 $query->whereNotNull('comet_device_id')
                     ->orWhere('comet_backup_enabled', true);
             });
+    }
+
+    /**
+     * Reconcile the client's ACTIVE PSA asset fleet against Comet coverage
+     * (psa-wnnus must-fix #4). deviceQuery() selects only assets carrying
+     * Comet state, so an eligible asset with NO backup configuration would
+     * otherwise be absent from every row and total — and a mixed
+     * protected/unprotected fleet would read as fully covered by omission.
+     *
+     * The totals reconcile BY CONSTRUCTION: the not-configured predicate is
+     * the null-safe complement of deviceQuery()'s, and the configured count
+     * is derived by subtraction, so no asset can fall between two
+     * hand-written predicates. Eligibility is deliberately ALL active assets,
+     * not an asset_type subset — the Comet sync itself treats every asset
+     * type as backupable (CometBackupSyncService defaults unknown types to
+     * 'workstation'), and a type filter would re-create the silent-omission
+     * channel this accounting closes; each row carries asset_type so the
+     * reading agent can judge a printer differently from a server. Inactive
+     * assets are excluded but counted loudly — retired hardware is not
+     * "unprotected", and ignoring it silently would be an omission too.
+     *
+     * @return array<string, mixed>
+     */
+    private function fleetCoverage(Client $client): array
+    {
+        $activeTotal = Asset::where('client_id', $client->id)->active()->count();
+
+        // Null-safe complement of deviceQuery()'s predicate. Negating it with
+        // whereNot(...) instead would NULL-eliminate a row whose enabled flag
+        // is NULL (NOT(false OR NULL) = NULL) — silently dropping exactly the
+        // unconfigured asset this accounting exists to surface.
+        $unconfigured = Asset::where('client_id', $client->id)->active()
+            ->whereNull('comet_device_id')
+            ->where(function ($query) {
+                $query->whereNull('comet_backup_enabled')->orWhere('comet_backup_enabled', false);
+            });
+        $unconfiguredCount = (clone $unconfigured)->count();
+
+        $rows = $unconfigured->orderByRaw("LOWER(COALESCE(hostname, ''))")
+            ->limit(self::MAX_DEVICE_ROWS)
+            ->get(['id', 'hostname', 'name', 'asset_type'])
+            ->map(fn (Asset $asset): array => [
+                'asset_id' => $asset->id,
+                'hostname' => $asset->hostname,
+                'asset_name' => $asset->name,
+                'asset_type' => $asset->asset_type,
+            ])->values()->all();
+
+        $inactiveExcluded = Asset::where('client_id', $client->id)->where('is_active', false)->count();
+
+        return [
+            'active_assets_total' => $activeTotal,
+            'backup_configured_count' => $activeTotal - $unconfiguredCount,
+            'backup_not_configured_count' => $unconfiguredCount,
+            'inactive_assets_excluded' => $inactiveExcluded,
+            'not_configured_assets' => $rows,
+            'not_configured_truncated' => $unconfiguredCount > count($rows),
+            'note' => $this->fleetCoverageNote($activeTotal, $unconfiguredCount, $inactiveExcluded),
+        ];
+    }
+
+    private function fleetCoverageNote(int $activeTotal, int $unconfiguredCount, int $inactiveExcluded): string
+    {
+        $note = match (true) {
+            $activeTotal === 0 => 'This client has no active PSA assets, so there is no device fleet to reconcile Comet coverage against.',
+            $unconfiguredCount === 0 => 'Every active PSA asset for this client carries Comet backup state — no active asset is missing from the device rows above.',
+            default => "{$unconfiguredCount} of {$activeTotal} active PSA assets for this client have NO Comet backup configuration recorded (no Comet registration and not flagged backup-enabled). They appear ONLY in not_configured_assets — no device row above covers them. Treat each as NOT PROTECTED by Comet unless the Comet console shows otherwise (a device may report to Comet under a hostname no PSA asset matches, or the daily sync may not have landed). Absence from the device rows above is NOT protection.",
+        };
+
+        if ($inactiveExcluded > 0) {
+            $note .= " {$inactiveExcluded} inactive PSA asset(s) are excluded from this accounting — retired hardware is not counted as unprotected.";
+        }
+
+        return $note;
     }
 
     private function hostnameMissError(Client $client, string $hostname): string

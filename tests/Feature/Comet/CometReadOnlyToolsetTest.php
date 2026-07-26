@@ -117,6 +117,7 @@ class CometReadOnlyToolsetTest extends TestCase
         $rival = $this->mappedClient('Rival Corp');
         $this->cometAsset($acme, ['hostname' => 'ACME-PC-01', 'comet_device_id' => 'acme-dev', 'comet_username' => 'acme-backup']);
         $this->cometAsset($rival, ['hostname' => 'RIVAL-SECRET-HOST', 'comet_device_id' => 'rival-dev', 'comet_username' => 'rival-backup']);
+        Asset::factory()->create(['client_id' => $rival->id, 'hostname' => 'RIVAL-UNCONFIGURED-HOST']);
 
         $this->mockJobs([
             'acme-backup' => [
@@ -132,7 +133,9 @@ class CometReadOnlyToolsetTest extends TestCase
         $this->assertStringNotContainsString('RIVAL-SECRET-HOST', $payload, "another client's hostname crossed the boundary");
         $this->assertStringNotContainsString('rival-dev', $payload, "another client's device id crossed the boundary");
         $this->assertStringNotContainsString('rival-backup', $payload, "another client's username crossed the boundary");
+        $this->assertStringNotContainsString('RIVAL-UNCONFIGURED-HOST', $payload, "another client's unconfigured asset crossed the boundary");
         $this->assertSame(1, $result['summary']['devices_total'], 'counts must reflect the scoped client only');
+        $this->assertSame(1, $result['fleet_coverage']['active_assets_total'], 'fleet accounting must reflect the scoped client only');
     }
 
     public function test_the_resolved_client_scope_wins_over_a_conflicting_input_client_id(): void
@@ -408,6 +411,88 @@ class CometReadOnlyToolsetTest extends TestCase
         $this->assertSame(0, $result['device_count']);
         $this->assertStringContainsString('no PSA assets carry Comet backup state', $result['note']);
         $this->assertStringContainsString('Verify in the Comet console', $result['note']);
+    }
+
+    // ── Mixed fleets: absence is counted, never silent (psa-wnnus #4) ─────────
+
+    public function test_a_mixed_fleet_surfaces_unconfigured_assets_instead_of_omitting_them(): void
+    {
+        // deviceQuery() only sees assets carrying Comet state — an ordinary
+        // PSA asset with no backup configuration was previously absent from
+        // every row AND every total, so a mixed protected/unprotected fleet
+        // read as fully covered by omission. It must be a first-class
+        // "no backup configured" finding instead.
+        $this->configureComet();
+        $client = $this->mappedClient('Acme');
+        $this->cometAsset($client, ['hostname' => 'PROTECTED-HOST', 'comet_device_id' => 'dev-1']);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST', 'asset_type' => 'Server']);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'RETIRED-HOST', 'is_active' => false]);
+        $this->mockJobs(['acme-backup' => [$this->job(['device' => 'dev-1'])]]);
+
+        $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
+
+        // Existing device accounting is unchanged: only the configured device.
+        $this->assertSame(1, $result['summary']['devices_total']);
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(2, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(1, $coverage['backup_not_configured_count']);
+        $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertFalse($coverage['not_configured_truncated']);
+
+        $this->assertCount(1, $coverage['not_configured_assets']);
+        $row = $coverage['not_configured_assets'][0];
+        $this->assertSame('UNPROTECTED-HOST', $row['hostname']);
+        $this->assertSame('Server', $row['asset_type'], 'the agent judges a printer differently from a server — the type must travel');
+        $this->assertNotNull($row['asset_id']);
+
+        $this->assertStringContainsString('NO Comet backup configuration', $coverage['note']);
+        $this->assertStringContainsString('NOT PROTECTED', $coverage['note']);
+        $this->assertStringContainsString('NOT protection', $coverage['note']);
+        $this->assertStringContainsString('Comet console', $coverage['note']);
+        // Retired hardware is excluded from the accounting, but loudly.
+        $this->assertStringContainsString('inactive', $coverage['note']);
+        $this->assertStringNotContainsString('RETIRED-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+    }
+
+    public function test_a_fully_covered_fleet_states_no_active_asset_is_missing(): void
+    {
+        $this->configureComet();
+        $client = $this->mappedClient('Acme');
+        $this->cometAsset($client, ['hostname' => 'PROTECTED-HOST', 'comet_device_id' => 'dev-1']);
+        $this->mockJobs(['acme-backup' => [$this->job(['device' => 'dev-1'])]]);
+
+        $coverage = $this->toolset()->execute('comet_get_backup_posture', [], $client->id)['fleet_coverage'];
+
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(0, $coverage['backup_not_configured_count']);
+        $this->assertSame([], $coverage['not_configured_assets']);
+        $this->assertStringContainsString('no active asset is missing', $coverage['note']);
+    }
+
+    public function test_an_all_unconfigured_fleet_is_visible_in_the_no_devices_branch(): void
+    {
+        // The empty-devices early return must carry the fleet accounting too:
+        // a client whose EVERY asset lacks backup configuration is the worst
+        // mixed-fleet case, not an exempt one. No CometClient mock is bound —
+        // this path must not touch the vendor API at all.
+        $this->configureComet();
+        $client = $this->mappedClient('Acme');
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST']);
+
+        $result = $this->toolset()->execute('comet_get_backup_posture', [], $client->id);
+
+        $this->assertSame(0, $result['device_count']);
+        $this->assertStringContainsString('no PSA assets carry Comet backup state', $result['note']);
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(0, $coverage['backup_configured_count']);
+        $this->assertSame(1, $coverage['backup_not_configured_count']);
+        $this->assertSame('UNPROTECTED-HOST', $coverage['not_configured_assets'][0]['hostname']);
+        $this->assertStringContainsString('NOT protection', $coverage['note']);
     }
 
     public function test_active_backup_alerts_are_included_sanitized_and_framed_as_corroboration_only(): void

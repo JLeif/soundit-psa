@@ -189,6 +189,7 @@ class ServosityReadOnlyToolsetTest extends TestCase
         $rival = $this->mappedClient('Rival Corp', 77);
         $this->enabledAsset($acme, ['hostname' => 'ACME-SRV-01']);
         $this->enabledAsset($rival, ['hostname' => 'RIVAL-SECRET-HOST']);
+        Asset::factory()->create(['client_id' => $rival->id, 'hostname' => 'RIVAL-UNCONFIGURED-HOST']);
         $this->servosityLicense($rival, 'pro', 'Servosity Pro Backup', 9, now());
 
         // The live list legitimately contains every company — only OURS may be projected.
@@ -199,8 +200,10 @@ class ServosityReadOnlyToolsetTest extends TestCase
 
         $this->assertArrayNotHasKey('error', $result);
         $this->assertStringNotContainsString('RIVAL-SECRET-HOST', $payload, "another client's hostname crossed the boundary");
+        $this->assertStringNotContainsString('RIVAL-UNCONFIGURED-HOST', $payload, "another client's unconfigured asset crossed the boundary");
         $this->assertStringNotContainsString('"Pro":9', $payload, "another company's live counts crossed the boundary");
         $this->assertSame(1, $result['enabled_device_count']);
+        $this->assertSame(1, $result['fleet_coverage']['active_assets_total'], 'fleet accounting must reflect the scoped client only');
         $this->assertCount(0, collect($result['synced_account_counts'])->where('quantity', 9));
     }
 
@@ -1003,6 +1006,89 @@ class ServosityReadOnlyToolsetTest extends TestCase
 
         $this->assertSame(0, $result['enabled_device_count']);
         $this->assertStringContainsString('M365/mailbox and NAS protection do not require an enabled PSA asset', $result['devices_note']);
+    }
+
+    // ── Mixed fleets: absence is counted, never silent (psa-wnnus #4) ─────────
+
+    public function test_a_mixed_fleet_surfaces_unconfigured_assets_instead_of_omitting_them(): void
+    {
+        // enabledDeviceQuery() only sees servosity_backup_enabled = true — an
+        // ordinary PSA asset with no backup provisioning was previously absent
+        // from every row AND every total, so a mixed protected/unprotected
+        // fleet read as fully covered by omission. It must be a first-class
+        // "no backup configured" finding instead.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme');
+        $this->enabledAsset($client, ['hostname' => 'DONE-HOST', 'servosity_dr_backup_id' => 501]);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST', 'asset_type' => 'Server']);
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'RETIRED-HOST', 'is_active' => false]);
+        $this->mockServosity($this->drfPage($this->companyRow(42)), $this->drfPage($this->drRow(501, 'DONE-HOST')));
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        // Existing device accounting is unchanged: only the enabled device.
+        $this->assertSame(1, $result['enabled_device_count']);
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(2, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(1, $coverage['backup_not_configured_count']);
+        $this->assertSame(1, $coverage['inactive_assets_excluded']);
+        $this->assertFalse($coverage['not_configured_truncated']);
+
+        $this->assertCount(1, $coverage['not_configured_assets']);
+        $row = $coverage['not_configured_assets'][0];
+        $this->assertSame('UNPROTECTED-HOST', $row['hostname']);
+        $this->assertSame('Server', $row['asset_type'], 'the agent judges a printer differently from a server — the type must travel');
+        $this->assertNotNull($row['asset_id']);
+
+        $this->assertStringContainsString('NO Servosity device-backup provisioning', $coverage['note']);
+        $this->assertStringContainsString('NOT PROTECTED', $coverage['note']);
+        $this->assertStringContainsString('NOT protection', $coverage['note']);
+        $this->assertStringContainsString('Servosity console', $coverage['note']);
+        $this->assertStringContainsString('account_counts', $coverage['note'], 'the note must keep the account-level (M365/NAS) nuance');
+        // Retired hardware is excluded from the accounting, but loudly.
+        $this->assertStringContainsString('inactive', $coverage['note']);
+        $this->assertStringNotContainsString('RETIRED-HOST', json_encode($result), 'an inactive asset is counted as excluded, never listed as unprotected');
+    }
+
+    public function test_a_fully_covered_fleet_states_no_active_asset_is_missing(): void
+    {
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme');
+        $this->enabledAsset($client, ['hostname' => 'DONE-HOST', 'servosity_dr_backup_id' => 501]);
+        $this->mockServosity($this->drfPage($this->companyRow(42)), $this->drfPage($this->drRow(501, 'DONE-HOST')));
+
+        $coverage = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id)['fleet_coverage'];
+
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(1, $coverage['backup_configured_count']);
+        $this->assertSame(0, $coverage['backup_not_configured_count']);
+        $this->assertSame([], $coverage['not_configured_assets']);
+        $this->assertStringContainsString('no active asset is missing', $coverage['note']);
+    }
+
+    public function test_an_all_unconfigured_fleet_is_visible_alongside_the_devices_note(): void
+    {
+        // A client whose EVERY asset lacks backup provisioning is the worst
+        // mixed-fleet case, not an exempt one: the devices_note (account-level
+        // products) and the fleet accounting must BOTH be present.
+        $this->configureServosity();
+        $client = $this->mappedClient('Acme');
+        Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'UNPROTECTED-HOST']);
+        $this->mockServosity($this->drfPage($this->companyRow(42, ['Mailboxes' => 30])));
+
+        $result = $this->toolset()->execute('servosity_get_backup_posture', [], $client->id);
+
+        $this->assertSame(0, $result['enabled_device_count']);
+        $this->assertStringContainsString('M365/mailbox and NAS protection do not require an enabled PSA asset', $result['devices_note']);
+
+        $coverage = $result['fleet_coverage'];
+        $this->assertSame(1, $coverage['active_assets_total']);
+        $this->assertSame(0, $coverage['backup_configured_count']);
+        $this->assertSame(1, $coverage['backup_not_configured_count']);
+        $this->assertSame('UNPROTECTED-HOST', $coverage['not_configured_assets'][0]['hostname']);
+        $this->assertStringContainsString('NOT protection', $coverage['note']);
     }
 
     public function test_an_unknown_tool_name_is_an_error(): void

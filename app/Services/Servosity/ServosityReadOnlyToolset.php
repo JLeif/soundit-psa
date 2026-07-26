@@ -102,6 +102,16 @@ use Illuminate\Support\Facades\Log;
  * unavailable keeps its attempt stamp, which claims nothing about upstream
  * state.
  *
+ * MIXED FLEETS — absence is counted, never silent (psa-wnnus must-fix #4):
+ * enabledDeviceQuery() deliberately selects only servosity_backup_enabled
+ * assets, so the posture payload additionally reconciles the client's whole
+ * ACTIVE PSA asset fleet in fleet_coverage — exhaustive
+ * active/configured/not-configured totals (reconciling by construction),
+ * explicit not_configured_assets rows, and a loud note that keeps the
+ * account-level (M365/NAS) nuance. An eligible asset with NO device-backup
+ * provisioning is a first-class "no backup configured" finding; a mixed
+ * protected/unprotected fleet must never read as fully covered by omission.
+ *
  * DATA BOUNDARY: scope resolves from clients.servosity_company_id on the PSA
  * client row, never from tool input. Live reads are filtered to that company
  * id; synced reads are client_id-scoped. servosity_backup_password exists on
@@ -171,7 +181,7 @@ class ServosityReadOnlyToolset
         return [
             [
                 'name' => 'servosity_get_backup_posture',
-                'description' => "Get a PSA client's Servosity backup posture: per-device enabled/provisioning state reconciled against a LIVE query of Servosity's DR backup accounts (each device's upstream_check: verified_live / upstream_missing / unverified / not_provisioned), synced backup account counts by product (with freshness), and live account + open-issue counts. IMPORTANT: job-run state (did the last backup run, did it succeed) CANNOT be answered by this tool — the vendor documents its job endpoint but NOT the response schema, so job_run_history is always status=unverifiable with no run count or outcome; verify run outcomes in the Servosity console. Never infer 'backups are healthy' from anything in this answer. Every section carries its own freshness (data_as_of/data_stale, or live_checked_at for live sections) EXCEPT schema_drift, which publishes NO timestamp — an uninterpretable answer is not an observation. Any status of unavailable/schema_drift/unverifiable/company_not_found means UNKNOWN — not zero, not passing.",
+                'description' => "Get a PSA client's Servosity backup posture: per-device enabled/provisioning state reconciled against a LIVE query of Servosity's DR backup accounts (each device's upstream_check: verified_live / upstream_missing / unverified / not_provisioned), synced backup account counts by product (with freshness), and live account + open-issue counts. fleet_coverage additionally reconciles the client's whole active PSA asset fleet: assets with NO Servosity device-backup provisioning are counted and listed explicitly (not_configured_assets) — the device rows alone are NOT the full fleet, and absence from them is never protection. IMPORTANT: job-run state (did the last backup run, did it succeed) CANNOT be answered by this tool — the vendor documents its job endpoint but NOT the response schema, so job_run_history is always status=unverifiable with no run count or outcome; verify run outcomes in the Servosity console. Never infer 'backups are healthy' from anything in this answer. Every section carries its own freshness (data_as_of/data_stale, or live_checked_at for live sections) EXCEPT schema_drift, which publishes NO timestamp — an uninterpretable answer is not an observation. Any status of unavailable/schema_drift/unverifiable/company_not_found means UNKNOWN — not zero, not passing.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -253,6 +263,9 @@ class ServosityReadOnlyToolset
             'upstream_check' => $this->upstreamCheck($asset, $drInfo),
         ])->values()->all();
         $result['devices_truncated'] = $devices->count() > self::MAX_DEVICE_ROWS;
+        // The device rows above cover only enabled assets — fleet_coverage is
+        // the exhaustive accounting that makes unconfigured assets visible.
+        $result['fleet_coverage'] = $this->fleetCoverage($client);
 
         // The enabled/provisioned flags are LOCAL provisioning records written
         // when backup was set up — no sync refreshes them, so this plane has no
@@ -919,6 +932,81 @@ class ServosityReadOnlyToolset
     {
         return Asset::where('client_id', $client->id)
             ->where('servosity_backup_enabled', true);
+    }
+
+    /**
+     * Reconcile the client's ACTIVE PSA asset fleet against Servosity
+     * device-backup coverage (psa-wnnus must-fix #4). enabledDeviceQuery()
+     * selects only servosity_backup_enabled assets, so an eligible asset with
+     * NO backup provisioning would otherwise be absent from every row and
+     * total — and a mixed protected/unprotected fleet would read as fully
+     * covered by omission.
+     *
+     * The totals reconcile BY CONSTRUCTION: the not-configured predicate is
+     * the null-safe complement of enabledDeviceQuery()'s, and the configured
+     * count is derived by subtraction, so no asset can fall between two
+     * hand-written predicates. Eligibility is deliberately ALL active assets,
+     * not an asset_type subset — ServosityDeploymentService treats every
+     * asset type as deployable (everything non-server maps to DR_DESKTOP),
+     * and a type filter would re-create the silent-omission channel this
+     * accounting closes; each row carries asset_type so the reading agent can
+     * judge a printer differently from a server. Inactive assets are excluded
+     * but counted loudly — retired hardware is not "unprotected", and
+     * ignoring it silently would be an omission too. The note keeps the
+     * account-level (M365/NAS) nuance: those products need no enabled asset.
+     *
+     * @return array<string, mixed>
+     */
+    private function fleetCoverage(Client $client): array
+    {
+        $activeTotal = Asset::where('client_id', $client->id)->active()->count();
+
+        // Null-safe complement of enabledDeviceQuery()'s predicate. Negating
+        // it with whereNot(...) instead would NULL-eliminate a row whose
+        // enabled flag is NULL (NOT(NULL) = NULL) — silently dropping exactly
+        // the unconfigured asset this accounting exists to surface.
+        $unconfigured = Asset::where('client_id', $client->id)->active()
+            ->where(function ($query) {
+                $query->whereNull('servosity_backup_enabled')->orWhere('servosity_backup_enabled', false);
+            });
+        $unconfiguredCount = (clone $unconfigured)->count();
+
+        $rows = $unconfigured->orderByRaw("LOWER(COALESCE(hostname, ''))")
+            ->limit(self::MAX_DEVICE_ROWS)
+            ->get(['id', 'hostname', 'name', 'asset_type'])
+            ->map(fn (Asset $asset): array => [
+                'asset_id' => $asset->id,
+                'hostname' => $asset->hostname,
+                'asset_name' => $asset->name,
+                'asset_type' => $asset->asset_type,
+            ])->values()->all();
+
+        $inactiveExcluded = Asset::where('client_id', $client->id)->where('is_active', false)->count();
+
+        return [
+            'active_assets_total' => $activeTotal,
+            'backup_configured_count' => $activeTotal - $unconfiguredCount,
+            'backup_not_configured_count' => $unconfiguredCount,
+            'inactive_assets_excluded' => $inactiveExcluded,
+            'not_configured_assets' => $rows,
+            'not_configured_truncated' => $unconfiguredCount > count($rows),
+            'note' => $this->fleetCoverageNote($activeTotal, $unconfiguredCount, $inactiveExcluded),
+        ];
+    }
+
+    private function fleetCoverageNote(int $activeTotal, int $unconfiguredCount, int $inactiveExcluded): string
+    {
+        $note = match (true) {
+            $activeTotal === 0 => 'This client has no active PSA assets, so there is no device fleet to reconcile Servosity coverage against.',
+            $unconfiguredCount === 0 => 'Every active PSA asset for this client has Servosity backup enabled — no active asset is missing from the device rows above.',
+            default => "{$unconfiguredCount} of {$activeTotal} active PSA assets for this client have NO Servosity device-backup provisioning recorded (backup was never enabled for them in the PSA). They appear ONLY in not_configured_assets — no device row above covers them. Treat each as NOT PROTECTED by Servosity device backup unless the Servosity console shows otherwise. M365/mailbox and NAS protection are account-level products that need no enabled PSA asset — see account_counts for those. Absence from the device rows above is NOT protection.",
+        };
+
+        if ($inactiveExcluded > 0) {
+            $note .= " {$inactiveExcluded} inactive PSA asset(s) are excluded from this accounting — retired hardware is not counted as unprotected.";
+        }
+
+        return $note;
     }
 
     private function client(): ServosityClient
