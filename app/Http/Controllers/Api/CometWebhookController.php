@@ -19,8 +19,13 @@ use Illuminate\Support\Facades\Log;
  * exact-code guards downstream) processed zero events in ~4.5 months of real
  * traffic, but no captured live payload establishes WHICH guard rejected it.
  * This handler therefore routes deliberately at every step and never drops
- * silently: recognised-but-unhandled SEVT families log at DEBUG, anything
- * outside the SEVT catalog logs at WARNING, and the settings stamps below
+ * silently — and never claims otherwise: the response `status` is the
+ * service's actual disposition (alert_created / alert_resolved /
+ * ignored_non_backup / dropped_unmatched / …), so a dropped event can no
+ * longer be reported as processed. HTTP stays 200 for authenticated,
+ * well-formed transport (Comet only reads the status line); the JSON is the
+ * honest record. Recognised-but-unhandled SEVT families log at DEBUG,
+ * anything outside the SEVT catalog logs at WARNING, and the settings stamps
  * give operators a real-traffic proof that recognition is actually working.
  */
 class CometWebhookController extends Controller
@@ -34,6 +39,9 @@ class CometWebhookController extends Controller
         $data = $request->json()->all();
 
         // Operator-visible delivery proof: any authenticated event arrived.
+        // "Recognized" is NOT stamped here — the service stamps it only when
+        // a job payload actually routes, so this stamp advancing while that
+        // one stalls is the operator's signal that matching broke (psa-enpew).
         Setting::setValue('comet_webhook_last_received_at', now()->toIso8601String());
 
         Log::debug('[Comet Webhook] Received', [
@@ -48,21 +56,32 @@ class CometWebhookController extends Controller
                 $jobData = $data['Data'] ?? null;
 
                 if (! is_array($jobData)) {
-                    Log::warning('[Comet Webhook] Job-completed event without job Data payload');
+                    $this->alertService->recordUnmatchedEvent('missing_job_data', [
+                        'classification' => null,
+                        'status' => null,
+                        'has_device_id' => false,
+                        'has_source_guid' => false,
+                        'has_destination_guid' => false,
+                    ]);
 
-                    return response()->json(['status' => 'ignored']);
+                    return response()->json([
+                        'status' => 'dropped_unmatched',
+                        'alert_id' => null,
+                        'reason' => 'missing_job_data',
+                    ]);
                 }
 
-                // Proof that event-type configuration is right: a job event
-                // was recognised and routed (whether or not it alerts).
-                Setting::setValue('comet_webhook_last_recognized_at', now()->toIso8601String());
+                $outcome = $this->alertService->handleJobCompleted($jobData);
 
-                $alert = $this->alertService->handleJobCompleted($jobData);
+                $body = [
+                    'status' => $outcome->disposition->value,
+                    'alert_id' => $outcome->alert?->id,
+                ];
+                if ($outcome->reason !== null) {
+                    $body['reason'] = $outcome->reason;
+                }
 
-                return response()->json([
-                    'status' => 'processed',
-                    'alert_id' => $alert?->id,
-                ]);
+                return response()->json($body);
             }
 
             if (is_int($type) && $type >= \Comet\Def::SEVT__MIN && $type <= \Comet\Def::SEVT__MAX) {
@@ -70,7 +89,7 @@ class CometWebhookController extends Controller
                 // account/bucket/server/tenant/policy events, meta hello…).
                 Log::debug('[Comet Webhook] Ignoring unhandled SEVT event family', ['type' => $type]);
 
-                return response()->json(['status' => 'ignored']);
+                return response()->json(['status' => 'ignored_unhandled_event_type']);
             }
 
             // Not a shape the vendor catalog defines (e.g. a string Type) —
@@ -80,7 +99,7 @@ class CometWebhookController extends Controller
                 'type_string' => is_scalar($data['TypeString'] ?? null) ? $data['TypeString'] : null,
             ]);
 
-            return response()->json(['status' => 'ignored']);
+            return response()->json(['status' => 'ignored_unrecognized_event_type']);
 
         } catch (\Exception $e) {
             Log::error('[Comet Webhook] Error processing webhook', [

@@ -1203,6 +1203,8 @@
                     @php
                         $cometLastReceived = \App\Models\Setting::getValue('comet_webhook_last_received_at');
                         $cometLastRecognized = \App\Models\Setting::getValue('comet_webhook_last_recognized_at');
+                        $cometLastUnmatched = \App\Models\Setting::getValue('comet_webhook_last_unmatched_at');
+                        $cometLastUnmatchedReason = \App\Models\Setting::getValue('comet_webhook_last_unmatched_reason');
                         $cometLastAlert = \App\Models\Setting::getValue('comet_webhook_last_alert_at');
                         $cometStamp = fn (?string $v) => $v
                             ? rescue(fn () => \Illuminate\Support\Carbon::parse($v)->toAppTz()->format('Y-m-d H:i:s T'), $v, false)
@@ -1212,14 +1214,33 @@
                         <label class="form-label small fw-bold mb-1">Webhook Delivery Status</label>
                         <ul class="small mb-1">
                             <li>Last event received: <strong>{{ $cometStamp($cometLastReceived) }}</strong></li>
-                            <li>Last job event recognized: <strong>{{ $cometStamp($cometLastRecognized) }}</strong></li>
-                            <li>Last alert created: <strong>{{ $cometStamp($cometLastAlert) }}</strong></li>
+                            <li>Last job event recognized and routed: <strong>{{ $cometStamp($cometLastRecognized) }}</strong></li>
+                            <li>
+                                Last unmatched job event: <strong>{{ $cometStamp($cometLastUnmatched) }}</strong>
+                                @if($cometLastUnmatched && $cometLastUnmatchedReason)
+                                    <span class="text-danger">(reason: {{ $cometLastUnmatchedReason }})</span>
+                                @endif
+                            </li>
+                            <li>Last failure alert raised: <strong>{{ $cometStamp($cometLastAlert) }}</strong></li>
                         </ul>
+                        @unless(\App\Support\CometConfig::alertsEnabled())
+                            <p class="small text-warning-emphasis mb-1">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                Alert creation is switched <strong>off</strong> above — failed backups are
+                                not turned into alerts while this stays off.
+                            </p>
+                        @endunless
                         <p class="small text-muted mb-0">
-                            Use these to verify the pipeline against real traffic after setup: "received"
+                            Use these to verify the pipeline against real traffic after setup. "Received"
                             advancing while "recognized" stays put means the event streamer is not sending
-                            <em>Job completed</em> events; "recognized" advancing with no alerts simply means
-                            no backup has failed. If nothing advances, check the webhook URL and key.
+                            <em>Job completed</em> events. "Recognized" advances only when a job event was
+                            fully understood and routed (alert raised, resolved, non-backup deliberately
+                            ignored, or a success with nothing to resolve) — on its own it is <em>not</em>
+                            an all-clear. If "last unmatched" advances, job events are arriving that this
+                            PSA cannot route — backup failures may be going unalerted; check the
+                            <code>[Comet Alert]</code> WARNING lines in the log. No failure alerts with
+                            "recognized" advancing and "unmatched" quiet means no backup failures were
+                            reported. If nothing advances, check the webhook URL and key.
                         </p>
                     </div>
                     @endif

@@ -23,7 +23,10 @@ use Tests\TestCase;
  *
  * The service's availability contract is also pinned here: a failed or
  * impossible read returns state=unavailable/not_queried, never the clean
- * empty shape a genuine no-jobs answer has.
+ * empty shape a genuine no-jobs answer has — and a genuine no-backup-jobs
+ * answer is its own first-class state (no_backup_jobs_observed, shared
+ * vocabulary with CometReadOnlyToolset, psa-z30dv), because "the server has
+ * never seen a backup here" must not render as an ok-shaped empty history.
  */
 class CometJobServiceTest extends TestCase
 {
@@ -237,12 +240,45 @@ class CometJobServiceTest extends TestCase
         $this->assertSame([], $result['jobs']);
     }
 
-    public function test_a_genuinely_empty_history_is_state_ok(): void
+    public function test_a_genuinely_empty_history_is_no_backup_jobs_observed_not_a_clean_ok(): void
     {
+        // The server really answered and reported nothing — that is a
+        // first-class state (backups may never have run), in the same
+        // vocabulary as comet_get_backup_posture (psa-z30dv), never an
+        // ok-shaped empty history.
         $result = $this->service([])->getRecentJobs($this->asset());
 
-        $this->assertSame('ok', $result['state'], 'only a real answer from the server is ok');
+        $this->assertSame('no_backup_jobs_observed', $result['state']);
+        $this->assertNotNull($result['jobs_checked_at'], 'a lookup ran, so its time is retained');
         $this->assertSame([], $result['jobs']);
+    }
+
+    public function test_a_history_with_only_non_backup_jobs_is_still_no_backup_jobs_observed(): void
+    {
+        // Retention/restore activity proves the device talks to the server —
+        // it proves nothing about backups. The rows still list.
+        $result = $this->service([
+            $this->job(['classification' => \Comet\Def::JOB_CLASSIFICATION_RETENTION, 'start' => now()->subHour()->timestamp]),
+            $this->job(['classification' => \Comet\Def::JOB_CLASSIFICATION_RESTORE, 'start' => now()->subHours(2)->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertSame('no_backup_jobs_observed', $result['state']);
+        $this->assertCount(2, $result['jobs'], 'non-backup rows still list');
+        $this->assertNull($result['last_success']);
+        $this->assertNull($result['last_failure']);
+    }
+
+    public function test_job_timestamps_are_iso8601_utc_for_unambiguous_relay(): void
+    {
+        // Display surfaces convert via ->toAppTz() (CLAUDE.md); tool surfaces
+        // relay the UTC form — the old bare date() strings carried no zone.
+        $result = $this->service([
+            $this->job(['start' => now()->subHour()->timestamp]),
+        ])->getRecentJobs($this->asset());
+
+        $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $result['jobs'][0]['started']);
+        $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $result['jobs'][0]['ended']);
+        $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $result['jobs_checked_at']);
     }
 
     // ── Asset detail page rendering ───────────────────────────────────────────
@@ -295,8 +331,28 @@ class CometJobServiceTest extends TestCase
         $response = $this->actingAs($user)->get(route('assets.show', $asset));
 
         $response->assertOk();
-        $response->assertSeeText('No backup jobs observed');
+        $response->assertSeeText('The Comet server returned no backup jobs for this device');
+        $response->assertSeeText('No jobs is not evidence of success');
         $response->assertDontSeeText('Backup job history unavailable');
+    }
+
+    public function test_asset_detail_page_points_at_older_activity_when_the_recent_window_is_empty(): void
+    {
+        // Backup jobs exist but none in the default 7-day window: that is
+        // NOT "no backup jobs observed" — the copy points at the older
+        // activity instead of an all-clear-shaped empty card.
+        $user = \App\Models\User::factory()->create();
+        $asset = $this->asset();
+        $this->mock(CometClient::class)->shouldReceive('getJobsForUser')->andReturn([
+            $this->job(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'start' => now()->subDays(30)->timestamp, 'end' => now()->subDays(30)->addHour()->timestamp]),
+        ]);
+
+        $response = $this->actingAs($user)->get(route('assets.show', $asset));
+
+        $response->assertOk();
+        $response->assertSeeText('No jobs in the last 7 days');
+        $response->assertSeeText('Last success:');
+        $response->assertDontSeeText('The Comet server returned no backup jobs for this device');
     }
 
     public function test_device_filter_and_recency_cutoff_still_apply(): void

@@ -723,7 +723,10 @@ class ContextBuilder
                     $cometClient = new CometClient;
                     $jobService = new CometJobService($cometClient);
                     $jobData = $jobService->getRecentJobs($asset, 3);
-                    if ($jobData['state'] !== 'ok') {
+                    if ($jobData['state'] === 'no_backup_jobs_observed') {
+                        // Queried fine, but the server has no backup jobs at all
+                        $info .= "\n    ⚠ No backup jobs observed on the Comet server — backups may never have run; not passing";
+                    } elseif ($jobData['state'] !== 'ok') {
                         // A failed/unqueried read must not read as "no failures" (psa-enpew)
                         $info .= "\n    ⚠ Backup job history {$jobData['state']} — backup state UNKNOWN, not passing";
                     }

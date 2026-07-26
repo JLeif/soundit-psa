@@ -2414,14 +2414,18 @@ class IntegrationsController extends Controller
                 // Remove any status/message wrapper
                 unset($existingWebhooks['Status'], $existingWebhooks['Message']);
 
-                // Add/update the PSA webhook
+                // Add/update the PSA webhook. Only SEVT_JOB_COMPLETED is
+                // subscribed — an empty whitelist means ALL events (vendor
+                // Comet/WebhookOption.php:43-48), which pushed thousands of
+                // unusable events/day through the endpoint. The controller
+                // still routes tolerantly for legacy all-event configs.
                 $existingWebhooks['psa-webhook'] = [
                     'URL' => url('/api/webhooks/comet'),
                     'CustomHeaders' => [
                         'Authorization' => 'Bearer '.$webhookKey,
                     ],
                     'Level' => 'full',
-                    'WhiteListedEventTypes' => [],
+                    'WhiteListedEventTypes' => [\Comet\Def::SEVT_JOB_COMPLETED],
                 ];
 
                 // Save back to Comet server

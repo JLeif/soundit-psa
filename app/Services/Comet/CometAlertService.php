@@ -10,7 +10,9 @@ use App\Models\Asset;
 use App\Models\Setting;
 use App\Services\AlertService;
 use App\Support\CometConfig;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -22,19 +24,38 @@ use Illuminate\Support\Facades\Log;
  * matched nothing, NOT which of its guards (classification scale vs exact
  * status code) was responsible. Everything here is robust to either.
  *
- * Alert series identity (psa-enpew review): one alert row per
- * device + protected item (SourceGUID) + storage vault (DestinationGUID),
- * classification-scale-free ('backup' token). Event ordering is enforced with
- * the job's EndTime — a stale/replayed success can never clear a newer
- * failure, and a stale failure can never clobber newer state. A failure
- * arriving after the series was resolved REOPENS the same row (the alerts
- * table is unique on source + source_alert_id, so create-after-resolve would
- * otherwise 500 on the duplicate key).
+ * SERIES IDENTITY IS REQUIRED, NEVER DEGRADED (psa-enpew.6): one alert row
+ * per device + protected item (SourceGUID) + storage vault (DestinationGUID),
+ * classification-scale-free ('backup' token). A payload missing ANY identity
+ * field is dropped loudly — silently falling back to a device-wide key would
+ * let an unrelated success resolve a different backup's failure, which is the
+ * original defect wearing a new key.
  *
- * Every drop path is deliberate and visible: unrecognised shapes log at
- * WARNING (silent non-matching is the exact defect this repairs); recognised
+ * EVENT ORDERING (psa-enpew.5/.6): Comet documents webhook delivery as
+ * parallel and possibly re-ordered/retried, so state changes are ordered by
+ * the job's vendor EndTime, never by arrival:
+ * - an event with no orderable EndTime (missing/zero/non-integer) is dropped
+ *   loudly — substituting receipt time would let an unorderable success
+ *   masquerade as newest and resolve a real failure;
+ * - a success resolves only when STRICTLY newer than the recorded watermark
+ *   (equal = replay, rejected); a failure refires/reopens only when strictly
+ *   newer; a repeated job GUID is a replay regardless of timestamp;
+ * - a success that finds its series already resolved still ADVANCES the
+ *   watermark, so a delayed older failure cannot reopen a series that a newer
+ *   success has vouched for (no row at all = nothing to advance: watermarks
+ *   exist once a series has alerted once);
+ * - each series' read-decide-write runs in a transaction holding a
+ *   lockForUpdate() on the series row (no-op on SQLite, real row lock on
+ *   MariaDB), and the create race under the unique (source, source_alert_id)
+ *   key is retried once as an update.
+ *
+ * Every drop path is deliberate and visible: unrouteable payloads log at
+ * WARNING (silent non-matching is the exact defect this repairs) and stamp
+ * comet_webhook_last_unmatched_at for the settings card; recognised
  * non-backup classifications (restore/retention/…) are routine and log at
  * DEBUG by design — warning there would flood at thousands of events/day.
+ * The caller receives a CometJobEventOutcome and must report its disposition
+ * honestly — never "processed" for a drop.
  */
 class CometAlertService
 {
@@ -45,15 +66,45 @@ class CometAlertService
     /**
      * Route a completed job (webhook Data payload) by its vendor status range:
      * failed range raises/refreshes an alert, success range resolves one.
+     * Single public entry point — the operator proof-of-life stamps derive
+     * from the outcome here, so "recognized" can only advance on a real route.
      */
-    public function handleJobCompleted(array $data): ?Alert
+    public function handleJobCompleted(array $data): CometJobEventOutcome
+    {
+        $outcome = $this->routeJobCompleted($data);
+
+        if ($outcome->disposition->wasRouted()) {
+            Setting::setValue('comet_webhook_last_recognized_at', now()->toIso8601String());
+        }
+        if ($outcome->disposition->raisedAlert()) {
+            Setting::setValue('comet_webhook_last_alert_at', now()->toIso8601String());
+        }
+
+        return $outcome;
+    }
+
+    /**
+     * The loud unmatched-event record (psa-enpew review): WARNING with
+     * bounded, safe structural fields only — no payload bodies, no customer
+     * identifiers — plus the operator-card stamp, so a matcher breaking again
+     * is visible on the settings screen, not only in a log nobody greps.
+     * Public because the webhook controller shares it for the missing-Data
+     * shape it drops before this service is reached.
+     */
+    public function recordUnmatchedEvent(string $reason, array $context = []): void
+    {
+        Log::warning('[Comet Alert] Job-completed event matched no route — dropped', ['reason' => $reason] + $context);
+
+        Setting::setValue('comet_webhook_last_unmatched_at', now()->toIso8601String());
+        Setting::setValue('comet_webhook_last_unmatched_reason', $reason);
+    }
+
+    private function routeJobCompleted(array $data): CometJobEventOutcome
     {
         $status = $data['Status'] ?? null;
 
         if (! is_int($status)) {
-            $this->warnUnmatched('missing_or_non_integer_status', $data);
-
-            return null;
+            return $this->dropUnmatched('missing_or_non_integer_status', $data);
         }
 
         if (CometJobCodes::isFailedStatus($status)) {
@@ -65,69 +116,103 @@ class CometAlertService
         }
 
         if (CometJobCodes::isRunningStatus($status)) {
-            // A recognised range, deliberately not a completion outcome.
-            Log::info('[Comet Alert] Job-completed event with running-range status, ignoring', ['status' => $status]);
-
-            return null;
+            // A running-range status inside a job-COMPLETED event is a
+            // contradiction — completed jobs carry stop codes. It matches no
+            // completion route, so it must be loud (psa-enpew.8), not an INFO
+            // line that prod's LOG_LEVEL=warning swallows. If real traffic
+            // ever proves Comet emits this pairing routinely, the unmatched
+            // stamp + warning is exactly the signal that will say so.
+            return $this->dropUnmatched('running_status_on_completed_event', $data);
         }
 
-        $this->warnUnmatched('status_outside_known_ranges', $data);
-
-        return null;
+        return $this->dropUnmatched('status_outside_known_ranges', $data);
     }
 
-    public function handleJobFailure(array $data): ?Alert
+    /** Dispatcher contract: only called with a verified failed-range status. */
+    private function handleJobFailure(array $data): CometJobEventOutcome
     {
         if (! CometConfig::alertsEnabled()) {
             Log::debug('[Comet Alert] Alerts disabled, ignoring');
 
-            return null;
+            return CometJobEventOutcome::alertsDisabled();
         }
 
-        $status = $data['Status'] ?? null;
-
-        if (! is_int($status) || ! CometJobCodes::isFailedStatus($status)) {
-            $this->warnUnmatched('non_failed_status_on_failure_path', $data);
-
-            return null;
+        $nonBackup = $this->routeBackupClassification($data);
+        if ($nonBackup !== null) {
+            return $nonBackup;
         }
 
-        if (! $this->routeBackupClassification($data)) {
-            return null;
+        $identity = $this->extractSeriesIdentity($data);
+        if ($identity instanceof CometJobEventOutcome) {
+            return $identity;
         }
 
-        $deviceId = $data['DeviceID'] ?? null;
-        if (! is_string($deviceId) || $deviceId === '') {
-            // Fail loudly: without device identity there is no series to key.
-            $this->warnUnmatched('missing_device_identity', $data);
+        return $this->withSeriesRow(
+            $identity['series_key'],
+            fn () => $this->applyJobFailure($data, $identity),
+        );
+    }
 
-            return null;
+    /** Dispatcher contract: only called with a verified success-range status. */
+    private function handleJobSuccess(array $data): CometJobEventOutcome
+    {
+        $nonBackup = $this->routeBackupClassification($data);
+        if ($nonBackup !== null) {
+            return $nonBackup;
         }
 
+        $identity = $this->extractSeriesIdentity($data);
+        if ($identity instanceof CometJobEventOutcome) {
+            return $identity;
+        }
+
+        return $this->withSeriesRow(
+            $identity['series_key'],
+            fn () => $this->applyJobSuccess($data, $identity),
+        );
+    }
+
+    /**
+     * Run one series' read-decide-write atomically. The closure re-reads the
+     * series row under lockForUpdate(), so two parallel deliveries cannot both
+     * act on the same stale watermark. When NO row exists there is nothing to
+     * lock — two parallel first-failures can race the insert, the unique
+     * (source, source_alert_id) key fails the loser, and one retry takes the
+     * now-existing row through the locked update path instead of 500ing.
+     */
+    private function withSeriesRow(string $seriesKey, \Closure $apply): CometJobEventOutcome
+    {
+        try {
+            return DB::transaction($apply);
+        } catch (QueryException $e) {
+            $rowNowExists = Alert::where('source', AlertSource::Comet)
+                ->where('source_alert_id', $seriesKey)
+                ->exists();
+
+            if (! $rowNowExists) {
+                throw $e;
+            }
+
+            return DB::transaction($apply);
+        }
+    }
+
+    private function applyJobFailure(array $data, array $identity): CometJobEventOutcome
+    {
+        $status = $data['Status'];
         $username = $data['Username'] ?? null;
         $classification = $data['Classification'] ?? null;
         $startTime = $data['StartTime'] ?? null;
-        $endTime = $data['EndTime'] ?? null;
         $totalSize = $data['TotalSize'] ?? null;
-        $sourceGuid = is_string($data['SourceGUID'] ?? null) ? $data['SourceGUID'] : '';
-        $destinationGuid = is_string($data['DestinationGUID'] ?? null) ? $data['DestinationGUID'] : '';
+        $eventTime = $identity['event_time'];
 
-        $sourceAlertId = CometJobCodes::backupSeriesKey($deviceId, $sourceGuid, $destinationGuid);
-        $eventTime = (is_int($endTime) && $endTime > 0) ? $endTime : now()->timestamp;
-
-        if ($sourceGuid === '' && $destinationGuid === '') {
-            Log::info('[Comet Alert] Job payload carries no SourceGUID/DestinationGUID — series identity degraded to device-level', [
-                'device_id' => $deviceId,
-            ]);
-        }
-
-        $asset = Asset::where('comet_device_id', $deviceId)->first();
+        $asset = Asset::where('comet_device_id', $identity['device_id'])->first();
         $clientId = $asset?->client_id;
 
         if (! $clientId) {
             Log::info('[Comet Alert] No client match for device, creating unlinked alert', [
                 'username' => $username,
-                'device_id' => $deviceId,
+                'device_id' => $identity['device_id'],
             ]);
         }
 
@@ -136,92 +221,78 @@ class CometAlertService
         $statusLabel = CometJobCodes::statusLabel($status);
         $title = mb_substr("Backup {$statusLabel} on {$hostname}", 0, 255);
 
-        $msgLines = ["Device: {$hostname}", "Job type: {$jobType}", "Status: {$statusLabel}"];
-        if ($sourceGuid !== '') {
-            $msgLines[] = "Protected item: {$sourceGuid}";
-        }
-        if ($destinationGuid !== '') {
-            $msgLines[] = "Storage vault: {$destinationGuid}";
-        }
+        $msgLines = [
+            "Device: {$hostname}",
+            "Job type: {$jobType}",
+            "Status: {$statusLabel}",
+            "Protected item: {$identity['source_guid']}",
+            "Storage vault: {$identity['destination_guid']}",
+        ];
         if (is_int($startTime) && $startTime > 0) {
-            $msgLines[] = 'Started: '.date('Y-m-d H:i:s', $startTime);
+            $msgLines[] = 'Started: '.date('Y-m-d H:i:s', $startTime).' UTC';
         }
-        if (is_int($endTime) && $endTime > 0) {
-            $msgLines[] = 'Ended: '.date('Y-m-d H:i:s', $endTime);
-        }
+        $msgLines[] = 'Ended: '.date('Y-m-d H:i:s', $eventTime).' UTC';
         if (is_numeric($totalSize) && $totalSize > 0) {
             $msgLines[] = 'Total size: '.number_format($totalSize / (1024 ** 3), 2).' GB';
         }
         $message = implode("\n", $msgLines);
 
         $metadata = [
-            'device_id' => $deviceId,
+            'device_id' => $identity['device_id'],
             'username' => $username,
             'classification' => $classification,
             'status' => $status,
             'start_time' => $startTime,
-            'end_time' => $endTime,
+            'end_time' => $eventTime,
             'total_size' => $totalSize,
-            'source_guid' => $sourceGuid,
-            'destination_guid' => $destinationGuid,
+            'source_guid' => $identity['source_guid'],
+            'destination_guid' => $identity['destination_guid'],
             'last_event_time' => $eventTime,
+            'last_event_guid' => $identity['guid'],
         ];
 
         // One row per series regardless of status (unique source + source_alert_id).
         $existing = Alert::where('source', AlertSource::Comet)
-            ->where('source_alert_id', $sourceAlertId)
+            ->where('source_alert_id', $identity['series_key'])
+            ->lockForUpdate()
             ->first();
 
         if (! $existing) {
-            try {
-                $alert = $this->alertService->upsert(
-                    AlertSource::Comet,
-                    $sourceAlertId,
-                    [
-                        'asset_id' => $asset?->id,
-                        'client_id' => $clientId,
-                        'severity' => AlertSeverity::fromVendor(AlertSource::Comet, null),
-                        'title' => $title,
-                        'message' => $message,
-                        'hostname' => $hostname,
-                        'fired_at' => Carbon::createFromTimestamp($eventTime),
-                        'metadata' => $metadata,
-                    ],
-                );
-
-                Log::info('[Comet Alert] Alert created', [
-                    'alert_id' => $alert->id,
-                    'source_alert_id' => $sourceAlertId,
-                    'hostname' => $hostname,
-                    'status' => $status,
-                    'client_id' => $clientId,
-                ]);
-
-                $this->stampLastAlert();
-
-                return $alert;
-            } catch (\Illuminate\Database\QueryException $e) {
-                // Concurrent webhook created the series row between our lookup
-                // and the insert — fall through to the existing-row paths.
-                $existing = Alert::where('source', AlertSource::Comet)
-                    ->where('source_alert_id', $sourceAlertId)
-                    ->first();
-                if (! $existing) {
-                    throw $e;
-                }
-            }
-        }
-
-        $lastEventTime = (int) ($existing->metadata['last_event_time'] ?? 0);
-        if ($eventTime < $lastEventTime) {
-            Log::info('[Comet Alert] Stale/replayed failure event ignored — newer state already recorded', [
-                'alert_id' => $existing->id,
-                'source_alert_id' => $sourceAlertId,
-                'event_time' => $eventTime,
-                'last_event_time' => $lastEventTime,
+            $alert = Alert::create([
+                'asset_id' => $asset?->id,
+                'client_id' => $clientId,
+                'source' => AlertSource::Comet,
+                'source_alert_id' => $identity['series_key'],
+                'severity' => AlertSeverity::fromVendor(AlertSource::Comet, null),
+                'status' => AlertStatus::Active,
+                'title' => $title,
+                'message' => $message,
+                'hostname' => $hostname,
+                'metadata' => $metadata,
+                'fired_at' => Carbon::createFromTimestamp($eventTime),
             ]);
 
-            return $existing;
+            Log::info('[Comet Alert] Alert created', [
+                'alert_id' => $alert->id,
+                'source_alert_id' => $identity['series_key'],
+                'hostname' => $hostname,
+                'status' => $status,
+                'client_id' => $clientId,
+            ]);
+
+            return CometJobEventOutcome::alertCreated($alert);
+        }
+
+        $stale = $this->staleAgainst($existing, $identity);
+        if ($stale !== null) {
+            Log::info('[Comet Alert] Stale/replayed failure event ignored — newer or equal state already recorded', [
+                'alert_id' => $existing->id,
+                'source_alert_id' => $identity['series_key'],
+                'event_time' => $eventTime,
+                'stale_because' => $stale,
+            ]);
+
+            return CometJobEventOutcome::staleIgnored($existing);
         }
 
         if ($existing->status === AlertStatus::Resolved) {
@@ -242,13 +313,11 @@ class CometAlertService
 
             Log::info('[Comet Alert] Resolved alert reopened by new failure', [
                 'alert_id' => $existing->id,
-                'source_alert_id' => $sourceAlertId,
+                'source_alert_id' => $identity['series_key'],
                 'status' => $status,
             ]);
 
-            $this->stampLastAlert();
-
-            return $existing;
+            return CometJobEventOutcome::alertReopened($existing);
         }
 
         // Re-fired while open: refresh title too, so a later quota/timeout
@@ -263,98 +332,127 @@ class CometAlertService
 
         Log::info('[Comet Alert] Alert re-fired', [
             'alert_id' => $existing->id,
-            'source_alert_id' => $sourceAlertId,
+            'source_alert_id' => $identity['series_key'],
             'status' => $status,
             'refired_count' => $existing->refired_count,
         ]);
 
-        $this->stampLastAlert();
-
-        return $existing;
+        return CometJobEventOutcome::alertRefired($existing);
     }
 
-    public function handleJobSuccess(array $data): ?Alert
+    private function applyJobSuccess(array $data, array $identity): CometJobEventOutcome
     {
-        $status = $data['Status'] ?? null;
+        $status = $data['Status'];
+        $eventTime = $identity['event_time'];
 
-        if (! is_int($status) || ! CometJobCodes::isSuccessStatus($status)) {
-            $this->warnUnmatched('non_success_status_on_success_path', $data);
-
-            return null;
-        }
-
-        if (! $this->routeBackupClassification($data)) {
-            return null;
-        }
-
-        $deviceId = $data['DeviceID'] ?? null;
-        if (! is_string($deviceId) || $deviceId === '') {
-            $this->warnUnmatched('missing_device_identity', $data);
-
-            return null;
-        }
-
-        $sourceGuid = is_string($data['SourceGUID'] ?? null) ? $data['SourceGUID'] : '';
-        $destinationGuid = is_string($data['DestinationGUID'] ?? null) ? $data['DestinationGUID'] : '';
-        $endTime = $data['EndTime'] ?? null;
-
-        $sourceAlertId = CometJobCodes::backupSeriesKey($deviceId, $sourceGuid, $destinationGuid);
-        $eventTime = (is_int($endTime) && $endTime > 0) ? $endTime : now()->timestamp;
-
-        $alert = Alert::where('source', AlertSource::Comet)
-            ->where('source_alert_id', $sourceAlertId)
-            ->whereIn('status', [AlertStatus::Active, AlertStatus::Acknowledged, AlertStatus::Ticketed])
+        $existing = Alert::where('source', AlertSource::Comet)
+            ->where('source_alert_id', $identity['series_key'])
+            ->lockForUpdate()
             ->first();
 
-        if (! $alert) {
-            return null;
+        if (! $existing) {
+            // Nothing has ever alerted for this series, so there is no
+            // watermark to advance and nothing to resolve.
+            return CometJobEventOutcome::noOpenAlert();
         }
 
-        $lastEventTime = (int) ($alert->metadata['last_event_time'] ?? 0);
-        if ($eventTime < $lastEventTime) {
-            // The mirror image of the original defect: a stale/replayed
-            // success must never present a broken backup as recovered.
-            Log::warning('[Comet Alert] Stale success rejected — it predates the recorded failure, alert stays open', [
-                'alert_id' => $alert->id,
-                'source_alert_id' => $sourceAlertId,
+        $isOpen = $existing->status !== AlertStatus::Resolved;
+
+        $stale = $this->staleAgainst($existing, $identity);
+        if ($stale !== null) {
+            if ($isOpen) {
+                // The mirror image of the original defect: a stale/replayed
+                // success must never present a broken backup as recovered.
+                Log::warning('[Comet Alert] Stale success rejected — it does not postdate the recorded failure, alert stays open', [
+                    'alert_id' => $existing->id,
+                    'source_alert_id' => $identity['series_key'],
+                    'event_time' => $eventTime,
+                    'stale_because' => $stale,
+                ]);
+            } else {
+                Log::info('[Comet Alert] Stale/replayed success ignored — newer state already recorded', [
+                    'alert_id' => $existing->id,
+                    'source_alert_id' => $identity['series_key'],
+                    'event_time' => $eventTime,
+                    'stale_because' => $stale,
+                ]);
+            }
+
+            return CometJobEventOutcome::staleIgnored($existing);
+        }
+
+        $watermark = [
+            'last_event_time' => $eventTime,
+            'last_event_guid' => $identity['guid'],
+        ];
+        if ($isOpen) {
+            $watermark['resolved_by_status'] = $status;
+            $watermark['resolved_by_end_time'] = $eventTime;
+        }
+
+        $existing->update([
+            'metadata' => array_merge($existing->metadata ?? [], $watermark),
+        ]);
+
+        if (! $isOpen) {
+            // Already resolved — but the watermark above still advanced, so a
+            // delayed older failure arriving after this success is provably
+            // stale instead of reopening a series this success vouched for.
+            Log::debug('[Comet Alert] Success for an already-resolved series — watermark advanced', [
+                'alert_id' => $existing->id,
+                'source_alert_id' => $identity['series_key'],
                 'event_time' => $eventTime,
-                'last_event_time' => $lastEventTime,
             ]);
 
-            return null;
+            return CometJobEventOutcome::noOpenAlert();
         }
 
-        $alert->update([
-            'metadata' => array_merge($alert->metadata ?? [], [
-                'last_event_time' => $eventTime,
-                'resolved_by_status' => $status,
-                'resolved_by_end_time' => is_int($endTime) ? $endTime : null,
-            ]),
-        ]);
-
-        $this->alertService->resolve($alert, 'Backup completed successfully.');
+        $this->alertService->resolve($existing, 'Backup completed successfully.');
 
         Log::info('[Comet Alert] Alert resolved on job success', [
-            'alert_id' => $alert->id,
-            'source_alert_id' => $sourceAlertId,
+            'alert_id' => $existing->id,
+            'source_alert_id' => $identity['series_key'],
         ]);
 
-        return $alert;
+        return CometJobEventOutcome::alertResolved($existing);
     }
 
     /**
-     * True when the payload's classification is backup (either scale).
-     * Recognised non-backup classifications are deliberately ignored at
-     * DEBUG (retention/restore completions are routine traffic); an
-     * unrecognised value is a WARNING — it means our reading of the vendor
+     * Replay/ordering guard against the series row's recorded watermark.
+     * Returns the reason a strictly-newer requirement failed, or null when
+     * the event is genuinely newer and may act. Equal timestamps are replays
+     * (one series never completes twice in the same second — Comet skips an
+     * already-running job), and a repeated job GUID is a replay regardless of
+     * what its timestamp claims.
+     */
+    private function staleAgainst(Alert $existing, array $identity): ?string
+    {
+        $lastEventGuid = $existing->metadata['last_event_guid'] ?? null;
+        if ($identity['guid'] !== null && $identity['guid'] === $lastEventGuid) {
+            return 'same_job_guid';
+        }
+
+        $lastEventTime = (int) ($existing->metadata['last_event_time'] ?? 0);
+        if ($identity['event_time'] <= $lastEventTime) {
+            return 'not_strictly_newer';
+        }
+
+        return null;
+    }
+
+    /**
+     * True when the payload's classification is backup (either scale) — the
+     * caller proceeds. Recognised non-backup classifications are deliberately
+     * ignored at DEBUG (retention/restore completions are routine traffic);
+     * an unrecognised value is a WARNING — it means our reading of the vendor
      * codes has drifted, which must never be silent.
      */
-    private function routeBackupClassification(array $data): bool
+    private function routeBackupClassification(array $data): ?CometJobEventOutcome
     {
         $classification = $data['Classification'] ?? null;
 
         if (CometJobCodes::isBackupClassification($classification)) {
-            return true;
+            return null;
         }
 
         if (CometJobCodes::isKnownNonBackupClassification($classification)) {
@@ -362,35 +460,67 @@ class CometAlertService
                 'classification' => $classification,
             ]);
 
-            return false;
+            return CometJobEventOutcome::ignoredNonBackup();
         }
 
-        $this->warnUnmatched('unrecognized_classification', $data);
-
-        return false;
+        return $this->dropUnmatched('unrecognized_classification', $data);
     }
 
     /**
-     * The loud unmatched-event signal (psa-enpew review): a job-completed
-     * payload we could not route logs at WARNING with bounded, safe
-     * structural fields only — no payload bodies, no customer identifiers.
+     * The full series identity + orderable event time, or a loud drop.
+     *
+     * SourceGUID and DestinationGUID are REQUIRED alongside DeviceID
+     * (psa-enpew.6): coercing a missing one to '' would silently degrade the
+     * series key to device-wide and let an unrelated success resolve a
+     * different backup's failure. EndTime must be a positive integer —
+     * substituting receipt time would make an unorderable event look newest.
+     *
+     * @return array{device_id: string, source_guid: string, destination_guid: string, series_key: string, event_time: int, guid: ?string}|CometJobEventOutcome
      */
-    private function warnUnmatched(string $reason, array $data): void
+    private function extractSeriesIdentity(array $data): array|CometJobEventOutcome
+    {
+        $deviceId = $data['DeviceID'] ?? null;
+        if (! is_string($deviceId) || trim($deviceId) === '') {
+            return $this->dropUnmatched('missing_device_identity', $data);
+        }
+
+        $sourceGuid = $data['SourceGUID'] ?? null;
+        $destinationGuid = $data['DestinationGUID'] ?? null;
+        if (! is_string($sourceGuid) || trim($sourceGuid) === ''
+            || ! is_string($destinationGuid) || trim($destinationGuid) === '') {
+            return $this->dropUnmatched('missing_series_identity', $data);
+        }
+
+        $endTime = $data['EndTime'] ?? null;
+        if (! is_int($endTime) || $endTime <= 0) {
+            return $this->dropUnmatched('unorderable_end_time', $data);
+        }
+
+        $guid = $data['GUID'] ?? null;
+
+        return [
+            'device_id' => $deviceId,
+            'source_guid' => $sourceGuid,
+            'destination_guid' => $destinationGuid,
+            'series_key' => CometJobCodes::backupSeriesKey($deviceId, $sourceGuid, $destinationGuid),
+            'event_time' => $endTime,
+            'guid' => (is_string($guid) && $guid !== '') ? $guid : null,
+        ];
+    }
+
+    private function dropUnmatched(string $reason, array $data): CometJobEventOutcome
     {
         $classification = $data['Classification'] ?? null;
         $status = $data['Status'] ?? null;
 
-        Log::warning('[Comet Alert] Job-completed event matched no route — dropped', [
-            'reason' => $reason,
+        $this->recordUnmatchedEvent($reason, [
             'classification' => is_scalar($classification) ? $classification : gettype($classification),
             'status' => is_scalar($status) ? $status : gettype($status),
-            'has_device_id' => is_string($data['DeviceID'] ?? null) && ($data['DeviceID'] ?? '') !== '',
+            'has_device_id' => is_string($data['DeviceID'] ?? null) && trim($data['DeviceID']) !== '',
+            'has_source_guid' => is_string($data['SourceGUID'] ?? null) && trim($data['SourceGUID']) !== '',
+            'has_destination_guid' => is_string($data['DestinationGUID'] ?? null) && trim($data['DestinationGUID']) !== '',
         ]);
-    }
 
-    /** Operator-visible proof-of-life: when did the webhook last write an alert. */
-    private function stampLastAlert(): void
-    {
-        Setting::setValue('comet_webhook_last_alert_at', now()->toIso8601String());
+        return CometJobEventOutcome::droppedUnmatched($reason);
     }
 }

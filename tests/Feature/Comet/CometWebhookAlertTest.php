@@ -4,6 +4,7 @@ namespace Tests\Feature\Comet;
 
 use App\Enums\AlertSource;
 use App\Enums\AlertStatus;
+use App\Enums\CometJobDisposition;
 use App\Models\Alert;
 use App\Models\Asset;
 use App\Models\Client;
@@ -11,6 +12,7 @@ use App\Models\Setting;
 use App\Services\Comet\CometAlertService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -22,7 +24,10 @@ use Tests\TestCase;
  * Type 4201 (Def.php:2115 SEVT_JOB_COMPLETED), Data = the job object with
  * Classification on the 4000-range and Status on the 5000/6000/7000 ranges
  * (Def.php:610-841) — and cannot drift into the shape our code merely wishes
- * for (CLAUDE.md fixture rule).
+ * for (CLAUDE.md fixture rule). Each event carries a unique job GUID unless a
+ * test pins one, exactly as real jobs do. Deliberately OFF-shape payloads
+ * (missing identity, malformed EndTime) are raw arrays on purpose: they pin
+ * the drop paths for payloads the SDK would never serialize.
  *
  * HONEST LIMIT: an SDK-serialized fixture proves what the SDK defines, not
  * what a live Comet webhook sends — no captured live payload exists, and prod
@@ -33,6 +38,9 @@ use Tests\TestCase;
  * status ranges, and the loud-drop behaviour, so the pipeline works whichever
  * shape arrives; the settings delivery stamps close the loop against real
  * traffic post-deploy.
+ *
+ * The response contract is pinned throughout: `status` is the service's real
+ * disposition — a dropped or ignored event is NEVER reported as processed.
  */
 class CometWebhookAlertTest extends TestCase
 {
@@ -53,7 +61,8 @@ class CometWebhookAlertTest extends TestCase
     private function jobCompletedEvent(array $attrs = []): array
     {
         $job = new \Comet\BackupJobDetail;
-        $job->GUID = $attrs['guid'] ?? 'f0000000-0000-4000-8000-000000000001';
+        // Real jobs are GUID-unique; a repeated GUID is a replayed delivery.
+        $job->GUID = $attrs['guid'] ?? (string) Str::uuid();
         $job->Username = $attrs['username'] ?? 'acme-backup';
         $job->DeviceID = $attrs['device'] ?? 'dev-1';
         $job->SourceGUID = $attrs['source_guid'] ?? 'item-1';
@@ -96,7 +105,7 @@ class CometWebhookAlertTest extends TestCase
 
         $response = $this->postEvent($this->jobCompletedEvent());
 
-        $response->assertOk()->assertJsonPath('status', 'processed');
+        $response->assertOk()->assertJsonPath('status', 'alert_created');
         $this->assertNotNull($response->json('alert_id'));
 
         $alert = Alert::sole();
@@ -133,7 +142,7 @@ class CometWebhookAlertTest extends TestCase
 
         foreach ($subtypes as $i => $status) {
             $this->postEvent($this->jobCompletedEvent(['status' => $status, 'device' => "dev-{$i}"]))
-                ->assertOk()->assertJsonPath('status', 'processed');
+                ->assertOk()->assertJsonPath('status', 'alert_created');
         }
 
         $this->assertSame(count($subtypes), Alert::count(), 'every failed-range subtype must raise an alert');
@@ -150,7 +159,7 @@ class CometWebhookAlertTest extends TestCase
 
         $response = $this->postEvent($this->jobCompletedEvent(['classification' => 4]));
 
-        $response->assertOk()->assertJsonPath('status', 'processed');
+        $response->assertOk()->assertJsonPath('status', 'alert_created');
         $alert = Alert::sole();
         $this->assertSame(AlertStatus::Active, $alert->status);
         // Canonical key carries the scale-free 'backup' token, not the raw code
@@ -172,7 +181,7 @@ class CometWebhookAlertTest extends TestCase
             'classification' => 4,
             'status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
             'end' => $failEnd + 600,
-        ]))->assertOk();
+        ]))->assertOk()->assertJsonPath('status', 'alert_resolved');
 
         $this->assertSame(AlertStatus::Resolved, Alert::sole()->fresh()->status);
     }
@@ -185,8 +194,9 @@ class CometWebhookAlertTest extends TestCase
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'end' => $failEnd]));
         $this->assertSame(AlertStatus::Active, Alert::sole()->status);
 
-        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $failEnd + 600]))
-            ->assertOk()->assertJsonPath('status', 'processed');
+        $response = $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $failEnd + 600]));
+        $response->assertOk()->assertJsonPath('status', 'alert_resolved');
+        $this->assertNotNull($response->json('alert_id'));
 
         $this->assertSame(AlertStatus::Resolved, Alert::sole()->fresh()->status);
     }
@@ -205,13 +215,38 @@ class CometWebhookAlertTest extends TestCase
         $this->assertSame(AlertStatus::Resolved, Alert::sole()->fresh()->status);
 
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'end' => $t0 + 1200]))
-            ->assertOk()->assertJsonPath('status', 'processed');
+            ->assertOk()->assertJsonPath('status', 'alert_reopened');
 
         $alert = Alert::sole()->fresh();
         $this->assertSame(AlertStatus::Active, $alert->status, 'a new failure after resolution reopens the series');
         $this->assertNull($alert->resolved_at);
         $this->assertSame('Backup Failed (quota exceeded) on ACME-SRV-01', $alert->title);
         $this->assertSame(1, $alert->refired_count);
+    }
+
+    public function test_a_success_after_resolution_advances_the_watermark_so_a_delayed_old_failure_cannot_reopen(): void
+    {
+        // The psa-enpew.5 regression: failure@t0 → success@t0+600 (resolved)
+        // → newer success@t0+1800 → DELAYED failure@t0+1200 arrives last.
+        // Without recording the newer success on the resolved row, the stale
+        // failure would reopen a series the newest event says is healthy.
+        $this->linkedAsset();
+        $t0 = now()->subHours(3)->timestamp;
+
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'end' => $t0]));
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $t0 + 600]))
+            ->assertJsonPath('status', 'alert_resolved');
+
+        // Newer success on the already-resolved series: watermark must advance.
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $t0 + 1800]))
+            ->assertOk()->assertJsonPath('status', 'no_open_alert');
+
+        // The delayed older failure must now be provably stale.
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'end' => $t0 + 1200]))
+            ->assertOk()->assertJsonPath('status', 'stale_ignored');
+
+        $this->assertSame(AlertStatus::Resolved, Alert::sole()->fresh()->status,
+            'a failure older than the newest success must not reopen the series');
     }
 
     public function test_refire_with_a_different_outcome_refreshes_the_alert_title(): void
@@ -224,7 +259,8 @@ class CometWebhookAlertTest extends TestCase
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_WARNING, 'end' => $t0]));
         $this->assertSame('Backup Completed with warnings on ACME-SRV-01', Alert::sole()->title);
 
-        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'end' => $t0 + 600]));
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'end' => $t0 + 600]))
+            ->assertOk()->assertJsonPath('status', 'alert_refired');
 
         $alert = Alert::sole()->fresh();
         $this->assertSame('Backup Failed (quota exceeded) on ACME-SRV-01', $alert->title);
@@ -243,12 +279,26 @@ class CometWebhookAlertTest extends TestCase
 
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'end' => $failEnd]));
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $failEnd - 3600]))
-            ->assertOk();
+            ->assertOk()->assertJsonPath('status', 'stale_ignored');
 
         $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status, 'stale success must be rejected');
         Log::shouldHaveReceived('warning')
             ->withArgs(fn ($message) => str_contains($message, 'Stale success rejected'))
             ->atLeast()->once();
+    }
+
+    public function test_a_success_with_an_end_time_equal_to_the_failures_is_not_strictly_newer_and_does_not_resolve(): void
+    {
+        // psa-enpew.6: `<` let an equal-time success resolve. Equal cannot
+        // prove the success postdates the failure — the alert stays open.
+        $this->linkedAsset();
+        $t0 = now()->subHour()->timestamp;
+
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_ERROR, 'end' => $t0]));
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS, 'end' => $t0]))
+            ->assertOk()->assertJsonPath('status', 'stale_ignored');
+
+        $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status);
     }
 
     public function test_a_stale_replayed_failure_does_not_clobber_newer_state(): void
@@ -258,7 +308,7 @@ class CometWebhookAlertTest extends TestCase
 
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_QUOTA, 'end' => $t0]));
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_FAILED_WARNING, 'end' => $t0 - 7200]))
-            ->assertOk();
+            ->assertOk()->assertJsonPath('status', 'stale_ignored');
 
         $alert = Alert::sole()->fresh();
         $this->assertSame('Backup Failed (quota exceeded) on ACME-SRV-01', $alert->title, 'older replay must not rewrite the newer outcome');
@@ -266,10 +316,26 @@ class CometWebhookAlertTest extends TestCase
         $this->assertSame($t0, $alert->fired_at->timestamp);
     }
 
+    public function test_a_replayed_delivery_with_the_same_job_guid_is_ignored(): void
+    {
+        // Comet retries deliveries; the same job GUID arriving again is the
+        // same completion, never a second failure — refired_count must not
+        // creep on network retries.
+        $this->linkedAsset();
+        $t0 = now()->subHour()->timestamp;
+
+        $event = $this->jobCompletedEvent(['guid' => 'aaaaaaaa-0000-4000-8000-000000000001', 'end' => $t0]);
+        $this->postEvent($event)->assertJsonPath('status', 'alert_created');
+        $this->postEvent($event)->assertOk()->assertJsonPath('status', 'stale_ignored');
+
+        $this->assertSame(0, Alert::sole()->fresh()->refired_count);
+    }
+
     public function test_success_for_one_protected_item_does_not_resolve_another_items_failure(): void
     {
         // A device can back up multiple protected items to multiple vaults;
-        // item B succeeding says nothing about item A.
+        // item B succeeding says nothing about item A. Item B has no series
+        // row of its own, so its success is an honest no_open_alert.
         $this->linkedAsset();
         $t0 = now()->subHour()->timestamp;
 
@@ -278,7 +344,7 @@ class CometWebhookAlertTest extends TestCase
             'source_guid' => 'item-B',
             'status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
             'end' => $t0 + 600,
-        ]))->assertOk();
+        ]))->assertOk()->assertJsonPath('status', 'no_open_alert');
 
         $alert = Alert::sole();
         $this->assertSame('dev-1:item-A:vault-1:backup', $alert->source_alert_id);
@@ -302,7 +368,7 @@ class CometWebhookAlertTest extends TestCase
     public function test_unmatched_device_still_creates_an_unlinked_alert(): void
     {
         $this->postEvent($this->jobCompletedEvent(['device' => 'never-synced', 'username' => 'orphan-user']))
-            ->assertOk();
+            ->assertOk()->assertJsonPath('status', 'alert_created');
 
         $alert = Alert::sole();
         $this->assertNull($alert->asset_id);
@@ -310,19 +376,137 @@ class CometWebhookAlertTest extends TestCase
         $this->assertSame('orphan-user', $alert->hostname);
     }
 
+    // ── Series identity is required, never degraded (psa-enpew.6) ────────────
+
     public function test_failure_without_device_identity_is_dropped_loudly_not_keyed_blind(): void
     {
         // Without a DeviceID there is no series to key — fail loud, no write.
         Log::spy();
 
         $this->postEvent($this->jobCompletedEvent(['device' => '']))
-            ->assertOk()->assertJsonPath('alert_id', null);
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'missing_device_identity')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
         Log::shouldHaveReceived('warning')
             ->withArgs(fn ($message, $context = []) => str_contains($message, 'matched no route')
                 && ($context['reason'] ?? null) === 'missing_device_identity')
             ->atLeast()->once();
+    }
+
+    public function test_failure_missing_either_identity_guid_is_dropped_not_degraded_to_a_device_wide_key(): void
+    {
+        // Coercing a missing SourceGUID/DestinationGUID to '' would key the
+        // series device-wide — the exact degradation psa-enpew.6 forbids.
+        Log::spy();
+
+        foreach ([
+            ['source_guid' => ''],
+            ['destination_guid' => ''],
+            ['source_guid' => '', 'destination_guid' => ''],
+        ] as $broken) {
+            $this->postEvent($this->jobCompletedEvent($broken))
+                ->assertOk()
+                ->assertJsonPath('status', 'dropped_unmatched')
+                ->assertJsonPath('reason', 'missing_series_identity');
+        }
+
+        $this->assertSame(0, Alert::count(), 'no device-level fallback alert may exist');
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message, $context = []) => str_contains($message, 'matched no route')
+                && ($context['reason'] ?? null) === 'missing_series_identity')
+            ->atLeast()->times(3);
+    }
+
+    public function test_a_success_with_missing_identity_cannot_resolve_an_open_failure(): void
+    {
+        // The .6 adversarial probe: real failure with full identity, then an
+        // empty-identity success. Under the old device-level fallback both
+        // mapped to the same degraded key and the failure was cleared.
+        $this->linkedAsset();
+        $t0 = now()->subHour()->timestamp;
+
+        $this->postEvent($this->jobCompletedEvent(['end' => $t0]));
+        $this->assertSame(AlertStatus::Active, Alert::sole()->status);
+
+        $this->postEvent($this->jobCompletedEvent([
+            'status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
+            'source_guid' => '',
+            'destination_guid' => '',
+            'end' => $t0 + 600,
+        ]))->assertOk()->assertJsonPath('status', 'dropped_unmatched');
+
+        $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status,
+            'an identityless success must never resolve an open failure');
+    }
+
+    // ── EndTime is the ordering authority; unorderable events are dropped ────
+
+    public function test_a_success_with_no_orderable_end_time_never_resolves(): void
+    {
+        // psa-enpew.6: substituting now() for a missing/zero EndTime made an
+        // unorderable success look newest and resolve a real failure. The SDK
+        // defaults EndTime to 0 when unset — that is not an orderable time.
+        $this->linkedAsset();
+        $t0 = now()->subHour()->timestamp;
+
+        $this->postEvent($this->jobCompletedEvent(['end' => $t0]));
+
+        $this->postEvent($this->jobCompletedEvent([
+            'status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
+            'end' => 0,
+        ]))->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'unorderable_end_time');
+
+        $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status);
+    }
+
+    public function test_a_success_with_a_malformed_end_time_never_resolves(): void
+    {
+        // Deliberately off-shape (raw array): a string EndTime cannot order
+        // events, so it must drop loudly instead of resolving.
+        $this->linkedAsset();
+        $t0 = now()->subHour()->timestamp;
+
+        $this->postEvent($this->jobCompletedEvent(['end' => $t0]));
+
+        $this->postEvent([
+            'Type' => \Comet\Def::SEVT_JOB_COMPLETED,
+            'Data' => [
+                'GUID' => (string) Str::uuid(),
+                'DeviceID' => 'dev-1',
+                'SourceGUID' => 'item-1',
+                'DestinationGUID' => 'vault-1',
+                'Classification' => \Comet\Def::JOB_CLASSIFICATION_BACKUP,
+                'Status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
+                'EndTime' => 'not-a-timestamp',
+            ],
+        ])->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'unorderable_end_time');
+
+        $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status);
+    }
+
+    public function test_a_failure_with_no_orderable_end_time_is_dropped_loudly(): void
+    {
+        // Symmetric with the success side: alerting on an unorderable failure
+        // with a substituted receipt time would poison the series watermark
+        // (and re-fire on every retry). The drop is loud — WARNING + the
+        // operator-card unmatched stamp — never silent.
+        Log::spy();
+        $this->linkedAsset();
+
+        $this->postEvent($this->jobCompletedEvent(['end' => 0]))
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'unorderable_end_time');
+
+        $this->assertSame(0, Alert::count());
+        $this->assertNotNull(Setting::getValue('comet_webhook_last_unmatched_at'));
     }
 
     // ── The loud unmatched-event signal (silent non-matching was the defect) ──
@@ -334,7 +518,10 @@ class CometWebhookAlertTest extends TestCase
         $this->postEvent([
             'Type' => \Comet\Def::SEVT_JOB_COMPLETED,
             'Data' => ['DeviceID' => 'dev-1', 'Classification' => \Comet\Def::JOB_CLASSIFICATION_BACKUP, 'Status' => 'failed'],
-        ])->assertOk()->assertJsonPath('alert_id', null);
+        ])->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'missing_or_non_integer_status')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
         Log::shouldHaveReceived('warning')
@@ -348,7 +535,10 @@ class CometWebhookAlertTest extends TestCase
         Log::spy();
 
         $this->postEvent($this->jobCompletedEvent(['status' => 4242]))
-            ->assertOk()->assertJsonPath('alert_id', null);
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'status_outside_known_ranges')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
         Log::shouldHaveReceived('warning')
@@ -362,12 +552,56 @@ class CometWebhookAlertTest extends TestCase
         Log::spy();
 
         $this->postEvent($this->jobCompletedEvent(['classification' => 9999]))
-            ->assertOk()->assertJsonPath('alert_id', null);
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'unrecognized_classification')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
         Log::shouldHaveReceived('warning')
             ->withArgs(fn ($message, $context = []) => str_contains($message, 'matched no route')
                 && ($context['reason'] ?? null) === 'unrecognized_classification')
+            ->atLeast()->once();
+    }
+
+    public function test_a_running_range_status_on_a_completed_event_is_a_loud_contradiction(): void
+    {
+        // A job-COMPLETED event carrying a running-range status matches no
+        // completion route. The old INFO line was invisible under prod's
+        // LOG_LEVEL=warning — psa-enpew.8 requires this pairing to be loud.
+        Log::spy();
+        $this->linkedAsset();
+
+        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_RUNNING_ACTIVE]))
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'running_status_on_completed_event')
+            ->assertJsonPath('alert_id', null);
+
+        $this->assertSame(0, Alert::count());
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message, $context = []) => str_contains($message, 'matched no route')
+                && ($context['reason'] ?? null) === 'running_status_on_completed_event')
+            ->atLeast()->once();
+    }
+
+    public function test_job_completed_event_without_data_payload_is_a_loud_drop(): void
+    {
+        Log::spy();
+
+        $event = new \Comet\StreamableEvent;
+        $event->Type = \Comet\Def::SEVT_JOB_COMPLETED;
+
+        $this->postEvent($event->toArray(false))
+            ->assertOk()
+            ->assertJsonPath('status', 'dropped_unmatched')
+            ->assertJsonPath('reason', 'missing_job_data');
+
+        $this->assertSame(0, Alert::count());
+        $this->assertNotNull(Setting::getValue('comet_webhook_last_unmatched_at'));
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message, $context = []) => str_contains($message, 'matched no route')
+                && ($context['reason'] ?? null) === 'missing_job_data')
             ->atLeast()->once();
     }
 
@@ -382,10 +616,10 @@ class CometWebhookAlertTest extends TestCase
                 if (! str_contains($message, 'matched no route')) {
                     return false;
                 }
-                // Bounded: reason + classification + status + device presence,
-                // never usernames/hostnames/payload bodies.
+                // Bounded: reason + classification + status + identity-field
+                // presence booleans, never usernames/hostnames/payload bodies.
                 $this->assertEqualsCanonicalizing(
-                    ['reason', 'classification', 'status', 'has_device_id'],
+                    ['reason', 'classification', 'status', 'has_device_id', 'has_source_guid', 'has_destination_guid'],
                     array_keys($context),
                 );
 
@@ -407,20 +641,11 @@ class CometWebhookAlertTest extends TestCase
             5, // legacy restore
             7, // legacy retention
         ] as $classification) {
-            $this->postEvent($this->jobCompletedEvent(['classification' => $classification]))->assertOk();
+            $this->postEvent($this->jobCompletedEvent(['classification' => $classification]))
+                ->assertOk()
+                ->assertJsonPath('status', 'ignored_non_backup')
+                ->assertJsonPath('alert_id', null);
         }
-
-        $this->assertSame(0, Alert::count());
-        Log::shouldNotHaveReceived('warning');
-    }
-
-    public function test_running_status_event_does_not_create_an_alert_and_does_not_warn(): void
-    {
-        Log::spy();
-        $this->linkedAsset();
-
-        $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_RUNNING_ACTIVE]))
-            ->assertOk()->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
         Log::shouldNotHaveReceived('warning');
@@ -432,7 +657,7 @@ class CometWebhookAlertTest extends TestCase
 
         $event = new \Comet\StreamableEvent;
         $event->Type = \Comet\Def::SEVT_JOB_NEW;
-        $this->postEvent($event->toArray(false))->assertOk()->assertJsonPath('status', 'ignored');
+        $this->postEvent($event->toArray(false))->assertOk()->assertJsonPath('status', 'ignored_unhandled_event_type');
 
         Log::shouldNotHaveReceived('warning');
     }
@@ -447,7 +672,7 @@ class CometWebhookAlertTest extends TestCase
             'status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS,
             'classification' => \Comet\Def::JOB_CLASSIFICATION_RETENTION,
             'end' => $failEnd + 600,
-        ]))->assertOk();
+        ]))->assertOk()->assertJsonPath('status', 'ignored_non_backup');
 
         $this->assertSame(AlertStatus::Active, Alert::sole()->fresh()->status,
             'a successful retention pass must not clear a backup-failure alert');
@@ -471,7 +696,7 @@ class CometWebhookAlertTest extends TestCase
                 'Classification' => 4,
                 'Status' => 7002,
             ],
-        ])->assertOk()->assertJsonPath('status', 'ignored');
+        ])->assertOk()->assertJsonPath('status', 'ignored_unrecognized_event_type');
 
         $this->assertSame(0, Alert::count());
         Log::shouldHaveReceived('warning')
@@ -479,61 +704,80 @@ class CometWebhookAlertTest extends TestCase
             ->atLeast()->once();
     }
 
-    public function test_job_completed_event_without_data_payload_is_ignored(): void
-    {
-        $event = new \Comet\StreamableEvent;
-        $event->Type = \Comet\Def::SEVT_JOB_COMPLETED;
-
-        $this->postEvent($event->toArray(false))->assertOk()->assertJsonPath('status', 'ignored');
-        $this->assertSame(0, Alert::count());
-    }
-
-    public function test_alerts_disabled_setting_suppresses_alert_creation(): void
+    public function test_alerts_disabled_setting_reports_itself_and_suppresses_alert_creation(): void
     {
         Setting::setValue('comet_alert_enabled', '0');
         $this->linkedAsset();
 
-        $this->postEvent($this->jobCompletedEvent())->assertOk();
+        $this->postEvent($this->jobCompletedEvent())
+            ->assertOk()
+            ->assertJsonPath('status', 'alerts_disabled')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
     }
 
-    public function test_success_without_prior_alert_is_a_noop(): void
+    public function test_success_without_prior_alert_is_an_honest_no_open_alert(): void
     {
         $this->linkedAsset();
 
         $this->postEvent($this->jobCompletedEvent(['status' => \Comet\Def::JOB_STATUS_STOP_SUCCESS]))
-            ->assertOk()->assertJsonPath('alert_id', null);
+            ->assertOk()
+            ->assertJsonPath('status', 'no_open_alert')
+            ->assertJsonPath('alert_id', null);
 
         $this->assertSame(0, Alert::count());
     }
 
-    public function test_non_integer_status_in_job_payload_is_ignored(): void
+    public function test_the_service_reports_dispositions_for_direct_malformed_payloads(): void
     {
-        $this->assertNull(app(CometAlertService::class)->handleJobCompleted(['Status' => 'failed']));
-        $this->assertNull(app(CometAlertService::class)->handleJobCompleted([]));
+        $service = app(CometAlertService::class);
+
+        $outcome = $service->handleJobCompleted(['Status' => 'failed']);
+        $this->assertSame(CometJobDisposition::DroppedUnmatched, $outcome->disposition);
+        $this->assertNull($outcome->alert);
+
+        $outcome = $service->handleJobCompleted([]);
+        $this->assertSame(CometJobDisposition::DroppedUnmatched, $outcome->disposition);
+        $this->assertSame('missing_or_non_integer_status', $outcome->reason);
     }
 
     // ── Operator-visible delivery proof ───────────────────────────────────────
 
-    public function test_webhook_delivery_stamps_advance_with_real_traffic(): void
+    public function test_webhook_delivery_stamps_tell_received_recognized_unmatched_and_alert_apart(): void
     {
         $this->linkedAsset();
         $this->assertNull(Setting::getValue('comet_webhook_last_received_at'));
 
-        // A non-job event advances "received" but not "recognized".
+        // A non-job event advances "received" and nothing else.
         $event = new \Comet\StreamableEvent;
         $event->Type = \Comet\Def::SEVT_JOB_NEW;
         $this->postEvent($event->toArray(false));
 
         $this->assertNotNull(Setting::getValue('comet_webhook_last_received_at'));
         $this->assertNull(Setting::getValue('comet_webhook_last_recognized_at'));
+        $this->assertNull(Setting::getValue('comet_webhook_last_unmatched_at'));
         $this->assertNull(Setting::getValue('comet_webhook_last_alert_at'));
 
-        // A job-completed failure advances all three.
-        $this->postEvent($this->jobCompletedEvent());
+        // An unrouteable job event advances "unmatched" — NOT "recognized":
+        // a matcher break must never render as recognized traffic (psa-enpew.7).
+        $this->postEvent($this->jobCompletedEvent(['classification' => 9999]));
+
+        $this->assertNull(Setting::getValue('comet_webhook_last_recognized_at'));
+        $this->assertNotNull(Setting::getValue('comet_webhook_last_unmatched_at'));
+        $this->assertSame('unrecognized_classification', Setting::getValue('comet_webhook_last_unmatched_reason'));
+        $this->assertNull(Setting::getValue('comet_webhook_last_alert_at'));
+
+        // A deliberately-ignored non-backup completion IS recognized traffic,
+        // but raises no alert.
+        $this->postEvent($this->jobCompletedEvent(['classification' => \Comet\Def::JOB_CLASSIFICATION_RETENTION]));
 
         $this->assertNotNull(Setting::getValue('comet_webhook_last_recognized_at'));
+        $this->assertNull(Setting::getValue('comet_webhook_last_alert_at'));
+
+        // A routed backup failure advances the alert stamp.
+        $this->postEvent($this->jobCompletedEvent());
+
         $this->assertNotNull(Setting::getValue('comet_webhook_last_alert_at'));
     }
 

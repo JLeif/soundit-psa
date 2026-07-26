@@ -944,7 +944,7 @@ class TriageToolDefinitions
         return [
             [
                 'name' => 'comet_get_backup_status',
-                'description' => 'Get backup health status for a device. Returns last job status, last success time, storage usage, and days since last successful backup. job_data_state says how the job history read went: ok (live answer), unavailable (Comet server unreachable), or not_queried (no synced Comet username) — for unavailable/not_queried treat backup state as UNKNOWN, never as passing; absence of a failure is not evidence of success.',
+                'description' => 'Get backup health status for a device. Returns last job status, last success time, storage usage, and days since last successful backup. job_state says how the job history read went (same vocabulary as comet_get_backup_posture): ok (live answer), no_backup_jobs_observed (queried, but the server reported no backup jobs — backups may never have run), unavailable (Comet server unreachable), or not_queried (no synced Comet username) — for anything but ok treat backup state as UNKNOWN, never as passing; absence of a failure is not evidence of success.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -958,7 +958,7 @@ class TriageToolDefinitions
             ],
             [
                 'name' => 'comet_get_backup_jobs',
-                'description' => 'Get recent backup job history for a device. Shows each job\'s outcome with failure subtype (error, timeout, quota, missed schedule, cancelled), type (backup/restore/retention), timestamps, duration, and sizes. Error message text is not available here — it lives in the Comet job log. When the history cannot be fetched the result carries job_data_state=unavailable (or not_queried) with an error instead of a job list — treat backup state as UNKNOWN then, never as passing; a 0 job_count only ever means the server really reported none.',
+                'description' => 'Get recent backup job history for a device. Shows each job\'s outcome with failure subtype (error, timeout, quota, missed schedule, cancelled), type (backup/restore/retention), timestamps, duration, and sizes. Error message text is not available here — it lives in the Comet job log. job_state uses the shared backup-read vocabulary (psa-z30dv): when the history cannot be fetched the result carries job_state=unavailable (or not_queried) with an error instead of a job list — treat backup state as UNKNOWN then, never as passing; job_state=no_backup_jobs_observed means the server really answered and reported no backup jobs at all (not an all-clear — backups may never have run); a 0 job_count only ever means the server really reported none.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [

@@ -2189,14 +2189,20 @@
                     </div>
                 </div>
             @elseif($cometJobData && !empty($cometJobData['jobs']))
+                @php
+                    // Service emits ISO-8601 UTC; display converts per CLAUDE.md
+                    $cometStampTz = fn (?string $iso) => $iso
+                        ? \Illuminate\Support\Carbon::parse($iso)->toAppTz()->format('Y-m-d H:i T')
+                        : '—';
+                @endphp
                 <div class="card mb-3">
                     <div class="card-header">
                         <i class="bi bi-clock-history me-2"></i>Recent Backup Jobs
                         @if($cometJobData['last_success'])
-                            <span class="badge bg-success ms-2">Last success: {{ $cometJobData['last_success']['started'] }}</span>
+                            <span class="badge bg-success ms-2">Last success: {{ $cometStampTz($cometJobData['last_success']['started']) }}</span>
                         @endif
                         @if($cometJobData['last_failure'])
-                            <span class="badge bg-danger ms-2">Last failure: {{ $cometJobData['last_failure']['started'] }}</span>
+                            <span class="badge bg-danger ms-2">Last failure: {{ $cometStampTz($cometJobData['last_failure']['started']) }}</span>
                         @endif
                     </div>
                     <div class="card-body p-0">
@@ -2229,7 +2235,7 @@
                                                 <span class="badge {{ $badgeClass }}">{{ $job['status'] }}</span>
                                             </td>
                                             <td>{{ $job['classification'] }}</td>
-                                            <td>{{ $job['started'] }}</td>
+                                            <td>{{ $cometStampTz($job['started']) }}</td>
                                             <td>
                                                 @if($job['duration_seconds'])
                                                     {{ gmdate('H:i:s', $job['duration_seconds']) }}
@@ -2242,6 +2248,24 @@
                                 </tbody>
                             </table>
                         </div>
+                        @if(($cometJobData['state'] ?? null) === 'no_backup_jobs_observed')
+                            <p class="small text-muted mb-0 px-3 py-2 border-top">
+                                <i class="bi bi-exclamation-circle me-1"></i>
+                                No <strong>backup</strong> jobs observed — the rows above are non-backup
+                                activity (restore/retention/…). Backups may never have run on this device.
+                            </p>
+                        @endif
+                    </div>
+                </div>
+            @elseif($cometJobData && ($cometJobData['state'] ?? null) === 'no_backup_jobs_observed')
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
+                    <div class="card-body">
+                        <p class="text-muted mb-0">
+                            The Comet server returned no backup jobs for this device — backups may never
+                            have run. No jobs is not evidence of success — verify the backup schedule in
+                            Comet if this device should be protected.
+                        </p>
                     </div>
                 </div>
             @elseif($cometJobData)
@@ -2249,8 +2273,13 @@
                     <div class="card-header"><i class="bi bi-clock-history me-2"></i>Recent Backup Jobs</div>
                     <div class="card-body">
                         <p class="text-muted mb-0">
-                            No backup jobs observed in the last 7 days. No jobs is not evidence of
-                            success — verify the backup schedule in Comet if this device should be protected.
+                            No jobs in the last 7 days — the most recent backup activity is older.
+                            @if($cometJobData['last_success'])
+                                Last success: {{ \Illuminate\Support\Carbon::parse($cometJobData['last_success']['started'])->toAppTz()->format('Y-m-d H:i T') }}.
+                            @endif
+                            @if($cometJobData['last_failure'])
+                                Last failure: {{ \Illuminate\Support\Carbon::parse($cometJobData['last_failure']['started'])->toAppTz()->format('Y-m-d H:i T') }}.
+                            @endif
                         </p>
                     </div>
                 </div>
