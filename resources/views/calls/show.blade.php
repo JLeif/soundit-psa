@@ -477,6 +477,7 @@
                                 <strong>{{ $ticket->display_id }}</strong>
                                 <span class="badge {{ $ticket->status->badgeClass() }} ms-1">{{ $ticket->status->label() }}</span>
                                 <div class="text-truncate small text-muted">{{ $ticket->subject }}</div>
+                                <div class="mt-1"><x-ticket-category-badge :node="$ticket->categoryNode" /></div>
                             </div>
                             <button type="submit" class="btn btn-sm btn-outline-primary flex-shrink-0">Link</button>
                         </form>

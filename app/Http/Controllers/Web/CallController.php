@@ -71,9 +71,12 @@ class CallController extends Controller
                                 ->where('updated_at', '>=', now()->subDays(7));
                         });
                 })
+                ->with('categoryNode.parent.parent')
                 ->orderByDesc('updated_at')
                 ->limit(20)
-                ->get(['id', 'halo_id', 'subject', 'status', 'opened_at', 'updated_at']);
+                // category_id MUST be selected or the categoryNode belongsTo eager-load
+                // silently no-matches (the FK is the join key). psa-717bn.7 GAP 1.
+                ->get(['id', 'halo_id', 'subject', 'status', 'opened_at', 'updated_at', 'category_id']);
         }
 
         $candidates = $this->phoneCallService->getCandidateCallers($call);

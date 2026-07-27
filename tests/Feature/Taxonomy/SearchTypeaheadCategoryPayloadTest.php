@@ -112,6 +112,30 @@ class SearchTypeaheadCategoryPayloadTest extends TestCase
             ->assertJsonPath('results.0.category_path', null);
     }
 
+    public function test_quick_search_category_path_is_not_n_plus_one(): void
+    {
+        $leaf = $this->tree();
+        // Several matching tickets on the same depth-3 node; the ancestor walk
+        // must resolve from the eager-loaded chain, not one query per row.
+        // psa-717bn.7 test-symmetry — mirrors the apiSearch guard above.
+        Ticket::factory()->count(4)->create([
+            'subject' => 'Zebra label printer offline',
+            'status' => TicketStatus::InProgress,
+            'category_id' => $leaf->id,
+        ]);
+
+        DB::enableQueryLog();
+        $this->actingAs(User::factory()->create())
+            ->getJson(route('search.quick', ['q' => 'Zebra label']))
+            ->assertOk();
+        $categoryQueries = collect(DB::getQueryLog())
+            ->filter(fn ($q) => str_contains($q['query'], 'ticket_categories'))
+            ->count();
+        DB::disableQueryLog();
+
+        $this->assertLessThanOrEqual(5, $categoryQueries, "Quick-search category path is N+1 across rows ({$categoryQueries} ticket_categories queries)");
+    }
+
     // --- softphone call-popup recent tickets (CallController::latest) ---
 
     private function ringingCallFor(Client $client): PhoneCall
@@ -161,5 +185,31 @@ class SearchTypeaheadCategoryPayloadTest extends TestCase
             ->assertOk()
             ->assertJsonPath('call.recent_tickets.0.category_id', null)
             ->assertJsonPath('call.recent_tickets.0.category_path', null);
+    }
+
+    public function test_call_popup_recent_tickets_category_path_is_not_n_plus_one(): void
+    {
+        $leaf = $this->tree();
+        $client = Client::factory()->create();
+        $this->ringingCallFor($client);
+        // Several tickets for the call's client on the same depth-3 node; the
+        // ancestor walk must resolve from the eager-loaded chain, not per row.
+        // psa-717bn.7 test-symmetry — mirrors the apiSearch guard above.
+        Ticket::factory()->count(4)->create([
+            'client_id' => $client->id,
+            'status' => TicketStatus::InProgress,
+            'category_id' => $leaf->id,
+        ]);
+
+        DB::enableQueryLog();
+        $this->actingAs(User::factory()->create())
+            ->getJson(route('calls.latest'))
+            ->assertOk();
+        $categoryQueries = collect(DB::getQueryLog())
+            ->filter(fn ($q) => str_contains($q['query'], 'ticket_categories'))
+            ->count();
+        DB::disableQueryLog();
+
+        $this->assertLessThanOrEqual(5, $categoryQueries, "Call-popup recent-tickets category path is N+1 across rows ({$categoryQueries} ticket_categories queries)");
     }
 }
