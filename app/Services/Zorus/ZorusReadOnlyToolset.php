@@ -157,7 +157,10 @@ class ZorusReadOnlyToolset
         $result['fleet_coverage'] = $this->fleetCoverage($client);
 
         if ($endpoints->isEmpty()) {
-            $result['note'] = $this->emptyFleetNote($client);
+            // Posture-scoped copy: "empty" here = no ACTIVE linked assets, which
+            // is NOT "no Zorus data" (inactive linked assets carry it and show in
+            // fleet_coverage). psa-zix2v R2.
+            $result['note'] = $this->emptyPostureNote($client);
 
             return $result;
         }
@@ -460,6 +463,20 @@ class ZorusReadOnlyToolset
         return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no PSA assets carry synced Zorus endpoint data. "
             .'Possible causes: the daily Zorus device sync has not run yet, no Zorus agents report under this customer, '
             .'or Zorus endpoints did not match any PSA asset by hostname. Verify in the Zorus console before treating this as no coverage.';
+    }
+
+    /**
+     * The empty note for the filtering-POSTURE rollup, whose "empty" means no
+     * ACTIVE linked assets. It must NOT claim "no PSA assets carry synced Zorus
+     * data" — an inactive linked asset carries that data and is reported in the
+     * same payload's fleet_coverage.inactive_assets_excluded (psa-zix2v R2: the
+     * unqualified copy was false at exactly the lifecycle boundary R1 clarified).
+     */
+    private function emptyPostureNote(Client $client): string
+    {
+        return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no ACTIVE PSA assets carry synced Zorus endpoint data. "
+            .'This posture covers active assets only — see fleet_coverage in this same response for any inactive/retired assets that DO carry Zorus data (inactive_assets_excluded / retired_assets_excluded) and for active assets with no Zorus link (unlinked_count); zorus_list_endpoints gives the lifecycle-unfiltered view. '
+            .'Possible causes: the daily Zorus device sync has not run yet, no Zorus agents report under this customer, or Zorus endpoints did not match any active PSA asset by hostname. Verify in the Zorus console before treating this as no coverage.';
     }
 
     private function hostnameMissNote(Client $client, string $hostname, ?bool $filteringFilter): string

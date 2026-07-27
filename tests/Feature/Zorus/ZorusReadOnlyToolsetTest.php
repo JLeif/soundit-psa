@@ -259,7 +259,10 @@ class ZorusReadOnlyToolsetTest extends TestCase
             $result = $this->toolset()->execute($tool, [], $client->id);
 
             $this->assertArrayNotHasKey('error', $result);
-            $this->assertStringContainsString('no PSA assets carry synced Zorus endpoint data', $result['note'], "{$tool} must not hand back a bare empty list");
+            // Common to both notes; get_filtering_status is lifecycle-qualified
+            // ("no ACTIVE PSA assets…", asserted in the inactive-linked tests),
+            // list_endpoints keeps the unqualified forensic copy (psa-zix2v R2).
+            $this->assertStringContainsString('PSA assets carry synced Zorus endpoint data', $result['note'], "{$tool} must not hand back a bare empty list");
             $this->assertStringContainsString('device sync', $result['note']);
         }
 
@@ -468,6 +471,7 @@ class ZorusReadOnlyToolsetTest extends TestCase
 
         $this->assertSame(0, $result['endpoint_count']); // inactive linked NOT in posture
         $this->assertArrayNotHasKey('filtering_enabled_count', $result); // no false "1 filtered endpoint"
+        $this->assertStringContainsString('no ACTIVE PSA assets', $result['note']); // lifecycle-qualified copy
         $fc = $result['fleet_coverage'];
         $this->assertSame(1, $fc['active_total']);
         $this->assertSame(0, $fc['zorus_linked_count']);
@@ -486,7 +490,11 @@ class ZorusReadOnlyToolsetTest extends TestCase
         $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
 
         $this->assertSame(0, $result['endpoint_count']);
-        $this->assertArrayHasKey('note', $result);                       // empty-fleet note, not a rollup
+        // The empty note must be lifecycle-qualified: an inactive linked asset DOES
+        // carry synced Zorus data, so the note must not deny it, and must point to
+        // fleet_coverage where it is counted (psa-zix2v R2).
+        $this->assertStringContainsString('no ACTIVE PSA assets', $result['note']);
+        $this->assertStringContainsString('fleet_coverage', $result['note']);
         $this->assertArrayNotHasKey('filtering_enabled_count', $result);
         $fc = $result['fleet_coverage'];
         $this->assertSame(0, $fc['active_total']);
