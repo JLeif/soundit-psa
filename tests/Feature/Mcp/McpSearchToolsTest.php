@@ -155,13 +155,25 @@ class McpSearchToolsTest extends TestCase
         $this->assertSame([], $payload['matches']);
         $this->assertSame(0, $payload['match_count']);
 
-        // No match: empty, with copy that says what absence MEANS (the tool
-        // does not exist; request_tool records a build request) — never a
-        // bare [] a caller could misread as a clean all-clear.
+        // No match: empty, with copy that treats the miss as a KEYWORD miss,
+        // never proof the capability is absent — matching is literal substring,
+        // so "wifi controller" cannot find "unifi". The honest recovery path
+        // (psa-cplo3.1 R1): try another keyword and/or list_tool_surface
+        // (the full catalog) BEFORE request_tool, reserving no-such-tool
+        // framing for confirmed full-surface absence. Still never a bare []
+        // a caller could misread as a clean all-clear.
         $payload = $this->search($token, ['query' => 'no_such_capability_zzz']);
         $this->assertSame([], $payload['matches']);
         $this->assertSame(0, $payload['match_count']);
-        $this->assertStringContainsString('request_tool', (string) ($payload['note'] ?? ''));
+        $note = (string) ($payload['note'] ?? '');
+        $this->assertStringContainsString('keyword', $note);
+        $this->assertStringContainsString('list_tool_surface', $note);
+        $this->assertStringContainsString('request_tool', $note);
+        // Reads-first ordering: the keyword-retry / full-surface advice comes
+        // before the request_tool build-request remedy.
+        $this->assertLessThan(strpos($note, 'request_tool'), strpos($note, 'list_tool_surface'));
+        // A keyword miss is no longer presented as proof of nonexistence.
+        $this->assertStringNotContainsString('does not exist', $note);
     }
 
     public function test_matching_is_case_insensitive_and_covers_descriptions_and_categories(): void

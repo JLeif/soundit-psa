@@ -2368,7 +2368,7 @@ class McpStaffController extends Controller
     {
         return [
             'name' => self::SEARCH_TOOLS_TOOL,
-            'description' => 'Search this server\'s full tool catalog by keyword before asking for a capability: each match carries its grant_state — granted (in this token\'s allowlist, callable now), available_ungranted (built and configured but not granted — an operator token grant enables it), or unavailable_config (built but its integration is switched off or not configured on this instance). Case-insensitive substring match on tool names, categories, and one-line descriptions. An empty result means no such tool exists on this server — request_tool records a build request. Same disclosure as list_tool_surface: names and one-line descriptions only — no data, no secrets.',
+            'description' => 'Search this server\'s full tool catalog by keyword before asking for a capability: each match carries its grant_state — granted (in this token\'s allowlist, callable now), available_ungranted (built and configured but not granted — an operator token grant enables it), or unavailable_config (built but its integration is switched off or not configured on this instance). Case-insensitive substring match on tool names, categories, and one-line descriptions. An empty result means only that this keyword matched nothing — not that the capability is absent (an equivalent tool may use different wording): try other keywords and/or list_tool_surface (the full catalog) first, and reserve a request_tool build request for capabilities confirmed absent from the full surface. Same disclosure as list_tool_surface: names and one-line descriptions only — no data, no secrets.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -2422,7 +2422,7 @@ class McpStaffController extends Controller
         if ($query === '') {
             $payload['note'] = 'Empty query — nothing was searched. Provide a keyword; list_tool_surface lists the full catalog.';
         } elseif ($matches === []) {
-            $payload['note'] = 'No catalog tool matches "'.$query.'". '.self::CATALOG_ABSENT_MEANS;
+            $payload['note'] = 'No tool name, category, or description contains "'.$query.'" — a keyword miss, not proof the capability is absent (an equivalent tool may use different wording). Try other keywords and/or list_tool_surface (the full catalog) before request_tool; reserve a build request for capabilities confirmed absent from the full surface.';
         }
 
         return $payload;
