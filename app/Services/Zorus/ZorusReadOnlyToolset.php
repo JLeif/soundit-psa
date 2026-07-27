@@ -72,7 +72,7 @@ class ZorusReadOnlyToolset
         return [
             [
                 'name' => 'zorus_get_filtering_status',
-                'description' => "Get a PSA client's Zorus DNS filtering posture from the last device sync: endpoint count, how many have filtering enabled/disabled, which Zorus groups (the filtering policies) apply, CyberSight coverage, agent connection states, and how fresh the data is. Start here when a user reports a website being blocked — it answers whether this client is covered by Zorus and which policy group their machines sit in. Synced data, not a live query; the response carries data_as_of.",
+                'description' => "Get a PSA client's Zorus DNS filtering posture from the last device sync: endpoint count, how many have filtering enabled/disabled, which Zorus groups (the filtering policies) apply, CyberSight coverage, agent connection states, and how fresh the data is. Start here when a user reports a website being blocked — it answers whether this client is covered by Zorus and which policy group their machines sit in. fleet_coverage additionally reconciles the client's WHOLE active PSA asset fleet: active assets with NO Zorus endpoint link are counted and listed (unlinked_assets) — the linked-endpoint counts above are NOT the full fleet, and an asset's absence from them is never DNS-filtering coverage (inactive and retired assets are excluded from active_total and counted separately). Synced data, not a live query; the response carries data_as_of.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -144,6 +144,12 @@ class ZorusReadOnlyToolset
 
         $result = $this->header($client, $endpoints->max('zorus_synced_at'));
         $result['endpoint_count'] = $endpoints->count();
+        // Reconcile the WHOLE active fleet, not just the Zorus-linked rows: an
+        // active PSA asset with no Zorus link is invisible to every count above,
+        // so absence from them is NOT coverage. Attached in both the empty and
+        // non-empty paths so an all-unlinked fleet cannot read as a clean empty
+        // (psa-zix2v — the absence-as-health class psa-wnnus closed for backup).
+        $result['fleet_coverage'] = $this->fleetCoverage($client);
 
         if ($endpoints->isEmpty()) {
             $result['note'] = $this->emptyFleetNote($client);
@@ -309,6 +315,75 @@ class ZorusReadOnlyToolset
     private function endpointQuery(Client $client): \Illuminate\Database\Eloquent\Builder
     {
         return Asset::where('client_id', $client->id)->whereNotNull('zorus_endpoint_id');
+    }
+
+    /**
+     * Reconcile the client's whole ACTIVE asset fleet against Zorus linkage, so
+     * an active asset with NO Zorus endpoint link is counted and named rather
+     * than silently absent from the linked-only rollup (absence is not coverage;
+     * psa-zix2v). Active (is_active) and not retired (the default not-trashed
+     * scope); excluded lifecycle states are counted loudly so nothing is
+     * invisible. Mirrors the psa-wnnus backup-posture fleet_coverage seam.
+     *
+     * @return array<string, mixed>
+     */
+    private function fleetCoverage(Client $client): array
+    {
+        $eligible = Asset::where('client_id', $client->id)->active();
+        $activeTotal = (clone $eligible)->count();
+
+        $unlinked = (clone $eligible)->whereNull('zorus_endpoint_id');
+        $unlinkedCount = (clone $unlinked)->count();
+
+        // Cap the explicit rows; unlinked_truncated flags when there are more.
+        $rows = $unlinked->orderByRaw("LOWER(COALESCE(hostname, ''))")
+            ->limit(50)
+            ->get(['id', 'hostname', 'name', 'asset_type'])
+            ->map(fn (Asset $asset): array => [
+                'asset_id' => $asset->id,
+                'hostname' => $asset->hostname,
+                'asset_name' => $asset->name,
+                'asset_type' => $asset->asset_type,
+            ])->values()->all();
+
+        $excluded = $this->excludedLifecycleCounts($client);
+
+        return [
+            'active_total' => $activeTotal,
+            'zorus_linked_count' => $activeTotal - $unlinkedCount,
+            'unlinked_count' => $unlinkedCount,
+            'unlinked_assets' => $rows,
+            'unlinked_truncated' => $unlinkedCount > count($rows),
+            'inactive_assets_excluded' => $excluded['inactive'],
+            'retired_assets_excluded' => $excluded['retired'],
+            'note' => $this->fleetCoverageNote($client, $activeTotal, $unlinkedCount),
+        ];
+    }
+
+    /**
+     * Loud counts of the lifecycle states fleet_coverage excludes from
+     * active_total — inactive (is_active=false, still visible to the default
+     * not-trashed builder) and retired (soft-deleted; AssetService::deleteAsset
+     * soft-deletes WITHOUT flipping is_active, so an asset that is both counts
+     * once, as retired). Together the exact complement of the active fleet.
+     *
+     * @return array{inactive: int, retired: int}
+     */
+    private function excludedLifecycleCounts(Client $client): array
+    {
+        return [
+            'inactive' => Asset::where('client_id', $client->id)->where('is_active', false)->count(),
+            'retired' => Asset::onlyTrashed()->where('client_id', $client->id)->count(),
+        ];
+    }
+
+    private function fleetCoverageNote(Client $client, int $activeTotal, int $unlinkedCount): string
+    {
+        return match (true) {
+            $activeTotal === 0 => "{$client->name} has no active PSA assets, so there is no fleet to reconcile Zorus DNS-filtering coverage against.",
+            $unlinkedCount === 0 => "All {$activeTotal} active PSA asset(s) for {$client->name} are linked to a Zorus endpoint.",
+            default => "{$unlinkedCount} of {$activeTotal} active PSA asset(s) for {$client->name} have NO Zorus endpoint link and therefore NO DNS-filtering visibility here — they appear ONLY in unlinked_assets and are absent from the filtering counts above. Absence from those counts is NOT coverage: treat each as not protected by Zorus DNS filtering until it is linked (in Zorus or on the asset page).",
+        };
     }
 
     // ── staleness / empty-answer framing ───────────────────────────────────────
