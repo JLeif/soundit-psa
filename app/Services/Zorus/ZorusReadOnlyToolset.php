@@ -72,7 +72,7 @@ class ZorusReadOnlyToolset
         return [
             [
                 'name' => 'zorus_get_filtering_status',
-                'description' => "Get a PSA client's Zorus DNS filtering posture from the last device sync: endpoint count, how many have filtering enabled/disabled, which Zorus groups (the filtering policies) apply, CyberSight coverage, agent connection states, and how fresh the data is. Start here when a user reports a website being blocked — it answers whether this client is covered by Zorus and which policy group their machines sit in. Synced data, not a live query; the response carries data_as_of.",
+                'description' => "Get a PSA client's Zorus DNS filtering posture from the last device sync: endpoint count, how many have filtering enabled/disabled, which Zorus groups (the filtering policies) apply, CyberSight coverage, agent connection states, and how fresh the data is. Start here when a user reports a website being blocked — it answers whether this client is covered by Zorus and which policy group their machines sit in. fleet_coverage additionally reconciles the client's WHOLE active PSA asset fleet: active assets with NO Zorus endpoint link are counted and listed (unlinked_assets) — the linked-endpoint counts above are NOT the full fleet, and an asset's absence from them is never DNS-filtering coverage (inactive and retired assets are excluded from active_total and counted separately). Synced data, not a live query; the response carries data_as_of.",
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -137,16 +137,30 @@ class ZorusReadOnlyToolset
             return $client; // error payload
         }
 
-        $endpoints = $this->endpointQuery($client)->get([
+        // Posture = the ACTIVE fleet (postureLinkedQuery), NOT endpointQuery's
+        // lifecycle-unfiltered set: endpoint_count, the filtering/group/state
+        // counts, and freshness must all describe the same active fleet
+        // fleet_coverage reconciles, so an inactive linked asset is never
+        // counted as coverage here AND excluded there (psa-zix2v).
+        $endpoints = $this->postureLinkedQuery($client)->get([
             'zorus_group_name', 'zorus_filtering_enabled', 'zorus_cybersight_enabled',
             'zorus_agent_state', 'zorus_last_seen_at', 'zorus_synced_at',
         ]);
 
         $result = $this->header($client, $endpoints->max('zorus_synced_at'));
         $result['endpoint_count'] = $endpoints->count();
+        // Reconcile the WHOLE active fleet, not just the Zorus-linked rows: an
+        // active PSA asset with no Zorus link is invisible to every count above,
+        // so absence from them is NOT coverage. Attached in both the empty and
+        // non-empty paths so an all-unlinked fleet cannot read as a clean empty
+        // (psa-zix2v — the absence-as-health class psa-wnnus closed for backup).
+        $result['fleet_coverage'] = $this->fleetCoverage($client);
 
         if ($endpoints->isEmpty()) {
-            $result['note'] = $this->emptyFleetNote($client);
+            // Posture-scoped copy: "empty" here = no ACTIVE linked assets, which
+            // is NOT "no Zorus data" (inactive linked assets carry it and show in
+            // fleet_coverage). psa-zix2v R2.
+            $result['note'] = $this->emptyPostureNote($client);
 
             return $result;
         }
@@ -300,15 +314,117 @@ class ZorusReadOnlyToolset
     }
 
     /**
-     * The one query seam every read goes through: this client's rows, nothing
-     * else. With the upstream customer filter unreliable, this client_id scope
-     * is the entire data boundary — do not widen it.
+     * FORENSIC seam: this client's Zorus-LINKED rows, active OR inactive
+     * (retired/soft-deleted are excluded by the default SoftDeletes scope — so
+     * this is lifecycle-BROAD, NOT lifecycle-unfiltered). Used by
+     * zorus_list_endpoints (a tech looking up a specific machine wants it even
+     * if the asset was marked inactive) and the unmapped-client leftover-data
+     * existence check. This client_id scope is the entire data boundary — do
+     * not widen it.
+     *
+     * NOT for the posture rollup: getFilteringStatus() counts must describe the
+     * ACTIVE fleet (postureLinkedQuery), or an inactive linked asset would be
+     * counted as current filtering coverage while fleet_coverage simultaneously
+     * reports it excluded — one payload, two fleets (psa-zix2v product review).
      *
      * @return \Illuminate\Database\Eloquent\Builder<Asset>
      */
     private function endpointQuery(Client $client): \Illuminate\Database\Eloquent\Builder
     {
         return Asset::where('client_id', $client->id)->whereNotNull('zorus_endpoint_id');
+    }
+
+    /**
+     * The single ACTIVE-fleet eligibility seam (active + not soft-deleted) that
+     * the filtering-posture rollup AND fleet_coverage share, so endpoint_count,
+     * every filtering/group/agent-state count, freshness, and the coverage
+     * reconciliation all describe ONE coherent fleet (mirrors the Comet/
+     * Servosity posture surfaces; psa-zix2v).
+     *
+     * @return \Illuminate\Database\Eloquent\Builder<Asset>
+     */
+    private function eligibleAssetQuery(Client $client): \Illuminate\Database\Eloquent\Builder
+    {
+        return Asset::where('client_id', $client->id)->active();
+    }
+
+    /**
+     * Active, Zorus-linked assets — the posture rollup's row/count seam.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder<Asset>
+     */
+    private function postureLinkedQuery(Client $client): \Illuminate\Database\Eloquent\Builder
+    {
+        return $this->eligibleAssetQuery($client)->whereNotNull('zorus_endpoint_id');
+    }
+
+    /**
+     * Reconcile the client's whole ACTIVE asset fleet against Zorus linkage, so
+     * an active asset with NO Zorus endpoint link is counted and named rather
+     * than silently absent from the linked-only rollup (absence is not coverage;
+     * psa-zix2v). Active (is_active) and not retired (the default not-trashed
+     * scope); excluded lifecycle states are counted loudly so nothing is
+     * invisible. Mirrors the psa-wnnus backup-posture fleet_coverage seam.
+     *
+     * @return array<string, mixed>
+     */
+    private function fleetCoverage(Client $client): array
+    {
+        $eligible = $this->eligibleAssetQuery($client); // same seam the posture rollup uses
+        $activeTotal = (clone $eligible)->count();
+
+        $unlinked = (clone $eligible)->whereNull('zorus_endpoint_id');
+        $unlinkedCount = (clone $unlinked)->count();
+
+        // Cap the explicit rows; unlinked_truncated flags when there are more.
+        $rows = $unlinked->orderByRaw("LOWER(COALESCE(hostname, ''))")
+            ->limit(50)
+            ->get(['id', 'hostname', 'name', 'asset_type'])
+            ->map(fn (Asset $asset): array => [
+                'asset_id' => $asset->id,
+                'hostname' => $asset->hostname,
+                'asset_name' => $asset->name,
+                'asset_type' => $asset->asset_type,
+            ])->values()->all();
+
+        $excluded = $this->excludedLifecycleCounts($client);
+
+        return [
+            'active_total' => $activeTotal,
+            'zorus_linked_count' => $activeTotal - $unlinkedCount,
+            'unlinked_count' => $unlinkedCount,
+            'unlinked_assets' => $rows,
+            'unlinked_truncated' => $unlinkedCount > count($rows),
+            'inactive_assets_excluded' => $excluded['inactive'],
+            'retired_assets_excluded' => $excluded['retired'],
+            'note' => $this->fleetCoverageNote($client, $activeTotal, $unlinkedCount),
+        ];
+    }
+
+    /**
+     * Loud counts of the lifecycle states fleet_coverage excludes from
+     * active_total — inactive (is_active=false, still visible to the default
+     * not-trashed builder) and retired (soft-deleted; AssetService::deleteAsset
+     * soft-deletes WITHOUT flipping is_active, so an asset that is both counts
+     * once, as retired). Together the exact complement of the active fleet.
+     *
+     * @return array{inactive: int, retired: int}
+     */
+    private function excludedLifecycleCounts(Client $client): array
+    {
+        return [
+            'inactive' => Asset::where('client_id', $client->id)->where('is_active', false)->count(),
+            'retired' => Asset::onlyTrashed()->where('client_id', $client->id)->count(),
+        ];
+    }
+
+    private function fleetCoverageNote(Client $client, int $activeTotal, int $unlinkedCount): string
+    {
+        return match (true) {
+            $activeTotal === 0 => "{$client->name} has no active PSA assets, so there is no fleet to reconcile Zorus DNS-filtering coverage against.",
+            $unlinkedCount === 0 => "All {$activeTotal} active PSA asset(s) for {$client->name} are linked to a Zorus endpoint.",
+            default => "{$unlinkedCount} of {$activeTotal} active PSA asset(s) for {$client->name} have NO Zorus endpoint link and therefore NO DNS-filtering visibility here — they appear ONLY in unlinked_assets and are absent from the filtering counts above. Absence from those counts is NOT coverage: treat each as not protected by Zorus DNS filtering until it is linked (in Zorus or on the asset page).",
+        };
     }
 
     // ── staleness / empty-answer framing ───────────────────────────────────────
@@ -348,6 +464,20 @@ class ZorusReadOnlyToolset
         return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no PSA assets carry synced Zorus endpoint data. "
             .'Possible causes: the daily Zorus device sync has not run yet, no Zorus agents report under this customer, '
             .'or Zorus endpoints did not match any PSA asset by hostname. Verify in the Zorus console before treating this as no coverage.';
+    }
+
+    /**
+     * The empty note for the filtering-POSTURE rollup, whose "empty" means no
+     * ACTIVE linked assets. It must NOT claim "no PSA assets carry synced Zorus
+     * data" — an inactive linked asset carries that data and is reported in the
+     * same payload's fleet_coverage.inactive_assets_excluded (psa-zix2v R2: the
+     * unqualified copy was false at exactly the lifecycle boundary R1 clarified).
+     */
+    private function emptyPostureNote(Client $client): string
+    {
+        return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no ACTIVE PSA assets carry synced Zorus endpoint data, so there is no active DNS-filtering posture to report. "
+            .'See fleet_coverage in this same response for active PSA assets with no Zorus link (unlinked_count) and for counts of PSA assets excluded from the active posture by lifecycle: inactive_assets_excluded and retired_assets_excluded count inactive/retired PSA assets regardless of whether they carry Zorus data. Use zorus_list_endpoints for this client\'s LINKED endpoints (active or inactive; retired assets are excluded). '
+            .'Possible causes: the daily Zorus device sync has not run yet, no Zorus agents report under this customer, or Zorus endpoints did not match any active PSA asset by hostname. Verify in the Zorus console before treating this as no coverage.';
     }
 
     private function hostnameMissNote(Client $client, string $hostname, ?bool $filteringFilter): string

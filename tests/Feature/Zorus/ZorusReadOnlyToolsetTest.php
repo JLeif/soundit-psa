@@ -259,7 +259,10 @@ class ZorusReadOnlyToolsetTest extends TestCase
             $result = $this->toolset()->execute($tool, [], $client->id);
 
             $this->assertArrayNotHasKey('error', $result);
-            $this->assertStringContainsString('no PSA assets carry synced Zorus endpoint data', $result['note'], "{$tool} must not hand back a bare empty list");
+            // Common to both notes; get_filtering_status is lifecycle-qualified
+            // ("no ACTIVE PSA assets…", asserted in the inactive-linked tests),
+            // list_endpoints keeps the unqualified forensic copy (psa-zix2v R2).
+            $this->assertStringContainsString('PSA assets carry synced Zorus endpoint data', $result['note'], "{$tool} must not hand back a bare empty list");
             $this->assertStringContainsString('device sync', $result['note']);
         }
 
@@ -370,6 +373,158 @@ class ZorusReadOnlyToolsetTest extends TestCase
 
         $status = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
         $this->assertStringContainsString('=== UNTRUSTED ZORUS GROUP NAME', $status['groups'][0]['name']);
+    }
+
+    // ── fleet coverage: unlinked active assets must not read as covered (psa-zix2v) ──
+
+    public function test_filtering_status_reports_fleet_coverage_reconciling_linked_and_unlinked_active_assets(): void
+    {
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client);
+        $this->zorusAsset($client);
+        // An active PSA asset with NO Zorus link — invisible to the linked-only
+        // rollup, so a mixed fleet must NOT read as fully filtered by omission.
+        Asset::factory()->create([
+            'client_id' => $client->id,
+            'zorus_endpoint_id' => null,
+            'hostname' => 'UNLINKED-1',
+            'asset_type' => 'Server',
+        ]);
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame(2, $result['endpoint_count']); // linked-only rollup unchanged
+        $this->assertArrayHasKey('fleet_coverage', $result);
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(3, $fc['active_total']);
+        $this->assertSame(2, $fc['zorus_linked_count']);
+        $this->assertSame(1, $fc['unlinked_count']);
+        $this->assertFalse($fc['unlinked_truncated']);
+        $this->assertSame(['UNLINKED-1'], array_column($fc['unlinked_assets'], 'hostname'));
+        $this->assertSame('Server', $fc['unlinked_assets'][0]['asset_type']);
+    }
+
+    public function test_filtering_status_all_unlinked_active_fleet_is_not_a_clean_empty(): void
+    {
+        // The core absence-as-health bug: zero Zorus-linked endpoints but active
+        // assets exist. The linked-only rollup calls this an empty fleet; fleet
+        // coverage must surface the unlinked assets instead of reading as covered.
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        Asset::factory()->count(2)->create([
+            'client_id' => $client->id,
+            'zorus_endpoint_id' => null,
+        ]);
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame(0, $result['endpoint_count']);
+        $this->assertArrayHasKey('fleet_coverage', $result);
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(2, $fc['active_total']);
+        $this->assertSame(0, $fc['zorus_linked_count']);
+        $this->assertSame(2, $fc['unlinked_count']);
+        $this->assertNotSame('', trim((string) ($fc['note'] ?? '')));
+    }
+
+    public function test_filtering_status_fleet_coverage_excludes_but_counts_inactive_and_retired(): void
+    {
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client); // 1 active linked
+        Asset::factory()->create([  // inactive, unlinked — excluded from active_total
+            'client_id' => $client->id,
+            'zorus_endpoint_id' => null,
+            'is_active' => false,
+        ]);
+        $retired = Asset::factory()->create([ // retired (soft-deleted) — excluded
+            'client_id' => $client->id,
+            'zorus_endpoint_id' => null,
+        ]);
+        $retired->delete();
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(1, $fc['active_total']);
+        $this->assertSame(1, $fc['zorus_linked_count']);
+        $this->assertSame(0, $fc['unlinked_count']);
+        $this->assertSame(1, $fc['inactive_assets_excluded']);
+        $this->assertSame(1, $fc['retired_assets_excluded']);
+    }
+
+    public function test_filtering_status_excludes_inactive_linked_from_posture_counts(): void
+    {
+        // psa-zix2v product REVISE: an INACTIVE linked asset must NOT count as
+        // current filtering coverage. It is absent from endpoint_count / the
+        // filtering counts (posture = ACTIVE fleet) and counted once in
+        // fleet_coverage.inactive_assets_excluded — one coherent fleet.
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client, ['is_active' => false, 'zorus_filtering_enabled' => true]); // inactive linked
+        Asset::factory()->create(['client_id' => $client->id, 'zorus_endpoint_id' => null]);   // active unlinked
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertSame(0, $result['endpoint_count']); // inactive linked NOT in posture
+        $this->assertArrayNotHasKey('filtering_enabled_count', $result); // no false "1 filtered endpoint"
+        $this->assertStringContainsString('no ACTIVE PSA assets', $result['note']); // lifecycle-qualified copy
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(1, $fc['active_total']);
+        $this->assertSame(0, $fc['zorus_linked_count']);
+        $this->assertSame(1, $fc['unlinked_count']);
+        $this->assertSame(1, $fc['inactive_assets_excluded']);
+    }
+
+    public function test_filtering_status_inactive_linked_only_does_not_take_nonempty_posture_path(): void
+    {
+        // The concrete misleading case: a client whose ONLY linked asset is
+        // inactive must not read as "has a filtered endpoint".
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client, ['is_active' => false, 'zorus_filtering_enabled' => true]);
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertSame(0, $result['endpoint_count']);
+        // The empty note must be lifecycle-qualified: an inactive linked asset DOES
+        // carry synced Zorus data, so the note must not deny it, and must point to
+        // fleet_coverage where it is counted (psa-zix2v R2).
+        $this->assertStringContainsString('no ACTIVE PSA assets', $result['note']);
+        $this->assertStringContainsString('fleet_coverage', $result['note']);
+        $this->assertArrayNotHasKey('filtering_enabled_count', $result);
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(0, $fc['active_total']);
+        $this->assertSame(1, $fc['inactive_assets_excluded']);
+    }
+
+    public function test_empty_posture_note_does_not_attribute_zorus_data_to_lifecycle_excluded_counts(): void
+    {
+        // psa-zix2v R2: inactive_assets_excluded / retired_assets_excluded count
+        // inactive/retired PSA assets REGARDLESS of Zorus linkage. An inactive
+        // UNLINKED asset carries NO Zorus data yet appears in the count, so the
+        // empty note must not present the excluded counts as Zorus-data evidence,
+        // nor call zorus_list_endpoints "lifecycle-unfiltered" (it excludes retired).
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        Asset::factory()->create([
+            'client_id' => $client->id,
+            'zorus_endpoint_id' => null, // UNLINKED — carries no Zorus data
+            'is_active' => false,        // inactive — lands in inactive_assets_excluded
+        ]);
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $note = $result['note'];
+        $this->assertStringContainsString('no ACTIVE PSA assets', $note);
+        $this->assertStringContainsString('regardless of whether they carry Zorus data', $note);
+        $this->assertStringNotContainsString('that DO carry Zorus data', $note);   // false qualifier rejected
+        $this->assertStringNotContainsString('lifecycle-unfiltered', $note);        // false qualifier rejected
+        $this->assertSame(0, $result['fleet_coverage']['active_total']);
+        $this->assertSame(1, $result['fleet_coverage']['inactive_assets_excluded']); // counted despite NO Zorus link
     }
 
     public function test_an_unknown_tool_name_is_an_error(): void
