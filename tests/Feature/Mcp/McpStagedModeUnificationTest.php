@@ -274,7 +274,7 @@ class McpStagedModeUnificationTest extends TestCase
 
         $payload = $this->decodedResult($this->callTool($token, 'whoami'));
 
-        $this->assertSame(['whoami', 'list_tool_surface', 'send_email', 'tactical_run_script', 'find_staff'], $payload['allowed_tools']);
+        $this->assertSame(['whoami', 'list_tool_surface', 'search_tools', 'send_email', 'tactical_run_script', 'find_staff'], $payload['allowed_tools']);
         $this->assertSame([
             'send_email' => 'staged',
             'tactical_run_script' => 'immediate',

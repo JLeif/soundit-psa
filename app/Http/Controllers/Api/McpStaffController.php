@@ -62,6 +62,16 @@ class McpStaffController extends Controller
 
     private const TOOL_SURFACE_TOOL = 'list_tool_surface';
 
+    private const SEARCH_TOOLS_TOOL = 'search_tools';
+
+    /**
+     * What "not in this catalog" MEANS, stated wherever the catalog is the
+     * answer (list_tool_surface, every search_tools response): absence is
+     * nonexistence, and the remedy is a request_tool build request — so an
+     * empty search can never read as a quiet all-clear.
+     */
+    private const CATALOG_ABSENT_MEANS = 'A capability not in this catalog does not exist on this server — request_tool records it as a build request.';
+
     /**
      * Appended to every grant-check denial. A denied call is the failure that
      * doubles as a refresh signal: the token's allowed-tool surface may have
@@ -348,7 +358,7 @@ class McpStaffController extends Controller
         // client_id off before dispatch, so the executor doesn't need to know
         // about MCP.
         $generalTools = array_merge(
-            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition()],
+            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition(), $this->searchToolsToolDefinition()],
             McpToolSurface::liveGeneralToolDefinitions(),
         );
         $generalNames = array_flip(array_column($generalTools, 'name'));
@@ -859,6 +869,8 @@ class McpStaffController extends Controller
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {
                 $result = $this->listToolSurface($request, $arguments);
+            } elseif ($name === self::SEARCH_TOOLS_TOOL) {
+                $result = $this->searchTools($request, $arguments);
             } elseif (OperatorBridgeTools::handles((string) $name)) {
                 $token = $request->attributes->get('mcp_staff_token');
                 $result = app(OperatorBridgeToolExecutor::class)->execute(
@@ -1984,7 +1996,7 @@ class McpStaffController extends Controller
         // legitimately absent from the live surface and must be exempted from
         // the liveness check below or a caller loses the very tools it would
         // use to find out why something was refused.
-        if ($toolName === self::WHOAMI_TOOL || $toolName === self::TOOL_SURFACE_TOOL) {
+        if ($toolName === self::WHOAMI_TOOL || $toolName === self::TOOL_SURFACE_TOOL || $toolName === self::SEARCH_TOOLS_TOOL) {
             return true;
         }
 
@@ -2259,7 +2271,7 @@ class McpStaffController extends Controller
             'label' => $token instanceof McpStaffToken && $token->label !== null ? $token->label : McpStaffToken::LEGACY_ACTOR_LABEL,
             'directive' => $token instanceof McpStaffToken ? $token->directiveOrDefault() : McpToken::defaultDirective(),
             'allowed_tools' => $token instanceof McpStaffToken && $token->allowedTools !== null
-                ? array_values(array_unique(array_merge([self::WHOAMI_TOOL, self::TOOL_SURFACE_TOOL], $token->allowedTools)))
+                ? array_values(array_unique(array_merge([self::WHOAMI_TOOL, self::TOOL_SURFACE_TOOL, self::SEARCH_TOOLS_TOOL], $token->allowedTools)))
                 : null,
         ];
 
@@ -2344,11 +2356,76 @@ class McpStaffController extends Controller
 
         return [
             'states' => $states,
-            'absent_means' => 'A capability not in this catalog does not exist on this server — request_tool records it as a build request.',
+            'absent_means' => self::CATALOG_ABSENT_MEANS,
             'counts' => $counts,
             'categories' => $categories,
             'tools' => $filtered,
         ];
+    }
+
+    /** @return array<string, mixed> */
+    private function searchToolsToolDefinition(): array
+    {
+        return [
+            'name' => self::SEARCH_TOOLS_TOOL,
+            'description' => 'Search this server\'s full tool catalog by keyword before asking for a capability: each match carries its grant_state — granted (in this token\'s allowlist, callable now), available_ungranted (built and configured but not granted — an operator token grant enables it), or unavailable_config (built but its integration is switched off or not configured on this instance). Case-insensitive substring match on tool names, categories, and one-line descriptions. An empty result means no such tool exists on this server — request_tool records a build request. Same disclosure as list_tool_surface: names and one-line descriptions only — no data, no secrets.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'query' => [
+                        'type' => 'string',
+                        'description' => 'Keyword to match (case-insensitive substring), e.g. "unifi", "backup", "mailbox".',
+                    ],
+                ],
+                'required' => ['query'],
+            ],
+        ];
+    }
+
+    /**
+     * The search_tools handler (psa-cplo3.1): the READ verb over this
+     * caller's own tool surface — "do I already have something for X?" —
+     * answered from the SAME per-caller classification list_tool_surface
+     * returns, narrowed to the query. Disclosure parity with that tool by
+     * construction ({@see McpToolSurface::search()} matches only over the
+     * fields it returns): same caller, same catalog, same states, same
+     * one-line descriptions; never schemas, data, or configuration values.
+     *
+     * An empty or missing query and a query with no matches both return an
+     * EMPTY result with explanatory copy — not an error (nothing is wrong),
+     * and never a bare [] that could read as a clean all-clear.
+     *
+     * @return array<string, mixed>
+     */
+    private function searchTools(Request $request, array $arguments): array
+    {
+        $query = trim((string) ($arguments['query'] ?? ''));
+
+        $matches = array_map(
+            static fn (array $entry): array => [
+                'name' => $entry['name'],
+                'category' => $entry['category'],
+                'grant_state' => $entry['state'],
+                'description' => $entry['description'],
+            ],
+            McpToolSurface::search($query, fn (string $tool): bool => $this->toolAllowed($request, $tool)),
+        );
+
+        $payload = [
+            'query' => $query,
+            'match_count' => count($matches),
+            'states' => McpToolSurface::states(),
+            'absent_means' => self::CATALOG_ABSENT_MEANS,
+            'matches' => $matches,
+        ];
+
+        if ($query === '') {
+            $payload['note'] = 'Empty query — nothing was searched. Provide a keyword; list_tool_surface lists the full catalog.';
+        } elseif ($matches === []) {
+            $payload['note'] = 'No catalog tool matches "'.$query.'". '.self::CATALOG_ABSENT_MEANS;
+        }
+
+        return $payload;
     }
 
     private function actorLabel(Request $request): string

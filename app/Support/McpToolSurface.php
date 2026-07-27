@@ -184,6 +184,36 @@ class McpToolSurface
     }
 
     /**
+     * Query-filtered projection of {@see classify()} (psa-cplo3.1): the same
+     * per-caller entries, narrowed to case-insensitive substring matches on
+     * tool name, category, or one-line description. An empty or whitespace
+     * query matches nothing — the full listing is list_tool_surface's job.
+     *
+     * Matching runs over EXACTLY the fields classify() returns, never the
+     * full catalog descriptions: whatever list_tool_surface reveals to this
+     * caller, search may match and reveal — and nothing else, so a query
+     * cannot act as an oracle over text the surface listing does not itself
+     * disclose (parity posture; the security review owns tightening it).
+     *
+     * @param  callable(string): bool|null  $granted
+     * @return array<int, array{name: string, category: string, state: string, description: string}>
+     */
+    public static function search(string $query, ?callable $granted): array
+    {
+        $needle = trim($query);
+        if ($needle === '') {
+            return [];
+        }
+
+        return array_values(array_filter(
+            self::classify($granted),
+            static fn (array $entry): bool => mb_stripos($entry['name'], $needle) !== false
+                || mb_stripos($entry['category'], $needle) !== false
+                || mb_stripos($entry['description'], $needle) !== false,
+        ));
+    }
+
+    /**
      * Classify specific catalog tool names for one caller. Unknown names are
      * skipped. The live-surface assembly only runs when `$names` is non-empty,
      * so no-match callers (the common request_tool case) pay nothing.

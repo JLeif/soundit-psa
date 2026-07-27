@@ -192,13 +192,13 @@ class McpCallPathLivenessTest extends TestCase
      * the invariant whose absence caused this bead.
      *
      * *** THE BUILT-INS ARE EXEMPT, AND FINDING OUT WHY MATTERS MORE THAN THE EXEMPTION. ***
-     * whoami and list_tool_surface ARE published by tools/list but are deliberately NOT in
-     * liveToolNames() — they are assembled as transport built-ins, outside the grant catalog
-     * the live surface is derived from. So they are a genuine, intended exception to
-     * "published implies live", and a liveness conjunct that did not exempt them would refuse
-     * two tools that tools/list had just advertised. toolAllowed() exempts them before the
-     * grant check for exactly this reason; test_the_transport_built_ins_remain_callable pins
-     * that they survive.
+     * whoami, list_tool_surface, and search_tools ARE published by tools/list but are
+     * deliberately NOT in liveToolNames() — they are assembled as transport built-ins,
+     * outside the grant catalog the live surface is derived from. So they are a genuine,
+     * intended exception to "published implies live", and a liveness conjunct that did not
+     * exempt them would refuse tools that tools/list had just advertised. toolAllowed()
+     * exempts them before the grant check for exactly this reason;
+     * test_the_transport_built_ins_remain_callable pins that they survive.
      */
     public function test_everything_published_to_a_token_is_callable_by_that_token(): void
     {
@@ -208,7 +208,10 @@ class McpCallPathLivenessTest extends TestCase
         $this->assertNotEmpty($published, 'precondition: tools/list published nothing');
 
         $live = McpToolSurface::liveToolNames();
-        $builtIns = ['whoami', 'list_tool_surface'];
+        // search_tools joined deliberately (psa-cplo3.1): the read verb over the
+        // caller's own surface shares the built-ins' whole rationale — a token
+        // must be able to ask what it can do without a grant for the asking.
+        $builtIns = ['whoami', 'list_tool_surface', 'search_tools'];
 
         foreach (array_diff($published, $builtIns) as $name) {
             $this->assertContains(
@@ -232,17 +235,17 @@ class McpCallPathLivenessTest extends TestCase
     // -----------------------------------------------------------------------
 
     /**
-     * whoami and list_tool_surface are always-callable by design — a token that cannot see
-     * its own scope cannot self-heal, and list_tool_surface exists precisely to tell a caller
-     * what is NOT available. They are assembled as transport built-ins rather than catalog
-     * entries, so a liveness conjunct that forgets to exempt them would take out the very
-     * tools an operator uses to diagnose a refusal.
+     * whoami, list_tool_surface, and search_tools are always-callable by design — a token
+     * that cannot see its own scope cannot self-heal, and the surface-discovery pair exists
+     * precisely to tell a caller what is NOT available. They are assembled as transport
+     * built-ins rather than catalog entries, so a liveness conjunct that forgets to exempt
+     * them would take out the very tools an operator uses to diagnose a refusal.
      */
     public function test_the_transport_built_ins_remain_callable(): void
     {
         $token = McpConfig::rotateStaffToken(allowedTools: [self::GRANTED_BUT_NOT_LIVE], label: 'opsbot');
 
-        foreach (['whoami', 'list_tool_surface'] as $builtIn) {
+        foreach (['whoami', 'list_tool_surface', 'search_tools'] as $builtIn) {
             $text = $this->resultText($this->callTool($token, $builtIn));
 
             $this->assertStringNotContainsString(
