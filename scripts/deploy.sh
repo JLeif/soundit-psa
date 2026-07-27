@@ -41,9 +41,86 @@ REVIEWED_REF="${1:-origin/$DEPLOY_BRANCH}"
 echo "=== Deploying to $DEPLOY_HOST ==="
 echo "Target ref: $REVIEWED_REF (must already be on origin — land code via the review gate, not this script)"
 
-# Deploy on VPS (deploy path + reviewed ref passed as $1/$2 into the remote shell)
+# =============================================================================
+# REVIEW GATE (so-xodo5, for so-kvdoh). Refuses a deploy whose window contains
+# held or un-approved work.
+#
+# Before this block, deploy.sh contained ZERO gate lines — "nothing ungated
+# reaches clients" was a BEHAVIOUR, not a control: it held only while whoever
+# ran the deploy remembered to read bead metadata first. On 2026-07-26 that was
+# tested for real — 17 commits and 4 migrations from two PRs, both carrying an
+# explicit "DO NOT MERGE" hold (one with an unresolved auth-bypass blocker),
+# reached main. The only thing between that and production was a person
+# choosing to check.
+#
+# ⭐ IT FAILS CLOSED. A missing or non-executable gate is a REFUSAL, never a
+# skip — otherwise deleting one file silently disables the whole control and
+# "the gate is absent" becomes indistinguishable from "the gate passed".
+# =============================================================================
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PSA_GATE="${PSA_DEPLOY_GATE:-/home/charlie/soundit-office/scripts/psa-deploy-gate.sh}"
+
+# Resolve the ref to an IMMUTABLE SHA and deploy THAT. The gate has to judge the
+# exact commit that ships: if we gated "origin/main" and then let the VPS fetch
+# "origin/main" for itself, anything merged in between would ship un-gated
+# through a gate that returned PASS. Pinning closes that window.
+echo "Refreshing origin refs..."
+git -C "$REPO_DIR" fetch --prune --quiet origin
+if ! TARGET_SHA="$(git -C "$REPO_DIR" rev-parse --verify "${REVIEWED_REF}^{commit}" 2>/dev/null)"; then
+  echo "🔴 DEPLOY REFUSED: cannot resolve '$REVIEWED_REF' to a commit in $REPO_DIR." >&2
+  echo "   The target must already be on origin. Nothing was deployed." >&2
+  exit 2
+fi
+echo "Pinned target: $TARGET_SHA"
+
+if [ ! -x "$PSA_GATE" ]; then
+  echo "🔴 DEPLOY REFUSED: review gate not found or not executable at:" >&2
+  echo "     $PSA_GATE" >&2
+  echo "   This is a HARD REFUSAL, not a skip. A missing gate is not a passing gate." >&2
+  echo "   Restore it, or if you are certain, set an explicit recorded override:" >&2
+  echo "     PSA_DEPLOY_GATE_OVERRIDE=\"<reason>\" $0 $*" >&2
+  # An override must still be reachable here or a lost file bricks emergency
+  # deploys — but it has to be the SAME explicit, recorded override, never a
+  # silent fallthrough.
+  if [ -z "${PSA_DEPLOY_GATE_OVERRIDE:-}" ]; then
+    exit 2
+  fi
+  echo "⚠️  OVERRIDE ACCEPTED (gate missing): ${PSA_DEPLOY_GATE_OVERRIDE}"
+  # An override that is not recorded is just an off switch, so a failed append
+  # must SCREAM rather than be swallowed.
+  # ⚠ COUPLING: this path points at the office city from a file in the client
+  # repo. Move or rename that directory and overrides stop being recorded —
+  # which is exactly why this falls back and shouts instead of failing silently.
+  _PSA_AUDIT="${PSA_DEPLOY_GATE_AUDIT:-/home/charlie/soundit-office/.gc/psa-deploy-gate.log}"
+  _PSA_AUDIT_FB="${PSA_DEPLOY_GATE_AUDIT_FALLBACK:-${TMPDIR:-/tmp}/psa-deploy-gate.audit.log}"
+  _PSA_LINE="$(date -u +%Y-%m-%dT%H:%M:%SZ) OVERRIDE-GATE-MISSING target=$TARGET_SHA reason=${PSA_DEPLOY_GATE_OVERRIDE}"
+  if ! echo "$_PSA_LINE" >> "$_PSA_AUDIT" 2>/dev/null; then
+    if echo "$_PSA_LINE" >> "$_PSA_AUDIT_FB" 2>/dev/null; then
+      echo "⚠️  AUDIT LOG UNWRITABLE ($_PSA_AUDIT) — recorded to fallback: $_PSA_AUDIT_FB" >&2
+    else
+      echo "############################################################################" >&2
+      echo "## ⚠  GATE-MISSING OVERRIDE **NOT RECORDED ANYWHERE ON DISK**             ##" >&2
+      echo "##    LOST LINE: $_PSA_LINE" >&2
+      echo "##    COPY THIS INTO THE BEAD BY HAND before you proceed." >&2
+      echo "############################################################################" >&2
+    fi
+  fi
+else
+  # The gate handles (and records) its own override internally. Exit codes:
+  #   0 = clear, or explicitly overridden and logged
+  #   2 = BLOCKED
+  #   3 = cannot assess — also a refusal: unable-to-assess is not permission.
+  if ! "$PSA_GATE" "$TARGET_SHA"; then
+    echo "" >&2
+    echo "🔴 DEPLOY REFUSED by the review gate (reasons above). Nothing was deployed." >&2
+    echo "   Fix it upstream of the deploy — in the merge — not here." >&2
+    exit 2
+  fi
+fi
+
+# Deploy on VPS (deploy path + PINNED reviewed sha passed as $1/$2 into the remote shell)
 echo "Deploying on VPS..."
-ssh "$DEPLOY_HOST" bash -s "$DEPLOY_PATH" "$REVIEWED_REF" << 'REMOTE'
+ssh "$DEPLOY_HOST" bash -s "$DEPLOY_PATH" "$TARGET_SHA" << 'REMOTE'
 set -eo pipefail
 cd "$1"
 TARGET="$2"
