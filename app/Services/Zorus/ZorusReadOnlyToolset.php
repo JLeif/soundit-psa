@@ -314,12 +314,13 @@ class ZorusReadOnlyToolset
     }
 
     /**
-     * FORENSIC seam: this client's Zorus-LINKED rows, lifecycle-UNFILTERED
-     * (includes inactive assets; soft-deleted excluded by the default scope).
-     * Used by zorus_list_endpoints (a tech looking up a specific machine wants
-     * it even if the asset was marked inactive) and the unmapped-client
-     * leftover-data existence check. This client_id scope is the entire data
-     * boundary — do not widen it.
+     * FORENSIC seam: this client's Zorus-LINKED rows, active OR inactive
+     * (retired/soft-deleted are excluded by the default SoftDeletes scope — so
+     * this is lifecycle-BROAD, NOT lifecycle-unfiltered). Used by
+     * zorus_list_endpoints (a tech looking up a specific machine wants it even
+     * if the asset was marked inactive) and the unmapped-client leftover-data
+     * existence check. This client_id scope is the entire data boundary — do
+     * not widen it.
      *
      * NOT for the posture rollup: getFilteringStatus() counts must describe the
      * ACTIVE fleet (postureLinkedQuery), or an inactive linked asset would be
@@ -474,8 +475,8 @@ class ZorusReadOnlyToolset
      */
     private function emptyPostureNote(Client $client): string
     {
-        return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no ACTIVE PSA assets carry synced Zorus endpoint data. "
-            .'This posture covers active assets only — see fleet_coverage in this same response for any inactive/retired assets that DO carry Zorus data (inactive_assets_excluded / retired_assets_excluded) and for active assets with no Zorus link (unlinked_count); zorus_list_endpoints gives the lifecycle-unfiltered view. '
+        return "{$client->name} is mapped to Zorus customer {$client->zorus_customer_id} but no ACTIVE PSA assets carry synced Zorus endpoint data, so there is no active DNS-filtering posture to report. "
+            .'See fleet_coverage in this same response for active PSA assets with no Zorus link (unlinked_count) and for counts of PSA assets excluded from the active posture by lifecycle: inactive_assets_excluded and retired_assets_excluded count inactive/retired PSA assets regardless of whether they carry Zorus data. Use zorus_list_endpoints for this client\'s LINKED endpoints (active or inactive; retired assets are excluded). '
             .'Possible causes: the daily Zorus device sync has not run yet, no Zorus agents report under this customer, or Zorus endpoints did not match any active PSA asset by hostname. Verify in the Zorus console before treating this as no coverage.';
     }
 
