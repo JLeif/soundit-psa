@@ -137,7 +137,12 @@ class ZorusReadOnlyToolset
             return $client; // error payload
         }
 
-        $endpoints = $this->endpointQuery($client)->get([
+        // Posture = the ACTIVE fleet (postureLinkedQuery), NOT endpointQuery's
+        // lifecycle-unfiltered set: endpoint_count, the filtering/group/state
+        // counts, and freshness must all describe the same active fleet
+        // fleet_coverage reconciles, so an inactive linked asset is never
+        // counted as coverage here AND excluded there (psa-zix2v).
+        $endpoints = $this->postureLinkedQuery($client)->get([
             'zorus_group_name', 'zorus_filtering_enabled', 'zorus_cybersight_enabled',
             'zorus_agent_state', 'zorus_last_seen_at', 'zorus_synced_at',
         ]);
@@ -306,15 +311,47 @@ class ZorusReadOnlyToolset
     }
 
     /**
-     * The one query seam every read goes through: this client's rows, nothing
-     * else. With the upstream customer filter unreliable, this client_id scope
-     * is the entire data boundary — do not widen it.
+     * FORENSIC seam: this client's Zorus-LINKED rows, lifecycle-UNFILTERED
+     * (includes inactive assets; soft-deleted excluded by the default scope).
+     * Used by zorus_list_endpoints (a tech looking up a specific machine wants
+     * it even if the asset was marked inactive) and the unmapped-client
+     * leftover-data existence check. This client_id scope is the entire data
+     * boundary — do not widen it.
+     *
+     * NOT for the posture rollup: getFilteringStatus() counts must describe the
+     * ACTIVE fleet (postureLinkedQuery), or an inactive linked asset would be
+     * counted as current filtering coverage while fleet_coverage simultaneously
+     * reports it excluded — one payload, two fleets (psa-zix2v product review).
      *
      * @return \Illuminate\Database\Eloquent\Builder<Asset>
      */
     private function endpointQuery(Client $client): \Illuminate\Database\Eloquent\Builder
     {
         return Asset::where('client_id', $client->id)->whereNotNull('zorus_endpoint_id');
+    }
+
+    /**
+     * The single ACTIVE-fleet eligibility seam (active + not soft-deleted) that
+     * the filtering-posture rollup AND fleet_coverage share, so endpoint_count,
+     * every filtering/group/agent-state count, freshness, and the coverage
+     * reconciliation all describe ONE coherent fleet (mirrors the Comet/
+     * Servosity posture surfaces; psa-zix2v).
+     *
+     * @return \Illuminate\Database\Eloquent\Builder<Asset>
+     */
+    private function eligibleAssetQuery(Client $client): \Illuminate\Database\Eloquent\Builder
+    {
+        return Asset::where('client_id', $client->id)->active();
+    }
+
+    /**
+     * Active, Zorus-linked assets — the posture rollup's row/count seam.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder<Asset>
+     */
+    private function postureLinkedQuery(Client $client): \Illuminate\Database\Eloquent\Builder
+    {
+        return $this->eligibleAssetQuery($client)->whereNotNull('zorus_endpoint_id');
     }
 
     /**
@@ -329,7 +366,7 @@ class ZorusReadOnlyToolset
      */
     private function fleetCoverage(Client $client): array
     {
-        $eligible = Asset::where('client_id', $client->id)->active();
+        $eligible = $this->eligibleAssetQuery($client); // same seam the posture rollup uses
         $activeTotal = (clone $eligible)->count();
 
         $unlinked = (clone $eligible)->whereNull('zorus_endpoint_id');

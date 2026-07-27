@@ -453,6 +453,46 @@ class ZorusReadOnlyToolsetTest extends TestCase
         $this->assertSame(1, $fc['retired_assets_excluded']);
     }
 
+    public function test_filtering_status_excludes_inactive_linked_from_posture_counts(): void
+    {
+        // psa-zix2v product REVISE: an INACTIVE linked asset must NOT count as
+        // current filtering coverage. It is absent from endpoint_count / the
+        // filtering counts (posture = ACTIVE fleet) and counted once in
+        // fleet_coverage.inactive_assets_excluded — one coherent fleet.
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client, ['is_active' => false, 'zorus_filtering_enabled' => true]); // inactive linked
+        Asset::factory()->create(['client_id' => $client->id, 'zorus_endpoint_id' => null]);   // active unlinked
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertSame(0, $result['endpoint_count']); // inactive linked NOT in posture
+        $this->assertArrayNotHasKey('filtering_enabled_count', $result); // no false "1 filtered endpoint"
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(1, $fc['active_total']);
+        $this->assertSame(0, $fc['zorus_linked_count']);
+        $this->assertSame(1, $fc['unlinked_count']);
+        $this->assertSame(1, $fc['inactive_assets_excluded']);
+    }
+
+    public function test_filtering_status_inactive_linked_only_does_not_take_nonempty_posture_path(): void
+    {
+        // The concrete misleading case: a client whose ONLY linked asset is
+        // inactive must not read as "has a filtered endpoint".
+        $this->configureZorus();
+        $client = $this->mappedClient('Acme');
+        $this->zorusAsset($client, ['is_active' => false, 'zorus_filtering_enabled' => true]);
+
+        $result = $this->toolset()->execute('zorus_get_filtering_status', [], $client->id);
+
+        $this->assertSame(0, $result['endpoint_count']);
+        $this->assertArrayHasKey('note', $result);                       // empty-fleet note, not a rollup
+        $this->assertArrayNotHasKey('filtering_enabled_count', $result);
+        $fc = $result['fleet_coverage'];
+        $this->assertSame(0, $fc['active_total']);
+        $this->assertSame(1, $fc['inactive_assets_excluded']);
+    }
+
     public function test_an_unknown_tool_name_is_an_error(): void
     {
         $this->configureZorus();
