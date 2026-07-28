@@ -356,6 +356,13 @@ class StaffPsaActionToolExecutor
             return ['error' => 'reason is required'];
         }
 
+        // Reject a supplied-but-invalid confidence BEFORE the ticket is touched (a bad value
+        // must not silently become a band bypass — nor close the ticket off it).
+        $confidence = $this->resolveCloseConfidence($arguments);
+        if (is_array($confidence)) {
+            return $confidence;
+        }
+
         // Eligibility gates ->Closed ONLY (resolving an active ticket is legitimate).
         if ($status === TicketStatus::Closed && ! CloseAutoEligibility::eligible($ticket)) {
             return ['error' => $this->directCloseIneligibleReason($ticket)];
@@ -382,7 +389,6 @@ class StaffPsaActionToolExecutor
             return ['error' => $e->getMessage()];
         }
 
-        $confidence = $this->closeConfidenceFloat($arguments['confidence'] ?? null);
         $summary = "Ticket {$status->label()} via close_ticket: {$reason}";
         $this->auditDirectExecution(
             'close_ticket',
@@ -443,6 +449,13 @@ class StaffPsaActionToolExecutor
             return ['error' => 'reason is required'];
         }
 
+        // Reject a supplied-but-invalid confidence before any run is created (a bad value must
+        // not silently become a band bypass on the held run the operator later approves).
+        $confidence = $this->resolveCloseConfidence($arguments);
+        if (is_array($confidence)) {
+            return $confidence;
+        }
+
         if ($ticket->status === TicketStatus::Closed) {
             return ['error' => "Ticket #{$ticket->id} is already closed — nothing to propose."];
         }
@@ -457,13 +470,15 @@ class StaffPsaActionToolExecutor
             ];
         }
 
-        $confidence = $this->closeConfidenceFloat($arguments['confidence'] ?? null);
-
-        // action_type is propose_close (NOT stage_close_ticket) and the content hash matches
-        // TechnicianApprovalService::approveClose()'s recomputation, so approval closes it
-        // through the existing lane. Held-only: run.confidence carries the mapped float for
-        // calibration while the gate is dispatched with null so the auto band never fires.
-        $hash = hash('sha256', 'propose_close:'.$ticket->id.':'.$resolutionSummary);
+        // action_type is propose_close (NOT stage_close_ticket) so approval flows through the
+        // existing approveClose lane. The stored content_hash is the firstOrCreate DEDUP key and
+        // binds the TARGET too: propose-resolved and propose-closed on the same summary are
+        // genuinely different proposals and must not collide on one run. (This is the dedup key
+        // ONLY — approveClose recomputes its own target-bound grant hash at approval time; the
+        // two are never compared, so the formulas need not agree.) Held-only: run.confidence
+        // carries the mapped float for calibration while the gate is dispatched with null so the
+        // auto band never fires.
+        $hash = hash('sha256', 'propose_close:'.$ticket->id.':'.$status->value.':'.$resolutionSummary);
         $meta = [
             'confidence' => $confidence,
             'close_status' => $status->value,
@@ -560,6 +575,30 @@ class StaffPsaActionToolExecutor
             'low' => 0.55,
             default => null,
         };
+    }
+
+    /**
+     * Resolve the close_ticket confidence argument, distinguishing OMITTED (a legitimate band
+     * bypass → null) from SUPPLIED-BUT-INVALID (a caller bug → error). A malformed confidence
+     * must never silently collapse to null: that would turn bad input into the exact value that
+     * bypasses the auto-close calibration band (architecture REVISE, psa-d9ayt). Returns a
+     * float|null on success, or an ['error' => string] array to reject before any mutation.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return float|null|array<string, string>
+     */
+    private function resolveCloseConfidence(array $arguments): float|null|array
+    {
+        if (! array_key_exists('confidence', $arguments) || $arguments['confidence'] === null) {
+            return null; // omitted → band bypass, per owner policy
+        }
+
+        $float = $this->closeConfidenceFloat($arguments['confidence']);
+        if ($float === null) {
+            return ['error' => 'confidence must be one of: high, medium, low (or omitted).'];
+        }
+
+        return $float;
     }
 
     /**

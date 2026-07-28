@@ -109,6 +109,35 @@ class CockpitUndoTest extends TestCase
         $this->assertSame(TicketStatus::InProgress, $run->ticket->fresh()->status);
     }
 
+    public function test_undo_reopens_an_approved_resolve_with_a_custom_resolution_note(): void
+    {
+        // A close_ticket-approved RESOLVE: the status note targets Resolved and its body is the
+        // resolution_summary, NOT the generic operator-approved note. The undo must still reopen
+        // it — undoApprovedClose reads the terminal target from the id-pinned note, never a
+        // hardcoded Closed/body (psa-d9ayt). Reopening lands the ticket back with the team.
+        $run = $this->cockpitRun('propose_close', TechnicianRunState::Done);
+        $run->ticket->update(['status' => TicketStatus::Resolved]);
+        $note = TicketNote::create([
+            'ticket_id' => $run->ticket_id,
+            'author_id' => $this->user->id,
+            'body' => 'Client confirmed the fix; resolving.',
+            'note_type' => NoteType::StatusChange,
+            'is_private' => true,
+            'status_from' => TicketStatus::InProgress,
+            'status_to' => TicketStatus::Resolved,
+            'noted_at' => now(),
+        ]);
+
+        $this->actingAs($this->user)
+            ->postJson($this->runUndoUrl($run, 'approve-close', extra: ['status_note_id' => $note->id]))
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('status', 'undone');
+
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame(TicketStatus::InProgress, $run->ticket->fresh()->status);
+    }
+
     public function test_undo_close_requires_the_matching_status_change_marker(): void
     {
         $run = $this->cockpitRun('propose_close', TechnicianRunState::Done);

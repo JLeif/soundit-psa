@@ -360,6 +360,10 @@
             @foreach ($closureDrafts as $run)
                 @php($badge = $badgeFor($run))
                 @php($isClose = $run->action_type === 'propose_close')
+                {{-- psa-d9ayt: a staged close_ticket run carries its requested terminal target in
+                     proposed_meta.close_status. A resolve is NOT a close — name it so on the card
+                     and the button, so the operator approves the transition they actually see. --}}
+                @php($isResolve = $isClose && data_get($run->proposed_meta, 'close_status') === \App\Enums\TicketStatus::Resolved->value)
                 @php($mergeMeta = $run->proposed_meta ?? [])
                 <article class="card cockpit-item cockpit-row" data-cockpit-item data-section="closures" data-label="{{ e(optional($run->ticket)->subject ?? 'Ticket #'.$run->ticket_id) }}">
                     <div class="card-body py-2">
@@ -373,7 +377,7 @@
                                         <span class="badge rounded-pill bg-light text-dark border">{{ $run->ticket->client->name }}</span>
                                     @endif
                                     @if($run->ticket?->categoryNode)<x-ticket-category-badge :node="$run->ticket->categoryNode" />@endif
-                                    <span class="badge rounded-pill {{ $badge[0] }}"><i class="bi {{ $badge[2] }} me-1"></i>{{ $badge[1] }}</span>
+                                    <span class="badge rounded-pill {{ $badge[0] }}"><i class="bi {{ $badge[2] }} me-1"></i>{{ $isResolve ? 'Proposed resolve' : $badge[1] }}</span>
                                 </div>
                                 <div class="text-muted small text-truncate">
                                     {{ $run->proposed_content }}
@@ -389,7 +393,7 @@
                             <div class="d-flex flex-wrap gap-2 align-items-center">
                                 <form id="approve-{{ $run->id }}" method="POST" action="{{ route('cockpit.approve', $run) }}" data-cockpit-form data-mode="{{ $isClose ? 'optimistic' : 'confirmed' }}" data-keybind="approve" data-arm="true" @if($isClose) data-undo-action="approve-close" data-target-type="run" data-target-id="{{ $run->id }}" @endif>
                                     @csrf
-                                    <button type="submit" class="btn btn-sm {{ $isClose ? 'btn-accent' : 'btn-primary' }}"><i class="bi {{ $isClose ? 'bi-check2' : 'bi-intersect' }} me-1"></i>{{ $isClose ? 'Close' : 'Approve merge' }}</button>
+                                    <button type="submit" class="btn btn-sm {{ $isClose ? 'btn-accent' : 'btn-primary' }}"><i class="bi {{ $isClose ? 'bi-check2' : 'bi-intersect' }} me-1"></i>{{ $isClose ? ($isResolve ? 'Resolve' : 'Close') : 'Approve merge' }}</button>
                                 </form>
                                 <form method="POST" action="{{ route('cockpit.deny', $run) }}" data-cockpit-form data-mode="optimistic" data-keybind="hold" data-undo-action="hold" data-target-type="run" data-target-id="{{ $run->id }}">
                                     @csrf

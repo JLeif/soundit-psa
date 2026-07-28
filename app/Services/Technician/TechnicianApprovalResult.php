@@ -4,8 +4,10 @@ namespace App\Services\Technician;
 
 /**
  * The outcome of an approve or reconnect-run action. status ∈ {sent, closed,
- * published, merged, executed, queued_offline, already_handled, gate_declined,
- * recipient_invalid}. $message carries an operator-facing reason for
+ * resolved, published, merged, executed, queued_offline, already_handled,
+ * gate_declined, recipient_invalid}. 'resolved' vs 'closed' distinguishes which
+ * terminal target an approved close_ticket run applied (psa-d9ayt). $message
+ * carries an operator-facing reason for
  * recipient_invalid (a To/CC that no longer resolves at approval time) or an
  * operator-facing summary for an executed action. $secret is a ONE-TIME
  * credential read back from the executed upstream call — the CIPP create-user

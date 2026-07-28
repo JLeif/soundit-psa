@@ -186,10 +186,19 @@ class TechnicianApprovalService
     }
 
     /**
-     * Approve a held propose_close run: closes the ticket to Closed (silent — no client
-     * notification) through the gate (atomic + audited). Mirrors approveAndSend exactly:
-     * single-use CAS latch, hash recompute, signed grant, try/catch-releaseClaim (CO-3),
-     * releaseClaim on non-executed. No body, no email, no client send.
+     * Approve a held propose_close run through the gate (atomic + audited). Mirrors
+     * approveAndSend exactly: single-use CAS latch, hash recompute, signed grant,
+     * try/catch-releaseClaim (CO-3), releaseClaim on non-executed. No body, no email.
+     *
+     * The applied TERMINAL TARGET and closing note come from the RUN, never a hardcoded
+     * Closed (psa-d9ayt): a close_ticket-originated run (stageClose) carries the requested
+     * target in proposed_meta.close_status and a resolution_summary in proposed_content —
+     * honor BOTH, so a staged status=resolved RESOLVES (not closes) and the summary is
+     * written as the closing note AND the ticket resolution. Staging changes governance,
+     * not action semantics: this must match the immediate closeTicket path exactly, side
+     * effects included (Resolved notifies the client via changeStatus; Closed stays silent).
+     * A LEGACY propose_close run (ProposeCloseTool) has no close_status marker → the
+     * generic operator-approved note, Closed, and no resolution, exactly as before.
      */
     public function approveClose(TechnicianRun $run, int $approverId): TechnicianApprovalResult
     {
@@ -198,10 +207,17 @@ class TechnicianApprovalService
             return new TechnicianApprovalResult('already_handled');
         }
 
+        $target = $this->approvedCloseTarget($run);
+        [$closeNote, $resolution] = $this->approvedCloseNoteAndResolution($run);
+
         $statusNoteId = null;
 
         try {
-            $hash = hash('sha256', 'propose_close:'.$run->ticket_id.':'.$run->proposed_content);
+            // Bind the terminal target INTO the grant + audit hash: the approver approves a
+            // specific transition and the audit records which one. The hash is recomputed at
+            // approval time and only ever compared issue-vs-verify (never against the stored
+            // run.content_hash), so this binding is safe for legacy runs too.
+            $hash = hash('sha256', 'propose_close:'.$run->ticket_id.':'.$target->value.':'.$run->proposed_content);
             $token = TechnicianApprovalGrant::issue('propose_close', $run->ticket_id, $hash, $approverId);
 
             $result = $this->gate->dispatch(
@@ -209,9 +225,9 @@ class TechnicianApprovalService
                 ticketId: $run->ticket_id,
                 clientId: $run->client_id,
                 contentHash: $hash,
-                summary: 'Operator-approved close.',
+                summary: 'Operator-approved '.$target->label().'.',
                 runId: $run->id,
-                executor: function () use ($run, &$statusNoteId): void {
+                executor: function () use ($run, $target, $closeNote, $resolution, &$statusNoteId): void {
                     $ticket = $run->ticket; // belongsTo — null if the ticket was (soft-)deleted
                     // CO-23 + CO-Fix6: capture the fresh model once so both the guard and
                     // changeStatus operate on the same (current) row. If the ticket is gone —
@@ -225,7 +241,12 @@ class TechnicianApprovalService
                         return;
                     }
 
-                    if ($fresh->status === TicketStatus::Closed) {
+                    // Already at the requested terminal state, or the proposal is now STALE —
+                    // the ticket moved to a terminal state that no longer permits this transition
+                    // (e.g. a human Closed it under a pending resolve; Closed→Resolved is not a
+                    // legal move). Treat as already-handled rather than letting changeStatus throw.
+                    if ($fresh->status === $target
+                        || ! in_array($target, $fresh->status->allowedTransitions(), true)) {
                         $run->advanceTo(TechnicianRunState::Done);
 
                         return;
@@ -233,15 +254,16 @@ class TechnicianApprovalService
                     // Using $fresh ensures the status-change note's "from" state is accurate.
                     app(TicketService::class)->changeStatus(
                         $fresh,
-                        TicketStatus::Closed,
+                        $target,
                         TechnicianConfig::aiActorUserId(),
-                        self::OPERATOR_APPROVED_CLOSE_NOTE,
+                        $closeNote,
+                        $resolution,
                     );
                     $statusNoteId = TicketNote::query()
                         ->where('ticket_id', $fresh->id)
                         ->where('note_type', NoteType::StatusChange->value)
-                        ->where('status_to', TicketStatus::Closed->value)
-                        ->where('body', self::OPERATOR_APPROVED_CLOSE_NOTE)
+                        ->where('status_to', $target->value)
+                        ->where('body', $closeNote)
                         ->latest('id')
                         ->value('id');
                     $run->advanceTo(TechnicianRunState::Done);
@@ -267,7 +289,47 @@ class TechnicianApprovalService
             return new TechnicianApprovalResult('already_handled');
         }
 
-        return new TechnicianApprovalResult('closed', noteId: (int) $statusNoteId); // no client notification (CO-18)
+        // 'resolved' vs 'closed' so the cockpit flash + undo lane name the transition the
+        // operator actually approved (Closed stays silent — CO-18; Resolved notified via changeStatus).
+        return new TechnicianApprovalResult(
+            $target === TicketStatus::Resolved ? 'resolved' : 'closed',
+            noteId: (int) $statusNoteId,
+        );
+    }
+
+    /**
+     * The terminal target an approved close applies. close_ticket-originated runs carry the
+     * requested target in proposed_meta.close_status; legacy propose_close runs (no marker)
+     * default to Closed. Fail-safe: an unrecognized or non-terminal marker also falls back to
+     * Closed — never a non-terminal status (the historical, safe default).
+     */
+    private function approvedCloseTarget(TechnicianRun $run): TicketStatus
+    {
+        $raw = data_get($run->proposed_meta, 'close_status');
+        $status = is_string($raw) ? TicketStatus::tryFrom($raw) : null;
+
+        return $status !== null && $status->isTerminal() ? $status : TicketStatus::Closed;
+    }
+
+    /**
+     * The closing status-change note body and the ticket resolution an approved close writes.
+     * A close_ticket-originated run (close_status marker present) uses its resolution_summary
+     * (proposed_content) as BOTH — no silent close. A legacy propose_close run keeps the generic
+     * operator-approved note and writes NO resolution (its proposed_content is a reason, not a
+     * client-facing resolution).
+     *
+     * @return array{0: string, 1: ?string} [note body, resolution]
+     */
+    private function approvedCloseNoteAndResolution(TechnicianRun $run): array
+    {
+        $isCloseTicketOriginated = data_get($run->proposed_meta, 'close_status') !== null;
+        $summary = trim((string) $run->proposed_content);
+
+        if ($isCloseTicketOriginated && $summary !== '') {
+            return [$summary, $summary];
+        }
+
+        return [self::OPERATOR_APPROVED_CLOSE_NOTE, null];
     }
 
     public function approveStagedEmail(TechnicianRun $run, string $body, int $approverId, array $to = [], array $cc = []): TechnicianApprovalResult

@@ -1679,6 +1679,118 @@ class PsaActionToolsTest extends TestCase
         $this->assertGreaterThanOrEqual(0.9, (float) $run->confidence, 'high maps into the top calibration band');
     }
 
+    public function test_close_ticket_rejects_a_present_but_invalid_confidence(): void
+    {
+        // Omitted confidence is a legitimate band bypass, but a SUPPLIED value outside the
+        // high|medium|low enum must ERROR — never silently map to null (band bypass). A
+        // malformed value is a caller bug and the ticket must NOT be closed off it.
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $ticket->update(['status' => TicketStatus::PendingClient]); // eligible + quiet
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Closing.',
+            'reason' => 'Stale ticket.',
+            'confidence' => 'super-high',
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('confidence', (string) $response->json('result.content.0.text'));
+        $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status, 'an invalid confidence must not close the ticket');
+    }
+
+    public function test_close_ticket_staged_rejects_a_present_but_invalid_confidence(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket:staged'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $ticket->update(['status' => TicketStatus::PendingClient]);
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Held propose.',
+            'reason' => 'Held propose.',
+            'confidence' => '0.9', // a raw float string is not the enum
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('confidence', (string) $response->json('result.content.0.text'));
+        $this->assertSame(
+            0,
+            TechnicianRun::query()->where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->count(),
+            'no held run may be created off an invalid confidence',
+        );
+    }
+
+    public function test_close_ticket_staged_records_the_requested_close_status_in_meta(): void
+    {
+        // The staged run must carry the requested terminal target so the approval lane can
+        // apply resolved-vs-closed faithfully (never hardcode Closed on approval).
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket:staged'], 'chet');
+
+        $ticket = $this->ticketWithContact();
+        $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Held close.',
+            'reason' => 'Held close.',
+        ])->assertOk();
+        $closedRun = TechnicianRun::query()->where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->firstOrFail();
+        $this->assertSame(TicketStatus::Closed->value, data_get($closedRun->proposed_meta, 'close_status'), 'omitted status stages a Closed marker');
+
+        $ticket2 = $this->ticketWithContact();
+        $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket2->id,
+            'status' => TicketStatus::Resolved->value,
+            'resolution_summary' => 'Held resolve.',
+            'reason' => 'Held resolve.',
+        ])->assertOk();
+        $resolvedRun = TechnicianRun::query()->where('ticket_id', $ticket2->id)->where('action_type', 'propose_close')->firstOrFail();
+        $this->assertSame(TicketStatus::Resolved->value, data_get($resolvedRun->proposed_meta, 'close_status'), 'an explicit resolved stages a Resolved marker');
+    }
+
+    public function test_staged_close_ticket_resolve_approved_in_cockpit_resolves_with_the_summary(): void
+    {
+        // End-to-end (the reviewers' exact ask): a close_ticket:staged grant + status=resolved
+        // stages a held run carrying the target; cockpit approval must RESOLVE (not close) and
+        // write resolution_summary as BOTH the ticket resolution and the closing note. The pre-fix
+        // approval hardcoded Closed + dropped the summary (psa-d9ayt security/architecture/product).
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket:staged'], 'chet');
+        $ticket = $this->ticketWithContact(); // InProgress
+        $summary = 'Reimaged the laptop; user confirmed working.';
+
+        $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'status' => TicketStatus::Resolved->value,
+            'resolution_summary' => $summary,
+            'reason' => 'Resolved after reimage.',
+        ])->assertOk();
+
+        $run = TechnicianRun::query()->where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->firstOrFail();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status, 'staged: the ticket is untouched until approval');
+
+        // Operator approves in the cockpit.
+        $this->actingAs(User::factory()->create())
+            ->post(route('cockpit.approve', $run))
+            ->assertRedirect();
+
+        $fresh = $ticket->fresh();
+        $this->assertSame(TicketStatus::Resolved, $fresh->status, 'approval must RESOLVE the staged resolve, not close it');
+        $this->assertSame($summary, $fresh->resolution);
+        $this->assertDatabaseHas('ticket_notes', [
+            'ticket_id' => $ticket->id,
+            'note_type' => NoteType::StatusChange->value,
+            'status_to' => TicketStatus::Resolved->value,
+            'body' => $summary,
+        ]);
+    }
+
     public function test_move_ticket_to_client_requires_typed_confirm_and_rehomes_assets(): void
     {
         $this->configureAiActor();

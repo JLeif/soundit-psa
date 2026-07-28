@@ -123,10 +123,12 @@ class TechnicianCockpitController extends Controller
             default => abort(422, 'Unsupported action type for approval.'),
         };
 
-        $ok = in_array($result->status, ['sent', 'closed', 'published', 'merged', 'executed', 'queued_offline'], true);
+        $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline'], true);
         $message = match ($result->status) {
             'sent' => 'Reply approved and sent.',
             'closed' => 'Ticket closed.',
+            // psa-d9ayt: a staged close_ticket(status=resolved) resolves, not closes — name it.
+            'resolved' => 'Ticket resolved.',
             'published' => 'Public note published.',
             'merged' => 'Tickets merged.',
             // An executed action may carry its own operator-facing summary
@@ -563,15 +565,26 @@ class TechnicianCockpitController extends Controller
             }
 
             $ticket = $run->ticket;
+            // Anchor on the EXACT status-change note this approval recorded (id-pinned). The
+            // terminal target is READ FROM THE NOTE, never hardcoded Closed: a close_ticket-
+            // approved run can be Resolved, and its note body is the resolution_summary rather
+            // than the generic operator-approved note (psa-d9ayt). Matching a fixed status_to /
+            // body here would silently fail to reopen those. The id-pin + ticket-ownership +
+            // StatusChange type + "ticket is still at the note's terminal target" + the later-
+            // transition guard below are what keep this from clobbering a subsequent change.
             $statusNote = TicketNote::query()
                 ->whereKey($statusNoteId)
                 ->where('ticket_id', $run->ticket_id)
                 ->where('note_type', NoteType::StatusChange->value)
-                ->where('status_to', TicketStatus::Closed->value)
-                ->where('body', TechnicianApprovalService::OPERATOR_APPROVED_CLOSE_NOTE)
                 ->first();
 
-            if (! $ticket || $ticket->status !== TicketStatus::Closed || ! $statusNote) {
+            $noteTarget = $statusNote?->status_to; // cast to TicketStatus (or null)
+
+            if (! $ticket
+                || ! $statusNote
+                || ! $noteTarget instanceof TicketStatus
+                || ! $noteTarget->isTerminal()
+                || $ticket->status !== $noteTarget) {
                 return false;
             }
 
