@@ -16,6 +16,91 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
+/**
+ * ── ERROR-WRITE ENUMERATION (psa-f9gbv class fix; manager ruling
+ *    so-wisp-f790a685da) ──
+ *
+ * Every write to invoices.stripe_sync_error on the Stripe push / void / send /
+ * pull / import surface, derived from `grep -rn stripe_sync_error app/`, each
+ * with its scoping mechanism or its per-site justification of why it cannot
+ * clobber a concurrent winner. THE PROTECTED INVARIANT: no failed or losing
+ * attempt may replace, clear, or re-point provenance owned by a concurrent
+ * WINNING attempt's chain (the winner is the attempt whose Stripe invoice id
+ * the row records at the locked boundary).
+ *
+ * FOUNDATION several justifications lean on — the row's stripe_invoice_id is
+ * WRITE-ONCE: Invoice::recordPushResult() is its only writer on an existing
+ * row and refuses to re-point (DuplicateId); the import upsert is KEYED by
+ * the id (updateOrCreate matches only the row already carrying it, and rows
+ * pushed from PSA are excluded upstream via metadata.psa_invoice_id); no code
+ * path nulls or replaces a recorded id. Therefore a loaded model with a
+ * non-null id always refers to the row's own chain — its writes are
+ * same-chain truth, not cross-chain clobber — and a row that GAINED an id
+ * since this attempt admitted belongs to a concurrent winner.
+ *
+ * W1  pushInvoiceToStripe() config refusal ("no Stripe customer linked") —
+ *     SCOPED: status != Void AND stripe_invoice_id IS NULL, the
+ *     attempt-admission CAS. Without the id guard, an attempt that admitted
+ *     on an unlinked row and stalled (stale client relation) could write its
+ *     config complaint over a winner that recorded meanwhile.
+ *     [regression: StripeErrorWriteScopingTest v2]
+ * W2  pushInvoiceToStripe() pre-boundary catch → settleAbortedPush() —
+ *     SCOPED: settles under the row lock; REPLACES only while the row still
+ *     holds this attempt's admission state (live + id IS NULL); on a
+ *     moved-on row (winner id or Void) writes nothing durable except the
+ *     idempotent, created-id-keyed APPEND of an unconfirmed-orphan alarm.
+ *     Created-object accounting: the created id is tracked from the moment
+ *     createInvoice() returns and any later failure compensates that EXACT
+ *     id (draft → DELETE, open/uncollectible → VOID, void → already dead;
+ *     destroyAbortedStripeInvoice()); createInvoice() carries a per-attempt
+ *     Stripe idempotency key so an ambiguous transport failure replays the
+ *     same logical create instead of minting an untraceable second draft.
+ *     [regressions: StripeErrorWriteScopingTest v1, v3–v7]
+ * W3  the locked result boundary's error clear (recordPushResult() input,
+ *     'stripe_sync_error' => null) — SCOPED by the boundary itself
+ *     [Invoice::recordPushResult()]: a foreign id ⇒ DuplicateId, nothing
+ *     written; a Void row drops the error key (and money/URL); a live
+ *     same-id row is the winner's own chain.
+ * W4  settleSendFailure() — lock-settled; reachable only after THIS
+ *     attempt's id was recorded at the boundary (outcome Recorded), and ids
+ *     are write-once ⇒ always same-chain; a Void row gets no write.
+ * W5  compensateVoidedPush() both writes — identity CAS: WHERE
+ *     stripe_invoice_id = this attempt's id; proof about this attempt's
+ *     object can only land while the row still points at exactly it.
+ * W6  compensateDuplicatePush() unconfirmed alarm — never replaces: an
+ *     idempotent APPEND keyed on the duplicate id, under the row lock; the
+ *     confirmed branch writes nothing durable at all.
+ * W7  syncInvoiceStatusFromStripe() transport catch — status-guarded
+ *     (!= Void); same-chain by the write-once id: entry requires a non-null
+ *     model id, and no concurrent winner under a DIFFERENT id can exist
+ *     because push admission refuses linked rows.
+ * W8  syncInvoiceStatusFromStripe() void-detected clear — same-chain
+ *     convergence proof: Stripe itself reported the row's own id void; the
+ *     local void that precedes the clear serializes on the row lock.
+ * W9  pull happy-path clear (recordStatusPullResult() input) — live row:
+ *     same-chain health proof for the row's own id; Void row: the error key
+ *     is DROPPED under the lock (MF8) so a stale pull cannot erase a void
+ *     propagation's divergence record.
+ * W10 voidInvoiceInStripe() — six per-cause error writes plus two
+ *     convergence clears, all on the void path: the row is Void AND linked,
+ *     so no concurrent winner can exist (push admission refuses BOTH), and
+ *     every write is provenance for the row's own id.
+ * W11 importInvoicesFromStripe() upsert clear — identity-KEYED: the upsert
+ *     writes only the row already carrying the imported id, and
+ *     PSA-originated invoices never reach it (metadata.psa_invoice_id skip).
+ * W12 InvoiceController::propagateVoidToStripe() not-configured write — void
+ *     path, Void + linked row: same reasoning as W10.
+ *
+ * RESIDUALS — disclosed, out of the winner-clobber class, filed as
+ * psa-zvima: (a) same-chain writers (W4, W7–W10, W12) legitimately
+ * replace/clear the column with their chain's newest truth, which erases a
+ * resident cross-chain ORPHAN alarm (W2/W6 appends) — the winner's own chain
+ * writing, not a loser clobbering a winner; durable orphan alarms need
+ * structured provenance, not more CAS guards. (b) a non-StripeClientException
+ * escaping the push try (vendor shape drift, e.g. a create response without
+ * an id) bypasses W2: WRITE-FREE — no clobber possible — but a created
+ * object can leak uncompensated.
+ */
 class StripeSyncService
 {
     public function __construct(
@@ -135,14 +220,32 @@ class StripeSyncService
 
         if (! $invoice->client->stripe_customer_id) {
             $error = "Client \"{$invoice->client->name}\" has no Stripe customer linked. Go to Settings → Stripe Customer Matching.";
-            // Status-guarded, column-scoped (R6): never replace a Void row's
-            // per-cause provenance with a config complaint.
+            // Admission-state CAS (W1): status-guarded AND id-guarded. This
+            // attempt admitted on a live, UNLINKED row; the write may land
+            // only while the row still holds that state. A Void row's
+            // per-cause provenance (R6) and a concurrent winner's chain — a
+            // push that recorded its id while this attempt's client relation
+            // was still loading — are both owned elsewhere, and this attempt
+            // created nothing upstream, so refusing the write loses no truth
+            // (the throw still tells the actor).
             Invoice::withTrashed()->whereKey($invoice->getKey())
                 ->where('status', '!=', InvoiceStatus::Void)
+                ->whereNull('stripe_invoice_id')
                 ->update(['stripe_sync_error' => $error]);
             $invoice->refresh();
             throw new StripeClientException($error);
         }
+
+        // Per-attempt Stripe idempotency key (W2): a create whose transport
+        // fails with no response is ambiguous — the invoice may or may not
+        // exist upstream, with its id unknown here. The key lets the client
+        // replay THE SAME logical create (Stripe returns the original object
+        // instead of minting a second draft). Per-ATTEMPT, deliberately not
+        // per-invoice: two concurrent attempts sharing a key would replay one
+        // attempt's invoice into the other, and the separate item POSTs below
+        // would then double every line on the shared object.
+        $attemptKey = 'psa-push-'.$invoice->id.'-'.Str::uuid();
+        $stripeInvoiceId = null;
 
         try {
             // 1. Create draft invoice
@@ -158,7 +261,7 @@ class StripeSyncService
                 'automatic_tax[enabled]' => 'true',
             ];
 
-            $stripeInvoice = $this->stripeClient->createInvoice($invoiceData);
+            $stripeInvoice = $this->stripeClient->createInvoice($invoiceData, $attemptKey);
             $stripeInvoiceId = $stripeInvoice['id'];
 
             // 2. Add line items
@@ -196,17 +299,11 @@ class StripeSyncService
             // 3. Finalize
             $finalized = $this->stripeClient->finalizeInvoice($stripeInvoiceId);
         } catch (StripeClientException $e) {
-            // Status-guarded, column-scoped (R6): a void that committed while
-            // this round-trip was in flight owns the row's provenance now — a
-            // failed attempt that created nothing payable must not replace it
-            // (nor mint a false alarm on a converged Void row). On a live row
-            // the failure IS the newest truth and is recorded as before.
-            Invoice::withTrashed()->whereKey($invoice->getKey())
-                ->where('status', '!=', InvoiceStatus::Void)
-                ->update(['stripe_sync_error' => $e->getMessage()]);
-            $invoice->refresh();
-
-            throw $e;
+            // W2 — settle the pre-boundary failure under the row lock:
+            // compensate any created upstream object by exact id, then write
+            // durable provenance only where this attempt still owns it (live
+            // row, no recorded id). See settleAbortedPush().
+            throw $this->settleAbortedPush($invoice, $e, $stripeInvoiceId);
         }
 
         // 4. Read back tax and totals
@@ -308,6 +405,133 @@ class StripeSyncService
             $e->getCode(),
             $e
         );
+    }
+
+    /**
+     * Settle a PRE-boundary push failure — create, an invoice item, or
+     * finalize threw before the locked result boundary ever ran (W2 of the
+     * error-write enumeration above). Two obligations, in order:
+     *
+     * 1. COMPENSATE THE EXACT CREATED OBJECT, when the attempt got far enough
+     *    to hold an id. Upstream state is ambiguous at this point: a draft
+     *    (an item or the finalize REQUEST failed) or a live payable open
+     *    invoice that no row points at (the finalize RESPONSE was lost after
+     *    upstream success). destroyAbortedStripeInvoice() resolves the
+     *    ambiguity by reading the object's status and killing it the way
+     *    Stripe requires. Failures BEFORE create carry no id and skip this.
+     *
+     * 2. SETTLE DURABLE PROVENANCE UNDER THE ROW LOCK — the same protocol as
+     *    settleSendFailure()/the compensators, applied to the last unscoped
+     *    writer on this surface (security R6, psa-f9gbv):
+     *    - row LIVE with NO recorded id → still this attempt's admission
+     *      state: the failure (plus the compensation outcome, when an object
+     *      existed) IS the newest truth. Recorded, replacing only prior
+     *      failures of the same unpushed row.
+     *    - row moved on (a concurrent winner's id, or Void) → that chain owns
+     *      the column; this attempt writes NOTHING durable — except when its
+     *      created object could NOT be confirmed dead, which must scream
+     *      durably: the orphan alarm is APPENDED idempotently (keyed on the
+     *      created id), never replacing the resident truth — two alarms are
+     *      two truths (the compensateDuplicatePush() protocol).
+     *
+     * Always returns the exception for the caller to throw: the push failed
+     * either way, and no email was ever authorized (the boundary never ran).
+     */
+    private function settleAbortedPush(Invoice $invoice, StripeClientException $e, ?string $createdStripeId): StripeClientException
+    {
+        $confirmed = false;
+        $note = null;
+
+        if ($createdStripeId !== null) {
+            ['confirmed' => $confirmed, 'action' => $action] = $this->destroyAbortedStripeInvoice($invoice, $createdStripeId);
+            $note = $confirmed
+                ? 'The partially created Stripe invoice '.$createdStripeId.' was '.$action.' upstream to compensate — nothing payable was left behind. It was NOT emailed.'
+                : 'A failed Stripe push left a partially created Stripe invoice '.$createdStripeId.' that could NOT be confirmed removed and may still be live — void or delete it manually in Stripe. It was NOT emailed.';
+        }
+
+        DB::transaction(function () use ($invoice, $e, $createdStripeId, $confirmed, $note) {
+            $locked = Invoice::withTrashed()->whereKey($invoice->getKey())
+                ->lockForUpdate()->firstOrFail();
+
+            if ($locked->status !== InvoiceStatus::Void && $locked->stripe_invoice_id === null) {
+                $locked->update([
+                    'stripe_sync_error' => $note === null ? $e->getMessage() : $e->getMessage().' '.$note,
+                ]);
+
+                return;
+            }
+
+            // The row moved on: only an UNCONFIRMED orphan may touch it.
+            if ($createdStripeId === null || $confirmed) {
+                return;
+            }
+
+            $existing = $locked->stripe_sync_error;
+            if ($existing !== null && str_contains($existing, $createdStripeId)) {
+                return; // already alarmed for this orphan
+            }
+
+            $locked->update([
+                'stripe_sync_error' => $existing === null ? $note : $existing.' ALSO: '.$note,
+            ]);
+        });
+        $invoice->refresh();
+
+        return new StripeClientException(
+            $note === null ? $e->getMessage() : $e->getMessage().' '.$note,
+            $e->getCode(),
+            $e
+        );
+    }
+
+    /**
+     * Kill this attempt's just-created Stripe invoice after a pre-boundary
+     * failure, the way Stripe's lifecycle requires (W2): a DRAFT is DELETEd
+     * (https://docs.stripe.com/api/invoices/delete — drafts cannot be
+     * voided), an OPEN or UNCOLLECTIBLE invoice is VOIDed (the lost-response
+     * finalize case: live and payable), and an already-void object is
+     * accepted as dead. Anything else — a failed read, a response for a
+     * different id, an unexpected status (paid), an unconfirmed delete/void —
+     * is UNCONFIRMED and the caller records the loud orphan alarm. Proof
+     * rules mirror compensateVoidedPush(): the response must identify the
+     * SAME id in the terminal state; never blindly act on an object this
+     * attempt cannot identify (the R2B rule).
+     *
+     * @return array{confirmed: bool, action: string}
+     */
+    private function destroyAbortedStripeInvoice(Invoice $invoice, string $stripeInvoiceId): array
+    {
+        $confirmed = false;
+        $action = 'removed';
+
+        try {
+            $current = $this->stripeClient->getInvoice($stripeInvoiceId);
+            $status = ($current['id'] ?? null) === $stripeInvoiceId ? ($current['status'] ?? null) : null;
+
+            if ($status === 'void') {
+                $confirmed = true;
+                $action = 'already void';
+            } elseif ($status === 'draft') {
+                $r = $this->stripeClient->deleteInvoice($stripeInvoiceId);
+                $confirmed = ($r['id'] ?? null) === $stripeInvoiceId && ($r['deleted'] ?? null) === true;
+                $action = 'deleted';
+            } elseif (in_array($status, ['open', 'uncollectible'], true)) {
+                $r = $this->stripeClient->voidInvoice($stripeInvoiceId);
+                $confirmed = ($r['id'] ?? null) === $stripeInvoiceId && ($r['status'] ?? null) === 'void';
+                $action = 'voided';
+            }
+        } catch (StripeClientException $ce) {
+            Log::warning('[StripeSync] Aborted-push compensation failed', [
+                'invoice_id' => $invoice->id, 'stripe_invoice_id' => $stripeInvoiceId, 'error' => $ce->getMessage(),
+            ]);
+        }
+
+        Log::warning('[StripeSync] Aborted-push compensation', [
+            'invoice_id' => $invoice->id, 'stripe_invoice_id' => $stripeInvoiceId,
+            'confirmed' => $confirmed, 'action' => $action,
+        ]);
+
+        return ['confirmed' => $confirmed, 'action' => $action];
     }
 
     /**
