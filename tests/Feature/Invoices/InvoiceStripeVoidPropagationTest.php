@@ -1538,6 +1538,13 @@ class InvoiceStripeVoidPropagationTest extends TestCase
 
                 throw new StripeClientException('finalize exploded');
             });
+        // psa-f9gbv (W2): the aborted attempt now compensates its own created
+        // object by exact id — finalize truly failed, so in_boom is still a
+        // DRAFT upstream and is DELETEd (drafts cannot be voided).
+        $stripe->shouldReceive('getInvoice')->once()->with('in_boom')
+            ->andReturn(['id' => 'in_boom', 'status' => 'draft']);
+        $stripe->shouldReceive('deleteInvoice')->once()->with('in_boom')
+            ->andReturn(['id' => 'in_boom', 'object' => 'invoice', 'deleted' => true]);
         $stripe->shouldNotReceive('sendInvoice');
 
         try {

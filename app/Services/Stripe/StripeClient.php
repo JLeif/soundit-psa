@@ -27,9 +27,23 @@ class StripeClient
         return $this->request('GET', $endpoint, ['query' => $params]);
     }
 
-    public function post(string $endpoint, array $data = []): array
+    /**
+     * POST, optionally under a Stripe idempotency key
+     * (https://docs.stripe.com/api/idempotent_requests — the `Idempotency-Key`
+     * header). A keyed request is safely replayable: Stripe returns the
+     * original result instead of creating a second object, so request() may
+     * retry an ambiguous transport failure. Unkeyed POSTs keep the old
+     * behavior exactly — no replay (a blind retry of a create that actually
+     * succeeded upstream would mint a duplicate).
+     */
+    public function post(string $endpoint, array $data = [], ?string $idempotencyKey = null): array
     {
-        return $this->request('POST', $endpoint, ['form_params' => $data]);
+        return $this->request('POST', $endpoint, ['form_params' => $data], $idempotencyKey);
+    }
+
+    private function delete(string $endpoint): array
+    {
+        return $this->request('DELETE', $endpoint);
     }
 
     // ── Health Check ──
@@ -95,14 +109,24 @@ class StripeClient
 
     // ── Invoices ──
 
-    public function createInvoice(array $data): array
+    public function createInvoice(array $data, ?string $idempotencyKey = null): array
     {
-        return $this->post('/v1/invoices', $data);
+        return $this->post('/v1/invoices', $data, $idempotencyKey);
     }
 
     public function createInvoiceItem(array $data): array
     {
         return $this->post('/v1/invoiceitems', $data);
+    }
+
+    /**
+     * Delete a DRAFT invoice (https://docs.stripe.com/api/invoices/delete —
+     * only drafts are deletable; finalized invoices must be voided instead).
+     * A successful deletion responds with `"deleted": true` for the id.
+     */
+    public function deleteInvoice(string $id): array
+    {
+        return $this->delete("/v1/invoices/{$id}");
     }
 
     public function finalizeInvoice(string $id): array
@@ -196,12 +220,15 @@ class StripeClient
 
     // ── Internal ──
 
-    private function request(string $method, string $endpoint, array $options = []): array
+    private function request(string $method, string $endpoint, array $options = [], ?string $idempotencyKey = null): array
     {
         $options['headers'] = [
             'Authorization' => 'Bearer '.($this->config['secret_key'] ?? ''),
             'Stripe-Version' => '2024-12-18.acacia',
         ];
+        if ($idempotencyKey !== null) {
+            $options['headers']['Idempotency-Key'] = $idempotencyKey;
+        }
 
         $attempts = 0;
         $maxAttempts = 3;
@@ -222,6 +249,22 @@ class StripeClient
                     }
                     Log::info("[StripeClient] Rate limited, retrying in {$retryAfter}s");
                     sleep($retryAfter);
+
+                    continue;
+                }
+
+                // An AMBIGUOUS failure — no response at all (code 0: the
+                // request may or may not have reached Stripe) or a 5xx (Stripe
+                // may have processed it before erroring) — is replayed ONLY
+                // when this request carries an idempotency key, which makes
+                // the replay return the original result instead of minting a
+                // second object (https://docs.stripe.com/api/idempotent_requests).
+                // Unkeyed requests keep the old fail-fast behavior: a blind
+                // replay of a possibly-succeeded create would be a duplicate.
+                if ($idempotencyKey !== null && $attempts < $maxAttempts
+                    && ($code === 0 || ($code >= 500 && $code < 600))) {
+                    Log::warning("[StripeClient] Ambiguous {$method} {$endpoint} failure (code {$code}); replaying under idempotency key");
+                    sleep(1);
 
                     continue;
                 }
