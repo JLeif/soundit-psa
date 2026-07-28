@@ -563,13 +563,20 @@ class StaffPsaActionToolExecutor
     }
 
     /**
-     * Map the close_ticket confidence enum to a representative float in the band the
+     * Map a close_ticket confidence value to a representative float in the band the
      * CloseBandEvaluator reads. DORMANT — this only records the value; it never enables an
-     * automatic close. Omitted/unrecognized confidence returns null (band bypass).
+     * automatic close. STRICT exact membership of the published schema enum [high, medium, low]
+     * (McpToolRegistry) — no lowercasing or trimming: a published schema is an execution
+     * boundary, so "HIGH", " high ", a non-string, or null are OUT of the enum and return the
+     * null sentinel. That sentinel means "not a valid enum member", NOT "bypass":
+     * resolveCloseConfidence() turns it into a REJECTED call for a SUPPLIED value; only an
+     * OMITTED key bypasses the band (architecture psa-d9ayt R3).
      */
     private function closeConfidenceFloat(mixed $value): ?float
     {
-        return match (is_string($value) ? mb_strtolower(trim($value)) : null) {
+        // match() compares with === , so only the exact enum strings map to a band; every other
+        // value (wrong case, padded, non-string, null) falls through to the null sentinel.
+        return match ($value) {
             'high' => 0.95,
             'medium' => 0.75,
             'low' => 0.55,

@@ -1770,6 +1770,64 @@ class PsaActionToolsTest extends TestCase
         $this->assertSame(TicketStatus::Closed, $ticket->fresh()->status);
     }
 
+    public function test_close_ticket_rejects_a_wrong_case_or_padded_confidence(): void
+    {
+        // The published schema enum is EXACT [high, medium, low]. A wrong-CASE "HIGH"/"High" is
+        // OUT of the published enum and must be rejected, never silently case-folded into a band
+        // (architecture R3: a published schema is an execution boundary, not documentation).
+        // NOTE: only case variants are exercised here — Laravel's global TrimStrings middleware
+        // strips surrounding whitespace before the executor sees it, so a padded " high " arrives
+        // as the valid "high" over HTTP; closeConfidenceFloat() still rejects a padded value at
+        // the executor boundary (exact match, no trim), which is what the reviewer reflected on.
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket'], 'chet');
+
+        foreach (['HIGH', 'High', 'MEDIUM', 'HiGh', 'higher'] as $variant) {
+            $ticket = $this->ticketWithContact();
+            $ticket->update(['status' => TicketStatus::PendingClient]);
+
+            $response = $this->callTool($token, 'close_ticket', [
+                'ticket_id' => $ticket->id,
+                'resolution_summary' => 'Closing.',
+                'reason' => 'Stale.',
+                'confidence' => $variant,
+            ]);
+
+            $response->assertOk();
+            $this->assertTrue((bool) $response->json('result.isError'), "confidence '{$variant}' must be rejected as out-of-enum");
+            $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status, "confidence '{$variant}' must not close the ticket");
+        }
+    }
+
+    public function test_close_ticket_staged_rejects_an_explicit_null_confidence(): void
+    {
+        // The staged twin of the direct null-rejection: a staged-only grant + confidence:null must
+        // ERROR before any held run is created, leaving the ticket untouched (architecture R3
+        // required direct AND staged coverage of the key-present-null branch — the prior staged
+        // test used the string "0.9" and could not catch a regression in the null branch).
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket:staged'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $ticket->update(['status' => TicketStatus::PendingClient]);
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Held propose.',
+            'reason' => 'Held propose.',
+            'confidence' => null,
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'a staged supplied confidence:null must be rejected');
+        $this->assertStringContainsString('confidence', (string) $response->json('result.content.0.text'));
+        $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status, 'staged null confidence must not touch the ticket');
+        $this->assertSame(
+            0,
+            TechnicianRun::query()->where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->count(),
+            'no held run may be created off an explicit null confidence',
+        );
+    }
+
     public function test_close_ticket_staged_records_the_requested_close_status_in_meta(): void
     {
         // The staged run must carry the requested terminal target so the approval lane can
