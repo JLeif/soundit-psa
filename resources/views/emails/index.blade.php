@@ -397,6 +397,15 @@
 
 @push('scripts')
 <script>
+// HTML-escape values interpolated into innerHTML strings below (psa-ed1an). The
+// textContent -> innerHTML idiom matches public/js/command-palette.js and
+// public/js/softphone.js; used by the link-ticket typeahead render sites.
+function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 // Preference persistence
 (function() {
     var STORAGE_KEY = 'emailListDefaults';
@@ -484,9 +493,9 @@ window.openLinkModal = function(emailId) {
                 .then(function(tickets) {
                     resultsDiv.innerHTML = tickets.map(function(t) {
                         return '<button type="button" class="list-group-item list-group-item-action small py-1" onclick="selectLinkTicket(' + t.id + ')">'
-                            + '<strong>' + t.display_id + '</strong> '
-                            + '<span class="badge ' + t.priority_class + ' me-1">' + t.priority + '</span>'
-                            + t.subject
+                            + '<strong>' + escapeHtml(t.display_id) + '</strong> '
+                            + '<span class="badge ' + escapeHtml(t.priority_class) + ' me-1">' + escapeHtml(t.priority) + '</span>'
+                            + escapeHtml(t.subject)
                             + '</button>';
                     }).join('') || '<div class="text-muted small p-2">No tickets found</div>';
                 });
@@ -620,9 +629,9 @@ window.selectLinkTicket = function(ticketId) {
                             .then(function(tickets) {
                                 bulkResults.innerHTML = tickets.map(function(t) {
                                     return '<button type="button" class="list-group-item list-group-item-action small py-1" onclick="selectLinkTicket(' + t.id + ')">'
-                                        + '<strong>' + t.display_id + '</strong> '
-                                        + '<span class="badge ' + t.priority_class + ' me-1">' + t.priority + '</span>'
-                                        + t.subject
+                                        + '<strong>' + escapeHtml(t.display_id) + '</strong> '
+                                        + '<span class="badge ' + escapeHtml(t.priority_class) + ' me-1">' + escapeHtml(t.priority) + '</span>'
+                                        + escapeHtml(t.subject)
                                         + '</button>';
                                 }).join('') || '<div class="text-muted small p-2">No tickets found</div>';
                             });
