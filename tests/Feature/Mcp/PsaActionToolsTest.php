@@ -1726,6 +1726,50 @@ class PsaActionToolsTest extends TestCase
         );
     }
 
+    public function test_close_ticket_rejects_an_explicit_null_confidence(): void
+    {
+        // A SUPPLIED confidence:null is not in the published enum [high, medium, low] — it must
+        // be REJECTED, never silently coerced to the band bypass (security + architecture R2
+        // fail-open). Only OMITTING confidence bypasses the band. The ticket must not close.
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $ticket->update(['status' => TicketStatus::PendingClient]);
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Closing.',
+            'reason' => 'Stale ticket.',
+            'confidence' => null,
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'), 'a supplied confidence:null must be rejected, not treated as omitted');
+        $this->assertStringContainsString('confidence', (string) $response->json('result.content.0.text'));
+        $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status, 'explicit null confidence must not close the ticket');
+    }
+
+    public function test_close_ticket_still_closes_when_confidence_is_omitted_entirely(): void
+    {
+        // The counterpart guard: OMITTING confidence (key absent) remains the sanctioned band
+        // bypass and must still succeed — the R2 fix rejects only a SUPPLIED invalid value.
+        $this->configureAiActor();
+        $token = $this->token(['close_ticket'], 'chet');
+        $ticket = $this->ticketWithContact();
+        $ticket->update(['status' => TicketStatus::PendingClient]);
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'resolution_summary' => 'Closing quietly.',
+            'reason' => 'Stale ticket.',
+            // confidence intentionally omitted
+        ]);
+
+        $response->assertOk();
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $this->assertSame(TicketStatus::Closed, $ticket->fresh()->status);
+    }
+
     public function test_close_ticket_staged_records_the_requested_close_status_in_meta(): void
     {
         // The staged run must carry the requested terminal target so the approval lane can

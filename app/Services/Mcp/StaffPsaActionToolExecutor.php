@@ -589,13 +589,19 @@ class StaffPsaActionToolExecutor
      */
     private function resolveCloseConfidence(array $arguments): float|null|array
     {
-        if (! array_key_exists('confidence', $arguments) || $arguments['confidence'] === null) {
-            return null; // omitted → band bypass, per owner policy
+        // OMITTING confidence (key absent) is the sanctioned band bypass (owner policy).
+        // A SUPPLIED value — INCLUDING an explicit null — is an input that must match the
+        // published enum [high, medium, low]; anything else (null, a float string, garbage)
+        // is REJECTED outright, never silently coerced to the bypass. A supplied confidence:null
+        // is NOT in the non-null enum, so it must not fail open past the enum/calibration band
+        // (security + architecture psa-d9ayt R2). Reject the call over guessing a band.
+        if (! array_key_exists('confidence', $arguments)) {
+            return null; // omitted → band bypass
         }
 
         $float = $this->closeConfidenceFloat($arguments['confidence']);
         if ($float === null) {
-            return ['error' => 'confidence must be one of: high, medium, low (or omitted).'];
+            return ['error' => 'confidence must be one of: high, medium, low — or omit it entirely to bypass the calibration band. A supplied null is not valid.'];
         }
 
         return $float;
