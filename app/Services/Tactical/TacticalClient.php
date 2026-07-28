@@ -267,11 +267,32 @@ class TacticalClient
         }
 
         if ($this->baseUri !== null) {
-            $resolved = UriResolver::resolve($this->baseUri, $endpointUri);
-            $collection = UriResolver::resolve($this->baseUri, new Uri('checks/'));
+            $resolvedPath = self::normalizedRequestPath(
+                UriResolver::resolve($this->baseUri, $endpointUri)->getPath()
+            );
+            $collectionPath = self::normalizedRequestPath(
+                UriResolver::resolve($this->baseUri, new Uri('checks/'))->getPath()
+            );
+            if ($resolvedPath === $collectionPath) {
+                return true;
+            }
 
-            return self::normalizedRequestPath($resolved->getPath())
-                === self::normalizedRequestPath($collection->getPath());
+            // Collection-valued base_uri (psa-y9ae5.1): when the configured base
+            // is ITSELF the checks collection, resolve(base, 'checks/') points at
+            // a FICTITIOUS .../checks/checks child, so the comparison above misses
+            // an empty / dot / query-only / absolute reference that resolves to the
+            // base collection itself. Fail closed when the base's own path is the
+            // checks collection and the request resolves to exactly it. Narrow by
+            // construction: a normal API-root base has a non-checks base path, so
+            // this branch cannot fire for it (the vendor check-CREATION aliases
+            // under a normal base are a separate, latent concern — psa-yfegz).
+            $basePath = self::normalizedRequestPath($this->baseUri->getPath());
+            if (($basePath === 'checks' || str_ends_with($basePath, '/checks'))
+                && $resolvedPath === $basePath) {
+                return true;
+            }
+
+            return false;
         }
 
         // No configured base: the collection's absolute location is

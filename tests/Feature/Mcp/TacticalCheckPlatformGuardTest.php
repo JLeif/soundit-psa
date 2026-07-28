@@ -1241,6 +1241,62 @@ class TacticalCheckPlatformGuardTest extends TestCase
         }
     }
 
+    /** @return array{0: TacticalClient, 1: \GuzzleHttp\Handler\MockHandler} */
+    private function realCollectionValuedBaseClientWithMock(array $responses): array
+    {
+        $mock = new \GuzzleHttp\Handler\MockHandler($responses);
+
+        // A base_uri that IS ALREADY the checks collection. This is an ACCEPTED
+        // config shape: SafeTacticalUrl validates scheme/host/IP, not path
+        // (IntegrationsController updateTactical), so nothing rejects it.
+        $client = new TacticalClient(new \GuzzleHttp\Client([
+            'base_uri' => 'https://tactical.example.test/api/v3/checks/',
+            'handler' => \GuzzleHttp\HandlerStack::create($mock),
+            'headers' => ['X-API-KEY' => 'k', 'Content-Type' => 'application/json'],
+        ]));
+
+        return [$client, $mock];
+    }
+
+    public function test_raw_transport_guard_covers_a_collection_valued_base_uri(): void
+    {
+        // psa-y9ae5.1 REVISE, closed: when base_uri IS ALREADY the checks
+        // collection, the resolution matcher computed the collection as
+        // resolve(base, 'checks/') = .../api/v3/checks/checks/ — a FICTITIOUS
+        // child — so an empty / dot / query-only / absolute reference that
+        // Guzzle resolves to the REAL .../api/v3/checks/ collection sailed past
+        // unguarded and the write was SENT. The matcher now ALSO fails closed
+        // when the configured base's own path IS the checks collection and the
+        // request resolves to exactly it. Dual-target payload refuses before any
+        // read, so each variant proves itself with an untouched one-response queue.
+        foreach ([
+            '',
+            '.',
+            '?dry=1',
+            'https://tactical.example.test/api/v3/checks/',
+            '/api/v3/checks/',
+        ] as $endpoint) {
+            [$client, $mock] = $this->realCollectionValuedBaseClientWithMock([
+                new \GuzzleHttp\Psr7\Response(200, [], json_encode('never sent')),
+            ]);
+
+            try {
+                $client->post($endpoint, [
+                    'agent' => 'agent-1',
+                    'policy' => 7,
+                    'check_type' => 'script',
+                    'script' => 102,
+                    'name' => 'Collection-valued base probe',
+                ]);
+                $this->fail("post('{$endpoint}', …) must be guarded on a collection-valued base_uri");
+            } catch (\App\Services\Tactical\TacticalClientException $e) {
+                $this->assertStringContainsString('BOTH an agent and a policy', $e->getMessage(), $endpoint);
+            }
+
+            $this->assertSame(1, $mock->count(), "no HTTP may be consumed for '{$endpoint}'");
+        }
+    }
+
     public function test_raw_transport_post_to_non_check_endpoints_is_not_guarded(): void
     {
         // The seam guards exactly the checks collection. Other collections
