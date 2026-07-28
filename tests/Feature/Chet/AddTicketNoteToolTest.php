@@ -252,18 +252,20 @@ class AddTicketNoteToolTest extends TestCase
 
     public function test_chet_token_does_not_publish_nonexistent_write_tools_even_if_accidentally_scoped(): void
     {
-        $token = $this->chetToken(['find_staff', 'get_staff', 'add_ticket_note', 'close_ticket', 'tactical_run_diagnostic', 'propose_close']);
+        // frobnicate_ticket is a deliberately non-existent tool name (close_ticket is
+        // now a real published tool, so it can no longer stand in as the fake here).
+        $token = $this->chetToken(['find_staff', 'get_staff', 'add_ticket_note', 'frobnicate_ticket', 'tactical_run_diagnostic', 'propose_close']);
 
         $names = $this->listToolNames($token);
         $this->assertContains('add_ticket_note', $names);
-        $this->assertNotContains('close_ticket', $names);
+        $this->assertNotContains('frobnicate_ticket', $names);
         $this->assertNotContains('tactical_run_diagnostic', $names);
         // Spike-2: propose_close is allowed-when-scoped (held-by-construction);
         // full behavior is covered in ChetProposeCloseTest.
         $this->assertContains('propose_close', $names);
 
         $client = Client::factory()->create();
-        foreach (['close_ticket', 'tactical_run_diagnostic'] as $tool) {
+        foreach (['frobnicate_ticket', 'tactical_run_diagnostic'] as $tool) {
             $response = $this->callTool($token, $tool, ['client_id' => $client->id]);
             $response->assertOk();
             $this->assertTrue((bool) $response->json('result.isError'), "{$tool} should fail.");

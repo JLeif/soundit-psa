@@ -207,7 +207,9 @@ class ChetProposeCloseTest extends TestCase
         $client = Client::factory()->create();
         Ticket::factory()->create(['client_id' => $client->id]);
 
-        $denied = ['close_ticket', 'tactical_run_diagnostic'];
+        // frobnicate_ticket is a deliberately non-existent tool name (close_ticket is
+        // now a real published tool, so it can no longer stand in as the fake here).
+        $denied = ['frobnicate_ticket', 'tactical_run_diagnostic'];
         $token = $this->chetToken($denied);
 
         foreach ($denied as $tool) {

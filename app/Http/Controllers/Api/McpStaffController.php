@@ -148,6 +148,11 @@ class McpStaffController extends Controller
         'propose_merge',
         'update_ticket',
         'set_ticket_status',
+        // psa-d9ayt: close_ticket is the only terminal transition; stage_close_ticket
+        // is its staged twin (the mode gate rewrites the canonical name to it), so BOTH
+        // must route to StaffPsaActionToolExecutor — mirrors send_email/stage_email.
+        'close_ticket',
+        'stage_close_ticket',
         'assign_ticket',
         'assign_asset',
         'unassign_asset',
@@ -158,6 +163,10 @@ class McpStaffController extends Controller
     private const PSA_TICKET_SCOPED_TOOLS = [
         'update_ticket',
         'set_ticket_status',
+        // Both close_ticket and its staged dispatch name derive their client scope from
+        // ticket_id (never an ambient client_id argument).
+        'close_ticket',
+        'stage_close_ticket',
         'assign_ticket',
         'assign_asset',
         'unassign_asset',
@@ -1149,6 +1158,10 @@ class McpStaffController extends Controller
             return $this->auditSetTicketStatusArguments($args);
         }
 
+        if ($tool === 'close_ticket' || $tool === 'stage_close_ticket') {
+            return $this->auditCloseTicketArguments($args);
+        }
+
         if ($tool === 'assign_ticket') {
             return $this->auditAssignTicketArguments($args);
         }
@@ -1379,11 +1392,37 @@ class McpStaffController extends Controller
         foreach ($arguments as $key => $value) {
             $normalized = mb_strtolower((string) $key);
 
-            if (in_array($normalized, ['ticket_id', 'status', 'confirm_status'], true)) {
+            if (in_array($normalized, ['ticket_id', 'status'], true)) {
                 $safe[$normalized] = $value;
             }
 
-            if (in_array($normalized, ['reason', 'note', 'resolution'], true)) {
+            if (in_array($normalized, ['reason', 'note'], true)) {
+                $safe[$normalized.'_length'] = is_string($value) ? mb_strlen($value) : 0;
+            }
+        }
+
+        return $safe;
+    }
+
+    /**
+     * close_ticket / stage_close_ticket audit shape: keep the scalar decision fields
+     * (ticket_id, status, confidence) and reduce the free-text resolution_summary / reason
+     * to lengths only — they can carry client detail and never belong in the audit body.
+     *
+     * @return array<string, mixed>
+     */
+    private function auditCloseTicketArguments(array $arguments): array
+    {
+        $safe = [];
+
+        foreach ($arguments as $key => $value) {
+            $normalized = mb_strtolower((string) $key);
+
+            if (in_array($normalized, ['ticket_id', 'status', 'confidence'], true)) {
+                $safe[$normalized] = $value;
+            }
+
+            if (in_array($normalized, ['resolution_summary', 'reason'], true)) {
                 $safe[$normalized.'_length'] = is_string($value) ? mb_strlen($value) : 0;
             }
         }

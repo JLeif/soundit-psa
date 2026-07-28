@@ -94,6 +94,8 @@ class StaffPsaActionToolExecutor
             'propose_merge' => $this->proposeMerge($arguments, $clientId, $actorLabel),
             'update_ticket' => $this->updateTicket($arguments, $clientId, $actorLabel),
             'set_ticket_status' => $this->setTicketStatus($arguments, $clientId, $actorLabel),
+            'close_ticket' => $this->closeTicket($arguments, $clientId, $actorLabel),
+            'stage_close_ticket' => $this->stageClose($arguments, $clientId, $actorLabel),
             'assign_ticket' => $this->assignTicket($arguments, $clientId, $actorLabel),
             'assign_asset' => $this->assignAsset($arguments, $clientId, $actorLabel),
             'unassign_asset' => $this->unassignAsset($arguments, $clientId, $actorLabel),
@@ -267,39 +269,16 @@ class StaffPsaActionToolExecutor
             return ['error' => 'status is required'];
         }
 
+        // psa-d9ayt: set_ticket_status handles NON-terminal transitions only. Resolving or
+        // closing routes through close_ticket, which carries the resolution summary and the
+        // full auto-close safety envelope — a terminal transition must never slip through the
+        // general status changer. Use the isTerminal() predicate, never a hardcoded list.
+        if ($status->isTerminal()) {
+            return ['error' => 'Resolving or closing a ticket must go through close_ticket.'];
+        }
+
         $reason = $this->optionalString($arguments, 'reason');
         $note = $this->optionalString($arguments, 'note');
-        $resolution = $this->optionalString($arguments, 'resolution');
-
-        // psa-y4ft: auto-close safety envelope on the DIRECT close path. Chet closes
-        // via set_ticket_status, which bypasses the held propose_close review AND the
-        // #177 state/dedup gate. "Fold it in" (Charlie): extend the SAME envelope here
-        // so the direct path can't route around it. Only ->Closed is gated for
-        // eligibility (resolving an active ticket is a legitimate everyday action);
-        // the dedup / already-in-state guard covers BOTH terminal transitions; every
-        // non-terminal transition stays fully open.
-        if ($status === TicketStatus::Closed && ! CloseAutoEligibility::eligible($ticket)) {
-            return ['error' => $this->directCloseIneligibleReason($ticket)];
-        }
-
-        if ($status->isTerminal()) {
-            if ($ticket->status === $status) {
-                return ['error' => "Ticket #{$ticket->id} is already {$status->label()} — leaving it as-is."];
-            }
-
-            if ($this->hasPendingProposedClose($ticket)) {
-                return ['error' => "A close is already proposed for ticket #{$ticket->id} and awaiting approval — not re-actioning it via the direct path."];
-            }
-
-            if ($reason === null) {
-                return ['error' => 'reason is required'];
-            }
-
-            $confirm = $this->optionalString($arguments, 'confirm_status');
-            if (! $this->confirmStatusMatches($status, $confirm)) {
-                return ['error' => 'The typed confirm_status does not match the requested ticket status. Ticket status change cancelled.'];
-            }
-        }
 
         try {
             $updated = $this->ticketService->changeStatus(
@@ -307,7 +286,7 @@ class StaffPsaActionToolExecutor
                 $status,
                 TechnicianConfig::requiredAiActorUserId(),
                 $note,
-                $resolution,
+                null,
             );
         } catch (\InvalidArgumentException $e) {
             return ['error' => $e->getMessage()];
@@ -321,16 +300,11 @@ class StaffPsaActionToolExecutor
             $this->mutationContentHash('set_ticket_status', $updated->id, [
                 'status' => $status->value,
                 'note' => $note,
-                'resolution' => $resolution,
                 'reason' => $reason,
             ]),
             $summary,
             TechnicianConfig::requiredAiActorUserId(),
         );
-
-        if ($status === TicketStatus::Closed) {
-            $this->recordDirectCloseUndoCard($updated, (string) $reason, $actorLabel);
-        }
 
         return [
             'success' => true,
@@ -339,6 +313,253 @@ class StaffPsaActionToolExecutor
             'status' => $updated->status->value,
             'message' => "Status changed to {$status->label()}.",
         ];
+    }
+
+    /**
+     * close_ticket (psa-d9ayt) — the ONLY sanctioned terminal transition. The psa-y4ft
+     * auto-close safety envelope moved here wholesale from set_ticket_status: ->Closed is
+     * eligibility-gated (a ticket still awaiting us, with recent client activity, or already
+     * closed is refused); the already-in-state + pending-held-close dedup covers BOTH terminal
+     * transitions; ->Resolved is a legitimate everyday action and is not eligibility-gated.
+     * resolution_summary is written as BOTH the closing note and the ticket resolution — no
+     * silent closes. An executed ->Closed records a Done direct_close run so the cockpit reopen
+     * lane can offer one-click Reopen.
+     *
+     * @return array<string, mixed>
+     */
+    private function closeTicket(array $arguments, int $clientId, string $actorLabel): array
+    {
+        if ($error = $this->guardDirectAction()) {
+            return $error;
+        }
+
+        $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
+        if (is_array($ticket)) {
+            return $ticket;
+        }
+
+        // status defaults to closed; only a terminal status may pass. Validate with the
+        // enum predicate, never a hardcoded ['resolved','closed'] list (a second definition
+        // would drift from TicketStatus).
+        $status = $this->closeTargetStatus($arguments['status'] ?? null);
+        if ($status === null) {
+            return ['error' => 'status must be resolved or closed.'];
+        }
+
+        $resolutionSummary = $this->requiredString($arguments, 'resolution_summary');
+        if ($resolutionSummary === null) {
+            return ['error' => 'resolution_summary is required — a ticket is never closed silently.'];
+        }
+
+        $reason = $this->requiredString($arguments, 'reason');
+        if ($reason === null) {
+            return ['error' => 'reason is required'];
+        }
+
+        // Eligibility gates ->Closed ONLY (resolving an active ticket is legitimate).
+        if ($status === TicketStatus::Closed && ! CloseAutoEligibility::eligible($ticket)) {
+            return ['error' => $this->directCloseIneligibleReason($ticket)];
+        }
+
+        // Already-in-state + pending-held-close dedup: both terminal transitions.
+        if ($ticket->status === $status) {
+            return ['error' => "Ticket #{$ticket->id} is already {$status->label()} — leaving it as-is."];
+        }
+
+        if ($this->hasPendingProposedClose($ticket)) {
+            return ['error' => "A close is already proposed for ticket #{$ticket->id} and awaiting approval — not re-actioning it via close_ticket."];
+        }
+
+        try {
+            $updated = $this->ticketService->changeStatus(
+                $ticket,
+                $status,
+                TechnicianConfig::requiredAiActorUserId(),
+                $resolutionSummary,
+                $resolutionSummary,
+            );
+        } catch (\InvalidArgumentException $e) {
+            return ['error' => $e->getMessage()];
+        }
+
+        $confidence = $this->closeConfidenceFloat($arguments['confidence'] ?? null);
+        $summary = "Ticket {$status->label()} via close_ticket: {$reason}";
+        $this->auditDirectExecution(
+            'close_ticket',
+            $updated,
+            $actorLabel,
+            $this->mutationContentHash('close_ticket', $updated->id, [
+                'status' => $status->value,
+                'resolution_summary' => $resolutionSummary,
+                'reason' => $reason,
+                'confidence' => $confidence,
+            ]),
+            $summary,
+            TechnicianConfig::requiredAiActorUserId(),
+        );
+
+        if ($status === TicketStatus::Closed) {
+            $this->recordDirectCloseUndoCard($updated, $reason, $actorLabel);
+        }
+
+        return [
+            'success' => true,
+            'ticket_id' => $updated->id,
+            'ticket_display_id' => $updated->display_id,
+            'status' => $updated->status->value,
+            'message' => "Ticket {$status->label()}.",
+        ];
+    }
+
+    /**
+     * Staged twin of close_ticket. Records a HELD propose_close proposal routed through the
+     * existing cockpit approval machinery (TechnicianApprovalService::approveClose), so the
+     * approval UI, the close dedup, and the CloseBandEvaluator calibration all work unchanged.
+     * Held-only: the gate is dispatched with a null confidence so it never auto-fires, while the
+     * confidence enum is mapped to a representative float and recorded on the run (where the
+     * band reads it). Omitted confidence records null — the band bypasses it.
+     *
+     * @return array<string, mixed>
+     */
+    private function stageClose(array $arguments, int $clientId, string $actorLabel): array
+    {
+        $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
+        if (is_array($ticket)) {
+            return $ticket;
+        }
+
+        $status = $this->closeTargetStatus($arguments['status'] ?? null);
+        if ($status === null) {
+            return ['error' => 'status must be resolved or closed.'];
+        }
+
+        $resolutionSummary = $this->requiredString($arguments, 'resolution_summary');
+        if ($resolutionSummary === null) {
+            return ['error' => 'resolution_summary is required — a ticket is never closed silently.'];
+        }
+
+        $reason = $this->requiredString($arguments, 'reason');
+        if ($reason === null) {
+            return ['error' => 'reason is required'];
+        }
+
+        if ($ticket->status === TicketStatus::Closed) {
+            return ['error' => "Ticket #{$ticket->id} is already closed — nothing to propose."];
+        }
+
+        // Ticket-level dedup: never stack a second held close on top of a pending one.
+        if ($this->hasPendingProposedClose($ticket)) {
+            return [
+                'success' => true,
+                'ticket_id' => $ticket->id,
+                'ticket_display_id' => $ticket->display_id,
+                'message' => "A close is already proposed for ticket #{$ticket->id}; awaiting approval.",
+            ];
+        }
+
+        $confidence = $this->closeConfidenceFloat($arguments['confidence'] ?? null);
+
+        // action_type is propose_close (NOT stage_close_ticket) and the content hash matches
+        // TechnicianApprovalService::approveClose()'s recomputation, so approval closes it
+        // through the existing lane. Held-only: run.confidence carries the mapped float for
+        // calibration while the gate is dispatched with null so the auto band never fires.
+        $hash = hash('sha256', 'propose_close:'.$ticket->id.':'.$resolutionSummary);
+        $meta = [
+            'confidence' => $confidence,
+            'close_status' => $status->value,
+            'drafted_by' => $actorLabel,
+        ];
+
+        $run = TechnicianRun::firstOrCreate(
+            [
+                'ticket_id' => $ticket->id,
+                'action_type' => 'propose_close',
+                'content_hash' => $hash,
+            ],
+            [
+                'client_id' => $ticket->client_id,
+                'state' => TechnicianRunState::AwaitingApproval,
+                'proposed_content' => $resolutionSummary,
+                'proposed_meta' => $meta,
+                'confidence' => $confidence,
+                'tokens_used' => 0,
+            ],
+        );
+
+        if (! $run->wasRecentlyCreated) {
+            if ($run->state === TechnicianRunState::AwaitingApproval) {
+                return [
+                    'success' => true,
+                    'ticket_id' => $ticket->id,
+                    'ticket_display_id' => $ticket->display_id,
+                    'run_id' => $run->id,
+                    'message' => 'Already proposed closing this ticket; awaiting approval.',
+                ];
+            }
+
+            $run->update([
+                'state' => TechnicianRunState::AwaitingApproval->value,
+                'proposed_content' => $resolutionSummary,
+                'proposed_meta' => $meta,
+                'confidence' => $confidence,
+                'tokens_used' => 0,
+            ]);
+        }
+
+        $this->gate->dispatch(
+            actionType: 'propose_close',
+            ticketId: $ticket->id,
+            clientId: $ticket->client_id,
+            contentHash: $hash,
+            summary: "MCP proposed closing ticket #{$ticket->id}: {$reason}",
+            runId: $run->id,
+            executor: static function (): void {
+                throw new \LogicException('Held-only staged close path must not execute directly.');
+            },
+            confidence: null,
+        );
+
+        return [
+            'success' => true,
+            'ticket_id' => $ticket->id,
+            'ticket_display_id' => $ticket->display_id,
+            'run_id' => $run->id,
+            'message' => 'Close proposed for cockpit approval.',
+        ];
+    }
+
+    /**
+     * Resolve the close_ticket target status: defaults to Closed when omitted, and only a
+     * TERMINAL status may pass (validated with TicketStatus::isTerminal(), never a hardcoded
+     * list). Returns null for any non-terminal or unrecognized value.
+     */
+    private function closeTargetStatus(mixed $value): ?TicketStatus
+    {
+        if ($value === null || (is_string($value) && trim($value) === '')) {
+            return TicketStatus::Closed;
+        }
+
+        $status = $this->ticketStatusFrom($value);
+        if ($status === null || ! $status->isTerminal()) {
+            return null;
+        }
+
+        return $status;
+    }
+
+    /**
+     * Map the close_ticket confidence enum to a representative float in the band the
+     * CloseBandEvaluator reads. DORMANT — this only records the value; it never enables an
+     * automatic close. Omitted/unrecognized confidence returns null (band bypass).
+     */
+    private function closeConfidenceFloat(mixed $value): ?float
+    {
+        return match (is_string($value) ? mb_strtolower(trim($value)) : null) {
+            'high' => 0.95,
+            'medium' => 0.75,
+            'low' => 0.55,
+            default => null,
+        };
     }
 
     /**
@@ -2562,17 +2783,6 @@ class StaffPsaActionToolExecutor
         }
 
         return \App\Enums\TicketStatus::tryFrom(trim($value));
-    }
-
-    private function confirmStatusMatches(\App\Enums\TicketStatus $status, ?string $typed): bool
-    {
-        if ($typed === null) {
-            return false;
-        }
-
-        $typed = mb_strtolower(trim($typed));
-
-        return $typed === mb_strtolower($status->value) || $typed === mb_strtolower($status->label());
     }
 
     private function confirmClientMatches(Client $client, ?string $typed): bool

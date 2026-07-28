@@ -468,6 +468,8 @@ class McpToolRegistry
             self::proposeMergeTool(),
             self::updateTicketTool(),
             self::setTicketStatusTool(),
+            self::closeTicketTool(),
+            self::stageCloseTicketTool(),
             self::assignTicketTool(),
             self::assignAssetTool(),
             self::unassignAssetTool(),
@@ -562,7 +564,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'set_ticket_status',
-            'description' => 'Change a ticket status immediately. Open and in-progress transitions are direct; terminal transitions to Resolved or Closed require typed confirmation and a concrete reason. The server derives the ticket client from ticket_id and writes an action audit row. Requires an explicit token grant.',
+            'description' => 'Change a ticket to a NON-TERMINAL status (New, In Progress, Pending Client, Pending Third Party). Resolving or closing a ticket is NOT done here — use the dedicated close_ticket tool for those. The server derives the ticket client from ticket_id and writes an action audit row. Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -572,27 +574,107 @@ class McpToolRegistry
                     ],
                     'status' => [
                         'type' => 'string',
-                        'enum' => ['new', 'in_progress', 'pending_client', 'pending_third_party', 'resolved', 'closed'],
-                        'description' => 'Target ticket status.',
-                    ],
-                    'confirm_status' => [
-                        'type' => 'string',
-                        'description' => 'Typed status confirmation required for Resolved and Closed transitions.',
+                        'enum' => ['new', 'in_progress', 'pending_client', 'pending_third_party'],
+                        'description' => 'Target non-terminal ticket status. To resolve or close, use close_ticket instead.',
                     ],
                     'reason' => [
                         'type' => 'string',
-                        'description' => 'Optional ticket-specific reason for the status change. Required for Resolved and Closed transitions.',
+                        'description' => 'Optional ticket-specific reason for the status change.',
                     ],
                     'note' => [
                         'type' => 'string',
                         'description' => 'Optional private status-change note.',
                     ],
-                    'resolution' => [
-                        'type' => 'string',
-                        'description' => 'Optional resolution text for Resolved/Closed transitions.',
-                    ],
                 ],
                 'required' => ['ticket_id', 'status'],
+            ],
+        ];
+    }
+
+    /**
+     * close_ticket (psa-d9ayt) — the ONLY sanctioned terminal transition. Resolving or
+     * closing a ticket routes here (never through set_ticket_status), so every close/resolve
+     * carries a resolution summary and passes the auto-close safety envelope. Stageable:
+     * a staged-only grant (or staged=true) holds a propose_close proposal for cockpit approval.
+     *
+     * @return array<string, mixed>
+     */
+    public static function closeTicketTool(): array
+    {
+        return [
+            'name' => 'close_ticket',
+            'description' => 'Resolve or close a ticket — the ONLY tool that performs a terminal transition. resolution_summary is written as BOTH the ticket resolution AND the closing note, so there are no silent closes. status defaults to closed; pass status=resolved to resolve instead. Closing is gated by the auto-close safety envelope (a ticket still awaiting us, with recent client activity, already closed, or with a pending held close proposal is refused); resolving is not gated. The server derives the ticket client from ticket_id and writes an action audit row. Requires an explicit token grant.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'ticket_id' => [
+                        'type' => 'integer',
+                        'description' => 'The ticket ID to close or resolve. The server derives the client from this ticket.',
+                    ],
+                    'resolution_summary' => [
+                        'type' => 'string',
+                        'description' => 'What was done to resolve the ticket. Written as the ticket resolution and the closing note. Required.',
+                    ],
+                    'reason' => [
+                        'type' => 'string',
+                        'description' => 'Specific ticket-based reason for closing/resolving now (recorded in the action audit). Required.',
+                    ],
+                    'status' => [
+                        'type' => 'string',
+                        'enum' => ['resolved', 'closed'],
+                        'description' => 'Terminal target: resolved or closed. Defaults to closed when omitted.',
+                    ],
+                    'confidence' => [
+                        'type' => 'string',
+                        'enum' => ['high', 'medium', 'low'],
+                        'description' => 'Optional self-reported confidence that closing is correct. Recorded for close calibration; it does NOT enable any automatic close — every terminal action still requires this explicit tool call or a human approval.',
+                    ],
+                ],
+                'required' => ['ticket_id', 'resolution_summary', 'reason'],
+            ],
+        ];
+    }
+
+    /**
+     * Staged twin of close_ticket. Retired from the advertised surface (folded into
+     * close_ticket's `staged` parameter by McpToolModes) and excluded from the grant
+     * catalog; it survives as the dispatch name for the held path, which records a
+     * propose_close proposal for cockpit approval.
+     *
+     * @return array<string, mixed>
+     */
+    public static function stageCloseTicketTool(): array
+    {
+        return [
+            'name' => 'stage_close_ticket',
+            'description' => 'Stage a ticket close as a held proposal for human cockpit approval. The call does not close the ticket directly; it records a propose_close proposal (the same approval lane as propose_close). resolution_summary is the proposed closing summary shown to the approver.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'ticket_id' => [
+                        'type' => 'integer',
+                        'description' => 'The ticket ID to propose closing. The server derives the client from this ticket.',
+                    ],
+                    'resolution_summary' => [
+                        'type' => 'string',
+                        'description' => 'Proposed closing summary shown to the approver. Required.',
+                    ],
+                    'reason' => [
+                        'type' => 'string',
+                        'description' => 'Specific ticket-based reason a human should approve closing this ticket. Required.',
+                    ],
+                    'status' => [
+                        'type' => 'string',
+                        'enum' => ['resolved', 'closed'],
+                        'description' => 'Terminal target the approver will apply: resolved or closed. Defaults to closed.',
+                    ],
+                    'confidence' => [
+                        'type' => 'string',
+                        'enum' => ['high', 'medium', 'low'],
+                        'description' => 'Optional self-reported confidence recorded on the held proposal for close calibration. Held-only; never auto-closes.',
+                    ],
+                ],
+                'required' => ['ticket_id', 'resolution_summary', 'reason'],
             ],
         ];
     }

@@ -46,6 +46,7 @@ class McpToolModes
     private const PSA_STAGED_TO_DIRECT = [
         'stage_email' => 'send_email',
         'stage_public_note' => 'write_public_note',
+        'stage_close_ticket' => 'close_ticket',
     ];
 
     /**

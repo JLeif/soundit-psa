@@ -40,6 +40,10 @@ class StagedActionLabels
         'send_email' => 'Staged email',
         'stage_public_note' => 'Staged public note',
         'write_public_note' => 'Staged public note',
+        // psa-d9ayt: the staged close records a propose_close run, so its operator-facing
+        // label matches propose_close ("Proposed close"). The alias needs its own curated
+        // entry so StagedActionLabelsTest's every-stageable-type guard passes.
+        'stage_close_ticket' => 'Proposed close',
         'direct_close' => 'Closed directly',
 
         // Tactical

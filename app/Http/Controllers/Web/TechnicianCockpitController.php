@@ -59,7 +59,10 @@ class TechnicianCockpitController extends Controller
         // Dispatch on action_type so future tools (reply, escalate) plug in without rework.
         // Fail-closed: an unrecognized action type must NOT fall through to a send.
         $result = match ($run->action_type) {
-            'propose_close' => $service->approveClose($run, (int) auth()->id()),
+            // psa-d9ayt: the staged close (stage_close_ticket) records a propose_close run,
+            // so it approves through the same approveClose lane. The alias is kept in the
+            // match so the every-staged-type-can-be-approved guard holds.
+            'propose_close', 'stage_close_ticket' => $service->approveClose($run, (int) auth()->id()),
             'propose_merge' => $service->approveMerge($run, (int) auth()->id()),
             'stage_email' => $service->approveStagedEmail(
                 $run,

@@ -4,7 +4,7 @@
 
 @php
     $replyTypes = ['send_reply', 'propose_resolution', 'stage_email', 'stage_public_note'];
-    $closureTypes = ['propose_close', 'propose_merge'];
+    $closureTypes = ['propose_close', 'stage_close_ticket', 'propose_merge'];
     $isAccountAction = fn (string $type): bool => str_starts_with($type, 'tactical_stage_') || str_starts_with($type, 'cipp_stage_');
 
     $replyDrafts = $drafts->filter(fn ($run) => in_array($run->action_type, $replyTypes, true));
@@ -20,6 +20,9 @@
         // kept byte-identical by StagedActionLabelsTest. (psa-2f0bg UX review psa-90ix3.)
         $badge = match ($run->action_type) {
             'propose_close' => ['bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'Proposed close', 'bi-archive'],
+            // psa-d9ayt: the staged close records a propose_close run, so this alias badge
+            // mirrors propose_close. Present so the staged-type badge guard holds.
+            'stage_close_ticket' => ['bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'Proposed close', 'bi-archive'],
             'propose_merge' => ['bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'Proposed merge', 'bi-intersect'],
             'propose_resolution' => ['bg-info-subtle text-info-emphasis border border-info-subtle', 'Proposed resolution', 'bi-send'],
             'stage_email' => ['bg-success-subtle text-success-emphasis border border-success-subtle', 'Staged email', 'bi-envelope'],
