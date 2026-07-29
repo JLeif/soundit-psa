@@ -457,6 +457,7 @@ class AssistantEnabledGateTest extends TestCase
             'get_asset',
             'get_client',
             'get_person',
+            'get_ticket_attachment',
             'get_ticket_notes',
             'search_tickets',
         ];

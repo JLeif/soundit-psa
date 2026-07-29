@@ -10,6 +10,7 @@ use App\Enums\NoteType;
 use App\Enums\ToolEffect;
 use App\Enums\TranscriptionStatus;
 use App\Models\Asset;
+use App\Models\Attachment;
 use App\Models\Client;
 use App\Models\Contract;
 use App\Models\Email;
@@ -22,6 +23,7 @@ use App\Models\Ticket;
 use App\Models\TicketCategory;
 use App\Models\TicketNote;
 use App\Services\Agent\ProposeCloseTool;
+use App\Services\AttachmentService;
 use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Level\LevelClient;
@@ -46,6 +48,12 @@ class AssistantToolExecutor
     use HandlesCippTools;
     use HandlesWikiTools;
     use PaginatesTicketLists;
+
+    /** get_ticket_attachment inline ceiling: bytes returned base64 in a tool result. */
+    private const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+    /** get_ticket_attachment decompression-bomb guard: max source pixels before GD decode. */
+    private const MAX_IMAGE_PIXELS = 30_000_000;
 
     private ?Ticket $ticket;
 
@@ -143,6 +151,7 @@ class AssistantToolExecutor
             // PSA tools (client-scoped)
             'search_tickets' => [ToolEffect::Read, static fn (self $x, array $in) => $x->searchTickets($in)],
             'get_ticket_notes' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getTicketNotes($in)],
+            'get_ticket_attachment' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getTicketAttachment($in)],
             'create_ticket' => [ToolEffect::Write, static fn (self $x, array $in) => $x->createTicket($in)],
             'add_ticket_note' => [ToolEffect::Write, static fn (self $x, array $in) => $x->addTicketNote($in)],
             'get_client' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getClient()],
@@ -781,6 +790,148 @@ class AssistantToolExecutor
             'date' => $n->noted_at?->toDateTimeString(),
             'is_private' => $n->is_private,
         ])->toArray();
+    }
+
+    /**
+     * Fetch one attachment's bytes for a ticket this client owns (psa-#331).
+     *
+     * The surface gap this closes: attachment URLs appear in note bodies but
+     * the /attachments/... web route 302s an MCP bearer to the login page, so
+     * client error screenshots — the normal way non-technical people report
+     * problems — were silently invisible to the agent. This is a pure surface
+     * verb over the already-shipped attachment store: it opens no new route and
+     * re-uses the SAME client scope get_ticket_notes proves. It is on the STAFF
+     * assistant/MCP surface (staff-authorized), which already returns private
+     * ticket notes — so it exposes no data class a staff caller can't already
+     * read; it does NOT publish on the client portal.
+     *
+     * CLIENT-SCOPED, identically to get_ticket_notes: resolveReference refuses a
+     * cross-client ticket_id by construction, and the attachment is additionally
+     * pinned to that ticket (its own attachable, or a note on it — email inline
+     * images are re-linked to the note/ticket that references them, so they land
+     * on those arms too) so a valid attachment_id from another ticket cannot be
+     * pulled through an unrelated ticket_id.
+     */
+    private function getTicketAttachment(array $input): array
+    {
+        if (! $this->clientId) {
+            return ['error' => 'No client context — cannot access ticket attachments'];
+        }
+
+        $ticketId = $input['ticket_id'] ?? null;
+        if (! $ticketId || (! is_int($ticketId) && ! is_string($ticketId))) {
+            return ['error' => 'ticket_id is required'];
+        }
+
+        // Strict integer id: a non-integer like "12.9" must not silently coerce
+        // to a DIFFERENT attachment (12), and a float/garbage id is rejected
+        // rather than cast.
+        $attachmentIdRaw = $input['attachment_id'] ?? null;
+        $attachmentId = match (true) {
+            is_int($attachmentIdRaw) => $attachmentIdRaw,
+            is_string($attachmentIdRaw) && ctype_digit($attachmentIdRaw) => (int) $attachmentIdRaw,
+            default => 0,
+        };
+        if ($attachmentId <= 0) {
+            return ['error' => 'attachment_id is required (positive integer)'];
+        }
+
+        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused.
+        $ticket = Ticket::resolveReference($ticketId, $this->clientId);
+        if (! $ticket) {
+            return ['error' => 'Ticket not found or belongs to a different client'];
+        }
+
+        $attachment = Attachment::find($attachmentId);
+
+        // SAME-SHAPED refusal: a non-existent id and an id that exists but hangs
+        // off another ticket return the IDENTICAL message, so the verb is not an
+        // existence oracle over the global attachment-id space.
+        if (! $attachment || ! $this->attachmentBelongsToTicket($attachment, $ticket->id)) {
+            return ['error' => 'Attachment not found on this ticket'];
+        }
+
+        $service = app(AttachmentService::class);
+
+        $content = $service->getContent($attachment);
+        if ($content === null) {
+            return ['error' => 'Attachment could not be read from storage'];
+        }
+
+        // Byte ceiling on BOTH paths, BEFORE any GD decode: a hostile or
+        // accidental multi-MB file must not be decoded through GD (memory
+        // blow-up) or returned as an unusably large base64 tool result.
+        if (strlen($content) > self::MAX_ATTACHMENT_BYTES) {
+            return ['error' => 'Attachment is too large to return inline ('.strlen($content).' bytes, limit '.self::MAX_ATTACHMENT_BYTES.'); open it in the PSA UI.'];
+        }
+
+        if ($attachment->isImage()) {
+            // Pixel ceiling before GD decode: a small "decompression-bomb" file
+            // can declare enormous dimensions that imagecreatefromstring would
+            // allocate in full. getimagesizefromstring reads only the header.
+            $info = @getimagesizefromstring($content);
+            if ($info !== false && ($info[0] * $info[1]) > self::MAX_IMAGE_PIXELS) {
+                return ['error' => 'Image dimensions too large to process ('.$info[0].'x'.$info[1].').'];
+            }
+
+            // Downscale + re-encode to vision-ready base64 (GIF→PNG for model
+            // compatibility, matching resizeImageForAi's output contract).
+            $data = $service->resizeImageForAi($attachment);
+            if ($data === null || $data === '') {
+                return ['error' => 'Attachment could not be decoded as an image'];
+            }
+
+            return [
+                'attachment_id' => $attachment->id,
+                'filename' => $attachment->original_filename,
+                'media_type' => $this->servedImageMediaType($attachment->mime_type),
+                'is_image' => true,
+                'data_base64' => $data,
+            ];
+        }
+
+        return [
+            'attachment_id' => $attachment->id,
+            'filename' => $attachment->original_filename,
+            'media_type' => $attachment->mime_type,
+            'is_image' => false,
+            // The bytes actually returned, not the stored DB column.
+            'size_bytes' => strlen($content),
+            'data_base64' => base64_encode($content),
+        ];
+    }
+
+    /**
+     * True when the attachment hangs off this ticket directly or off a note on
+     * it. attachable_type is matched exactly (never a LIKE) and the note's
+     * ticket_id is re-checked, so the client scope proven on the ticket carries
+     * to the attachment. Email inline images are not their own arm: they are
+     * re-linked to the note/ticket that references them (AttachmentService::
+     * linkAttachmentsFromBody), so an Email-attachable arm would be dead code.
+     */
+    private function attachmentBelongsToTicket(Attachment $attachment, int $ticketId): bool
+    {
+        return match ($attachment->attachable_type) {
+            Ticket::class => (int) $attachment->attachable_id === $ticketId,
+            TicketNote::class => TicketNote::where('id', $attachment->attachable_id)
+                ->where('ticket_id', $ticketId)->exists(),
+            default => false,
+        };
+    }
+
+    /**
+     * The media type resizeImageForAi actually emits: GIF is transcoded to PNG
+     * for model compatibility; png/webp/jpeg round-trip to themselves; anything
+     * else falls through its imagejpeg default.
+     */
+    private function servedImageMediaType(string $sourceMime): string
+    {
+        return match ($sourceMime) {
+            'image/png' => 'image/png',
+            'image/webp' => 'image/webp',
+            'image/gif' => 'image/png',
+            default => 'image/jpeg',
+        };
     }
 
     private function createTicket(array $input): array
