@@ -1586,7 +1586,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             // ITIL taxonomy chip (psa-717bn): leaf in the row, full path on hover.
                             const catChip = t.category_path
                                 ? ' <span class="badge bg-light text-dark border fw-normal" title="' + escHtml(t.category_path) + '">' +
-                                    escHtml(String(t.category_path).split(' / ').pop()) + '</span>'
+                                    escHtml(t.category_leaf || String(t.category_path).split(' / ').pop()) + '</span>'
                                 : '';
                             // psa-717bn follow-up: every ticket field in this innerHTML template is
                             // escHtml()-wrapped — t.subject arrives from unauthenticated inbound email

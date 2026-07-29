@@ -470,7 +470,7 @@ window.dismissEmail = function(emailId) {
 function ticketCategoryChip(t) {
     return t.category_path
         ? '<span class="badge bg-light text-dark border fw-normal me-1" title="' + escapeHtml(t.category_path).replace(/"/g, '&quot;') + '">'
-            + escapeHtml(String(t.category_path).split(' / ').pop()) + '</span>'
+            + escapeHtml(t.category_leaf || String(t.category_path).split(' / ').pop()) + '</span>'
         : '';
 }
 

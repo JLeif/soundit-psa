@@ -143,6 +143,7 @@ class Ticket extends Model
 
         return [
             'category_id' => $node?->id,
+            'category_leaf' => $node?->name,
             'category_path' => $node?->pathString(),
         ];
     }

@@ -372,7 +372,7 @@
                 // the title="" attribute.
                 var catChip = t.category_path
                     ? '<span class="sp-ticket-cat" title="' + esc(t.category_path).replace(/"/g, '&quot;') + '">' +
-                        esc(String(t.category_path).split(' / ').pop()) + '</span>'
+                        esc(t.category_leaf || String(t.category_path).split(' / ').pop()) + '</span>'
                     : '';
                 html += '<a href="' + esc(t.url) + '" target="_blank" class="sp-ticket-item">' +
                     '<span class="sp-ticket-id">' + esc(t.display_id) + '</span>' +
