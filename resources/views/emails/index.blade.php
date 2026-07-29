@@ -469,7 +469,7 @@ window.dismissEmail = function(emailId) {
 // full path on hover; empty string when the ticket has no category.
 function ticketCategoryChip(t) {
     return t.category_path
-        ? '<span class="badge bg-light text-dark border fw-normal me-1" title="' + escapeHtml(t.category_path) + '">'
+        ? '<span class="badge bg-light text-dark border fw-normal me-1" title="' + escapeHtml(t.category_path).replace(/"/g, '&quot;') + '">'
             + escapeHtml(String(t.category_path).split(' / ').pop()) + '</span>'
         : '';
 }
