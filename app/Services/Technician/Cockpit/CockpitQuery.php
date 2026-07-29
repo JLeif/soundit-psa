@@ -12,6 +12,7 @@ use App\Models\PhoneCall;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Services\Agent\Steering\LeaveItOutcomeRecorder;
+use App\Support\StagedActionLabels;
 use Illuminate\Support\Collection;
 
 /**
@@ -393,8 +394,9 @@ class CockpitQuery
 
     private function isEndpointOrAccountAction(string $actionType): bool
     {
-        return str_starts_with($actionType, 'tactical_stage_')
-            || str_starts_with($actionType, 'cipp_stage_');
+        // Single source shared with the cockpit blade so the "actions" lane
+        // cannot drift; calendar_stage_* joins tactical/cipp here (psa-lulgh).
+        return StagedActionLabels::isVendorSideEffectAction($actionType);
     }
 
     /** @return array<int,int> the non-terminal ticket status values */

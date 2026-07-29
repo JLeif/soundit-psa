@@ -83,7 +83,48 @@ class StagedActionLabels
         'cipp_stage_create_user' => 'CIPP create user',
         'cipp_stage_edit_user' => 'CIPP edit user',
         'cipp_stage_set_group_membership' => 'CIPP group membership',
+
+        // Calendar & scheduling (psa-lulgh)
+        'calendar_stage_create_event' => 'Calendar event create',
+        'calendar_stage_update_event' => 'Calendar event update',
+        'calendar_stage_cancel_event' => 'Calendar event cancel',
+        'calendar_stage_respond_event' => 'Calendar event response',
     ];
+
+    /**
+     * action_type prefixes for staged actions that side-effect an OUTSIDE system
+     * (an RMM device, an M365 tenant, a Graph calendar) and therefore surface in
+     * the cockpit "actions" lane behind an approval card. PSA-native staged
+     * actions (proposed close/merge, staged email/note) are laned separately and
+     * are deliberately NOT here.
+     *
+     * This lives in the one place both the cockpit query (CockpitQuery::
+     * isEndpointOrAccountAction) and the cockpit blade ($isAccountAction) already
+     * consume, so the two lanes cannot drift. Registering a family's label above
+     * without adding its prefix here is exactly the drift that left
+     * calendar_stage_* with labels and badges but no card and no Approve — a
+     * staged cancellation the operator could never see (psa-lulgh review). A new
+     * side-effecting family is one line here, once.
+     *
+     * @var array<int, string>
+     */
+    private const VENDOR_SIDE_EFFECT_PREFIXES = ['tactical_stage_', 'cipp_stage_', 'calendar_stage_'];
+
+    /**
+     * Whether a staged action_type is an externally side-effecting vendor write —
+     * the cockpit "actions" (endpoint/account) lane that must render an approval
+     * card. Single source for both the query and the blade.
+     */
+    public static function isVendorSideEffectAction(string $actionType): bool
+    {
+        foreach (self::VENDOR_SIDE_EFFECT_PREFIXES as $prefix) {
+            if (str_starts_with($actionType, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /** Operator-facing label for a staged/held action type. Never returns a raw slug. */
     public static function humanLabel(string $actionType): string

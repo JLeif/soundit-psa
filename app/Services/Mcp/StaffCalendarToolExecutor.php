@@ -2,8 +2,25 @@
 
 namespace App\Services\Mcp;
 
+use App\Enums\NoteType;
+use App\Enums\TechnicianRunState;
+use App\Enums\TechnicianTier;
+use App\Enums\WhoType;
+use App\Helpers\MarkdownRenderer;
+use App\Models\TechnicianActionLog;
+use App\Models\TechnicianRun;
+use App\Models\Ticket;
+use App\Models\TicketNote;
+use App\Models\User;
 use App\Services\Graph\GraphClient;
+use App\Services\Graph\GraphClientException;
+use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\CalendarConfig;
+use App\Support\TechnicianConfig;
+use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Staff-MCP Calendar/scheduling READ executor (psa-abl0i, Slice A). Read-only calendar access
@@ -112,6 +129,80 @@ class StaffCalendarToolExecutor
                     'required' => ['user_upn', 'schedules', 'start', 'end'],
                 ],
             ],
+            [
+                'name' => 'calendar_create_event',
+                'description' => 'Create a calendar event on a mailbox you own (Microsoft Graph create event). user_upn is the ORGANIZER mailbox and MUST be on the server-side calendar owner allowlist — a non-allowlisted mailbox is refused before any Graph call. attendees may be ANY email address, including external client contacts (attendees are never the organizer, so they are not allowlist-checked). ticket_id is REQUIRED and must resolve to an existing ticket — the event is back-linked to it and a private audit note records the reason. reason is REQUIRED. Times are UTC ISO-8601 (tz defaults to UTC). Requires an explicit token grant.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'user_upn' => ['type' => 'string', 'description' => 'The organizer mailbox (UPN). Must be an allowlisted calendar owner.'],
+                        'subject' => ['type' => 'string', 'description' => 'Event subject/title.'],
+                        'start' => ['type' => 'string', 'description' => 'Start, ISO-8601 (UTC unless tz is given).'],
+                        'end' => ['type' => 'string', 'description' => 'End, ISO-8601 (UTC unless tz is given).'],
+                        'tz' => ['type' => 'string', 'description' => 'Optional IANA/Windows time zone for start/end. Defaults to UTC.'],
+                        'attendees' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Optional attendee email addresses. May be external client contacts; each must be a valid email.'],
+                        'body' => ['type' => 'string', 'description' => 'Optional plain-text event body/agenda.'],
+                        'location' => ['type' => 'string', 'description' => 'Optional location display name.'],
+                        'teams_meeting' => ['type' => 'boolean', 'description' => 'Set true to attach a Teams online meeting. Defaults to false.'],
+                        'ticket_id' => ['type' => 'integer', 'description' => 'REQUIRED. The ticket this event traces to; the event is back-linked and a private audit note is written.'],
+                        'reason' => ['type' => 'string', 'description' => 'REQUIRED. Short audit note for why this event is being created.'],
+                    ],
+                    'required' => ['user_upn', 'subject', 'start', 'end', 'ticket_id', 'reason'],
+                ],
+            ],
+            [
+                'name' => 'calendar_update_event',
+                'description' => 'Update an existing calendar event on an owner mailbox (Microsoft Graph update event). user_upn is the owner mailbox and MUST be allowlisted (refused before any Graph call). Only scheduling fields may change — supply at least one of subject/start/end/tz/location/body/attendees; other event fields cannot be set. ticket_id and reason are REQUIRED (back-link + audit). Requires an explicit token grant.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'user_upn' => ['type' => 'string', 'description' => 'The owner mailbox (UPN). Must be an allowlisted calendar owner.'],
+                        'event_id' => ['type' => 'string', 'description' => 'The Graph event id to update.'],
+                        'subject' => ['type' => 'string', 'description' => 'Optional replacement subject.'],
+                        'start' => ['type' => 'string', 'description' => 'Optional replacement start (ISO-8601).'],
+                        'end' => ['type' => 'string', 'description' => 'Optional replacement end (ISO-8601).'],
+                        'tz' => ['type' => 'string', 'description' => 'Optional time zone for start/end. Defaults to UTC.'],
+                        'location' => ['type' => 'string', 'description' => 'Optional replacement location display name.'],
+                        'body' => ['type' => 'string', 'description' => 'Optional replacement plain-text body.'],
+                        'attendees' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Optional replacement attendee email list (external allowed).'],
+                        'ticket_id' => ['type' => 'integer', 'description' => 'REQUIRED. The ticket this change traces to.'],
+                        'reason' => ['type' => 'string', 'description' => 'REQUIRED. Short audit note for the change.'],
+                    ],
+                    'required' => ['user_upn', 'event_id', 'ticket_id', 'reason'],
+                ],
+            ],
+            [
+                'name' => 'calendar_cancel_event',
+                'description' => 'Cancel a meeting the owner mailbox organizes (Microsoft Graph cancel — organizer-only; an attendee mailbox is rejected upstream). user_upn is the organizer mailbox and MUST be allowlisted (refused before any Graph call). An optional comment is sent to attendees. ticket_id and reason are REQUIRED (back-link + audit). Requires an explicit token grant.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'user_upn' => ['type' => 'string', 'description' => 'The organizer mailbox (UPN). Must be an allowlisted calendar owner.'],
+                        'event_id' => ['type' => 'string', 'description' => 'The Graph event id to cancel.'],
+                        'comment' => ['type' => 'string', 'description' => 'Optional cancellation message sent to attendees.'],
+                        'ticket_id' => ['type' => 'integer', 'description' => 'REQUIRED. The ticket this cancellation traces to.'],
+                        'reason' => ['type' => 'string', 'description' => 'REQUIRED. Short audit note for the cancellation.'],
+                    ],
+                    'required' => ['user_upn', 'event_id', 'ticket_id', 'reason'],
+                ],
+            ],
+            [
+                'name' => 'calendar_respond_event',
+                'description' => 'Respond to a meeting invite AS the owner mailbox (Microsoft Graph accept/decline/tentativelyAccept). user_upn is the responding mailbox and MUST be allowlisted (refused before any Graph call). response is one of accept, decline, tentative. ticket_id and reason are REQUIRED (back-link + audit). Requires an explicit token grant.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'user_upn' => ['type' => 'string', 'description' => 'The responding mailbox (UPN). Must be an allowlisted calendar owner.'],
+                        'event_id' => ['type' => 'string', 'description' => 'The Graph event id to respond to.'],
+                        'response' => ['type' => 'string', 'enum' => ['accept', 'decline', 'tentative'], 'description' => 'The response to send.'],
+                        'comment' => ['type' => 'string', 'description' => 'Optional comment included with the response.'],
+                        'send_response' => ['type' => 'boolean', 'description' => 'Whether to send the response to the organizer. Defaults to true.'],
+                        'ticket_id' => ['type' => 'integer', 'description' => 'REQUIRED. The ticket this response traces to.'],
+                        'reason' => ['type' => 'string', 'description' => 'REQUIRED. Short audit note for the response.'],
+                    ],
+                    'required' => ['user_upn', 'event_id', 'response', 'ticket_id', 'reason'],
+                ],
+            ],
         ];
     }
 
@@ -121,26 +212,68 @@ class StaffCalendarToolExecutor
         return array_column(self::definitions(), 'name');
     }
 
-    /** Whether this executor owns the named tool (the controller's dispatch/grant gate). */
+    /**
+     * Whether this executor owns the named tool (the controller's dispatch/grant gate). Covers the
+     * published tools AND the staged twin dispatch names (calendar_stage_*) — the mode gate rewrites
+     * a stageable call to its staged internal name before dispatch, so isCalendarTool() must route
+     * that name here too. The staged twins are deliberately NOT in definitions() (dispatch-only, not
+     * grantable/published), so they are recognised via stagedToDirectMap(), not toolNames().
+     */
     public static function handles(string $name): bool
     {
-        return in_array($name, self::toolNames(), true);
+        return in_array($name, self::toolNames(), true) || self::isStagedActionType($name);
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
-        // The allowlist choke point — before ANY handler or Graph call, for every calendar tool.
+        // The allowlist choke point — before ANY handler or Graph call, for every calendar tool
+        // (reads AND writes; a staged write is still gated here, so you cannot even PARK a write to
+        // a non-allowlisted mailbox — approval re-verifies it too, closing the TOCTOU window).
         if ($error = $this->guardOwnerUpn($name, $arguments)) {
             return $error;
+        }
+
+        // A staged twin (calendar_stage_*) parks the write for cockpit approval instead of
+        // executing it. The immediate name executes now. Both are the SAME validated write — the
+        // shared prepare/executeCalendarWrite seam guarantees identical behaviour either way.
+        if (array_key_exists($name, self::stagedToDirectMap())) {
+            return $this->stageWrite($name, $arguments, $actorLabel, $tokenLabel);
         }
 
         return match ($name) {
             'calendar_list_events' => $this->listEvents($arguments),
             'calendar_get_event' => $this->getEvent($arguments),
             'calendar_get_schedule' => $this->getScheduleAvailability($arguments),
+            'calendar_create_event',
+            'calendar_update_event',
+            'calendar_cancel_event',
+            'calendar_respond_event' => $this->immediateWrite($name, $arguments, $actorLabel),
             default => ['error' => "Unknown calendar tool: {$name}"],
         };
+    }
+
+    /**
+     * Staged↔direct twin map (the McpToolModes contribution). Each write ships as an immediate
+     * canonical name + a staged twin; McpToolModes::stagedToCanonical() merges this in so the mode
+     * gate, grant catalog, and dispatch all agree. Mirrors StaffCippWriteToolExecutor.
+     *
+     * @return array<string, string>
+     */
+    public static function stagedToDirectMap(): array
+    {
+        return [
+            'calendar_stage_create_event' => 'calendar_create_event',
+            'calendar_stage_update_event' => 'calendar_update_event',
+            'calendar_stage_cancel_event' => 'calendar_cancel_event',
+            'calendar_stage_respond_event' => 'calendar_respond_event',
+        ];
+    }
+
+    /** Whether $actionType is one of this executor's staged (held) action types. */
+    public static function isStagedActionType(string $actionType): bool
+    {
+        return array_key_exists($actionType, self::stagedToDirectMap());
     }
 
     /**
@@ -263,6 +396,781 @@ class StaffCalendarToolExecutor
             'interval_minutes' => $interval,
             'schedules' => array_map([$this, 'projectSchedule'], $information),
         ];
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Slice B (psa-lulgh) — WRITES. Every write is gated by the same guardOwnerUpn() security spine
+    // as the reads (the owner user_upn must be allowlisted), takes a REQUIRED ticket_id (Charlie
+    // 19:10Z: every event traces to a why) that must resolve to a real ticket, takes a REQUIRED
+    // reason (audit), and drops a PRIVATE back-link note on that ticket. The Graph body is built
+    // here from validated tool args to the shapes grounded in the MS Graph v1.0 producer — the
+    // executor never accepts a raw passthrough body (an agent must not be able to set owner /
+    // organizer / responseStatus or any field outside the scheduling surface). External client
+    // emails are legitimate ATTENDEES; they are NEVER the owner (the guard proves the owner).
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * IMMEDIATE write path: validate → build the Graph body → execute NOW → back-link → audit. The
+     * staged path (stageWrite/approveStagedRun) shares the SAME prepareWrite/executeCalendarWrite
+     * seam, so a write behaves identically whether it runs now or after cockpit approval (the
+     * manager's "behaviour must be identical either way").
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    private function immediateWrite(string $directTool, array $arguments, string $actorLabel): array
+    {
+        $upn = (string) $arguments['user_upn'];
+        $ctx = $this->requireTicketAndReason($arguments);
+        if (isset($ctx['error'])) {
+            return $ctx;
+        }
+        /** @var Ticket $ticket */
+        $ticket = $ctx['ticket'];
+
+        $prep = $this->prepareWrite($directTool, $arguments);
+        if (isset($prep['error'])) {
+            return $prep;
+        }
+
+        $contentHash = $this->contentHash($directTool, $upn, $prep['plan'], $ticket->id);
+        try {
+            $exec = $this->executeCalendarWrite($directTool, $upn, $prep['plan'], $ticket, $contentHash);
+        } catch (CalendarWriteRefusedException $e) {
+            // Blocker 3 join-link guard — refused before any Graph write; surface it as a clean
+            // tool error rather than letting it bubble to a generic MCP 500.
+            $this->safeAudit($directTool, 'blocked', $ticket, $contentHash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $actorLabel);
+
+            return ['error' => $e->getMessage()];
+        } catch (GraphClientException $e) {
+            // review diff:2 + contract:1: the immediate path must NOT let an upstream failure escape
+            // as an uncaught exception (a generic MCP 500 the agent blindly retries). A 15s timeout is
+            // outcome-INDETERMINATE — a non-idempotent cancel/respond may already have reached the
+            // client — so we never imply a safe retry for those.
+            $this->safeAudit($directTool, 'error', $ticket, $contentHash, 'Graph calendar write failed/timed out (indeterminate outcome): '.mb_substr($e->getMessage(), 0, 140), $actorLabel);
+
+            return ['error' => $this->indeterminateWriteMessage($directTool)];
+        }
+
+        // The external write has COMMITTED. Record the immutable 'executed' row FIRST (idempotency +
+        // forensics), then best-effort back-link — a bookkeeping failure here must NEVER surface as a
+        // retryable error that re-sends a committed non-idempotent write (review diff:2).
+        $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
+        $this->safeAudit($directTool, 'executed', $ticket, $contentHash, $prep['summary'].' — '.$ctx['reason'], $actorLabel);
+        try {
+            $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) $ctx['reason'], approved: false));
+        } catch (\Throwable $bookkeeping) {
+            Log::error('[Calendar] immediate write committed but post-write back-link failed', ['tool' => $directTool, 'error' => $bookkeeping->getMessage()]);
+        }
+
+        return array_merge([
+            'success' => true,
+            'action' => $this->actionVerb($directTool),
+            'user_upn' => $upn,
+            'ticket_id' => $ticket->id,
+        ], $exec);
+    }
+
+    /**
+     * Validate the verb-specific args and build its Graph execution PLAN — WITHOUT touching Graph.
+     * The single source of truth for what a write does, consumed identically by the immediate path,
+     * the staged encrypted payload, and the approval executor. Returns ['error'=>..] or
+     * ['plan'=>[...], 'summary'=>string] (summary is the operator-facing proposal line).
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    private function prepareWrite(string $directTool, array $arguments): array
+    {
+        return match ($directTool) {
+            'calendar_create_event' => $this->prepareCreate($arguments),
+            'calendar_update_event' => $this->prepareUpdate($arguments),
+            'calendar_cancel_event' => $this->prepareCancel($arguments),
+            'calendar_respond_event' => $this->prepareRespond($arguments),
+            default => ['error' => "Unknown calendar write: {$directTool}"],
+        };
+    }
+
+    /** @param array<string, mixed> $arguments @return array<string, mixed> */
+    private function prepareCreate(array $arguments): array
+    {
+        $subject = $this->requiredString($arguments, 'subject');
+        $start = $this->requiredString($arguments, 'start');
+        $end = $this->requiredString($arguments, 'end');
+        if ($subject === null || $start === null || $end === null) {
+            return ['error' => 'subject, start, and end (ISO-8601 timestamps) are required to create an event.'];
+        }
+
+        $attendees = $this->attendeesFrom($arguments['attendees'] ?? []);
+        if (isset($attendees['error'])) {
+            return $attendees;
+        }
+
+        $tz = $this->timeZoneFrom($arguments);
+        $body = [
+            'subject' => $subject,
+            'start' => ['dateTime' => $start, 'timeZone' => $tz],
+            'end' => ['dateTime' => $end, 'timeZone' => $tz],
+        ];
+        if ($attendees['attendees'] !== []) {
+            $body['attendees'] = $attendees['attendees'];
+        }
+        if (($location = $this->requiredString($arguments, 'location')) !== null) {
+            $body['location'] = ['displayName' => $location];
+        }
+        if (($eventBody = $this->requiredString($arguments, 'body')) !== null) {
+            // contentType Text: the agent supplies plain text; we do not accept HTML so a body can
+            // never smuggle markup into a client-facing invite.
+            $body['body'] = ['contentType' => 'Text', 'content' => $eventBody];
+        }
+        if (filter_var($arguments['teams_meeting'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            $body['isOnlineMeeting'] = true;
+            $body['onlineMeetingProvider'] = 'teamsForBusiness';
+        }
+
+        return ['plan' => ['body' => $body], 'summary' => sprintf('Create "%s" (%s → %s, %s)', $subject, $start, $end, $tz)];
+    }
+
+    /** @param array<string, mixed> $arguments @return array<string, mixed> */
+    private function prepareUpdate(array $arguments): array
+    {
+        $eventId = $this->requiredString($arguments, 'event_id');
+        if ($eventId === null) {
+            return ['error' => 'event_id is required.'];
+        }
+
+        $tz = $this->timeZoneFrom($arguments);
+        $patch = [];
+        if (($subject = $this->requiredString($arguments, 'subject')) !== null) {
+            $patch['subject'] = $subject;
+        }
+        if (($start = $this->requiredString($arguments, 'start')) !== null) {
+            $patch['start'] = ['dateTime' => $start, 'timeZone' => $tz];
+        }
+        if (($end = $this->requiredString($arguments, 'end')) !== null) {
+            $patch['end'] = ['dateTime' => $end, 'timeZone' => $tz];
+        }
+        if (($location = $this->requiredString($arguments, 'location')) !== null) {
+            $patch['location'] = ['displayName' => $location];
+        }
+        if (($eventBody = $this->requiredString($arguments, 'body')) !== null) {
+            $patch['body'] = ['contentType' => 'Text', 'content' => $eventBody];
+        }
+        if (array_key_exists('attendees', $arguments)) {
+            $attendees = $this->attendeesFrom($arguments['attendees']);
+            if (isset($attendees['error'])) {
+                return $attendees;
+            }
+            $patch['attendees'] = $attendees['attendees'];
+        }
+
+        if ($patch === []) {
+            return ['error' => 'Provide at least one field to update (subject, start, end, location, body, or attendees).'];
+        }
+
+        return ['plan' => ['event_id' => $eventId, 'patch' => $patch], 'summary' => sprintf('Update event %s (%s)', $eventId, implode(', ', array_keys($patch)))];
+    }
+
+    /** @param array<string, mixed> $arguments @return array<string, mixed> */
+    private function prepareCancel(array $arguments): array
+    {
+        $eventId = $this->requiredString($arguments, 'event_id');
+        if ($eventId === null) {
+            return ['error' => 'event_id is required.'];
+        }
+
+        return ['plan' => ['event_id' => $eventId, 'comment' => $this->requiredString($arguments, 'comment')], 'summary' => sprintf('Cancel event %s', $eventId)];
+    }
+
+    /** @param array<string, mixed> $arguments @return array<string, mixed> */
+    private function prepareRespond(array $arguments): array
+    {
+        $eventId = $this->requiredString($arguments, 'event_id');
+        if ($eventId === null) {
+            return ['error' => 'event_id is required.'];
+        }
+        $response = $this->requiredString($arguments, 'response');
+        if ($response === null || ! in_array($response, ['accept', 'decline', 'tentative'], true)) {
+            return ['error' => 'response is required and must be one of: accept, decline, tentative.'];
+        }
+
+        return [
+            'plan' => [
+                'event_id' => $eventId,
+                'response' => $response,
+                'comment' => $this->requiredString($arguments, 'comment'),
+                'send_response' => filter_var($arguments['send_response'] ?? true, FILTER_VALIDATE_BOOLEAN),
+            ],
+            'summary' => sprintf('Respond "%s" to event %s', $response, $eventId),
+        ];
+    }
+
+    /**
+     * THE ONE seam where a validated plan becomes a Graph call — used identically by the immediate
+     * path and the approval executor, so a staged write executes exactly what an immediate one
+     * would. create/update return the projected event; cancel/respond return the event_id.
+     *
+     * @param  array<string, mixed>  $plan
+     * @param  string  $contentHash  the WHOLE-plan hash (owner+plan+ticket) — reused as create's transactionId
+     * @return array<string, mixed>
+     */
+    private function executeCalendarWrite(string $directTool, string $upn, array $plan, Ticket $ticket, string $contentHash): array
+    {
+        if ($directTool === 'calendar_create_event') {
+            $body = $plan['body'];
+            // Deterministic transactionId — create is NON-IDEMPOTENT, so an accidental retry (or a
+            // re-approval) must not double-book: Graph returns the FIRST event for a repeated
+            // transactionId (idempotent-on-retry, user-post-events producer). It MUST derive from
+            // the whole-plan contentHash, not just subject+window (review #3): two genuinely
+            // distinct creates on one ticket sharing subject+window but differing in
+            // body/attendees/location would otherwise collide, Graph would dedupe to the FIRST
+            // event, and the back-link note would record a create that never happened.
+            $body['transactionId'] = $contentHash;
+
+            return ['event' => $this->projectEvent($this->graph->createEvent($upn, $body))];
+        }
+        if ($directTool === 'calendar_update_event') {
+            $patch = $plan['patch'];
+            if (array_key_exists('body', $patch)) {
+                // Protect a Teams meeting's join block on a body edit (blocker 3): re-read the
+                // event immediately before the write and, if it is an online meeting, keep its
+                // existing join block above the new agenda — or refuse if we cannot confirm it.
+                $patch['body'] = $this->updateBodyPreservingTeamsJoin($upn, (string) $plan['event_id'], $patch['body']);
+            }
+
+            return ['event' => $this->projectEvent($this->graph->updateEvent($upn, $plan['event_id'], $patch))];
+        }
+        if ($directTool === 'calendar_cancel_event') {
+            $this->graph->cancelEvent($upn, $plan['event_id'], $plan['comment'] ?? null);
+
+            return ['event_id' => $plan['event_id']];
+        }
+
+        // calendar_respond_event
+        $this->graph->respondEvent($upn, $plan['event_id'], $plan['response'], $plan['comment'] ?? null, $plan['send_response'] ?? true);
+
+        return ['event_id' => $plan['event_id'], 'response' => $plan['response']];
+    }
+
+    /**
+     * Protect a Teams meeting's join link on a body edit (review blocker 3).
+     *
+     * A calendar_update_event body is built as plain Text, and a Graph PATCH replaces the
+     * event body WHOLESALE — which for an online meeting deletes the "Join the meeting"
+     * block Graph embeds in the body HTML. So we re-read the event immediately before the
+     * write (state can change between stage and approval) and:
+     *   - if it is NOT an online meeting, the plain-Text body is safe as-is;
+     *   - if it IS, we rebuild the body as HTML that keeps the existing meeting block
+     *     verbatim below the new agenda. The agent's text is html-escaped, so no agent
+     *     markup can enter the body — the only HTML carried over is Graph's own block.
+     *
+     * FAIL CLOSED (Jeeves's edge on approach (a)): if the current body cannot be parsed
+     * confidently enough to locate the join block — not HTML, no https join URL, the URL
+     * absent from the body, or no Graph separator bracketing the block — we REFUSE the edit
+     * rather than silently drop the link. (b) "can't edit a Teams agenda here" is the
+     * fallback branch, not the design.
+     *
+     * @param  array{contentType?:string,content?:string}  $newBody  the Text body from prepareUpdate
+     * @return array{contentType:string,content:string}
+     */
+    private function updateBodyPreservingTeamsJoin(string $upn, string $eventId, array $newBody): array
+    {
+        $event = $this->graph->getEvent($upn, $eventId); // immediately before the write
+
+        if (! ($event['isOnlineMeeting'] ?? false)) {
+            return $newBody; // not a Teams meeting — nothing to preserve
+        }
+
+        $joinUrl = is_array($event['onlineMeeting'] ?? null) ? (string) ($event['onlineMeeting']['joinUrl'] ?? '') : '';
+        $currentHtml = is_array($event['body'] ?? null) ? (string) ($event['body']['content'] ?? '') : '';
+        $currentType = is_array($event['body'] ?? null) ? strtolower((string) ($event['body']['contentType'] ?? '')) : '';
+
+        // Graph brackets the online-meeting block in the body with a long underscore rule;
+        // everything from it to the end of the body is the meeting block, the agenda is above.
+        $sepAt = preg_match('/_{20,}/', $currentHtml, $m, PREG_OFFSET_CAPTURE) ? (int) $m[0][1] : -1;
+        $joinAt = $joinUrl !== '' ? strpos($currentHtml, $joinUrl) : false;
+
+        // Every condition must hold, or we cannot confidently preserve the link → refuse.
+        if ($currentType !== 'html'
+            || ! str_starts_with($joinUrl, 'https://')
+            || $joinAt === false
+            || $sepAt < 0
+            || $joinAt < $sepAt) {
+            throw new CalendarWriteRefusedException(
+                'This event is a Teams meeting and its join link could not be confidently located in the '.
+                'current event body, so editing the agenda here would risk removing the "Join" link. Update '.
+                'other fields (subject/time/location/attendees) without the body, or edit the agenda in '.
+                'Outlook/Teams where the join block is preserved automatically.'
+            );
+        }
+
+        // Keep the meeting block verbatim; put the new agenda (escaped) above it.
+        $meetingBlock = substr($currentHtml, $sepAt);
+        $agendaHtml = nl2br(e((string) ($newBody['content'] ?? '')), false);
+
+        return ['contentType' => 'HTML', 'content' => '<div>'.$agendaHtml.'</div>'.$meetingBlock];
+    }
+
+    /**
+     * Content hash for the run idempotency key (ticket_id + action_type + content_hash is UNIQUE)
+     * and the audit row. Deterministic from the write's identity — the same (owner, plan, ticket)
+     * stages/audits as one action; distinct content gets its own row.
+     *
+     * @param  array<string, mixed>  $plan
+     */
+    private function contentHash(string $directTool, string $upn, array $plan, int $ticketId): string
+    {
+        return hash('sha256', (string) json_encode([$directTool, mb_strtolower($upn), $plan, $ticketId], JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * STAGED write path (the owner's control): park the validated write as a TechnicianRun
+     * (AwaitingApproval) with an ENCRYPTED held payload; the TechnicianRunObserver notifies the
+     * operator automatically on the state transition (do NOT dispatch here). Nothing touches Graph
+     * until approval. Mirrors StaffCippWriteToolExecutor — an external, non-idempotent write parked
+     * for a human, NOT close_ticket's transactional lane.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    private function stageWrite(string $stagedName, array $arguments, string $actorLabel, ?string $tokenLabel): array
+    {
+        $directTool = self::stagedToDirectMap()[$stagedName];
+        $upn = (string) $arguments['user_upn'];
+        $ctx = $this->requireTicketAndReason($arguments);
+        if (isset($ctx['error'])) {
+            return $ctx;
+        }
+        /** @var Ticket $ticket */
+        $ticket = $ctx['ticket'];
+
+        $prep = $this->prepareWrite($directTool, $arguments);
+        if (isset($prep['error'])) {
+            return $prep;
+        }
+
+        $reason = (string) $ctx['reason'];
+        $plan = $prep['plan'];
+        $contentHash = $this->contentHash($directTool, $upn, $plan, $ticket->id);
+
+        $meta = [
+            'drafted_by' => $actorLabel,
+            'drafted_by_token' => $tokenLabel,
+            'reasons' => [$reason],
+            'direct_tool' => $directTool,
+            // The whole write intent is encrypted at rest — subject/body/attendees never sit in
+            // plaintext on the run row. Decrypted only at approval, inside approveStagedRun.
+            'encrypted_payload' => Crypt::encryptString((string) json_encode([
+                'direct_tool' => $directTool,
+                'user_upn' => $upn,
+                'ticket_id' => $ticket->id,
+                'reason' => $reason,
+                'plan' => $plan,
+            ], JSON_THROW_ON_ERROR)),
+        ];
+        $proposedContent = $prep['summary']." in {$upn}\nReason: ".$reason;
+
+        // HOISTED idempotency guard (review diff:1, final_edit): a write that already committed —
+        // via the IMMEDIATE path (which creates NO staged run) or a prior staged approval — must be
+        // refused BEFORE firstOrCreate. Otherwise an immediate-then-stage of byte-identical content
+        // creates a FRESH run that the in-branch guard never sees, and its approval re-fires a
+        // non-idempotent client-facing write. The immutable 'executed' audit row is the proof
+        // (mirrors StaffCippWriteToolExecutor::alreadyExecuted).
+        if ($this->calendarWriteAlreadyExecuted($stagedName, $directTool, $ticket->client_id, $contentHash)) {
+            return ['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => null, 'ticket_id' => $ticket->id, 'message' => 'This exact calendar write already executed; not staged.'];
+        }
+
+        // Keyed on the DB idempotency invariant (ticket_id + action_type + content_hash UNIQUE):
+        // identical content either doesn't exist yet (create) or exists but is no longer live
+        // (revive it) — never a second colliding row.
+        $run = TechnicianRun::firstOrCreate(
+            ['ticket_id' => $ticket->id, 'action_type' => $stagedName, 'content_hash' => $contentHash],
+            [
+                'client_id' => $ticket->client_id,
+                'state' => TechnicianRunState::AwaitingApproval,
+                'proposed_content' => $proposedContent,
+                'proposed_meta' => $meta,
+                'confidence' => null,
+                'tokens_used' => 0,
+            ],
+        );
+
+        if (! $run->wasRecentlyCreated) {
+            // GUARD (review diff:1/context:1): never revive a run that is mid-execution (Executing)
+            // or already done. The hoisted check above catches COMMITTED writes via the audit row;
+            // this additionally stops reviving an in-flight Executing run, which has no 'executed'
+            // row yet, so its re-arm would be invisible to the audit-based guard.
+            if (in_array($run->state, [TechnicianRunState::Executing, TechnicianRunState::Done], true)) {
+                return ['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'This exact calendar write already executed (or is executing); not re-staged.'];
+            }
+            if ($run->state === TechnicianRunState::AwaitingApproval) {
+                return ['success' => true, 'staged' => true, 'idempotent' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'Identical calendar write already staged; awaiting approval.'];
+            }
+            // Only a prior that did NOT execute and is not pending (denied/superseded/expired/etc.) is
+            // safe to re-arm as a fresh awaiting proposal.
+            $run->update([
+                'state' => TechnicianRunState::AwaitingApproval->value,
+                'proposed_content' => $proposedContent,
+                'proposed_meta' => $meta,
+                'confidence' => null,
+                'tokens_used' => 0,
+            ]);
+        }
+
+        $this->auditWrite($stagedName, 'awaiting_approval', $ticket, $contentHash, $prep['summary'].' — '.$reason, $actorLabel, $run->id, null);
+
+        return ['success' => true, 'staged' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'Calendar write staged; awaiting operator approval in the cockpit.'];
+    }
+
+    /**
+     * Execute an operator-approved staged calendar write. claim (single-use CAS) → decrypt →
+     * RE-VERIFY the owner allowlist AND the master switch AT APPROVAL (the TOCTOU close: the
+     * allowlist can change between staging and approval, and it is the one boundary that matters on
+     * a tenant-wide Calendars.ReadWrite token) → execute the SAME plan an immediate call would →
+     * back-link → audit → Done. On any failure the claim is released so the run is never stranded
+     * Executing. External/non-idempotent, so it is deliberately absent from
+     * TechnicianRun::RECOVERY_SAFE_ACTION_TYPES (a stranded run is flagged for manual review, never
+     * auto-reopened — that would risk a double-book).
+     */
+    public function approveStagedRun(TechnicianRun $run, int $approverId, array $approvalInputs = []): TechnicianApprovalResult
+    {
+        if (! self::isStagedActionType($run->action_type) || ! $run->claimForExecution()) {
+            return new TechnicianApprovalResult('already_handled');
+        }
+
+        // Tracks whether the external, non-idempotent Graph write has committed. Once it
+        // has, no failure path below may return the run to AwaitingApproval — a re-approval
+        // would re-fire it (double create / duplicate client cancellation).
+        $writeCommitted = false;
+
+        try {
+            $payload = $this->decryptRunPayload($run);
+            $directTool = is_array($payload) ? (string) ($payload['direct_tool'] ?? '') : '';
+            $upn = is_array($payload) ? (string) ($payload['user_upn'] ?? '') : '';
+            $plan = is_array($payload) && is_array($payload['plan'] ?? null) ? $payload['plan'] : null;
+
+            if ($plan === null || $upn === '' || (self::stagedToDirectMap()[$run->action_type] ?? null) !== $directTool) {
+                $run->releaseClaim();
+
+                return $this->declined('The held calendar payload could not be read or does not match this action; deny this proposal and re-stage it.');
+            }
+
+            // *** TOCTOU RE-VERIFY at approval time — not only at stage time. ***
+            if (! CalendarConfig::isEnabled()) {
+                $this->auditWrite($run->action_type, 'blocked', $run->ticket, $run->content_hash, 'Calendar toolset disabled at approval time.', $this->approverLabel($approverId), $run->id, $approverId);
+                $run->releaseClaim();
+
+                return $this->declined('The calendar toolset is now disabled in this deployment; the staged write was refused.');
+            }
+            if (! CalendarConfig::ownerUpnAllowed($upn)) {
+                $this->auditWrite($run->action_type, 'blocked', $run->ticket, $run->content_hash, "Owner {$upn} no longer allowlisted at approval time.", $this->approverLabel($approverId), $run->id, $approverId);
+                $run->releaseClaim();
+
+                return $this->declined("Calendar owner {$upn} is no longer on the allowlist; the staged write was refused. Add it back (or deny and re-stage) if this is still intended.");
+            }
+
+            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            if ($ticket === null) {
+                $run->releaseClaim();
+
+                return $this->declined('The ticket this write traced to no longer exists; deny this proposal and re-stage it.');
+            }
+
+            try {
+                $exec = $this->executeCalendarWrite($directTool, $upn, $plan, $ticket, $run->content_hash);
+            } catch (CalendarWriteRefusedException $e) {
+                // Refused BEFORE any Graph write (blocker 3 join-link guard) — nothing committed,
+                // so release and decline. NOT a retry: re-approving would only refuse again.
+                $this->auditWrite($run->action_type, 'blocked', $ticket, $run->content_hash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $this->approverLabel($approverId), $run->id, $approverId);
+                $run->releaseClaim();
+
+                return $this->declined($e->getMessage());
+            } catch (GraphClientException $e) {
+                // review contract:1: the outcome is INDETERMINATE — a 15s timeout or a post-POST
+                // shape-drift can leave a non-idempotent write already committed, so "nothing changed,
+                // re-approve to retry" can double-send. Only create is retry-safe (transactionId).
+                $this->safeAudit($run->action_type, 'error', $ticket, $run->content_hash, 'Graph calendar write failed/timed out at approval (indeterminate outcome): '.mb_substr($e->getMessage(), 0, 140), $this->approverLabel($approverId), $run->id, $approverId);
+                if ($this->isRetrySafe($directTool)) {
+                    $run->releaseClaim();
+
+                    return $this->declined('The calendar write failed upstream (Microsoft Graph); it is safe to retry (Graph de-duplicates the create by transaction id). Re-approve to retry.');
+                }
+
+                // Non-idempotent + indeterminate: do NOT reopen to AwaitingApproval — leave the run
+                // CLAIMED (Executing) so it cannot be one-tap re-approved into a duplicate client send;
+                // calendar is excluded from RECOVERY_SAFE, so the stale-claim path flags it for a human.
+                return $this->declined('The calendar write may already have reached the client (upstream timeout/error) — outcome unknown. The run is held for manual verification, NOT reopened for one-tap re-approval; check the calendar before any re-send.');
+            }
+
+            // The external Graph write has now COMMITTED. From here NO local failure may
+            // return the run to AwaitingApproval — a re-approval would re-fire a
+            // non-idempotent cancel/respond (a second client notification) or a redundant
+            // write (review blocker 2). Land the run terminal FIRST, then do best-effort
+            // bookkeeping; a bookkeeping failure is recorded for a human, never reopened.
+            $writeCommitted = true;
+            $run->advanceTo(TechnicianRunState::Done);
+
+            try {
+                $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
+                $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) ($payload['reason'] ?? ''), approved: true));
+                $this->auditWrite($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
+            } catch (\Throwable $bookkeeping) {
+                // Write done + run already Done: record the partial failure for a human and
+                // return success. Reopening here is the exact double-execute bug this guards.
+                Log::error('[Calendar] post-write bookkeeping failed after an approved calendar write', [
+                    'run_id' => $run->id, 'action' => $run->action_type, 'error' => $bookkeeping->getMessage(),
+                ]);
+                try {
+                    $this->auditWrite($run->action_type, 'error', $ticket, $run->content_hash, 'Calendar write EXECUTED but post-write back-link/audit failed ('.mb_substr($bookkeeping->getMessage(), 0, 160).') — run left Done; verify the ticket record manually.', $this->approverLabel($approverId), $run->id, $approverId);
+                } catch (\Throwable) {
+                    // Audit is best-effort on this already-degraded path; the Log line above is the durable record.
+                }
+            }
+
+            return new TechnicianApprovalResult('executed', message: 'Calendar write executed after approval.');
+        } catch (\Throwable $e) {
+            // Only reachable for a failure BEFORE the write committed — safe to reopen for a
+            // retry. If the write committed but advanceTo(Done) itself threw, do NOT reopen
+            // (double-execute risk): leave the run claimed/Executing to be flagged for manual
+            // review, per this family's exclusion from RECOVERY_SAFE_ACTION_TYPES.
+            if ($writeCommitted) {
+                Log::error('[Calendar] finalizing an executed calendar write failed; run left claimed for manual review', [
+                    'run_id' => $run->id, 'error' => $e->getMessage(),
+                ]);
+
+                return new TechnicianApprovalResult('executed', message: 'Calendar write executed; finalizing the run failed and was flagged — do NOT re-approve.');
+            }
+
+            $run->releaseClaim();
+
+            throw $e;
+        }
+    }
+
+    /** Decrypt the held write intent from the run's encrypted payload. Null on any tamper/absence. */
+    private function decryptRunPayload(TechnicianRun $run): ?array
+    {
+        $ciphertext = $run->proposed_meta['encrypted_payload'] ?? null;
+        if (! is_string($ciphertext) || $ciphertext === '') {
+            return null;
+        }
+
+        // Crypt::decryptString THROWS DecryptException on a bad MAC / tampered ciphertext — it does
+        // not return null (review #4). Catch it so tamper reaches the graceful deny-and-re-stage
+        // path (approveStagedRun -> declined), never a rethrown cockpit 500.
+        try {
+            $payload = json_decode(Crypt::decryptString($ciphertext), true);
+        } catch (DecryptException) {
+            return null;
+        }
+
+        return is_array($payload) ? $payload : null;
+    }
+
+    private function declined(string $reason): TechnicianApprovalResult
+    {
+        return new TechnicianApprovalResult('gate_declined', message: mb_substr($reason, 0, 300));
+    }
+
+    private function approverLabel(int $approverId): string
+    {
+        $user = User::find($approverId);
+
+        return $user?->email ?? $user?->name ?? "approver:{$approverId}";
+    }
+
+    /**
+     * Append the forensic technician_action_log row (append-only, separate from the controller's
+     * mcp_audit_logs transport audit). Lean version of the CIPP auditAttempt — no person/license
+     * target. $resultStatus ∈ awaiting_approval|executed|blocked|error.
+     */
+    /** auditWrite that never throws — for best-effort audit rows on already-committed or failed paths. */
+    private function safeAudit(string $actionType, string $resultStatus, ?Ticket $ticket, string $contentHash, string $summary, string $actorLabel, ?int $runId = null, ?int $approverId = null): void
+    {
+        try {
+            $this->auditWrite($actionType, $resultStatus, $ticket, $contentHash, $summary, $actorLabel, $runId, $approverId);
+        } catch (\Throwable $e) {
+            Log::error('[Calendar] audit write failed', ['action' => $actionType, 'status' => $resultStatus, 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Whether a failed/indeterminate write of this tool is safe to blindly retry. Only create is — it
+     * carries a deterministic Graph transactionId, so a repeat de-duplicates to the first event.
+     * cancel/respond/update have no such guard: a retry re-sends a notice to the client.
+     */
+    private function isRetrySafe(string $directTool): bool
+    {
+        return $directTool === 'calendar_create_event';
+    }
+
+    /** Caller-facing message for an indeterminate immediate-write failure (review diff:2 / contract:1). */
+    private function indeterminateWriteMessage(string $directTool): string
+    {
+        if ($this->isRetrySafe($directTool)) {
+            return 'The calendar create failed upstream (Microsoft Graph); it is safe to retry — Graph de-duplicates the repeat by transaction id.';
+        }
+
+        return 'The calendar write failed or timed out upstream and its outcome is INDETERMINATE — it may already have reached the client. Verify in the calendar before retrying; do not blindly retry a cancel/response/update.';
+    }
+
+    /**
+     * True when this exact calendar write already committed to Graph (review diff:1/context:1) —
+     * the guard stageWrite() uses to refuse reviving an executed run into a second send. An
+     * immutable 'executed' TechnicianActionLog row is the proof; staged approvals audit under the
+     * staged action_type and the immediate path under the direct tool, so match either. Mirrors
+     * StaffCippWriteToolExecutor::alreadyExecuted.
+     */
+    private function calendarWriteAlreadyExecuted(string $stagedName, string $directTool, ?int $clientId, string $contentHash): bool
+    {
+        return TechnicianActionLog::query()
+            ->whereIn('action_type', [$stagedName, $directTool])
+            ->where('content_hash', $contentHash)
+            ->where('result_status', 'executed')
+            ->when($clientId !== null, fn ($q) => $q->where('client_id', $clientId))
+            ->exists();
+    }
+
+    private function auditWrite(string $actionType, string $resultStatus, ?Ticket $ticket, string $contentHash, string $summary, string $actorLabel, ?int $runId, ?int $approverId): void
+    {
+        TechnicianActionLog::create([
+            'actor_id' => TechnicianConfig::aiActorUserId(),
+            'approver_user_id' => $approverId,
+            'actor_label' => $actorLabel,
+            'action_type' => $actionType,
+            'tier' => TechnicianTier::Approve->value,
+            'result_status' => $resultStatus,
+            'ticket_id' => $ticket?->id,
+            'client_id' => $ticket?->client_id,
+            'run_id' => $runId,
+            'content_hash' => $contentHash,
+            'summary' => mb_substr($summary, 0, 1000),
+            'correlation_id' => (string) Str::uuid(),
+        ]);
+    }
+
+    /** The human-readable back-link note body dropped on the ticket, for immediate and approved writes alike. */
+    private function writeBacklinkBody(string $directTool, string $upn, string $eventId, string $reason, bool $approved): string
+    {
+        $verb = match ($directTool) {
+            'calendar_create_event' => 'created',
+            'calendar_update_event' => 'updated',
+            'calendar_cancel_event' => 'cancelled',
+            'calendar_respond_event' => 'responded to',
+            default => 'acted on',
+        };
+
+        return sprintf('AI technician %s calendar event %s in %s%s. Reason: %s', $verb, $eventId, $upn, $approved ? ' (operator-approved)' : '', $reason);
+    }
+
+    private function actionVerb(string $directTool): string
+    {
+        return match ($directTool) {
+            'calendar_create_event' => 'created',
+            'calendar_update_event' => 'updated',
+            'calendar_cancel_event' => 'cancelled',
+            'calendar_respond_event' => 'responded',
+            default => 'done',
+        };
+    }
+
+    /**
+     * Resolve the REQUIRED ticket_id + reason shared by every write. ticket_id must resolve to a
+     * real ticket (the audit anchor); reason is the audit note. Returns ['ticket'=>Ticket,
+     * 'reason'=>string] or ['error'=>string].
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    private function requireTicketAndReason(array $arguments): array
+    {
+        $reason = $this->requiredString($arguments, 'reason');
+        if ($reason === null) {
+            return ['error' => 'reason is required (a short audit note for why this calendar action is being taken).'];
+        }
+
+        $raw = $arguments['ticket_id'] ?? null;
+        $ticketId = match (true) {
+            is_int($raw) && $raw > 0 => $raw,
+            is_string($raw) && ctype_digit($raw) && (int) $raw > 0 => (int) $raw,
+            default => null,
+        };
+        if ($ticketId === null) {
+            return ['error' => 'ticket_id is required (the ticket this calendar action traces to) and must be a positive integer.'];
+        }
+
+        $ticket = Ticket::find($ticketId);
+        if ($ticket === null) {
+            return ['error' => "ticket_id {$ticketId} does not resolve to an existing ticket."];
+        }
+
+        return ['ticket' => $ticket, 'reason' => $reason];
+    }
+
+    /**
+     * Build a Graph attendees[] collection from a list of email addresses. Attendees may be
+     * EXTERNAL (the manager's rule: externals are attendees, never the owner) — so they are NOT
+     * allowlist-checked here; they are only validated as syntactically real email addresses. One
+     * malformed entry refuses the whole call NAMING it, so the agent fixes it rather than silently
+     * inviting garbage. Shape: MS Graph attendee {emailAddress{address}, type}.
+     *
+     * @return array{attendees: array<int, array<string, mixed>>}|array{error: string}
+     */
+    private function attendeesFrom(mixed $raw): array
+    {
+        if (! is_array($raw)) {
+            return ['error' => 'attendees must be an array of email addresses.'];
+        }
+
+        $attendees = [];
+        foreach ($raw as $entry) {
+            $email = is_string($entry) ? trim($entry) : null;
+            if ($email === null || $email === '' || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+                $shown = is_string($entry) ? $entry : gettype($entry);
+
+                return ['error' => "Attendee '{$shown}' is not a valid email address."];
+            }
+            $attendees[] = ['emailAddress' => ['address' => $email], 'type' => 'required'];
+        }
+
+        return ['attendees' => $attendees];
+    }
+
+    /**
+     * The event time zone. The repo works in UTC (DB stores UTC), so the tz arg defaults to UTC and
+     * the caller passes UTC ISO-8601 — mirroring getSchedule's timeZone=UTC convention.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    private function timeZoneFrom(array $arguments): string
+    {
+        $tz = $arguments['tz'] ?? null;
+
+        return is_string($tz) && trim($tz) !== '' ? trim($tz) : 'UTC';
+    }
+
+    /**
+     * Drop the PRIVATE audit back-link note on the ticket the write traced to. Private + system
+     * note type (never client-visible), authored by the AI actor — the human-readable half of the
+     * audit (the redacted mcp_audit_logs row is the other). Mirrors StaffPsaActionToolExecutor's
+     * createAiNote author wiring, but private and NoteType::System.
+     */
+    private function backlinkNote(Ticket $ticket, string $body): void
+    {
+        TicketNote::create([
+            'ticket_id' => $ticket->id,
+            'author_id' => TechnicianConfig::requiredAiActorUserId(),
+            'author_name' => TechnicianConfig::aiActorName(),
+            'who_type' => WhoType::Agent,
+            'ai_authored' => true,
+            'body' => $body,
+            'body_html' => MarkdownRenderer::render($body),
+            'note_type' => NoteType::System,
+            'is_private' => true,
+            'noted_at' => now(),
+        ]);
+
+        $ticket->touch();
     }
 
     /**
