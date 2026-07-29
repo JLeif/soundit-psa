@@ -1588,9 +1588,13 @@ document.addEventListener('DOMContentLoaded', function() {
                                 ? ' <span class="badge bg-light text-dark border fw-normal" title="' + escHtml(t.category_path) + '">' +
                                     escHtml(String(t.category_path).split(' / ').pop()) + '</span>'
                                 : '';
-                            a.innerHTML = '<span><strong>' + t.display_id + '</strong> ' +
-                                truncateStr(t.subject, 35) + catChip + '</span>' +
-                                '<span class="badge ' + t.priority_class + '" style="font-size: 0.65rem;">' + t.priority + '</span>';
+                            // psa-717bn follow-up: every ticket field in this innerHTML template is
+                            // escHtml()-wrapped — t.subject arrives from unauthenticated inbound email
+                            // and previously injected RAW into the staff browser (stored XSS), same
+                            // class as the emails/index typeahead fixed in PR #328.
+                            a.innerHTML = '<span><strong>' + escHtml(t.display_id) + '</strong> ' +
+                                escHtml(truncateStr(t.subject, 35)) + catChip + '</span>' +
+                                '<span class="badge ' + escHtml(t.priority_class) + '" style="font-size: 0.65rem;">' + escHtml(t.priority) + '</span>';
                             a.addEventListener('click', function(e) {
                                 e.preventDefault();
                                 mergeResults.innerHTML = '';
