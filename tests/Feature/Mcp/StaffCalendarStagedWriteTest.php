@@ -347,4 +347,32 @@ class StaffCalendarStagedWriteTest extends TestCase
         // Re-approve is a no-op — not AwaitingApproval, so the cancel cannot fire a second time.
         $this->assertSame('already_handled', $exec->approveStagedRun($run->fresh(), $this->approver->id)->status);
     }
+
+    /**
+     * Rework diff:1 (final_edit): an IMMEDIATE write creates NO staged run, so a later STAGE of the
+     * byte-identical content used to firstOrCreate a FRESH approvable run — bypassing the in-branch
+     * guard — that re-fired the write on approval. The hoisted already-executed guard must refuse the
+     * stage before any run is created. cancelEvent fires exactly once (the immediate execute).
+     */
+    public function test_staging_a_write_that_already_executed_immediately_is_refused(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = Ticket::factory()->create();
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once());
+
+        $exec = app(StaffCalendarToolExecutor::class);
+        $args = ['user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG', 'comment' => 'x', 'ticket_id' => $ticket->id, 'reason' => 'Resolved.'];
+
+        // Immediate execute: writes an 'executed' audit row, creates NO staged run.
+        $imm = $exec->execute('calendar_cancel_event', $args, 0, 'mcp-staff:chet');
+        $this->assertTrue($imm['success'] ?? false);
+
+        // Stage the byte-identical write: must be refused as already-executed, not create a run.
+        $staged = $exec->execute('calendar_stage_cancel_event', $args, 0, 'mcp-staff:chet', 'chet');
+        $this->assertTrue($staged['already_executed'] ?? false, 'immediate-then-stage of identical content must be refused before creating a fresh approvable run');
+        $this->assertFalse($staged['staged'] ?? true);
+        $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)
+            ->where('action_type', 'calendar_stage_cancel_event')
+            ->where('state', TechnicianRunState::AwaitingApproval->value)->count());
+    }
 }

@@ -770,6 +770,16 @@ class StaffCalendarToolExecutor
         ];
         $proposedContent = $prep['summary']." in {$upn}\nReason: ".$reason;
 
+        // HOISTED idempotency guard (review diff:1, final_edit): a write that already committed —
+        // via the IMMEDIATE path (which creates NO staged run) or a prior staged approval — must be
+        // refused BEFORE firstOrCreate. Otherwise an immediate-then-stage of byte-identical content
+        // creates a FRESH run that the in-branch guard never sees, and its approval re-fires a
+        // non-idempotent client-facing write. The immutable 'executed' audit row is the proof
+        // (mirrors StaffCippWriteToolExecutor::alreadyExecuted).
+        if ($this->calendarWriteAlreadyExecuted($stagedName, $directTool, $ticket->client_id, $contentHash)) {
+            return ['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => null, 'ticket_id' => $ticket->id, 'message' => 'This exact calendar write already executed; not staged.'];
+        }
+
         // Keyed on the DB idempotency invariant (ticket_id + action_type + content_hash UNIQUE):
         // identical content either doesn't exist yet (create) or exists but is no longer live
         // (revive it) — never a second colliding row.
@@ -786,13 +796,11 @@ class StaffCalendarToolExecutor
         );
 
         if (! $run->wasRecentlyCreated) {
-            // GUARD (review diff:1/context:1): a re-stage of byte-identical content must NEVER revive
-            // a write that already EXECUTED or is mid-execution — reviving re-arms a non-idempotent
-            // client-facing Graph write for a second send (a duplicate cancellation/response mailed to
-            // the client). The immutable 'executed' audit row is the proof (mirrors
-            // StaffCippWriteToolExecutor::alreadyExecuted); Executing/Done are also caught by state.
-            if (in_array($run->state, [TechnicianRunState::Executing, TechnicianRunState::Done], true)
-                || $this->calendarWriteAlreadyExecuted($stagedName, $directTool, $ticket->client_id, $contentHash)) {
+            // GUARD (review diff:1/context:1): never revive a run that is mid-execution (Executing)
+            // or already done. The hoisted check above catches COMMITTED writes via the audit row;
+            // this additionally stops reviving an in-flight Executing run, which has no 'executed'
+            // row yet, so its re-arm would be invisible to the audit-based guard.
+            if (in_array($run->state, [TechnicianRunState::Executing, TechnicianRunState::Done], true)) {
                 return ['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'This exact calendar write already executed (or is executing); not re-staged.'];
             }
             if ($run->state === TechnicianRunState::AwaitingApproval) {
