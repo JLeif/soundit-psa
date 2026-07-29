@@ -196,9 +196,10 @@ class TacticalDeviceSyncService
                 SweepQueuedActionsForAgent::dispatch((string) $agentId);
             }
 
-            // Link to PSA asset if not already linked
+            // Link to PSA asset if not already linked — creating the asset when
+            // Tactical is the discovery source for this device.
             if (! $tacticalAsset->asset_id) {
-                $this->linkToAsset($tacticalAsset, $psaClientId, $agent['hostname'] ?? null, $result);
+                $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
             }
 
             // Update the linked asset's last_user if available
@@ -302,10 +303,22 @@ class TacticalDeviceSyncService
     }
 
     /**
-     * Attempt to link a TacticalAsset to an existing PSA Asset by hostname match.
+     * Link a TacticalAsset to the mapped client's PSA Asset by hostname match,
+     * CREATING that asset when the client has no record of the device yet.
+     *
+     * Tactical is a discovery source, not only an enricher — same posture as the
+     * Level and Ninja syncs, which both seed assets. Without the create, an agent
+     * on a mapped site with no matching asset left a tactical_assets row with
+     * asset_id = NULL, and since every tactical UI surface hangs off Asset, the
+     * device was invisible: the sync said "N created, 0 linked" and the operator
+     * saw nothing.
+     *
+     * @param  array<string, mixed>  $agent
      */
-    private function linkToAsset(TacticalAsset $tacticalAsset, int $psaClientId, ?string $hostname, SyncResult $result): void
+    private function linkOrCreateAsset(TacticalAsset $tacticalAsset, int $psaClientId, array $agent, SyncResult $result): void
     {
+        $hostname = $agent['hostname'] ?? null;
+
         if (! $hostname) {
             return;
         }
@@ -321,7 +334,13 @@ class TacticalDeviceSyncService
             ->first();
 
         if (! $asset) {
-            return;
+            $asset = $this->createAssetFromAgent($psaClientId, $agent);
+
+            if (! $asset) {
+                return;
+            }
+
+            $result->details['assets_created'] = ($result->details['assets_created'] ?? 0) + 1;
         }
 
         $asset->update(['tactical_asset_id' => $tacticalAsset->id]);
@@ -336,5 +355,112 @@ class TacticalDeviceSyncService
             'agent' => $hostname,
             'asset_id' => $asset->id,
         ]);
+    }
+
+    /**
+     * Create the PSA asset for a discovered agent, or null when creating one
+     * would fork an existing device into two records.
+     *
+     * The link query above only considers LIVE, UNLINKED assets, so "no match"
+     * is not the same as "this client has never seen this hostname". Two cases
+     * must NOT create:
+     *
+     *  - Hostname already owned by another TacticalAsset — an agent reinstall
+     *    issues a new agent_id for the same box while the stale row keeps the
+     *    link. Creating would fork the device; leave the new row unlinked so the
+     *    stale one can be reconciled (or removed) first.
+     *  - Hostname belongs to a soft-deleted asset — the operator retired that
+     *    record deliberately. Resurrecting it (or shipping a second copy) is a
+     *    decision for a human, not for a read-driven sync.
+     *
+     * @param  array<string, mixed>  $agent
+     */
+    private function createAssetFromAgent(int $psaClientId, array $agent): ?Asset
+    {
+        $hostname = (string) $agent['hostname'];
+        $lowerHostname = strtolower($hostname);
+
+        $conflict = Asset::withTrashed()
+            ->where('client_id', $psaClientId)
+            ->where(function ($q) use ($lowerHostname) {
+                $q->whereRaw('LOWER(hostname) = ?', [$lowerHostname])
+                    ->orWhereRaw('LOWER(name) = ?', [$lowerHostname]);
+            })
+            ->first();
+
+        if ($conflict) {
+            Log::info('[TacticalSync] Skipped asset creation — hostname already exists for this client', [
+                'agent' => $hostname,
+                'asset_id' => $conflict->id,
+                'trashed' => $conflict->trashed(),
+                'linked_tactical_asset_id' => $conflict->tactical_asset_id,
+            ]);
+
+            return null;
+        }
+
+        // Reuse the tactical_assets mapping so the asset and its agent snapshot
+        // agree on every shared field (cpu/disk joining, plat sniffing, IP
+        // normalization) instead of re-deriving them from the payload here.
+        $mapped = $this->mapAgentToTacticalAsset($agent);
+
+        $localIps = $mapped['local_ips'] ?? null;
+
+        $asset = Asset::create([
+            'client_id' => $psaClientId,
+            'name' => $hostname,
+            'hostname' => $hostname,
+            'asset_type' => $this->mapAssetType($mapped['plat'] ?? null, $agent['monitoring_type'] ?? null),
+            'os' => $mapped['os'] ?? null,
+            'serial_number' => $mapped['serial_number'] ?? null,
+            'cpu' => $mapped['cpu'] ?? null,
+            'disk_summary' => $mapped['disk_summary'] ?? null,
+            'ip_address' => is_array($localIps) ? ($localIps[0] ?? null) : $localIps,
+            'last_user' => $mapped['last_user'] ?? null,
+            'rmm_online' => ($mapped['status'] ?? null) === 'online',
+            'last_seen_at' => $mapped['last_seen_at'] ?? null,
+            'needs_reboot' => (bool) ($mapped['needs_reboot'] ?? false),
+            'is_active' => true,
+        ]);
+
+        Log::info('[TacticalSync] Created PSA asset for discovered agent', [
+            'agent' => $hostname,
+            'asset_id' => $asset->id,
+            'client_id' => $psaClientId,
+        ]);
+
+        return $asset;
+    }
+
+    /**
+     * asset_type for a discovered device, in the same vocabulary the Ninja sync
+     * writes ("Windows Workstation", "Windows Server", "Mac", "Linux Server", …)
+     * so the Assets type filter stays one list instead of two dialects.
+     *
+     * Both inputs are honestly optional: an unknown platform yields null rather
+     * than a guessed type, matching TacticalPlatform's "never assume" contract.
+     */
+    private function mapAssetType(?string $plat, ?string $monitoringType): ?string
+    {
+        // macOS agents are just "Mac" in the Ninja vocabulary — no server split.
+        if ($plat === TacticalPlatform::DARWIN) {
+            return 'Mac';
+        }
+
+        $os = match ($plat) {
+            TacticalPlatform::WINDOWS => 'Windows',
+            TacticalPlatform::LINUX => 'Linux',
+            default => null,
+        };
+
+        if ($os === null) {
+            return null;
+        }
+
+        return match ($monitoringType) {
+            'server' => "{$os} Server",
+            'workstation' => "{$os} Workstation",
+            default => $os,
+        };
     }
 }
