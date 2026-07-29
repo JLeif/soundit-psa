@@ -2284,8 +2284,18 @@ class IntegrationsController extends Controller
             $result = $service->syncDevices();
 
             $linked = $result->details['linked'] ?? 0;
+            $assetsCreated = $result->details['assets_created'] ?? 0;
 
-            return back()->with('success', "Tactical device sync complete: {$result->created} created, {$result->updated} updated, {$linked} linked.");
+            // `created` counts AGENT snapshots (tactical_assets rows), which have
+            // no UI of their own — assets do. Report both, so a bare "2 created"
+            // can never read as "2 assets you can go find in the Assets list".
+            $message = "Tactical device sync complete: {$result->created} agents added, "
+                ."{$result->updated} updated, {$linked} linked to assets";
+            $message .= $assetsCreated > 0
+                ? ' ('.$assetsCreated.' new asset'.($assetsCreated === 1 ? '' : 's').' created).'
+                : '.';
+
+            return back()->with('success', $message);
         } catch (\Throwable $e) {
             return back()->with('error', "Tactical device sync failed: {$e->getMessage()}");
         }

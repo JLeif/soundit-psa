@@ -47,6 +47,10 @@ class TacticalSyncDevices extends Command
             $this->info("Linked: {$result->details['linked']}");
         }
 
+        if (! empty($result->details['assets_created'])) {
+            $this->info("Assets created: {$result->details['assets_created']}");
+        }
+
         return $result->errors > 0 ? self::FAILURE : self::SUCCESS;
     }
 }
