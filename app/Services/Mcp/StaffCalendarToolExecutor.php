@@ -434,7 +434,15 @@ class StaffCalendarToolExecutor
         }
 
         $contentHash = $this->contentHash($directTool, $upn, $prep['plan'], $ticket->id);
-        $exec = $this->executeCalendarWrite($directTool, $upn, $prep['plan'], $ticket, $contentHash);
+        try {
+            $exec = $this->executeCalendarWrite($directTool, $upn, $prep['plan'], $ticket, $contentHash);
+        } catch (CalendarWriteRefusedException $e) {
+            // Blocker 3 join-link guard — refused before any Graph write; surface it as a clean
+            // tool error rather than letting it bubble to a generic MCP 500.
+            $this->auditWrite($directTool, 'blocked', $ticket, $contentHash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $actorLabel, null, null);
+
+            return ['error' => $e->getMessage()];
+        }
         $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
 
         $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) $ctx['reason'], approved: false));
@@ -607,7 +615,15 @@ class StaffCalendarToolExecutor
             return ['event' => $this->projectEvent($this->graph->createEvent($upn, $body))];
         }
         if ($directTool === 'calendar_update_event') {
-            return ['event' => $this->projectEvent($this->graph->updateEvent($upn, $plan['event_id'], $plan['patch']))];
+            $patch = $plan['patch'];
+            if (array_key_exists('body', $patch)) {
+                // Protect a Teams meeting's join block on a body edit (blocker 3): re-read the
+                // event immediately before the write and, if it is an online meeting, keep its
+                // existing join block above the new agenda — or refuse if we cannot confirm it.
+                $patch['body'] = $this->updateBodyPreservingTeamsJoin($upn, (string) $plan['event_id'], $patch['body']);
+            }
+
+            return ['event' => $this->projectEvent($this->graph->updateEvent($upn, $plan['event_id'], $patch))];
         }
         if ($directTool === 'calendar_cancel_event') {
             $this->graph->cancelEvent($upn, $plan['event_id'], $plan['comment'] ?? null);
@@ -619,6 +635,65 @@ class StaffCalendarToolExecutor
         $this->graph->respondEvent($upn, $plan['event_id'], $plan['response'], $plan['comment'] ?? null, $plan['send_response'] ?? true);
 
         return ['event_id' => $plan['event_id'], 'response' => $plan['response']];
+    }
+
+    /**
+     * Protect a Teams meeting's join link on a body edit (review blocker 3).
+     *
+     * A calendar_update_event body is built as plain Text, and a Graph PATCH replaces the
+     * event body WHOLESALE — which for an online meeting deletes the "Join the meeting"
+     * block Graph embeds in the body HTML. So we re-read the event immediately before the
+     * write (state can change between stage and approval) and:
+     *   - if it is NOT an online meeting, the plain-Text body is safe as-is;
+     *   - if it IS, we rebuild the body as HTML that keeps the existing meeting block
+     *     verbatim below the new agenda. The agent's text is html-escaped, so no agent
+     *     markup can enter the body — the only HTML carried over is Graph's own block.
+     *
+     * FAIL CLOSED (Jeeves's edge on approach (a)): if the current body cannot be parsed
+     * confidently enough to locate the join block — not HTML, no https join URL, the URL
+     * absent from the body, or no Graph separator bracketing the block — we REFUSE the edit
+     * rather than silently drop the link. (b) "can't edit a Teams agenda here" is the
+     * fallback branch, not the design.
+     *
+     * @param  array{contentType?:string,content?:string}  $newBody  the Text body from prepareUpdate
+     * @return array{contentType:string,content:string}
+     */
+    private function updateBodyPreservingTeamsJoin(string $upn, string $eventId, array $newBody): array
+    {
+        $event = $this->graph->getEvent($upn, $eventId); // immediately before the write
+
+        if (! ($event['isOnlineMeeting'] ?? false)) {
+            return $newBody; // not a Teams meeting — nothing to preserve
+        }
+
+        $joinUrl = is_array($event['onlineMeeting'] ?? null) ? (string) ($event['onlineMeeting']['joinUrl'] ?? '') : '';
+        $currentHtml = is_array($event['body'] ?? null) ? (string) ($event['body']['content'] ?? '') : '';
+        $currentType = is_array($event['body'] ?? null) ? strtolower((string) ($event['body']['contentType'] ?? '')) : '';
+
+        // Graph brackets the online-meeting block in the body with a long underscore rule;
+        // everything from it to the end of the body is the meeting block, the agenda is above.
+        $sepAt = preg_match('/_{20,}/', $currentHtml, $m, PREG_OFFSET_CAPTURE) ? (int) $m[0][1] : -1;
+        $joinAt = $joinUrl !== '' ? strpos($currentHtml, $joinUrl) : false;
+
+        // Every condition must hold, or we cannot confidently preserve the link → refuse.
+        if ($currentType !== 'html'
+            || ! str_starts_with($joinUrl, 'https://')
+            || $joinAt === false
+            || $sepAt < 0
+            || $joinAt < $sepAt) {
+            throw new CalendarWriteRefusedException(
+                'This event is a Teams meeting and its join link could not be confidently located in the '.
+                'current event body, so editing the agenda here would risk removing the "Join" link. Update '.
+                'other fields (subject/time/location/attendees) without the body, or edit the agenda in '.
+                'Outlook/Teams where the join block is preserved automatically.'
+            );
+        }
+
+        // Keep the meeting block verbatim; put the new agenda (escaped) above it.
+        $meetingBlock = substr($currentHtml, $sepAt);
+        $agendaHtml = nl2br(e((string) ($newBody['content'] ?? '')), false);
+
+        return ['contentType' => 'HTML', 'content' => '<div>'.$agendaHtml.'</div>'.$meetingBlock];
     }
 
     /**
@@ -769,6 +844,13 @@ class StaffCalendarToolExecutor
 
             try {
                 $exec = $this->executeCalendarWrite($directTool, $upn, $plan, $ticket, $run->content_hash);
+            } catch (CalendarWriteRefusedException $e) {
+                // Refused BEFORE any Graph write (blocker 3 join-link guard) — nothing committed,
+                // so release and decline. NOT a retry: re-approving would only refuse again.
+                $this->auditWrite($run->action_type, 'blocked', $ticket, $run->content_hash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $this->approverLabel($approverId), $run->id, $approverId);
+                $run->releaseClaim();
+
+                return $this->declined($e->getMessage());
             } catch (GraphClientException $e) {
                 $this->auditWrite($run->action_type, 'error', $ticket, $run->content_hash, 'Upstream Microsoft Graph calendar write failed at approval.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();

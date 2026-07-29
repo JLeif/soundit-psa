@@ -362,4 +362,102 @@ class StaffCalendarWriteToolExecutorTest extends TestCase
         $this->assertArrayHasKey('error', $result);
         $this->assertStringContainsString('disabled', mb_strtolower($result['error']));
     }
+
+    private const TEAMS_BODY = '<div>Old agenda</div>'
+        .'<div>________________________________________________________________________________</div>'
+        .'<div>Microsoft Teams meeting<br><a href="https://teams.microsoft.com/l/meetup-join/xyz">Join the meeting now</a><br>Meeting ID: 123 456 789</div>';
+
+    /**
+     * Blocker 3 (psa-lulgh review) — Chet's acceptance probe verbatim: editing the agenda of a
+     * Teams meeting must PRESERVE the join link. The body is re-read immediately before the write;
+     * Graph's meeting block is kept verbatim below the new (escaped) agenda, sent as HTML.
+     */
+    public function test_a_body_edit_on_a_teams_meeting_preserves_the_join_link(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = $this->ticket();
+        $captured = null;
+        $this->mock(GraphClient::class, function ($m) use (&$captured) {
+            $m->shouldReceive('getEvent')->once()->andReturn([
+                'id' => 'AAMkAG',
+                'isOnlineMeeting' => true,
+                'onlineMeeting' => ['joinUrl' => 'https://teams.microsoft.com/l/meetup-join/xyz'],
+                'body' => ['contentType' => 'html', 'content' => self::TEAMS_BODY],
+            ]);
+            $m->shouldReceive('updateEvent')->once()->andReturnUsing(function (string $upn, string $eventId, array $patch) use (&$captured) {
+                $captured = $patch;
+
+                return ['id' => $eventId, 'subject' => 'x', 'webLink' => 'https://outlook/x'];
+            });
+        });
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG',
+            'body' => "New agenda line 1\nline 2", 'ticket_id' => $ticket->id, 'reason' => 'Reworked the agenda.',
+        ], 0, 'mcp-staff:chet');
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame('HTML', $captured['body']['contentType']);
+        // The join link AND the rest of Graph's meeting block survive the agenda edit.
+        $this->assertStringContainsString('https://teams.microsoft.com/l/meetup-join/xyz', $captured['body']['content']);
+        $this->assertStringContainsString('Meeting ID: 123 456 789', $captured['body']['content']);
+        // The new agenda is present (and escaped — no raw agent markup enters the body).
+        $this->assertStringContainsString('New agenda line 1', $captured['body']['content']);
+    }
+
+    /**
+     * Fail-closed edge: if the current body can't be parsed confidently enough to locate the join
+     * block, refuse the edit rather than silently drop the link — and never touch Graph.
+     */
+    public function test_a_body_edit_on_a_teams_meeting_with_no_locatable_join_block_is_refused(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = $this->ticket();
+        $this->mock(GraphClient::class, function ($m) {
+            $m->shouldReceive('getEvent')->once()->andReturn([
+                'id' => 'AAMkAG',
+                'isOnlineMeeting' => true,
+                'onlineMeeting' => ['joinUrl' => 'https://teams.microsoft.com/l/meetup-join/xyz'],
+                // No separator and the join URL is absent from the body — not confidently preservable.
+                'body' => ['contentType' => 'html', 'content' => '<div>Just an agenda, no meeting block</div>'],
+            ]);
+            $m->shouldReceive('updateEvent')->never();
+        });
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG',
+            'body' => 'New agenda', 'ticket_id' => $ticket->id, 'reason' => 'Reworked the agenda.',
+        ], 0, 'mcp-staff:chet');
+
+        $this->assertArrayHasKey('error', $result);
+        $this->assertStringContainsString('Join', $result['error']);
+    }
+
+    /** A non-Teams event keeps the existing plain-Text body path unchanged (no HTML, no join guard). */
+    public function test_a_body_edit_on_a_non_teams_event_stays_plain_text(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = $this->ticket();
+        $captured = null;
+        $this->mock(GraphClient::class, function ($m) use (&$captured) {
+            $m->shouldReceive('getEvent')->once()->andReturn([
+                'id' => 'AAMkAG', 'isOnlineMeeting' => false,
+                'body' => ['contentType' => 'text', 'content' => 'plain'],
+            ]);
+            $m->shouldReceive('updateEvent')->once()->andReturnUsing(function (string $upn, string $eventId, array $patch) use (&$captured) {
+                $captured = $patch;
+
+                return ['id' => $eventId, 'subject' => 'x', 'webLink' => 'https://outlook/x'];
+            });
+        });
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG',
+            'body' => 'New agenda', 'ticket_id' => $ticket->id, 'reason' => 'Reworked the agenda.',
+        ], 0, 'mcp-staff:chet');
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame('Text', $captured['body']['contentType']);
+        $this->assertSame('New agenda', $captured['body']['content']);
+    }
 }
