@@ -5,7 +5,7 @@
 @php
     $replyTypes = ['send_reply', 'propose_resolution', 'stage_email', 'stage_public_note'];
     $closureTypes = ['propose_close', 'stage_close_ticket', 'propose_merge'];
-    $isAccountAction = fn (string $type): bool => str_starts_with($type, 'tactical_stage_') || str_starts_with($type, 'cipp_stage_');
+    $isAccountAction = fn (string $type): bool => \App\Support\StagedActionLabels::isVendorSideEffectAction($type);
 
     $replyDrafts = $drafts->filter(fn ($run) => in_array($run->action_type, $replyTypes, true));
     $closureDrafts = $drafts->filter(fn ($run) => in_array($run->action_type, $closureTypes, true));

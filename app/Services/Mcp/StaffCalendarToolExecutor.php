@@ -19,6 +19,7 @@ use App\Support\CalendarConfig;
 use App\Support\TechnicianConfig;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -728,6 +729,11 @@ class StaffCalendarToolExecutor
             return new TechnicianApprovalResult('already_handled');
         }
 
+        // Tracks whether the external, non-idempotent Graph write has committed. Once it
+        // has, no failure path below may return the run to AwaitingApproval — a re-approval
+        // would re-fire it (double create / duplicate client cancellation).
+        $writeCommitted = false;
+
         try {
             $payload = $this->decryptRunPayload($run);
             $directTool = is_array($payload) ? (string) ($payload['direct_tool'] ?? '') : '';
@@ -770,13 +776,45 @@ class StaffCalendarToolExecutor
                 return $this->declined('The calendar write failed upstream (Microsoft Graph); nothing was changed. Re-approve to retry.');
             }
 
-            $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
-            $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) ($payload['reason'] ?? ''), approved: true));
-            $this->auditWrite($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
+            // The external Graph write has now COMMITTED. From here NO local failure may
+            // return the run to AwaitingApproval — a re-approval would re-fire a
+            // non-idempotent cancel/respond (a second client notification) or a redundant
+            // write (review blocker 2). Land the run terminal FIRST, then do best-effort
+            // bookkeeping; a bookkeeping failure is recorded for a human, never reopened.
+            $writeCommitted = true;
             $run->advanceTo(TechnicianRunState::Done);
+
+            try {
+                $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
+                $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) ($payload['reason'] ?? ''), approved: true));
+                $this->auditWrite($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
+            } catch (\Throwable $bookkeeping) {
+                // Write done + run already Done: record the partial failure for a human and
+                // return success. Reopening here is the exact double-execute bug this guards.
+                Log::error('[Calendar] post-write bookkeeping failed after an approved calendar write', [
+                    'run_id' => $run->id, 'action' => $run->action_type, 'error' => $bookkeeping->getMessage(),
+                ]);
+                try {
+                    $this->auditWrite($run->action_type, 'error', $ticket, $run->content_hash, 'Calendar write EXECUTED but post-write back-link/audit failed ('.mb_substr($bookkeeping->getMessage(), 0, 160).') — run left Done; verify the ticket record manually.', $this->approverLabel($approverId), $run->id, $approverId);
+                } catch (\Throwable) {
+                    // Audit is best-effort on this already-degraded path; the Log line above is the durable record.
+                }
+            }
 
             return new TechnicianApprovalResult('executed', message: 'Calendar write executed after approval.');
         } catch (\Throwable $e) {
+            // Only reachable for a failure BEFORE the write committed — safe to reopen for a
+            // retry. If the write committed but advanceTo(Done) itself threw, do NOT reopen
+            // (double-execute risk): leave the run claimed/Executing to be flagged for manual
+            // review, per this family's exclusion from RECOVERY_SAFE_ACTION_TYPES.
+            if ($writeCommitted) {
+                Log::error('[Calendar] finalizing an executed calendar write failed; run left claimed for manual review', [
+                    'run_id' => $run->id, 'error' => $e->getMessage(),
+                ]);
+
+                return new TechnicianApprovalResult('executed', message: 'Calendar write executed; finalizing the run failed and was flagged — do NOT re-approve.');
+            }
+
             $run->releaseClaim();
 
             throw $e;

@@ -253,4 +253,43 @@ class StaffCalendarStagedWriteTest extends TestCase
         $this->assertSame('AAMkAG', $captured['eventId']);
         $this->assertSame('No longer needed', $captured['comment']);
     }
+
+    /**
+     * Blocker 2 (psa-lulgh review): once the non-idempotent Graph write has committed, a
+     * LATER local failure must leave the run TERMINAL — never back to AwaitingApproval,
+     * which a re-approval would turn into a second client cancellation notice. Here the
+     * post-write back-link throws (its AI actor no longer resolves); the run must still end
+     * Done and the cancel must fire exactly once across both approval attempts.
+     */
+    public function test_a_post_write_bookkeeping_failure_lands_terminal_and_never_re_fires_the_write(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = Ticket::factory()->create();
+
+        // Exactly ONE cancel across BOTH approvals below — the double-execute guard.
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once());
+
+        $staged = app(StaffCalendarToolExecutor::class)->execute('calendar_stage_cancel_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG',
+            'comment' => 'No longer needed', 'ticket_id' => $ticket->id, 'reason' => 'Resolved remotely.',
+        ], 0, 'mcp-staff:chet', 'chet');
+        $run = TechnicianRun::find($staged['run_id']);
+
+        // Break the post-write back-link: the AI actor it is attributed to no longer exists,
+        // so backlinkNote throws AFTER executeCalendarWrite has already called Graph.
+        Setting::setValue('triage_system_user_id', '99999999');
+
+        $first = app(StaffCalendarToolExecutor::class)->approveStagedRun($run, $this->approver->id);
+
+        $this->assertSame('executed', $first->status);
+        $this->assertSame(
+            TechnicianRunState::Done,
+            $run->fresh()->state,
+            'a post-write local failure must NOT return the run to AwaitingApproval'
+        );
+
+        // Re-approval must be a no-op: the run is terminal, so Graph is not touched again.
+        $second = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+        $this->assertSame('already_handled', $second->status);
+    }
 }
