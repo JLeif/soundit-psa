@@ -284,7 +284,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'get_ticket_attachment',
-                'description' => 'Fetch the binary content of an image or file attachment on one of THIS client\'s tickets, returned base64-encoded so you can actually see what a client or operator put on the ticket — error screenshots (the normal way non-technical people report problems), photos, PDFs. Note bodies reference attachments as /attachments/{id}/{filename}; pass that {id} as attachment_id together with the ticket_id it appears on. Images are downscaled and re-encoded for direct visual inspection; the response carries media_type + data_base64. The attachment must belong to the given ticket (its ticket, a note on it, or an email on it) or the fetch is refused.',
+                'description' => 'Fetch the binary content of an image or file attachment on one of THIS client\'s tickets, returned base64-encoded so you can actually see what a client or operator put on the ticket — error screenshots (the normal way non-technical people report problems), photos, PDFs. Note bodies reference attachments as /attachments/{id}/{filename}; pass that {id} as attachment_id together with the ticket_id it appears on. Images are downscaled and re-encoded for direct visual inspection; the response carries media_type + data_base64. The attachment must belong to the given ticket (its ticket or a note on it) or the fetch is refused.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [

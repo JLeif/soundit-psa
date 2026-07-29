@@ -49,6 +49,12 @@ class AssistantToolExecutor
     use HandlesWikiTools;
     use PaginatesTicketLists;
 
+    /** get_ticket_attachment inline ceiling: bytes returned base64 in a tool result. */
+    private const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+    /** get_ticket_attachment decompression-bomb guard: max source pixels before GD decode. */
+    private const MAX_IMAGE_PIXELS = 30_000_000;
+
     private ?Ticket $ticket;
 
     // Read by HandlesWikiTools; nullable here means global-only wiki scope (spec §6).
@@ -793,15 +799,18 @@ class AssistantToolExecutor
      * the /attachments/... web route 302s an MCP bearer to the login page, so
      * client error screenshots — the normal way non-technical people report
      * problems — were silently invisible to the agent. This is a pure surface
-     * verb over the already-shipped attachment store; it widens no bearer and
-     * grants no new reach: authorization is the SAME client scope get_ticket_notes
-     * proves, re-used here, not a route of its own.
+     * verb over the already-shipped attachment store: it opens no new route and
+     * re-uses the SAME client scope get_ticket_notes proves. It is on the STAFF
+     * assistant/MCP surface (staff-authorized), which already returns private
+     * ticket notes — so it exposes no data class a staff caller can't already
+     * read; it does NOT publish on the client portal.
      *
      * CLIENT-SCOPED, identically to get_ticket_notes: resolveReference refuses a
      * cross-client ticket_id by construction, and the attachment is additionally
-     * pinned to that ticket (its own attachable, a note on it, or an email on it)
-     * so a valid attachment_id from another ticket cannot be pulled through an
-     * unrelated ticket_id.
+     * pinned to that ticket (its own attachable, or a note on it — email inline
+     * images are re-linked to the note/ticket that references them, so they land
+     * on those arms too) so a valid attachment_id from another ticket cannot be
+     * pulled through an unrelated ticket_id.
      */
     private function getTicketAttachment(array $input): array
     {
@@ -814,9 +823,17 @@ class AssistantToolExecutor
             return ['error' => 'ticket_id is required'];
         }
 
-        $attachmentId = $input['attachment_id'] ?? null;
-        if (! is_numeric($attachmentId) || (int) $attachmentId <= 0) {
-            return ['error' => 'attachment_id is required'];
+        // Strict integer id: a non-integer like "12.9" must not silently coerce
+        // to a DIFFERENT attachment (12), and a float/garbage id is rejected
+        // rather than cast.
+        $attachmentIdRaw = $input['attachment_id'] ?? null;
+        $attachmentId = match (true) {
+            is_int($attachmentIdRaw) => $attachmentIdRaw,
+            is_string($attachmentIdRaw) && ctype_digit($attachmentIdRaw) => (int) $attachmentIdRaw,
+            default => 0,
+        };
+        if ($attachmentId <= 0) {
+            return ['error' => 'attachment_id is required (positive integer)'];
         }
 
         // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused.
@@ -825,25 +842,43 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
-        $attachment = Attachment::find((int) $attachmentId);
-        if (! $attachment) {
-            return ['error' => 'Attachment not found'];
-        }
+        $attachment = Attachment::find($attachmentId);
 
-        if (! $this->attachmentBelongsToTicket($attachment, $ticket->id)) {
-            // Same-shaped refusal as the cross-client case: never confirm that
-            // an attachment id exists on some OTHER ticket.
+        // SAME-SHAPED refusal: a non-existent id and an id that exists but hangs
+        // off another ticket return the IDENTICAL message, so the verb is not an
+        // existence oracle over the global attachment-id space.
+        if (! $attachment || ! $this->attachmentBelongsToTicket($attachment, $ticket->id)) {
             return ['error' => 'Attachment not found on this ticket'];
         }
 
         $service = app(AttachmentService::class);
 
-        // Images: downscale + re-encode to vision-ready base64 (GIF→PNG for
-        // model compatibility, matching resizeImageForAi's output contract).
+        $content = $service->getContent($attachment);
+        if ($content === null) {
+            return ['error' => 'Attachment could not be read from storage'];
+        }
+
+        // Byte ceiling on BOTH paths, BEFORE any GD decode: a hostile or
+        // accidental multi-MB file must not be decoded through GD (memory
+        // blow-up) or returned as an unusably large base64 tool result.
+        if (strlen($content) > self::MAX_ATTACHMENT_BYTES) {
+            return ['error' => 'Attachment is too large to return inline ('.strlen($content).' bytes, limit '.self::MAX_ATTACHMENT_BYTES.'); open it in the PSA UI.'];
+        }
+
         if ($attachment->isImage()) {
+            // Pixel ceiling before GD decode: a small "decompression-bomb" file
+            // can declare enormous dimensions that imagecreatefromstring would
+            // allocate in full. getimagesizefromstring reads only the header.
+            $info = @getimagesizefromstring($content);
+            if ($info !== false && ($info[0] * $info[1]) > self::MAX_IMAGE_PIXELS) {
+                return ['error' => 'Image dimensions too large to process ('.$info[0].'x'.$info[1].').'];
+            }
+
+            // Downscale + re-encode to vision-ready base64 (GIF→PNG for model
+            // compatibility, matching resizeImageForAi's output contract).
             $data = $service->resizeImageForAi($attachment);
-            if ($data === null) {
-                return ['error' => 'Attachment could not be read from storage'];
+            if ($data === null || $data === '') {
+                return ['error' => 'Attachment could not be decoded as an image'];
             }
 
             return [
@@ -855,40 +890,30 @@ class AssistantToolExecutor
             ];
         }
 
-        // Non-image (e.g. PDF): raw bytes, guarded against an oversized payload.
-        $content = $service->getContent($attachment);
-        if ($content === null) {
-            return ['error' => 'Attachment could not be read from storage'];
-        }
-
-        $maxBytes = 8 * 1024 * 1024;
-        if (strlen($content) > $maxBytes) {
-            return ['error' => 'Attachment is too large to return inline ('.strlen($content).' bytes); download it from the PSA UI.'];
-        }
-
         return [
             'attachment_id' => $attachment->id,
             'filename' => $attachment->original_filename,
             'media_type' => $attachment->mime_type,
             'is_image' => false,
-            'size_bytes' => $attachment->size_bytes,
+            // The bytes actually returned, not the stored DB column.
+            'size_bytes' => strlen($content),
             'data_base64' => base64_encode($content),
         ];
     }
 
     /**
-     * True when the attachment hangs off this ticket directly, off a note on
-     * it, or off an email on it. attachable_type is matched exactly (never a
-     * LIKE) and the parent's ticket_id is re-checked, so the client scope
-     * proven on the ticket carries to the attachment.
+     * True when the attachment hangs off this ticket directly or off a note on
+     * it. attachable_type is matched exactly (never a LIKE) and the note's
+     * ticket_id is re-checked, so the client scope proven on the ticket carries
+     * to the attachment. Email inline images are not their own arm: they are
+     * re-linked to the note/ticket that references them (AttachmentService::
+     * linkAttachmentsFromBody), so an Email-attachable arm would be dead code.
      */
     private function attachmentBelongsToTicket(Attachment $attachment, int $ticketId): bool
     {
         return match ($attachment->attachable_type) {
             Ticket::class => (int) $attachment->attachable_id === $ticketId,
             TicketNote::class => TicketNote::where('id', $attachment->attachable_id)
-                ->where('ticket_id', $ticketId)->exists(),
-            Email::class => Email::where('id', $attachment->attachable_id)
                 ->where('ticket_id', $ticketId)->exists(),
             default => false,
         };

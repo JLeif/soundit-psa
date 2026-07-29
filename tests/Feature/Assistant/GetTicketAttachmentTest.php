@@ -153,4 +153,73 @@ class GetTicketAttachmentTest extends TestCase
         $this->assertArrayHasKey('error', $result);
         $this->assertArrayNotHasKey('data_base64', $result);
     }
+
+    /**
+     * The no-oracle guarantee: a totally non-existent attachment id and an id
+     * that exists but hangs off another ticket must return the SAME message, so
+     * the verb cannot be used to enumerate which attachment ids exist globally.
+     */
+    public function test_missing_and_foreign_attachment_refuse_with_the_same_message(): void
+    {
+        $client = Client::factory()->create();
+        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $otherTicket = Ticket::factory()->create(['client_id' => $client->id]);
+        $foreign = $this->imageAttachmentOn(Ticket::class, $otherTicket->id);
+
+        $exec = new AssistantToolExecutor(clientId: $client->id);
+
+        $missing = $exec->execute('get_ticket_attachment', ['ticket_id' => $ticket->id, 'attachment_id' => 999999]);
+        $elsewhere = $exec->execute('get_ticket_attachment', ['ticket_id' => $ticket->id, 'attachment_id' => $foreign->id]);
+
+        $this->assertArrayHasKey('error', $missing);
+        $this->assertArrayHasKey('error', $elsewhere);
+        $this->assertSame($missing['error'], $elsewhere['error'],
+            'a non-existent id and a foreign-ticket id must be indistinguishable');
+    }
+
+    /**
+     * attachment_id must be a strict integer: "12.9" must not silently coerce
+     * to attachment 12 and leak its bytes.
+     */
+    public function test_rejects_a_non_integer_attachment_id(): void
+    {
+        $client = Client::factory()->create();
+        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $att = $this->imageAttachmentOn(Ticket::class, $ticket->id); // id is an int like 1
+
+        $result = (new AssistantToolExecutor(clientId: $client->id))
+            ->execute('get_ticket_attachment', ['ticket_id' => $ticket->id, 'attachment_id' => $att->id.'.9']);
+
+        $this->assertArrayHasKey('error', $result);
+        $this->assertArrayNotHasKey('data_base64', $result);
+    }
+
+    public function test_reads_a_non_image_attachment_as_guarded_base64(): void
+    {
+        $client = Client::factory()->create();
+        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $body = "%PDF-1.4 not really a pdf but bytes\n";
+
+        $att = Attachment::create([
+            'filename' => 'report.pdf',
+            'original_filename' => 'report.pdf',
+            'mime_type' => 'application/pdf',
+            'size_bytes' => strlen($body),
+            'storage_path' => 'attachments/tmp',
+            'attachable_type' => Ticket::class,
+            'attachable_id' => $ticket->id,
+        ]);
+        $path = "attachments/{$att->id}/report.pdf";
+        Storage::disk('local')->put($path, $body);
+        $att->update(['storage_path' => $path]);
+
+        $result = (new AssistantToolExecutor(clientId: $client->id))
+            ->execute('get_ticket_attachment', ['ticket_id' => $ticket->id, 'attachment_id' => $att->id]);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertFalse($result['is_image']);
+        $this->assertSame('application/pdf', $result['media_type']);
+        $this->assertSame($body, base64_decode($result['data_base64']));
+        $this->assertSame(strlen($body), $result['size_bytes']);
+    }
 }
