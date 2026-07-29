@@ -439,14 +439,29 @@ class StaffCalendarToolExecutor
         } catch (CalendarWriteRefusedException $e) {
             // Blocker 3 join-link guard — refused before any Graph write; surface it as a clean
             // tool error rather than letting it bubble to a generic MCP 500.
-            $this->auditWrite($directTool, 'blocked', $ticket, $contentHash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $actorLabel, null, null);
+            $this->safeAudit($directTool, 'blocked', $ticket, $contentHash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $actorLabel);
 
             return ['error' => $e->getMessage()];
-        }
-        $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
+        } catch (GraphClientException $e) {
+            // review diff:2 + contract:1: the immediate path must NOT let an upstream failure escape
+            // as an uncaught exception (a generic MCP 500 the agent blindly retries). A 15s timeout is
+            // outcome-INDETERMINATE — a non-idempotent cancel/respond may already have reached the
+            // client — so we never imply a safe retry for those.
+            $this->safeAudit($directTool, 'error', $ticket, $contentHash, 'Graph calendar write failed/timed out (indeterminate outcome): '.mb_substr($e->getMessage(), 0, 140), $actorLabel);
 
-        $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) $ctx['reason'], approved: false));
-        $this->auditWrite($directTool, 'executed', $ticket, $contentHash, $prep['summary'].' — '.$ctx['reason'], $actorLabel, null, null);
+            return ['error' => $this->indeterminateWriteMessage($directTool)];
+        }
+
+        // The external write has COMMITTED. Record the immutable 'executed' row FIRST (idempotency +
+        // forensics), then best-effort back-link — a bookkeeping failure here must NEVER surface as a
+        // retryable error that re-sends a committed non-idempotent write (review diff:2).
+        $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
+        $this->safeAudit($directTool, 'executed', $ticket, $contentHash, $prep['summary'].' — '.$ctx['reason'], $actorLabel);
+        try {
+            $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) $ctx['reason'], approved: false));
+        } catch (\Throwable $bookkeeping) {
+            Log::error('[Calendar] immediate write committed but post-write back-link failed', ['tool' => $directTool, 'error' => $bookkeeping->getMessage()]);
+        }
 
         return array_merge([
             'success' => true,
@@ -770,8 +785,21 @@ class StaffCalendarToolExecutor
             ],
         );
 
-        if (! $run->wasRecentlyCreated && $run->state !== TechnicianRunState::AwaitingApproval) {
-            // A prior identical proposal was superseded/denied — revive THIS row as fresh awaiting.
+        if (! $run->wasRecentlyCreated) {
+            // GUARD (review diff:1/context:1): a re-stage of byte-identical content must NEVER revive
+            // a write that already EXECUTED or is mid-execution — reviving re-arms a non-idempotent
+            // client-facing Graph write for a second send (a duplicate cancellation/response mailed to
+            // the client). The immutable 'executed' audit row is the proof (mirrors
+            // StaffCippWriteToolExecutor::alreadyExecuted); Executing/Done are also caught by state.
+            if (in_array($run->state, [TechnicianRunState::Executing, TechnicianRunState::Done], true)
+                || $this->calendarWriteAlreadyExecuted($stagedName, $directTool, $ticket->client_id, $contentHash)) {
+                return ['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'This exact calendar write already executed (or is executing); not re-staged.'];
+            }
+            if ($run->state === TechnicianRunState::AwaitingApproval) {
+                return ['success' => true, 'staged' => true, 'idempotent' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'Identical calendar write already staged; awaiting approval.'];
+            }
+            // Only a prior that did NOT execute and is not pending (denied/superseded/expired/etc.) is
+            // safe to re-arm as a fresh awaiting proposal.
             $run->update([
                 'state' => TechnicianRunState::AwaitingApproval->value,
                 'proposed_content' => $proposedContent,
@@ -779,8 +807,6 @@ class StaffCalendarToolExecutor
                 'confidence' => null,
                 'tokens_used' => 0,
             ]);
-        } elseif (! $run->wasRecentlyCreated) {
-            return ['success' => true, 'staged' => true, 'idempotent' => true, 'run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'Identical calendar write already staged; awaiting approval.'];
         }
 
         $this->auditWrite($stagedName, 'awaiting_approval', $ticket, $contentHash, $prep['summary'].' — '.$reason, $actorLabel, $run->id, null);
@@ -852,10 +878,20 @@ class StaffCalendarToolExecutor
 
                 return $this->declined($e->getMessage());
             } catch (GraphClientException $e) {
-                $this->auditWrite($run->action_type, 'error', $ticket, $run->content_hash, 'Upstream Microsoft Graph calendar write failed at approval.', $this->approverLabel($approverId), $run->id, $approverId);
-                $run->releaseClaim();
+                // review contract:1: the outcome is INDETERMINATE — a 15s timeout or a post-POST
+                // shape-drift can leave a non-idempotent write already committed, so "nothing changed,
+                // re-approve to retry" can double-send. Only create is retry-safe (transactionId).
+                $this->safeAudit($run->action_type, 'error', $ticket, $run->content_hash, 'Graph calendar write failed/timed out at approval (indeterminate outcome): '.mb_substr($e->getMessage(), 0, 140), $this->approverLabel($approverId), $run->id, $approverId);
+                if ($this->isRetrySafe($directTool)) {
+                    $run->releaseClaim();
 
-                return $this->declined('The calendar write failed upstream (Microsoft Graph); nothing was changed. Re-approve to retry.');
+                    return $this->declined('The calendar write failed upstream (Microsoft Graph); it is safe to retry (Graph de-duplicates the create by transaction id). Re-approve to retry.');
+                }
+
+                // Non-idempotent + indeterminate: do NOT reopen to AwaitingApproval — leave the run
+                // CLAIMED (Executing) so it cannot be one-tap re-approved into a duplicate client send;
+                // calendar is excluded from RECOVERY_SAFE, so the stale-claim path flags it for a human.
+                return $this->declined('The calendar write may already have reached the client (upstream timeout/error) — outcome unknown. The run is held for manual verification, NOT reopened for one-tap re-approval; check the calendar before any re-send.');
             }
 
             // The external Graph write has now COMMITTED. From here NO local failure may
@@ -940,6 +976,53 @@ class StaffCalendarToolExecutor
      * mcp_audit_logs transport audit). Lean version of the CIPP auditAttempt — no person/license
      * target. $resultStatus ∈ awaiting_approval|executed|blocked|error.
      */
+    /** auditWrite that never throws — for best-effort audit rows on already-committed or failed paths. */
+    private function safeAudit(string $actionType, string $resultStatus, ?Ticket $ticket, string $contentHash, string $summary, string $actorLabel, ?int $runId = null, ?int $approverId = null): void
+    {
+        try {
+            $this->auditWrite($actionType, $resultStatus, $ticket, $contentHash, $summary, $actorLabel, $runId, $approverId);
+        } catch (\Throwable $e) {
+            Log::error('[Calendar] audit write failed', ['action' => $actionType, 'status' => $resultStatus, 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Whether a failed/indeterminate write of this tool is safe to blindly retry. Only create is — it
+     * carries a deterministic Graph transactionId, so a repeat de-duplicates to the first event.
+     * cancel/respond/update have no such guard: a retry re-sends a notice to the client.
+     */
+    private function isRetrySafe(string $directTool): bool
+    {
+        return $directTool === 'calendar_create_event';
+    }
+
+    /** Caller-facing message for an indeterminate immediate-write failure (review diff:2 / contract:1). */
+    private function indeterminateWriteMessage(string $directTool): string
+    {
+        if ($this->isRetrySafe($directTool)) {
+            return 'The calendar create failed upstream (Microsoft Graph); it is safe to retry — Graph de-duplicates the repeat by transaction id.';
+        }
+
+        return 'The calendar write failed or timed out upstream and its outcome is INDETERMINATE — it may already have reached the client. Verify in the calendar before retrying; do not blindly retry a cancel/response/update.';
+    }
+
+    /**
+     * True when this exact calendar write already committed to Graph (review diff:1/context:1) —
+     * the guard stageWrite() uses to refuse reviving an executed run into a second send. An
+     * immutable 'executed' TechnicianActionLog row is the proof; staged approvals audit under the
+     * staged action_type and the immediate path under the direct tool, so match either. Mirrors
+     * StaffCippWriteToolExecutor::alreadyExecuted.
+     */
+    private function calendarWriteAlreadyExecuted(string $stagedName, string $directTool, ?int $clientId, string $contentHash): bool
+    {
+        return TechnicianActionLog::query()
+            ->whereIn('action_type', [$stagedName, $directTool])
+            ->where('content_hash', $contentHash)
+            ->where('result_status', 'executed')
+            ->when($clientId !== null, fn ($q) => $q->where('client_id', $clientId))
+            ->exists();
+    }
+
     private function auditWrite(string $actionType, string $resultStatus, ?Ticket $ticket, string $contentHash, string $summary, string $actorLabel, ?int $runId, ?int $approverId): void
     {
         TechnicianActionLog::create([

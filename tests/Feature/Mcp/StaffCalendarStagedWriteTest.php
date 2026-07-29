@@ -10,6 +10,7 @@ use App\Models\Ticket;
 use App\Models\TicketNote;
 use App\Models\User;
 use App\Services\Graph\GraphClient;
+use App\Services\Graph\GraphClientException;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Support\McpToolModes;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -291,5 +292,59 @@ class StaffCalendarStagedWriteTest extends TestCase
         // Re-approval must be a no-op: the run is terminal, so Graph is not touched again.
         $second = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
         $this->assertSame('already_handled', $second->status);
+    }
+
+    /**
+     * Rework diff:1/context:1: re-staging byte-identical content for a write that already EXECUTED
+     * must NOT revive the Done run — reviving re-arms a non-idempotent cancel into a second client
+     * cancellation. The cancel must fire exactly once across stage → approve → re-stage → approve.
+     */
+    public function test_re_staging_an_executed_cancel_does_not_revive_or_refire(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = Ticket::factory()->create();
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once());
+
+        $args = ['user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG', 'comment' => 'x', 'ticket_id' => $ticket->id, 'reason' => 'Resolved.'];
+        $exec = app(StaffCalendarToolExecutor::class);
+
+        $staged = $exec->execute('calendar_stage_cancel_event', $args, 0, 'mcp-staff:chet', 'chet');
+        $run = TechnicianRun::find($staged['run_id']);
+        $this->assertSame('executed', $exec->approveStagedRun($run, $this->approver->id)->status);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+
+        // Re-stage the byte-identical cancel: must be refused as already-executed, NOT revived.
+        $restage = $exec->execute('calendar_stage_cancel_event', $args, 0, 'mcp-staff:chet', 'chet');
+        $this->assertTrue($restage['idempotent'] ?? false);
+        $this->assertTrue($restage['already_executed'] ?? false);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'an executed run must not revive to AwaitingApproval');
+
+        // Approving the still-Done run is a no-op — the ->once() mock enforces no second cancel.
+        $this->assertSame('already_handled', $exec->approveStagedRun($run->fresh(), $this->approver->id)->status);
+    }
+
+    /**
+     * Rework contract:1: an indeterminate Graph failure (e.g. a timeout) on a NON-idempotent cancel
+     * must NOT reopen the run for a one-tap retry — the write may already have reached the client.
+     * It is held (not AwaitingApproval), and a re-approve cannot re-fire it.
+     */
+    public function test_an_indeterminate_graph_failure_on_a_cancel_is_held_not_reopened(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = Ticket::factory()->create();
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once()->andThrow(new GraphClientException('read timeout')));
+
+        $exec = app(StaffCalendarToolExecutor::class);
+        $staged = $exec->execute('calendar_stage_cancel_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG', 'comment' => 'x', 'ticket_id' => $ticket->id, 'reason' => 'Resolved.',
+        ], 0, 'mcp-staff:chet', 'chet');
+        $run = TechnicianRun::find($staged['run_id']);
+
+        $r = $exec->approveStagedRun($run, $this->approver->id);
+        $this->assertSame('gate_declined', $r->status);
+        $this->assertNotSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'a maybe-committed non-idempotent write must not reopen for retry');
+
+        // Re-approve is a no-op — not AwaitingApproval, so the cancel cannot fire a second time.
+        $this->assertSame('already_handled', $exec->approveStagedRun($run->fresh(), $this->approver->id)->status);
     }
 }

@@ -8,6 +8,7 @@ use App\Models\Ticket;
 use App\Models\TicketNote;
 use App\Models\User;
 use App\Services\Graph\GraphClient;
+use App\Services\Graph\GraphClientException;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -459,5 +460,45 @@ class StaffCalendarWriteToolExecutorTest extends TestCase
         $this->assertArrayNotHasKey('error', $result);
         $this->assertSame('Text', $captured['body']['contentType']);
         $this->assertSame('New agenda', $captured['body']['content']);
+    }
+
+    /**
+     * Rework diff:2: on the immediate path, a post-commit local failure (here the back-link's AI
+     * actor no longer resolves) must NOT surface as an exception/retryable error — the Graph cancel
+     * already committed, so re-firing it would mail the client a second cancellation.
+     */
+    public function test_an_immediate_cancel_survives_a_post_write_bookkeeping_failure(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = $this->ticket();
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once());
+        // Break the post-write back-link: the AI actor it attributes to no longer exists.
+        Setting::setValue('triage_system_user_id', '99999999');
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_cancel_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG', 'comment' => 'x', 'ticket_id' => $ticket->id, 'reason' => 'Resolved.',
+        ], 0, 'mcp-staff:chet');
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertTrue($result['success'] ?? false);
+    }
+
+    /**
+     * Rework diff:2/contract:1: an upstream Graph failure on the immediate path returns a clean,
+     * NON-retry-implying error (not an uncaught exception), because a timed-out cancel may already
+     * have reached the client.
+     */
+    public function test_an_immediate_cancel_graph_failure_returns_a_non_retry_error(): void
+    {
+        $this->enableCalendar(['charlie@soundit.co']);
+        $ticket = $this->ticket();
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('cancelEvent')->once()->andThrow(new GraphClientException('read timeout')));
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_cancel_event', [
+            'user_upn' => 'charlie@soundit.co', 'event_id' => 'AAMkAG', 'comment' => 'x', 'ticket_id' => $ticket->id, 'reason' => 'Resolved.',
+        ], 0, 'mcp-staff:chet');
+
+        $this->assertArrayHasKey('error', $result);
+        $this->assertStringContainsString('INDETERMINATE', $result['error']);
     }
 }
