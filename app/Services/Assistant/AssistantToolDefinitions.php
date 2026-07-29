@@ -283,6 +283,24 @@ class AssistantToolDefinitions
                 ],
             ],
             [
+                'name' => 'get_ticket_attachment',
+                'description' => 'Fetch the binary content of an image or file attachment on one of THIS client\'s tickets, returned base64-encoded so you can actually see what a client or operator put on the ticket — error screenshots (the normal way non-technical people report problems), photos, PDFs. Note bodies reference attachments as /attachments/{id}/{filename}; pass that {id} as attachment_id together with the ticket_id it appears on. Images are downscaled and re-encoded for direct visual inspection; the response carries media_type + data_base64. The attachment must belong to the given ticket (its ticket, a note on it, or an email on it) or the fetch is refused.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'ticket_id' => [
+                            'type' => ['integer', 'string'],
+                            'description' => 'The ticket the attachment appears on: internal numeric ID, or a display ID like "#12345" or "T-123".',
+                        ],
+                        'attachment_id' => [
+                            'type' => 'integer',
+                            'description' => 'The attachment ID — the {id} in the /attachments/{id}/{filename} URL shown in a note body.',
+                        ],
+                    ],
+                    'required' => ['ticket_id', 'attachment_id'],
+                ],
+            ],
+            [
                 'name' => 'create_ticket',
                 'description' => 'Create a new ticket for this client with a subject, description, and optional priority.',
                 'input_schema' => [

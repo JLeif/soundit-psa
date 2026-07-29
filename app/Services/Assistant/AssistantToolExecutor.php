@@ -10,6 +10,7 @@ use App\Enums\NoteType;
 use App\Enums\ToolEffect;
 use App\Enums\TranscriptionStatus;
 use App\Models\Asset;
+use App\Models\Attachment;
 use App\Models\Client;
 use App\Models\Contract;
 use App\Models\Email;
@@ -22,6 +23,7 @@ use App\Models\Ticket;
 use App\Models\TicketCategory;
 use App\Models\TicketNote;
 use App\Services\Agent\ProposeCloseTool;
+use App\Services\AttachmentService;
 use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Level\LevelClient;
@@ -143,6 +145,7 @@ class AssistantToolExecutor
             // PSA tools (client-scoped)
             'search_tickets' => [ToolEffect::Read, static fn (self $x, array $in) => $x->searchTickets($in)],
             'get_ticket_notes' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getTicketNotes($in)],
+            'get_ticket_attachment' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getTicketAttachment($in)],
             'create_ticket' => [ToolEffect::Write, static fn (self $x, array $in) => $x->createTicket($in)],
             'add_ticket_note' => [ToolEffect::Write, static fn (self $x, array $in) => $x->addTicketNote($in)],
             'get_client' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getClient()],
@@ -781,6 +784,129 @@ class AssistantToolExecutor
             'date' => $n->noted_at?->toDateTimeString(),
             'is_private' => $n->is_private,
         ])->toArray();
+    }
+
+    /**
+     * Fetch one attachment's bytes for a ticket this client owns (psa-#331).
+     *
+     * The surface gap this closes: attachment URLs appear in note bodies but
+     * the /attachments/... web route 302s an MCP bearer to the login page, so
+     * client error screenshots — the normal way non-technical people report
+     * problems — were silently invisible to the agent. This is a pure surface
+     * verb over the already-shipped attachment store; it widens no bearer and
+     * grants no new reach: authorization is the SAME client scope get_ticket_notes
+     * proves, re-used here, not a route of its own.
+     *
+     * CLIENT-SCOPED, identically to get_ticket_notes: resolveReference refuses a
+     * cross-client ticket_id by construction, and the attachment is additionally
+     * pinned to that ticket (its own attachable, a note on it, or an email on it)
+     * so a valid attachment_id from another ticket cannot be pulled through an
+     * unrelated ticket_id.
+     */
+    private function getTicketAttachment(array $input): array
+    {
+        if (! $this->clientId) {
+            return ['error' => 'No client context — cannot access ticket attachments'];
+        }
+
+        $ticketId = $input['ticket_id'] ?? null;
+        if (! $ticketId || (! is_int($ticketId) && ! is_string($ticketId))) {
+            return ['error' => 'ticket_id is required'];
+        }
+
+        $attachmentId = $input['attachment_id'] ?? null;
+        if (! is_numeric($attachmentId) || (int) $attachmentId <= 0) {
+            return ['error' => 'attachment_id is required'];
+        }
+
+        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused.
+        $ticket = Ticket::resolveReference($ticketId, $this->clientId);
+        if (! $ticket) {
+            return ['error' => 'Ticket not found or belongs to a different client'];
+        }
+
+        $attachment = Attachment::find((int) $attachmentId);
+        if (! $attachment) {
+            return ['error' => 'Attachment not found'];
+        }
+
+        if (! $this->attachmentBelongsToTicket($attachment, $ticket->id)) {
+            // Same-shaped refusal as the cross-client case: never confirm that
+            // an attachment id exists on some OTHER ticket.
+            return ['error' => 'Attachment not found on this ticket'];
+        }
+
+        $service = app(AttachmentService::class);
+
+        // Images: downscale + re-encode to vision-ready base64 (GIF→PNG for
+        // model compatibility, matching resizeImageForAi's output contract).
+        if ($attachment->isImage()) {
+            $data = $service->resizeImageForAi($attachment);
+            if ($data === null) {
+                return ['error' => 'Attachment could not be read from storage'];
+            }
+
+            return [
+                'attachment_id' => $attachment->id,
+                'filename' => $attachment->original_filename,
+                'media_type' => $this->servedImageMediaType($attachment->mime_type),
+                'is_image' => true,
+                'data_base64' => $data,
+            ];
+        }
+
+        // Non-image (e.g. PDF): raw bytes, guarded against an oversized payload.
+        $content = $service->getContent($attachment);
+        if ($content === null) {
+            return ['error' => 'Attachment could not be read from storage'];
+        }
+
+        $maxBytes = 8 * 1024 * 1024;
+        if (strlen($content) > $maxBytes) {
+            return ['error' => 'Attachment is too large to return inline ('.strlen($content).' bytes); download it from the PSA UI.'];
+        }
+
+        return [
+            'attachment_id' => $attachment->id,
+            'filename' => $attachment->original_filename,
+            'media_type' => $attachment->mime_type,
+            'is_image' => false,
+            'size_bytes' => $attachment->size_bytes,
+            'data_base64' => base64_encode($content),
+        ];
+    }
+
+    /**
+     * True when the attachment hangs off this ticket directly, off a note on
+     * it, or off an email on it. attachable_type is matched exactly (never a
+     * LIKE) and the parent's ticket_id is re-checked, so the client scope
+     * proven on the ticket carries to the attachment.
+     */
+    private function attachmentBelongsToTicket(Attachment $attachment, int $ticketId): bool
+    {
+        return match ($attachment->attachable_type) {
+            Ticket::class => (int) $attachment->attachable_id === $ticketId,
+            TicketNote::class => TicketNote::where('id', $attachment->attachable_id)
+                ->where('ticket_id', $ticketId)->exists(),
+            Email::class => Email::where('id', $attachment->attachable_id)
+                ->where('ticket_id', $ticketId)->exists(),
+            default => false,
+        };
+    }
+
+    /**
+     * The media type resizeImageForAi actually emits: GIF is transcoded to PNG
+     * for model compatibility; png/webp/jpeg round-trip to themselves; anything
+     * else falls through its imagejpeg default.
+     */
+    private function servedImageMediaType(string $sourceMime): string
+    {
+        return match ($sourceMime) {
+            'image/png' => 'image/png',
+            'image/webp' => 'image/webp',
+            'image/gif' => 'image/png',
+            default => 'image/jpeg',
+        };
     }
 
     private function createTicket(array $input): array
