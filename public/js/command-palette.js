@@ -139,7 +139,7 @@
         // row, full path on hover.
         var categoryChip = item.category_path
             ? '<span class="cmd-palette-item-category" title="' + escapeAttr(item.category_path) + '">' +
-                escapeHtml(String(item.category_path).split(' / ').pop()) + '</span>'
+                escapeHtml(item.category_leaf || String(item.category_path).split(' / ').pop()) + '</span>'
             : '';
         return '<a href="' + escapeHtml(item.url) + '" ' +
             'class="cmd-palette-item" ' +

@@ -25,6 +25,7 @@ class TicketCategoryFieldsTest extends TestCase
 
         $this->assertSame([
             'category_id' => $leaf->id,
+            'category_leaf' => 'Fake-AV popup',
             'category_path' => 'Security & EDR / Scareware / Fake-AV popup',
         ], $ticket->categoryFields());
     }
@@ -33,7 +34,7 @@ class TicketCategoryFieldsTest extends TestCase
     {
         $ticket = Ticket::factory()->create(['category_id' => null]);
 
-        $this->assertSame(['category_id' => null, 'category_path' => null], $ticket->categoryFields());
+        $this->assertSame(['category_id' => null, 'category_leaf' => null, 'category_path' => null], $ticket->categoryFields());
     }
 
     public function test_preserves_a_retired_nodes_path(): void

@@ -31,6 +31,7 @@ class TypeaheadCategoryRendererTest extends TestCase
         $js = file_get_contents(public_path('js/command-palette.js'));
 
         $this->assertStringContainsString('category_path', $js, 'command-palette.js never reads category_path — ticket rows lose their category');
+        $this->assertStringContainsString('category_leaf', $js, 'command-palette.js must prefer the authoritative category_leaf over splitting the display path');
         $this->assertStringContainsString('cmd-palette-item-category', $js, 'command-palette.js emits no category chip markup');
     }
 
@@ -48,6 +49,7 @@ class TypeaheadCategoryRendererTest extends TestCase
         $js = file_get_contents(public_path('js/softphone.js'));
 
         $this->assertStringContainsString('category_path', $js, 'softphone.js never reads category_path — popup ticket rows lose their category');
+        $this->assertStringContainsString('category_leaf', $js, 'softphone.js must prefer the authoritative category_leaf over splitting the display path');
         $this->assertStringContainsString('sp-ticket-cat', $js, 'softphone.js emits no category chip markup');
     }
 
@@ -70,6 +72,7 @@ class TypeaheadCategoryRendererTest extends TestCase
             ->getContent();
 
         $this->assertStringContainsString('category_path', $html, 'tickets/show merge typeahead never reads category_path — result rows lose their category');
+        $this->assertStringContainsString('category_leaf', $html, 'tickets/show merge typeahead must prefer the authoritative category_leaf');
     }
 
     // ── email link + bulk-link typeaheads (inline JS on emails/index) ───────
@@ -88,5 +91,6 @@ class TypeaheadCategoryRendererTest extends TestCase
             substr_count($html, 'category_path'),
             'emails/index has two ticket typeahead renderers (link + bulk-link); each must read category_path'
         );
+        $this->assertStringContainsString('category_leaf', $html, 'emails/index chip helper must prefer the authoritative category_leaf');
     }
 }

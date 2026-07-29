@@ -35,6 +35,26 @@ class SearchTypeaheadCategoryPayloadTest extends TestCase
 
     // --- merge/link typeahead (TicketController::apiSearch) ---
 
+    /**
+     * psa-717bn follow-up (run psa-717bn.9#332r2 finding diff:1): node names are
+     * free text, so a name containing the path separator ' / ' made the
+     * client-side split(' / ').pop() render the wrong leaf. The payload now
+     * carries the authoritative leaf name; renderers must prefer it.
+     */
+    public function test_ticket_api_search_leaf_survives_separator_in_node_name(): void
+    {
+        $root = TicketCategory::create(['name' => 'Security']);
+        $leaf = TicketCategory::create(['name' => 'Endpoint / EDR', 'parent_id' => $root->id]);
+        Ticket::factory()->create(['status' => TicketStatus::InProgress, 'category_id' => $leaf->id]);
+
+        $this->actingAs(User::factory()->create())
+            ->getJson(route('api.tickets.search'))
+            ->assertOk()
+            ->assertJsonPath('0.category_leaf', 'Endpoint / EDR')
+            ->assertJsonPath('0.category_path', 'Security / Endpoint / EDR');
+    }
+
+
     public function test_ticket_api_search_rows_carry_category_fields(): void
     {
         $leaf = $this->tree();
@@ -45,6 +65,7 @@ class SearchTypeaheadCategoryPayloadTest extends TestCase
             ->assertOk()
             ->assertJsonPath('0.id', $ticket->id)
             ->assertJsonPath('0.category_id', $leaf->id)
+            ->assertJsonPath('0.category_leaf', 'Fake-AV popup')
             ->assertJsonPath('0.category_path', 'Security & EDR / Scareware / Fake-AV popup');
     }
 
@@ -56,6 +77,7 @@ class SearchTypeaheadCategoryPayloadTest extends TestCase
             ->getJson(route('api.tickets.search'))
             ->assertOk()
             ->assertJsonPath('0.category_id', null)
+            ->assertJsonPath('0.category_leaf', null)
             ->assertJsonPath('0.category_path', null);
     }
 
