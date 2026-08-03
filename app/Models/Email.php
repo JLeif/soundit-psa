@@ -31,6 +31,7 @@ class Email extends Model
         'is_read',
         'dismissed_at',
         'dismissed_by',
+        'unresolved_notified_at',
         'client_id',
         'person_id',
         'user_id',
@@ -49,6 +50,7 @@ class Email extends Model
             'is_read' => 'boolean',
             'received_at' => 'datetime',
             'dismissed_at' => 'datetime',
+            'unresolved_notified_at' => 'datetime',
         ];
     }
 

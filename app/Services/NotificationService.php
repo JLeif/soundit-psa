@@ -122,9 +122,24 @@ class NotificationService
 
     /**
      * Notify all opted-in users when an inbound email can't be resolved.
+     *
+     * Fires ONCE per email. The email:poll fallback re-runs processInbound() on every
+     * still-unresolved inbound email inside its lookback window, and the poll cursor can
+     * never advance past the newest message — so without this claim the newest unresolved
+     * email re-notifies every 5 minutes until the 24h guard ages it out (208 duplicate
+     * notifications from one spam message, 2026-08-02).
      */
     public function notifyUnresolvedEmail(Email $email): void
     {
+        // Atomic claim via conditional UPDATE — two concurrent poll passes can't both win.
+        $claimed = Email::where('id', $email->id)
+            ->whereNull('unresolved_notified_at')
+            ->update(['unresolved_notified_at' => now()]);
+
+        if ($claimed === 0) {
+            return;
+        }
+
         $context = "From: {$email->from_address} — {$email->subject}";
 
         $users = User::where('is_active', true)->whereNotNull('email')->get();
