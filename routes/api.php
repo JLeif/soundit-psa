@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\LevelWebhookController;
 use App\Http\Controllers\Api\NinjaWebhookController;
 use App\Http\Controllers\Api\PlivoWebhookController;
 use App\Http\Controllers\Api\QboWebhookController;
+use App\Http\Controllers\Api\RmmController;
 use App\Http\Controllers\Api\ScreenConnectWebhookController;
 use App\Http\Controllers\Api\T2TController;
 use App\Http\Controllers\Api\TacticalWebhookController;
@@ -16,12 +17,29 @@ use App\Http\Middleware\VerifyHuntressApiKey;
 use App\Http\Middleware\VerifyLevelWebhookSignature;
 use App\Http\Middleware\VerifyPlivoWebhookSecret;
 use App\Http\Middleware\VerifyQboWebhookSignature;
+use App\Http\Middleware\VerifyRmmApiKey;
 use App\Http\Middleware\VerifyScreenConnectSecret;
 use App\Http\Middleware\VerifyT2TApiKey;
 use App\Http\Middleware\VerifyTacticalWebhookKey;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'index']);
+
+// Leif RMM integration — bearer token, read-only.
+//
+// Its own surface rather than a reuse of the UI's client routes, which carry
+// web+auth (session cookies plus CSRF) and are therefore unusable by a service.
+// A UI endpoint borrowed as a contract changes whenever the UI does and the
+// consumer finds out in production.
+//
+// The PSA owns client identity; the RMM mirrors it and writes nothing back, so
+// nothing here mutates. Throttled because a shared bearer token deserves a
+// ceiling on guessing.
+Route::middleware([VerifyRmmApiKey::class, 'throttle:60,1'])
+    ->prefix('rmm')
+    ->group(function () {
+        Route::get('clients', [RmmController::class, 'clients']);
+    });
 
 // NinjaRMM webhooks — no auth available from Ninja's side
 Route::post('webhooks/ninja', [NinjaWebhookController::class, 'handle']);
