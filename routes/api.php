@@ -39,6 +39,7 @@ Route::middleware([VerifyRmmApiKey::class, 'throttle:60,1'])
     ->prefix('rmm')
     ->group(function () {
         Route::get('clients', [RmmController::class, 'clients']);
+        Route::get('assets', [RmmController::class, 'assets']);
     });
 
 // NinjaRMM webhooks — no auth available from Ninja's side
