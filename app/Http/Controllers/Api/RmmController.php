@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Asset;
 use App\Models\Client;
 use Illuminate\Http\JsonResponse;
 
@@ -70,6 +71,81 @@ class RmmController extends Controller
             // detectable by the consumer rather than silently short.
             'count' => $clients->count(),
         ]);
+    }
+
+    /**
+     * GET /api/rmm/assets
+     *
+     * Every asset, with the fields the RMM needs to create a device from it.
+     *
+     * WHY THE RMM READS THESE AT ALL, given D-004 makes the RMM authoritative
+     * for devices: it has no other source. The agent that will eventually report
+     * device truth does not exist yet, so the RMM holds zero devices and
+     * everything downstream — coverage, reconciliation, the Huntress join — is a
+     * no-op. This is a BOOTSTRAP, not an ongoing authority. Once the RMM has its
+     * own agent reporting, this endpoint stops being how devices come into
+     * existence.
+     *
+     * Not paginated, for the same reason `clients` is not: an estate of tens,
+     * and a paginated list is one a consumer can silently read the first page of
+     * and treat as complete.
+     *
+     * Soft-deleted assets are excluded by the model's global scope. Inactive ones
+     * ARE returned, with `is_active` false — a decommissioned machine is still
+     * something the RMM has to account for rather than have vanish.
+     */
+    public function assets(): JsonResponse
+    {
+        $assets = Asset::query()
+            ->orderBy('id')
+            ->get([
+                'id',
+                'client_id',
+                'hostname',
+                'serial_number',
+                'asset_type',
+                'os',
+                'is_active',
+                'last_seen_at',
+            ])
+            ->map(fn (Asset $a): array => [
+                'id' => (int) $a->id,
+                'client_id' => $a->client_id === null ? null : (int) $a->client_id,
+                // hostname and serial are returned RAW, not normalised. The RMM
+                // has one authority on what counts as a serial (its serial.ts,
+                // which knows the placeholder family) and a second opinion here
+                // would be a second answer to the same question.
+                'hostname' => self::asText($a->hostname),
+                'serial_number' => self::asText($a->serial_number),
+                'asset_type' => self::asText($a->asset_type),
+                'os' => self::asText($a->os),
+                'is_active' => (bool) $a->is_active,
+                'last_seen_at' => $a->last_seen_at?->toIso8601String(),
+            ])
+            ->values();
+
+        return response()->json([
+            'assets' => $assets,
+            'count' => $assets->count(),
+        ]);
+    }
+
+    /**
+     * A trimmed string, or null when there is nothing there.
+     *
+     * An empty hostname is not a hostname. Returning "" would let the consumer
+     * create a device named nothing, which is worse than refusing the row —
+     * `device.hostname` is NOT NULL precisely so that cannot happen quietly.
+     */
+    private static function asText(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $s = trim((string) $value);
+
+        return $s === '' ? null : $s;
     }
 
     /**
