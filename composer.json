@@ -13,7 +13,8 @@
         "laravel/tinker": "^2.10.1",
         "smalot/pdfparser": "^2.12",
         "socialiteproviders/microsoft": "^4.8",
-        "soundasleep/html2text": "^2.1"
+        "soundasleep/html2text": "^2.1",
+        "svix/svix": "2.5.0"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
