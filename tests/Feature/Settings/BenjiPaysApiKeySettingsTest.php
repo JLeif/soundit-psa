@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Settings;
 
+use App\Enums\UserRole;
 use App\Models\Setting;
 use App\Models\User;
 use App\Support\BenjiPaysConfig;
@@ -31,7 +32,7 @@ class BenjiPaysApiKeySettingsTest extends TestCase
     {
         parent::setUp();
 
-        $this->user = User::factory()->create();
+        $this->user = User::factory()->create(['role' => UserRole::Admin]);
     }
 
     public function test_the_card_renders_an_empty_password_field_when_no_key_is_stored(): void
@@ -154,6 +155,29 @@ class BenjiPaysApiKeySettingsTest extends TestCase
             ->assertRedirect(route('login'));
 
         $this->assertNull(Setting::getValue('benjipays_api_key'));
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('nonAdminRoles')]
+    public function test_non_admin_users_cannot_replace_the_stored_key(UserRole $role): void
+    {
+        Setting::setEncrypted('benjipays_api_key', self::DUMMY_KEY);
+        $ciphertext = Setting::getValue('benjipays_api_key');
+
+        $user = User::factory()->create(['role' => $role]);
+        $this->actingAs($user)
+            ->post(route('settings.integrations.benjipays.update'), ['api_key' => 'bp_test_unauthorized_replacement'])
+            ->assertForbidden();
+
+        $this->assertSame($ciphertext, Setting::getValue('benjipays_api_key'), $role->value);
+    }
+
+    public static function nonAdminRoles(): array
+    {
+        return [
+            'tech' => [UserRole::Tech],
+            'billing' => [UserRole::Billing],
+            'contractor' => [UserRole::Contractor],
+        ];
     }
 
     public function test_config_reads_null_when_nothing_is_stored(): void
