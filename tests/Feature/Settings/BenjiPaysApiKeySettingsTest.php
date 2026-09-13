@@ -138,7 +138,12 @@ class BenjiPaysApiKeySettingsTest extends TestCase
         $this->actingAs($this->user)
             ->from(route('settings.integrations'))
             ->post(route('settings.integrations.benjipays.update'), ['api_key' => str_repeat('x', 501)])
-            ->assertSessionHasErrors('api_key');
+            ->assertSessionHasErrors('api_key')
+            ->assertSessionMissing('_old_input.api_key');
+
+        $this->get(route('settings.integrations'))
+            ->assertOk()
+            ->assertDontSee(str_repeat('x', 501), false);
 
         $this->assertSame(self::DUMMY_KEY, BenjiPaysConfig::get('api_key'));
     }

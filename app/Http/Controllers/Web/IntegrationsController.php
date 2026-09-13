@@ -702,9 +702,16 @@ class IntegrationsController extends Controller
      */
     public function updateBenjiPays(Request $request)
     {
-        $validated = $request->validate([
+        $validator = \Illuminate\Support\Facades\Validator::make($request->only('api_key'), [
             'api_key' => 'nullable|string|min:1|max:500',
         ]);
+
+        if ($validator->fails()) {
+            // Do not flash submitted credentials into the session on rejection.
+            return redirect()->route('settings.integrations')->withErrors($validator);
+        }
+
+        $validated = $validator->validated();
 
         $submitted = trim((string) ($validated['api_key'] ?? ''));
 
