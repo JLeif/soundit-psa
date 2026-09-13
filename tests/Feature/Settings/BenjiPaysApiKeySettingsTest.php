@@ -138,15 +138,27 @@ class BenjiPaysApiKeySettingsTest extends TestCase
 
         $this->actingAs($this->user)
             ->from(route('settings.integrations'))
-            ->post(route('settings.integrations.benjipays.update'), ['api_key' => str_repeat('x', 501)])
+            ->post(route('settings.integrations.benjipays.update'), ['api_key' => str_repeat('x', 4097)])
             ->assertSessionHasErrors('api_key')
             ->assertSessionMissing('_old_input.api_key');
 
         $this->get(route('settings.integrations'))
             ->assertOk()
-            ->assertDontSee(str_repeat('x', 501), false);
+            ->assertDontSee(str_repeat('x', 4097), false);
 
         $this->assertSame(self::DUMMY_KEY, BenjiPaysConfig::get('api_key'));
+    }
+
+    public function test_a_key_at_the_storage_bound_round_trips_byte_identically(): void
+    {
+        $key = str_repeat('x', 4096);
+
+        $this->actingAs($this->user)
+            ->post(route('settings.integrations.benjipays.update'), ['api_key' => $key])
+            ->assertSessionHasNoErrors()
+            ->assertRedirect(route('settings.integrations'));
+
+        $this->assertSame($key, BenjiPaysConfig::get('api_key'));
     }
 
     public function test_a_guest_cannot_save_a_key(): void

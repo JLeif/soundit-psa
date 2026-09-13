@@ -703,7 +703,8 @@ class IntegrationsController extends Controller
     public function updateBenjiPays(Request $request)
     {
         $validator = \Illuminate\Support\Facades\Validator::make($request->only('api_key'), [
-            'api_key' => 'nullable|string|min:1|max:500',
+            // Our settings.value TEXT storage bound after encryption, not a BenjiPays contract: vendor documents no key length as of 2026-09-13.
+            'api_key' => 'nullable|string|min:1|max:4096',
         ]);
 
         if ($validator->fails()) {
