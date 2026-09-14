@@ -13,11 +13,18 @@ class HuntressConfig
             'api_key' => Setting::getEncrypted('huntress_api_key'),
             'api_secret' => Setting::getEncrypted('huntress_api_secret'),
             'cw_api_key' => Setting::getEncrypted('huntress_cw_api_key'),
+            'webhook_signing_secret' => Setting::getEncrypted('huntress_webhook_signing_secret'),
+            'webhook_account_id' => Setting::getValue('huntress_webhook_account_id'),
             'user_api_key' => Setting::getEncrypted('huntress_user_api_key'),
             'user_api_secret' => Setting::getEncrypted('huntress_user_api_secret'),
             'system_user_id' => Setting::getValue('huntress_system_user_id'),
             default => null,
         };
+    }
+
+    public static function webhooksEnabled(): bool
+    {
+        return Setting::getValue('huntress_webhooks_enabled', '0') === '1';
     }
 
     public static function isEnabled(): bool
