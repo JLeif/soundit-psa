@@ -7,6 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 class McpAuditLog extends Model
 {
     protected $fillable = [
+        'ticket_id',
+        'client_id',
+        'action_log_id',
+        'correlation_id',
+        'activity_kind',
+        'result_summary',
         'server_name',
         'method',
         'tool_name',

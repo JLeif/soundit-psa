@@ -171,6 +171,7 @@ class TicketController extends Controller
         return view('tickets.show', [
             'ticket' => $ticket,
             'timeline' => $timeline,
+            'toolActivity' => app(\App\Services\Mcp\TicketToolActivity::class)->page($ticket, 20, (int) request()->query('tool_offset', 0)),
             'users' => User::active()->orderBy('name')->get(['id', 'name']),
             'statuses' => TicketStatus::cases(),
             'priorities' => TicketPriority::cases(),

@@ -60,6 +60,11 @@ class TechnicianActionLog extends Model
 
     protected static function booted(): void
     {
+        static::created(function (self $log): void {
+            // The row just produced by this dispatch is the link; UUID/time matching is not.
+            \App\Services\Mcp\TicketToolActivityContext::current()?->produced($log);
+        });
+
         // Append-only: block any mutation of an existing row. `updating` only
         // fires for rows that already exist, so inserts pass through.
         static::updating(function (self $log): void {
