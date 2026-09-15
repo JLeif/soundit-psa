@@ -137,7 +137,9 @@ class TechnicianCockpitController extends Controller
             default => abort(422, 'Unsupported action type for approval.'),
         };
 
-        $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline'], true);
+        // 'offboarding_admission' is a committed, non-replayable send: it must render on the
+        // success channel, or the operator reads a landed admission as a failure and retries.
+        $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline', 'offboarding_admission'], true);
         $message = match ($result->status) {
             'offboarding_admission' => $result->message ?? 'Offboarding admission recorded; execution and effects remain unverified.',
             'sent' => 'Reply approved and sent.',

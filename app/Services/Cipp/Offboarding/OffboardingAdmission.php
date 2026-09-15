@@ -26,7 +26,9 @@ class OffboardingAdmission
             }
             $this->scope->token($tokenId);
             $installation = Setting::getValue('cipp_offboarding_installation_id');
-            $reference = 'soundpsa-offboard:'.$installation.':'.Str::uuid();
+            // The setting is validated case-insensitively and namespaced lowercase by the scope;
+            // the reference regex is case-sensitive, so normalize here too.
+            $reference = 'soundpsa-offboard:'.strtolower((string) $installation).':'.Str::uuid();
             $snapshot = $this->scope->resolve($input, $reference);
             $snapshot['token_id'] = $tokenId;
             (new OffboardingLedger(DB::connection()))->assertAvailable($snapshot);
