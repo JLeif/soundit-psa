@@ -28,6 +28,9 @@ class WindowsInstallerCommandTest extends TestCase
             foreach (["\$ErrorActionPreference = 'Stop'", 'IsInRole', '[Guid]::NewGuid()', "Join-Path \$dir '".$filename."'", '-OutFile $file -ErrorAction Stop', 'Length -lt 1024', 'ReadByte() -ne 77', 'ReadByte() -ne 90', '-Wait -PassThru', '$process.ExitCode -ne 0', '$LASTEXITCODE -ne 0', "'--client-id','3','--site-id','5'", "'--auth','synthetic-token'", 'finally', 'Remove-Item -LiteralPath $file'] as $guard) {
                 $this->assertStringContainsString($guard, $script);
             }
+            $this->assertStringContainsString('Invoke-WebRequest -UseBasicParsing', $script);
+            $this->assertNotFalse(strpos($script, 'Start-Process'));
+            $this->assertNotFalse(strpos($script, 'Invoke-WebRequest'));
             $this->assertLessThan(strpos($script, 'Start-Process'), strpos($script, 'Invoke-WebRequest'));
             $this->assertLessThan(strpos($script, '& $agent'), strpos($script, '$process.ExitCode -ne 0'));
             $this->assertStringNotContainsString('&&', $script);
