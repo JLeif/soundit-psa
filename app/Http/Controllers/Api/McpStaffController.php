@@ -266,6 +266,7 @@ class McpStaffController extends Controller
      * phone-call tools are cross-client, with client_id as an optional filter.
      */
     private const PSA_READ_TOOLS = [
+        'get_ticket_tool_history',
         'list_client_contracts',
         'get_contract',
         'list_email_items',
@@ -1055,8 +1056,12 @@ class McpStaffController extends Controller
             ]);
         }
 
+        $activity = new \App\Services\Mcp\TicketToolActivityContext;
+        $request->attributes->set(\App\Services\Mcp\TicketToolActivityContext::class, $activity);
         try {
-            if ($name === self::WHOAMI_TOOL) {
+            if ($name === 'get_ticket_tool_history') {
+                $result = app(\App\Services\Mcp\TicketToolHistoryTool::class)->execute($arguments, $clientId);
+            } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {
                 $result = $this->listToolSurface($request, $arguments);
@@ -1240,6 +1245,7 @@ class McpStaffController extends Controller
                 'error' => $e->getMessage(),
             ]);
 
+            $activity->finish(['error' => true]);
             $this->audit('tools/call', $name, $auditArguments, 'error', $e->getMessage(), $start, $request);
 
             return response()->json([
@@ -1250,6 +1256,8 @@ class McpStaffController extends Controller
                     'isError' => true,
                 ],
             ]);
+        } finally {
+            $request->attributes->remove(\App\Services\Mcp\TicketToolActivityContext::class);
         }
     }
 
@@ -1329,8 +1337,18 @@ class McpStaffController extends Controller
 
     private function audit(string $method, ?string $tool, mixed $args, string $status, ?string $error, float $start, Request $request): void
     {
+        $activity = $request->attributes->get(\App\Services\Mcp\TicketToolActivityContext::class);
+        if ($activity?->ticketId === null) {
+            $activity = null;
+        }
         try {
             McpAuditLog::create([
+                'ticket_id' => $activity?->ticketId,
+                'client_id' => $activity?->clientId,
+                'action_log_id' => $activity?->actionLogId,
+                'correlation_id' => $activity?->correlationId,
+                'activity_kind' => $activity?->kind,
+                'result_summary' => $activity?->summary,
                 'server_name' => 'staff',
                 'method' => $method,
                 'tool_name' => $tool,

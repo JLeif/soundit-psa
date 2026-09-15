@@ -1221,6 +1221,7 @@ class McpToolRegistry
     public static function psaReadTools(): array
     {
         return [
+            \App\Services\Mcp\TicketToolHistoryTool::definition(),
             self::listClientContractsTool(),
             self::getContractTool(),
             self::listEmailItemsTool(),

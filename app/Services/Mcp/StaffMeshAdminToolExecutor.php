@@ -293,7 +293,7 @@ class StaffMeshAdminToolExecutor
             return ['error' => 'Mesh Email Security is not configured'];
         }
 
-        return match ($name) {
+        $result = match ($name) {
             'mesh_stage_add_allow_rule' => $this->stageAllowRule($arguments, (int) $clientId, $actorLabel),
             'mesh_add_allow_rule' => $this->immediateRefused('mesh_add_allow_rule', 'mesh_stage_add_allow_rule', $arguments, $clientId, $actorLabel),
             'mesh_stage_remove_allow_rule' => $this->stageRemoveAllowRule($arguments, (int) $clientId, $actorLabel),
@@ -302,6 +302,11 @@ class StaffMeshAdminToolExecutor
             'mesh_edit_allow_rule' => $this->immediateRefused('mesh_edit_allow_rule', 'mesh_stage_edit_allow_rule', $arguments, $clientId, $actorLabel),
             default => ['error' => "Unknown Mesh admin tool: {$name}"],
         };
+        // Same outcome recording as the PSA/Assistant executors: a returned
+        // ['error' => ...] here is a failure, not a pending outcome.
+        TicketToolActivityContext::current()?->finish($result);
+
+        return $result;
     }
 
     /**
@@ -1436,6 +1441,8 @@ class StaffMeshAdminToolExecutor
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
+
+        TicketToolActivityContext::current()?->validated($ticket);
 
         return $ticket;
     }

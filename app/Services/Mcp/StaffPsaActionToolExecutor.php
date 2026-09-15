@@ -90,7 +90,7 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Unlinked ticket: link with move_ticket_to_client (confirm_client_name required) before this action.'];
         }
 
-        return match ($name) {
+        $result = match ($name) {
             'create_ticket' => $this->createTicket($arguments, $clientId, $actorLabel),
             'send_email' => $this->sendEmail($arguments, $clientId, $actorLabel, $tokenLabel),
             'write_public_note' => $this->writePublicNote($arguments, $clientId, $actorLabel, $tokenLabel),
@@ -132,6 +132,9 @@ class StaffPsaActionToolExecutor
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),
             default => ['error' => "Unknown PSA action tool: {$name}"],
         };
+        TicketToolActivityContext::current()?->finish($result);
+
+        return $result;
     }
 
     /** @return array<string, mixed> */
@@ -3050,6 +3053,8 @@ class StaffPsaActionToolExecutor
             : ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
+
+        TicketToolActivityContext::current()?->validated($ticket);
 
         return $ticket;
     }

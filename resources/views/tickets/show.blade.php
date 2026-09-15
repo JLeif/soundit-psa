@@ -126,6 +126,8 @@
             </div>
         @endif
 
+        @include('tickets._tool_activity')
+
         {{-- Notes --}}
         <div class="card shadow-sm mt-4" id="notes">
             <div class="card-header d-flex justify-content-between align-items-center">

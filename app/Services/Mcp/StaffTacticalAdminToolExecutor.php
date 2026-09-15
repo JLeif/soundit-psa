@@ -328,16 +328,21 @@ class StaffTacticalAdminToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return match ($name) {
+            $staged = match ($name) {
                 'tactical_stage_reset_patch_policies' => $this->stagePatchPolicyReset($arguments, (int) $clientId, $actorLabel),
                 'tactical_stage_run_policy_task_all' => $this->stagePolicyTaskRunAll($arguments, (int) $clientId, $actorLabel),
                 'tactical_stage_remove_agent' => $this->stageAgentRemoval($arguments, (int) $clientId, $actorLabel),
                 'tactical_stage_set_client_custom_field' => $this->stageClientCustomField($arguments, (int) $clientId, $actorLabel),
                 default => ['error' => "Unknown Tactical staged admin tool: {$name}"],
             };
+            // Same outcome recording as the PSA/Assistant executors: a returned
+            // ['error' => ...] here is a failure, not a pending outcome.
+            TicketToolActivityContext::current()?->finish($staged);
+
+            return $staged;
         }
 
-        return match ($name) {
+        $result = match ($name) {
             'tactical_create_client_site', 'tactical_provision_client_site' => $this->createClientSite($name, $arguments, (int) $clientId, $actorLabel),
             'tactical_set_agent_custom_field' => $this->setAgentCustomField($arguments, (int) $clientId, $actorLabel),
             'tactical_upsert_url_action' => $this->upsertUrlAction($arguments, $actorLabel),
@@ -380,6 +385,9 @@ class StaffTacticalAdminToolExecutor
             'tactical_set_client_custom_field' => $this->immediateClientCustomFieldRefused($arguments, $clientId, $actorLabel),
             default => ['error' => "Unknown Tactical admin tool: {$name}"],
         };
+        TicketToolActivityContext::current()?->finish($result);
+
+        return $result;
     }
 
     /** @return array<string, mixed> */
@@ -5476,6 +5484,8 @@ class StaffTacticalAdminToolExecutor
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
+
+        TicketToolActivityContext::current()?->validated($ticket);
 
         return $ticket;
     }

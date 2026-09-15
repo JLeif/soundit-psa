@@ -105,7 +105,10 @@ class AssistantToolExecutor
 
         [, $handler] = self::entry($toolName, $table[$toolName]);
 
-        return $handler($this, $input);
+        $result = $handler($this, $input);
+        \App\Services\Mcp\TicketToolActivityContext::current()?->finish($result, read: in_array($toolName, self::readTools(), true));
+
+        return $result;
     }
 
     /**
@@ -509,6 +512,8 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found'];
         }
 
+        \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
+
         $notes = TicketNote::where('ticket_id', $ticketId)
             ->with('attachments')
             ->orderByDesc('noted_at')
@@ -751,6 +756,8 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found'];
         }
 
+        \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
+
         $calls = PhoneCall::where('ticket_id', $ticketId)
             ->with('person')
             ->orderBy('started_at')
@@ -874,6 +881,8 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
+
         // Latest notes, not oldest: fetch the newest 20 then present them
         // chronologically. The old ASC+limit dropped the tail on busy tickets,
         // so "what did the client say last" could be absent entirely (psa-m7re).
@@ -968,6 +977,8 @@ class AssistantToolExecutor
         if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
+
+        \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
 
         $attachment = Attachment::find($attachmentId);
 
