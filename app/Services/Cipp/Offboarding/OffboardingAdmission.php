@@ -102,7 +102,16 @@ class OffboardingAdmission
                 return true;
             }, fn (array $body) => $this->client->submitOffboardingOnce($body));
 
-            return new TechnicianApprovalResult('offboarding_admission', message: 'Operation '.$operation['operation_id'].': '.$result['admission'].'. This is admission evidence, not completed offboarding. No replay is permitted; progress/reconciliation is a separate capability.');
+            // Only a correlated queue acceptance may reach the cockpit success channel. The
+            // other dispatch() outcomes — 'ambiguous' (transport throw, unrecognized/uncorrelated
+            // body, receipt-persist failure) and 'already_claimed' — are unconfirmed, still
+            // non-replayable sends: they carry a distinct status so the cockpit renders them as a
+            // fault and the operator reconciles instead of reading a green banner.
+            $status = ($result['admission'] ?? null) === 'accepted'
+                ? 'offboarding_admission'
+                : 'offboarding_admission_unconfirmed';
+
+            return new TechnicianApprovalResult($status, message: 'Operation '.$operation['operation_id'].': '.$result['admission'].'. This is admission evidence, not completed offboarding. No replay is permitted; progress/reconciliation is a separate capability.');
         } catch (\Throwable $e) {
             // Only ledger conflict text is safe to expose (local IDs/date, no source values).
             $message = str_starts_with($e->getMessage(), 'Already attempted or reserved: operation ')

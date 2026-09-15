@@ -137,11 +137,18 @@ class TechnicianCockpitController extends Controller
             default => abort(422, 'Unsupported action type for approval.'),
         };
 
-        // 'offboarding_admission' is a committed, non-replayable send: it must render on the
-        // success channel, or the operator reads a landed admission as a failure and retries.
+        // 'offboarding_admission' is a CONFIRMED queue-accepted, committed, non-replayable send:
+        // it must render on the success channel, or the operator reads a landed admission as a
+        // failure and retries. Its unconfirmed sibling is deliberately absent from this list.
         $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline', 'offboarding_admission'], true);
         $message = match ($result->status) {
             'offboarding_admission' => $result->message ?? 'Offboarding admission recorded; execution and effects remain unverified.',
+            // The single send was committed but its receipt is unknown (transport failure,
+            // uncorrelated body, receipt-persist failure) or the dispatch was already claimed.
+            // Deliberately NOT in the $ok list, on the same convention as executed_with_fault:
+            // an unconfirmed non-replayable send must arrive on the error channel — a green
+            // banner is how the one outcome that needs reconciliation gets scrolled past.
+            'offboarding_admission_unconfirmed' => $result->message ?? 'Offboarding admission is unconfirmed — the single send may or may not have been accepted. Do not retry; reconcile this operation.',
             'sent' => 'Reply approved and sent.',
             'closed' => 'Ticket closed.',
             // psa-d9ayt: a staged close_ticket(status=resolved) resolves, not closes — name it.
