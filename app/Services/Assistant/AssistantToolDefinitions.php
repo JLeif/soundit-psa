@@ -275,7 +275,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'get_ticket_notes',
-                'description' => 'Get the notes and conversation history for a specific ticket. Staff MCP callers can separately use get_ticket_tool_history for tool calls and action outcomes (explicit grant required). Useful for understanding how a past issue was resolved. Each note carries an attachments list of metadata refs (attachment_id, filename, mime_type, size_bytes, is_inline — inline means an image embedded in an email body, e.g. a pasted screenshot); pass an attachment_id to get_ticket_attachment to see the file itself.',
+                'description' => 'Get the notes and conversation history for a specific ticket. Staff MCP callers should use get_ticket_timeline for a unified filtered stream (explicit grant required). Legacy default returns the latest 20 notes as a chronological list. Set paginate=true for a notes/count envelope with has_more, truncated, before/after and next_cursor; pass before for older or after for newer pages, keeping the client/ticket unchanged. Cursor requests always return that envelope. Useful for understanding how a past issue was resolved. Each note carries an attachments list of metadata refs (attachment_id, filename, mime_type, size_bytes, is_inline — inline means an image embedded in an email body, e.g. a pasted screenshot); pass an attachment_id to get_ticket_attachment to see the file itself.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -283,6 +283,9 @@ class AssistantToolDefinitions
                             'type' => ['integer', 'string'],
                             'description' => 'The ticket to read: internal numeric ID, or a display ID like "#12345" (externally-synced ticket number) or "T-123"',
                         ],
+                        'paginate' => ['type' => 'boolean', 'description' => 'Opt into cursor metadata without breaking legacy list consumers.'],
+                        'before' => ['type' => 'string', 'description' => 'Opaque older-page cursor from a prior paginated response.'],
+                        'after' => ['type' => 'string', 'description' => 'Opaque newer-page cursor; mutually exclusive with before.'],
                     ],
                     'required' => ['ticket_id'],
                 ],

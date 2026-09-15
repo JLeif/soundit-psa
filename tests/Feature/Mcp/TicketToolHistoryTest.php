@@ -80,7 +80,7 @@ class TicketToolHistoryTest extends TestCase
         $this->assertStringContainsString('synthetic-bot', $page['items'][0]['actor']);
         $this->assertStringNotContainsString('SECRET-RAW-PAYLOAD', json_encode($page));
         $this->actingAs($actor)->get(route('tickets.show', $ticket))->assertOk()
-            ->assertSee('Tool activity')->assertSee('Awaiting approval; not executed.');
+            ->assertDontSee('Tool activity')->assertSee('data-timeline-kind="tool"', false)->assertSee('Awaiting approval; not executed.');
     }
 
     public function test_read_association_scope_absent_context_and_grant_denial(): void

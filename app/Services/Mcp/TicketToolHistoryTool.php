@@ -9,7 +9,7 @@ final class TicketToolHistoryTool
     public static function definition(): array
     {
         return ['name' => 'get_ticket_tool_history',
-            'description' => 'Staff-only ticket tool calls and action outcomes. Proposed is not executed. State executed_with_fault means the write DID land and needs follow-up — treat it as executed and do not re-run it; failure means no execution was recorded. The states field on each page names every state. Explicit associations only; raw results redacted. Newest first, bounded offset pagination (concurrent inserts may shift pages); has_more/next_offset/truncated describe remaining rows. Complements get_ticket_notes.',
+            'description' => 'Staff-only ticket tool calls and action outcomes. Proposed is not executed. State executed_with_fault means the write DID land and needs follow-up — treat it as executed and do not re-run it; failure means no execution was recorded. The states field on each page names every state. Explicit associations only; raw results redacted. Newest first, bounded offset pagination (concurrent inserts may shift pages); has_more/next_offset/truncated describe remaining rows. Compatibility read; prefer get_ticket_timeline for unified notes, calls, emails, AI chats and tool activity with stable cursors.',
             'input_schema' => ['type' => 'object', 'properties' => [
                 'ticket_id' => ['type' => ['integer', 'string']],
                 'client_id' => ['type' => 'integer'],

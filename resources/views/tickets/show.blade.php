@@ -126,8 +126,6 @@
             </div>
         @endif
 
-        @include('tickets._tool_activity')
-
         {{-- Notes --}}
         <div class="card shadow-sm mt-4" id="notes">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -145,9 +143,12 @@
                 @include('tickets._action-reply')
                 @include('tickets._action-status')
 
-                {{-- Activity timeline (notes + phone calls, newest first) --}}
+                @include('tickets._timeline-navigation')
+                {{-- Unified activity timeline, newest first --}}
                 @forelse($timeline as $item)
-                    @if($item instanceof App\Models\AssistantConversation)
+                    @if($item instanceof stdClass)
+                        @include('tickets._timeline-entry', ['entry' => $item])
+                    @elseif($item instanceof App\Models\AssistantConversation)
                         @include('tickets._timeline-ai-chat', ['conversation' => $item])
                     @elseif($item instanceof App\Models\PhoneCall)
                         {{-- Phone call entry --}}
