@@ -122,6 +122,8 @@ class IntegrationsController extends Controller
 
         // BenjiPays
         $benjipaysConfigured = BenjiPaysConfig::isConfigured();
+        $benjipaysLastVerifiedAt = $fmtTs(Setting::getValue('benjipays_last_verified_at'));
+        $benjipaysLastOutcome = Setting::getValue('benjipays_last_verification_outcome');
 
         // Level
         $levelHasApiKey = (bool) (Setting::getValue('level_api_key') ?? config('services.level.api_key'));
@@ -531,6 +533,8 @@ class IntegrationsController extends Controller
             'qboClientId', 'qboHasSecret', 'qboEnvironment', 'qboRealmId', 'qboConnected', 'qboTokenExpiresAt', 'qboAutoPush', 'qboHasWebhookToken', 'qboDefaultIncomeId', 'qboDefaultExpenseId', 'qboIncomeAccounts', 'qboExpenseAccounts',
             'stripeConfigured', 'stripeMode', 'stripeConnected', 'stripeAutoPush', 'stripeEnabled',
             'benjipaysConfigured',
+            'benjipaysLastVerifiedAt',
+            'benjipaysLastOutcome',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
@@ -698,6 +702,23 @@ class IntegrationsController extends Controller
      * follows. Nothing reads the key back out: the form never renders it and the
      * flash names the outcome only.
      */
+    public function testBenjiPays(\App\Services\BenjiPays\BenjiPaysClient $client)
+    {
+        try {
+            $client->gateways();
+            $outcome = 'ok';
+            $message = 'BenjiPays gateways connection check succeeded. Invoice access was not tested.';
+        } catch (\App\Services\BenjiPays\BenjiPaysException $e) {
+            $outcome = $e->outcome();
+            $message = $e->getMessage();
+        }
+
+        Setting::setValue('benjipays_last_verified_at', now()->toIso8601String());
+        Setting::setValue('benjipays_last_verification_outcome', $outcome);
+
+        return redirect()->route('settings.integrations')->with($outcome === 'ok' ? 'success' : 'error', $message);
+    }
+
     public function updateBenjiPays(Request $request)
     {
         $validator = \Illuminate\Support\Facades\Validator::make($request->only('api_key'), [
