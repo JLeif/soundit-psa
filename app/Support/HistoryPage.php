@@ -19,6 +19,7 @@ final class HistoryPage
             $rows = $rows->reverse()->values();
         }
 
-        return ['ids' => $rows->pluck('id')->all(), 'metadata' => TimelineCursor::metadata($rows, $limit, $more, $scope, $after)];
+        return ['ids' => $rows->pluck('id')->all(),
+            'metadata' => TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']))];
     }
 }

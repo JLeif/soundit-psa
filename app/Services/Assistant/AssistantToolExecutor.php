@@ -907,9 +907,16 @@ class AssistantToolExecutor
             'attachments' => $this->attachmentRefs($n->attachments),
         ])->toArray();
 
+        // The shared cursor metadata describes the newest-first page SELECTION, but
+        // the notes array above is reversed to oldest-first for reading. Restate the
+        // two order fields so the envelope cannot misdescribe its own payload.
+        $metadata = $page['metadata'];
+        $metadata['order'] = 'pages selected newest first; notes within this page are oldest first (at ASC)';
+        $metadata['pagination'] = 'before means older; after means newer (nearest page first). Pages are selected newest first, but the notes array within a page is ordered oldest first. Timestamps UTC. Cursors bind scope and filters; inserts do not shift pages. Edits to event timestamps can reposition entries.';
+
         // Preserve the legacy list shape unless the caller explicitly requests paging.
         return ! empty($input['paginate']) || isset($input['before']) || isset($input['after'])
-            ? ['notes' => $items, 'count' => count($items)] + $page['metadata'] + ['notes_order' => 'oldest first within this page']
+            ? ['notes' => $items, 'count' => count($items)] + $metadata + ['notes_order' => 'oldest first within this page']
             : $items;
     }
 

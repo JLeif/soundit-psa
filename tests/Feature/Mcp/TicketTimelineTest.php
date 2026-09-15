@@ -72,7 +72,7 @@ class TicketTimelineTest extends TestCase
     {
         $ticket = $this->ticket();
         $at = '2026-01-01 10:00:00';
-        $this->note($ticket, $at);
+        $this->note($ticket, $at, 'Latency <500ms before <b>the</b> change, >2s after');
         $action = $this->action($ticket, $at);
         McpAuditLog::forceCreate(['id' => $action->id, 'ticket_id' => $ticket->id, 'client_id' => $ticket->client_id,
             'server_name' => 'staff', 'method' => 'tools/call', 'tool_name' => 'synthetic_read', 'actor_label' => 'Synthetic reader',
@@ -89,6 +89,8 @@ class TicketTimelineTest extends TestCase
         $this->assertContains('tool_call:'.$action->id, array_column($all['items'], 'id'));
         $this->assertContains('tool_action:'.$action->id, array_column($all['items'], 'id'));
         $this->assertEqualsCanonicalizing(TicketTimeline::TYPES, array_unique(array_column($all['items'], 'kind')));
+        $this->assertSame('Latency <500ms before the change, >2s after',
+            collect($all['items'])->firstWhere('kind', 'note')['summary'], 'A bare < must not truncate the summary');
         $this->assertEqualsCanonicalizing(['inbound', 'outbound'], array_column(array_filter($all['items'], fn ($e) => $e['kind'] === 'email'), 'direction'));
         $seen = [];
         $input = ['limit' => 1];
@@ -123,9 +125,12 @@ class TicketTimelineTest extends TestCase
         $next = $timeline->page($ticket, ['limit' => 1, 'types' => ['note'], 'before' => $first['before']]);
         $this->assertSame(['note:'.$old->id], array_column($next['items'], 'id'));
         $this->assertFalse($next['has_more']);
+        $this->assertNull($first['after'], 'The newest page must not offer a newer page');
+        $this->assertNull($next['before'], 'The oldest page must not offer an older page');
+        $this->assertNotNull($next['after']);
         $tool = app(TicketTimelineTool::class);
         foreach ([['types' => ['tool'], 'before' => $first['before']], ['before' => 'bad'],
-            ['before' => $first['before'], 'after' => $first['after']], ['limit' => 51], ['limit' => '2'], ['types' => []], ['types' => ['bogus']]] as $bad) {
+            ['before' => $first['before'], 'after' => $first['before']], ['limit' => 51], ['limit' => '2'], ['types' => []], ['types' => ['bogus']]] as $bad) {
             $this->assertArrayHasKey('error', $tool->execute($bad + ['ticket_id' => $ticket->id], $ticket->client_id));
         }
         $other = $this->ticket();
@@ -142,7 +147,9 @@ class TicketTimelineTest extends TestCase
         $this->actingAs(User::factory()->create())->get(route('tickets.show', $ticket))->assertOk()
             ->assertDontSee('Tool activity')->assertSee('Timeline filters')
             ->assertSeeInOrder(['Newest synthetic note marker', 'synthetic_timeline_tool', 'Oldest synthetic note marker'])
-            ->assertSee('Awaiting approval; not executed.')->assertDontSee('RAW-SECRET-PAYLOAD');
+            ->assertSee('Awaiting approval; not executed.')->assertDontSee('RAW-SECRET-PAYLOAD')
+            // One page holds every entry, so neither navigation link may be offered.
+            ->assertDontSee('>Newer<', false)->assertDontSee('>Older<', false);
         $this->get(route('tickets.show', ['ticket' => $ticket, 'types' => ['tool']]))->assertOk()
             ->assertSee('synthetic_timeline_tool')->assertDontSee('Newest synthetic note marker');
     }
@@ -169,13 +176,17 @@ class TicketTimelineTest extends TestCase
             $this->action($ticket, '2026-01-01 10:00:0'.$i, $state);
         }
         $this->action($other, '2026-01-01 12:00:00');
+        // Linked to the ticket before caller/client resolution: still the ticket's call.
+        PhoneCall::forceCreate(['ticket_id' => $ticket->id, 'client_id' => null, 'call_uuid' => (string) Str::uuid(),
+            'from_number' => '5550199', 'direction' => 'inbound', 'started_at' => '2026-01-01 11:00:00']);
         $foreign = $this->email($ticket, '2026-01-01 13:00:00');
         $foreign->update(['client_id' => $other->client_id]);
         $token = McpConfig::rotateStaffToken(allowedTools: ['get_ticket_timeline']);
         $args = ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id];
         for ($i = 0; $i < 2; $i++) {
             $page = $this->decoded($this->callTool($token, 'get_ticket_timeline', $args));
-            $this->assertCount(5, $page['items']);
+            $this->assertCount(6, $page['items']);
+            $this->assertContains('call', array_column($page['items'], 'kind'), 'A NULL-client call linked to the ticket stays on the timeline');
             $this->assertEqualsCanonicalizing(['proposed', 'executed', 'executed_with_fault', 'failed', 'pending'], array_column($page['items'], 'state'));
             $this->assertStringContainsString('not executed', $page['states']);
             $this->assertStringContainsString('do not re-run', $page['states']);
@@ -207,6 +218,8 @@ class TicketTimelineTest extends TestCase
         $second = $this->decoded($this->callTool($token, 'get_ticket_notes', $args + ['before' => $first['next_cursor']]));
         $this->assertSame(['Synthetic note 0', 'Synthetic note 1', 'Synthetic note 2'], array_column($second['notes'], 'body'));
         $this->assertFalse($second['has_more']);
+        $this->assertStringContainsString('oldest first', $second['order']);
+        $this->assertStringNotContainsString('Entries always newest first', $second['pagination']);
         $this->assertTrue($this->callTool($token, 'get_ticket_notes', $args + ['before' => 'bad'])['result']['isError']);
     }
 

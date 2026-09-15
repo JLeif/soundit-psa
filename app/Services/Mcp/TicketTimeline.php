@@ -36,11 +36,11 @@ final class TicketTimeline
                 ->selectRaw("id, COALESCE(noted_at, created_at, '1970-01-01 00:00:00') as at, 'note' as source")->toBase();
         }
         if (in_array('call', $types, true)) {
-            $queries[] = PhoneCall::query()->where('ticket_id', $ticket->id)->where('client_id', $ticket->client_id)
+            $queries[] = PhoneCall::query()->where('ticket_id', $ticket->id)->where($this->clientFence($ticket))
                 ->selectRaw("id, COALESCE(started_at, created_at, '1970-01-01 00:00:00') as at, 'call' as source")->toBase();
         }
         if (in_array('email', $types, true)) {
-            $queries[] = Email::query()->where('ticket_id', $ticket->id)->where('client_id', $ticket->client_id)
+            $queries[] = Email::query()->where('ticket_id', $ticket->id)->where($this->clientFence($ticket))
                 ->selectRaw("id, COALESCE(received_at, created_at, '1970-01-01 00:00:00') as at, 'email' as source")->toBase();
         }
         if (in_array('ai_chat', $types, true)) {
@@ -84,11 +84,11 @@ final class TicketTimeline
                 $entry['actor'] = $model?->author?->name ?? $model?->author_name ?? 'System';
                 $entry['summary'] = $this->text($model?->body);
             } elseif ($kind === 'call') {
-                $model = PhoneCall::with('answeredBy', 'person')->where('ticket_id', $ticket->id)->where('client_id', $ticket->client_id)->find($row->id);
+                $model = PhoneCall::with('answeredBy', 'person')->where('ticket_id', $ticket->id)->where($this->clientFence($ticket))->find($row->id);
                 $entry['actor'] = $model?->answeredBy?->name ?? 'Phone';
                 $entry['summary'] = $this->text($model?->call_summary ?? $model?->notes);
             } elseif ($kind === 'email') {
-                $model = Email::where('ticket_id', $ticket->id)->where('client_id', $ticket->client_id)->find($row->id);
+                $model = Email::where('ticket_id', $ticket->id)->where($this->clientFence($ticket))->find($row->id);
                 $entry['actor'] = $model?->from_name ?? 'Email';
                 $entry['summary'] = $this->text(($model?->subject ?? '').' — '.($model?->body_preview ?? ''));
                 $entry['direction'] = $model?->direction?->value;
@@ -111,11 +111,28 @@ final class TicketTimeline
 
         return ['items' => $items, 'states' => str_replace('failure =', 'failed =', TicketToolActivity::STATES),
             'coverage' => 'Ticket-associated records only. Tool outputs and arguments withheld; absence is not proof of no activity.']
-            + TimelineCursor::metadata($rows, $limit, $more, $scope, $after);
+            + TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']));
+    }
+
+    /**
+     * A ticket-linked call or email may carry no client of its own (an intake
+     * ticket whose client_id is still NULL, or a Plivo row linked before caller
+     * resolution). Equality alone is never true for NULL, which silently dropped
+     * rows the ticket_id relation used to show, so keep the cross-client fence
+     * but let an unresolved client through.
+     */
+    private function clientFence(Ticket $ticket): \Closure
+    {
+        return fn ($q) => $q->whereNull('client_id')->orWhere('client_id', $ticket->client_id);
     }
 
     private function text(?string $text): string
     {
-        return mb_substr(strip_tags($text ?? ''), 0, 4000);
+        // Not strip_tags(): it also discards everything from a bare '<' to the
+        // next '>' or to end of string, so a note reading "latency <500ms before,
+        // >2s after" loses real content with no truncation signal. Remove markup only.
+        $plain = preg_replace('#<(?:/?[a-zA-Z][^>]*|!--.*?--|![^>]*)>#s', '', $text ?? '');
+
+        return mb_substr($plain ?? strip_tags($text ?? ''), 0, 4000);
     }
 }

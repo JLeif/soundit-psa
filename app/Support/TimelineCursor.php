@@ -51,11 +51,21 @@ final class TimelineCursor
         return $after;
     }
 
-    public static function metadata($rows, int $limit, bool $more, string $scope, bool $after): array
+    /**
+     * $cursored says the caller reached this page through a cursor, which is what
+     * proves the opposite direction still holds rows: paging older means newer
+     * ones exist, and paging newer means older ones do. before/after are emitted
+     * only for a direction that actually has entries, so a Newer/Older link built
+     * from them can never land on an empty dead-end page.
+     */
+    public static function metadata($rows, int $limit, bool $more, string $scope, bool $after, bool $cursored): array
     {
+        $newer = $after ? $more : $cursored;
+        $older = $after ? $cursored : $more;
+
         return ['limit' => $limit, 'has_more' => $more, 'truncated' => $more,
-            'before' => $rows->isEmpty() ? null : self::encode($scope, $rows->last()),
-            'after' => $rows->isEmpty() ? null : self::encode($scope, $rows->first()),
+            'before' => $rows->isEmpty() || ! $older ? null : self::encode($scope, $rows->last()),
+            'after' => $rows->isEmpty() || ! $newer ? null : self::encode($scope, $rows->first()),
             'next_cursor' => ! $more || $rows->isEmpty() ? null : self::encode($scope, $after ? $rows->first() : $rows->last()),
             'direction' => $after ? 'after' : 'before',
             'order' => 'at DESC, source DESC, id DESC',
