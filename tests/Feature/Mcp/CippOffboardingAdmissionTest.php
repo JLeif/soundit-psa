@@ -168,7 +168,7 @@ class CippOffboardingAdmissionTest extends TestCase
             'checked_at' => now()->subMinute()->toIso8601String(), 'expires_at' => now()->addHour()->toIso8601String(),
         ]));
         $query = ['tenantFilter' => 'example.test', 'Name' => 'Offboarding: leaver@example.test', 'Type' => 'Invoke-CIPPOffboardingJob'];
-        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', [...$query, 'ShowHidden' => 'false'])->once()->andReturn([]);
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', $query)->once()->andReturn([]);
         $this->vendor->shouldReceive('offboardingRead')->with('scheduled', [...$query, 'ShowHidden' => 'true'])->once()->andReturn([['TaskState' => 'Running']]);
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('scheduler task blocks admission');

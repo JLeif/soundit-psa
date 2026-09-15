@@ -129,7 +129,7 @@ class OffboardingScope
             $rows = $this->client->offboardingRead('scheduled', [
                 'tenantFilter' => $snapshot['body']['tenantFilter'],
                 'Name' => 'Offboarding: '.$snapshot['target_upn'], 'Type' => 'Invoke-CIPPOffboardingJob',
-                'ShowHidden' => $hidden,
+                ...($hidden === 'true' ? ['ShowHidden' => 'true'] : []),
             ]);
             foreach ($rows as $row) {
                 if (($row['Reference'] ?? null) === $snapshot['body']['reference']
