@@ -176,6 +176,31 @@ class HuntressWebhookSettingsTest extends TestCase
         $this->get(route('settings.integrations'))->assertDontSee('id="huntress_webhook_signing_secret"', false);
     }
 
+    public function test_real_csrf_rejects_missing_and_bad_tokens_then_accepts_matching_token(): void
+    {
+        $this->app->bind(\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class, fn ($app) => new class($app, $app['encrypter']) extends \Illuminate\Foundation\Http\Middleware\ValidateCsrfToken
+        {
+            protected function runningUnitTests()
+            {
+                return false;
+            }
+        });
+        $this->admin()->withSession(['_token' => 'synthetic-csrf']);
+        $this->save($this->payload())->assertStatus(419);
+        $this->save($this->payload(['_token' => 'wrong']))->assertStatus(419);
+        $this->assertNull(HuntressConfig::get('webhook_signing_secret'));
+        $this->assertNull(HuntressConfig::get('webhook_account_id'));
+        $this->assertFalse(HuntressConfig::webhooksEnabled());
+        $this->save($this->payload(['_token' => 'synthetic-csrf']))->assertSessionHasNoErrors();
+        $this->assertSame(self::SECRET, HuntressConfig::get('webhook_signing_secret'));
+    }
+
+    public function test_get_cannot_write_settings(): void
+    {
+        $this->admin()->get(route('settings.integrations.huntress-webhooks.update'))->assertStatus(405);
+        $this->assertNull(HuntressConfig::get('webhook_signing_secret'));
+    }
+
     public static function nonAdmins(): array
     {
         return [[UserRole::Tech], [UserRole::Billing], [UserRole::Contractor]];
