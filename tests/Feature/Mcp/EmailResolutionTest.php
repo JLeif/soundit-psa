@@ -88,6 +88,7 @@ class EmailResolutionTest extends TestCase
         $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $service = app(EmailResolutionService::class);
         $refused = $service->approve($result['proposal_id'], $admin);
+        $this->assertArrayHasKey('error', $refused);
         $this->assertStringContainsString('backlog changed', $refused['error']);
         $this->assertSame('stale', EmailResolutionProposal::find($result['proposal_id'])->state);
         $this->assertNull($first->fresh()->client_id);
@@ -117,6 +118,54 @@ class EmailResolutionTest extends TestCase
         $this->assertTrue((bool) $r->json('result.isError'));
         $this->assertSame(0, EmailResolutionProposal::count());
         $this->assertNull($email->fresh()->client_id);
+    }
+
+    public function test_surface_is_default_ungranted_and_staged_schema_is_truthful(): void
+    {
+        foreach ([null, ['list_clients'], ['resolve_email_item:staged']] as $grant) {
+            $token = McpConfig::rotateStaffToken(allowedTools: $grant);
+            $response = $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => [],
+            ]);
+            $tools = collect($response->json('result.tools'));
+            $definition = $tools->firstWhere('name', 'resolve_email_item');
+            $this->assertNull($tools->firstWhere('name', 'stage_resolve_email_item'));
+            if ($grant !== ['resolve_email_item:staged']) {
+                $this->assertNull($definition);
+            } else {
+                $this->assertSame([true], $definition['inputSchema']['properties']['staged']['enum']);
+                $this->assertContains('staged', $definition['inputSchema']['required']);
+                $this->assertStringNotContainsString('downgraded', $definition['description']);
+            }
+        }
+    }
+
+    public function test_resolution_failure_rolls_back_proposal_and_email_updates(): void
+    {
+        $client = Client::factory()->create();
+        $email = $this->email();
+        $result = $this->stage($email, $client);
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $dispatcher = EmailResolutionProposal::getEventDispatcher();
+        EmailResolutionProposal::setEventDispatcher(clone $dispatcher);
+        EmailResolutionProposal::updating(function (EmailResolutionProposal $proposal): void {
+            if ($proposal->state === 'done') {
+                throw new \RuntimeException('Injected before commit');
+            }
+        });
+        try {
+            try {
+                app(EmailResolutionService::class)->approve($result['proposal_id'], $admin);
+                $this->fail('Injected failure did not fire');
+            } catch (\RuntimeException $e) {
+                $this->assertSame('Injected before commit', $e->getMessage());
+            }
+        } finally {
+            EmailResolutionProposal::setEventDispatcher($dispatcher);
+        }
+        $this->assertNull($email->fresh()->client_id);
+        $this->assertSame('pending', EmailResolutionProposal::find($result['proposal_id'])->state);
+        $this->assertTrue(app(EmailResolutionService::class)->approve($result['proposal_id'], $admin)['success']);
     }
 
     public function test_kill_switch_deny_and_removed_cohort_member_refuse(): void
@@ -157,6 +206,14 @@ class EmailResolutionTest extends TestCase
         $payload['client_id'] = Client::factory()->create()->id;
         $proposal->update(['payload' => $payload]);
         $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $this->assertArrayHasKey('error', $service->approve($proposal->id, $admin));
+        $this->assertNull($email->fresh()->client_id);
+
+        $fresh = $this->stage($email, $client);
+        $proposal = EmailResolutionProposal::findOrFail($fresh['proposal_id']);
+        $payload = $proposal->payload;
+        $payload['reason'] = 'A changed approval reason';
+        $proposal->update(['payload' => $payload]);
         $this->assertArrayHasKey('error', $service->approve($proposal->id, $admin));
         $this->assertNull($email->fresh()->client_id);
     }

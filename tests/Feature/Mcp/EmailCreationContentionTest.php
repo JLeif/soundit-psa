@@ -37,6 +37,8 @@ class EmailCreationContentionTest extends TestCase
         try {
             $this->assertStringContainsString('MariaDB', DB::selectOne('SELECT VERSION() AS v')->v);
             $this->assertSame(1, (int) DB::selectOne('SELECT @@skip_networking AS n')->n);
+            // The sibling approval control uses real FKs to these disposable parents.
+            Schema::dropIfExists('email_resolution_proposals');
             foreach (['emails', 'tickets', 'settings'] as $table) {
                 Schema::dropIfExists($table);
             }

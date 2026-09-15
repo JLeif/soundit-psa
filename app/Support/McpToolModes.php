@@ -430,6 +430,12 @@ class McpToolModes
             $description .= ' Supports staged=true to hold the action for cockpit approval instead of executing immediately.';
         }
 
+        if (($direct['name'] ?? null) === 'resolve_email_item') {
+            $schema['properties']['staged'] = ['type' => 'boolean', 'enum' => [true], 'description' => 'Required true. No immediate execution or automatic downgrade.'];
+            $schema['required'] = array_values(array_unique([...($schema['required'] ?? []), 'staged']));
+            $description = (string) $direct['description'];
+        }
+
         $direct['description'] = $description;
         $direct['input_schema'] = $schema;
 
