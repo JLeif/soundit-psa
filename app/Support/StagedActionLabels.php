@@ -87,6 +87,7 @@ class StagedActionLabels
         'cipp_stage_add_tenant_allow_entry' => 'CIPP tenant allow-list',
         'cipp_stage_wipe_device' => 'CIPP device wipe',
         'cipp_stage_reassign_onedrive' => 'CIPP OneDrive handover',
+        'cipp_stage_offboard_user' => 'CIPP offboarding admission',
         'cipp_stage_create_user' => 'CIPP create user',
         'cipp_stage_edit_user' => 'CIPP edit user',
         'cipp_stage_set_group_membership' => 'CIPP group membership',

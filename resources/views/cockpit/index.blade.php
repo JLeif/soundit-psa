@@ -441,6 +441,21 @@
         <div class="vstack gap-3">
             @foreach ($actionDrafts as $run)
                 @php($badge = $badgeFor($run))
+                @if($run->action_type === 'cipp_stage_offboard_user')
+                    <div class="border rounded p-3 mb-3">
+                        <p class="fw-semibold">Confirm this exact offboarding plan</p>
+                        <p>Revision {{ $run->proposed_meta['revision'] ?? '?' }} · Plan {{ $run->content_hash }}</p>
+                        <p>Check every selected action. Admission is not completed offboarding. No replay or automatic compensation is available.</p>
+                        <input type="hidden" name="revision" value="1" form="approve-{{ $run->id }}">
+                        <input type="hidden" name="plan_hash" value="{{ $run->content_hash }}" form="approve-{{ $run->id }}">
+                        @foreach(($run->proposed_meta['actions'] ?? []) as $selectedAction)
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" required name="actions[]" value="{{ $selectedAction }}" id="offboard-{{ $run->id }}-{{ $loop->index }}" form="approve-{{ $run->id }}">
+                                <label class="form-check-label" for="offboard-{{ $run->id }}-{{ $loop->index }}">{{ str_replace('_', ' ', $selectedAction) }}</label>
+                            </div>
+                        @endforeach
+                    </div>
+                @endif
                 @php($cippInputs = (array)($run->proposed_meta['sensitive_inputs'] ?? []))
                 <article class="card cockpit-item cockpit-action-card" data-cockpit-item data-section="actions" data-label="{{ e(optional($run->ticket)->subject ?? 'Ticket #'.$run->ticket_id) }}">
                     <div class="card-body">

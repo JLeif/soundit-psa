@@ -186,6 +186,10 @@ final class CippMcpToolPolicy
      */
     public static function refusalReason(string $localName, string $upstreamName): ?string
     {
+        if (in_array(strtolower(trim($upstreamName)), ['execoffboarduser', 'exec_offboard_user', 'invoke-execoffboarduser'], true)
+            || in_array(strtolower(trim($localName)), ['cipp_offboard_user', 'cipp_stage_offboard_user'], true)) {
+            return 'offboarding requires the dedicated sealed single-send admission path';
+        }
         if (in_array(trim($upstreamName), self::BLOCKED_UPSTREAM_TOOLS, true)) {
             return 'blocked upstream tool';
         }

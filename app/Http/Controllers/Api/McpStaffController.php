@@ -570,6 +570,11 @@ class McpStaffController extends Controller
             return $this->error($id, -32602, 'Missing tool name');
         }
 
+        $offboarding = in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true);
+        if ($offboarding && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
+            return $this->error($id, -32602, 'Offboarding requires staged=true and an explicit positive integer client_id; immediate calls are refused, not downgraded.');
+        }
+
         // Unified staged/immediate boundary. Retired stage_* names remain
         // callable as thin aliases that force staged=true on their canonical
         // tool; stageable canonicals carry a `staged` argument instead. The
@@ -1077,6 +1082,10 @@ class McpStaffController extends Controller
             } elseif (ChetDataSurfaceTools::handles((string) $name)) {
                 $result = app(ChetDataSurfaceToolExecutor::class)->execute((string) $name, $arguments, $clientId);
             } elseif ($this->isCippWriteTool((string) $name)) {
+                if ($offboarding) {
+                    $arguments['client_id'] = (int) $clientId;
+                    $arguments['staged'] = true;
+                }
                 $result = app(StaffCippWriteToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
