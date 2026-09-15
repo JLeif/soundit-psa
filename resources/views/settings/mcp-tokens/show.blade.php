@@ -293,7 +293,9 @@
                                                     <span class="badge rounded-pill bg-info-subtle text-info-emphasis border tool-instr-flag" style="font-size:.6rem; {{ $hasInstr ? '' : 'display:none;' }}"><i class="bi bi-card-text me-1"></i>instruction</span>
                                                 </div>
                                                 @if($tool['description'] !== '')<div class="tool-desc">{{ $tool['description'] }}</div>@endif
-                                                @if(!empty($tool['stageable']))
+                                                @if(!empty($tool['held_only']))
+                                                    <div class="mcp-mode mt-1 small text-muted" style="{{ $isGranted ? '' : 'display:none;' }}">held-only — every call is a cockpit proposal</div>
+                                                @elseif(!empty($tool['stageable']))
                                                     @php $isImmediate = ($grantModes[$tool['name']] ?? null) === 'immediate'; @endphp
                                                     <div class="mcp-mode mt-1" style="{{ $isGranted ? '' : 'display:none;' }}">
                                                         <div class="form-check m-0">

@@ -209,7 +209,7 @@ class MeshRemoveAllowRuleTest extends TestCase
         $this->assertSame('Mesh allow rule removal', StagedActionLabels::humanLabel('mesh_stage_remove_allow_rule'));
     }
 
-    public function test_a_bare_immediate_grant_is_refused_and_names_the_staged_grant(): void
+    public function test_executor_immediate_defence_refuses_and_names_the_staged_grant(): void
     {
         $this->configureMesh();
         $fixture = $this->fixture();
@@ -217,10 +217,9 @@ class MeshRemoveAllowRuleTest extends TestCase
         $write->shouldNotReceive('deleteRule');
         $write->shouldNotReceive('findRuleById');
 
-        // The immediate mode is reachable only by an explicit grant; the
-        // executor refuses it anyway, so both locks are exercised.
-        $result = $this->decodedResult(
-            $this->callTool($this->token(['mesh_remove_allow_rule:immediate']), 'mesh_remove_allow_rule', $this->removeArgs($fixture))
+        // Bypass grant parsing to exercise the retained executor defence directly.
+        $result = app(\App\Services\Mcp\StaffMeshAdminToolExecutor::class)->execute(
+            'mesh_remove_allow_rule', $this->removeArgs($fixture), null, 'synthetic-test'
         );
 
         $this->assertStringContainsString('staged-only', $result['error']);

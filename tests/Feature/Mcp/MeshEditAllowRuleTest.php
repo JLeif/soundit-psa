@@ -213,7 +213,7 @@ class MeshEditAllowRuleTest extends TestCase
         $this->assertSame('Mesh allow rule expiry edit', StagedActionLabels::humanLabel('mesh_stage_edit_allow_rule'));
     }
 
-    public function test_a_bare_immediate_grant_is_refused_and_names_the_staged_grant(): void
+    public function test_executor_immediate_defence_refuses_and_names_the_staged_grant(): void
     {
         $this->configureMesh();
         $fixture = $this->fixture();
@@ -221,8 +221,9 @@ class MeshEditAllowRuleTest extends TestCase
         $write->shouldNotReceive('patchRule');
         $write->shouldNotReceive('findRuleById');
 
-        $result = $this->decodedResult(
-            $this->callTool($this->token(['mesh_edit_allow_rule:immediate']), 'mesh_edit_allow_rule', $this->editArgs($fixture))
+        // Bypass grant parsing to exercise the retained executor defence directly.
+        $result = app(\App\Services\Mcp\StaffMeshAdminToolExecutor::class)->execute(
+            'mesh_edit_allow_rule', $this->editArgs($fixture), null, 'synthetic-test'
         );
 
         $this->assertStringContainsString('staged-only', $result['error']);

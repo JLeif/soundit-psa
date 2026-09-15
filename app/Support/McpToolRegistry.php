@@ -203,6 +203,7 @@ class McpToolRegistry
                     'description' => $tool['description'] ?? '',
                     'sensitive' => $sensitive,
                     'stageable' => McpToolModes::isStageable((string) $tool['name']),
+                    'held_only' => McpToolModes::isHeldOnly((string) $tool['name']),
                 ];
             };
 
