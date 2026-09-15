@@ -29,15 +29,9 @@ use Tests\TestCase;
  * Auto-resolved Huntress incidents (→ status closed/dismissed on the API) don't fire the
  * CW-Manage status webhook, so the bridged PSA ticket strands open. This service resolves it.
  *
- * SAFETY (from real prod data):
- *  - SCOPE: only INCIDENT-backed source=Huntress tickets are eligible. Escalations / ISPM /
- *    ITDR / product-notices share the source but have no incident report — they must never
- *    be touched. We detect an incident ticket by parsing "Incident on <host>" from its
- *    subject (escalations/notices don't carry it).
- *  - CORRESPONDENCE: resolve ONLY on positive ticket↔incident correspondence — an exact
- *    incident id (minority), or the closed incident's body mentioning the ticket's host,
- *    within the sent_at window. Bare time-window matching is a mis-close vector (a
- *    coincidental sibling incident close) and is NOT a resolve trigger.
+ * Only immutable CW candidates correlated with verified events authorize polling.
+ * Former host/window and text-id positives are retained as explicit refusals.
+ * Lifecycle and human-touch controls use the real capture/promotion seam.
  *
  * Only the Huntress HTTP boundary is faked; reconcile/scope/correspondence/guards are real.
  */
@@ -105,9 +99,7 @@ class HuntressIncidentReconcileTest extends TestCase
             'noted_at' => now(),
         ]);
 
-        // Linked alert — source_alert_id is a synth hash for the majority (no recoverable id),
-        // or the incident URL for the minority. metadata['agent'] is intentionally absent
-        // (empty in real prod data), so correspondence must come from the incident body.
+        // A legacy alert is not a validated link, even if its source id is a URL.
         Alert::create([
             'source' => AlertSource::Huntress->value,
             'source_alert_id' => $sourceAlertUrl ?? md5('synth-'.$ticket->id),
@@ -141,16 +133,36 @@ class HuntressIncidentReconcileTest extends TestCase
     private function service(array $incidentsByOrg = [], array $reportsById = []): HuntressIncidentReconcileService
     {
         $client = Mockery::mock(HuntressClient::class);
-        $client->shouldReceive('getIncidentReports')
-            ->andReturnUsing(fn (array $p) => $incidentsByOrg[$p['organization_id'] ?? 0] ?? []);
-        $client->shouldReceive('getIncidentReport')
-            ->andReturnUsing(fn (int $id) => $reportsById[$id] ?? ['id' => $id, 'status' => 'sent']);
+        $client->shouldReceive('getIncidentReports')->never();
+        if ($reportsById === []) {
+            $client->shouldReceive('getIncidentReport')->never();
+        } else {
+            $client->shouldReceive('getIncidentReport')
+                ->andReturnUsing(fn (int $id) => $reportsById[$id] ?? throw new \LogicException('Unexpected synthetic id'));
+        }
 
         return new HuntressIncidentReconcileService(
             $client,
             app(TicketService::class),
             app(AlertService::class),
         );
+    }
+
+    private function bind(Ticket $ticket, int $id): void
+    {
+        Setting::setValue('huntress_webhooks_enabled', '1');
+        Setting::setValue('huntress_webhook_account_id', '11');
+        \Illuminate\Support\Facades\DB::table('huntress_webhook_events')->insert([
+            'delivery_id' => 'synthetic-'.$ticket->id, 'content_hash' => str_repeat('a', 64),
+            'event_type' => 'incident_report.created', 'record_type' => 'incident_report',
+            'record_id' => $id, 'account_id' => 11, 'organization_ids' => '[42]',
+            'resolved' => false, 'record_created_at' => $ticket->created_at,
+            'correlation_at' => $ticket->created_at, 'received_at' => now(),
+        ]);
+        app(\App\Services\Huntress\HuntressLinkService::class)->capture(
+            Alert::where('ticket_id', $ticket->id)->firstOrFail(), $ticket,
+            'https://synthetic.huntress.io/org/42/incident_reports/'.$id, $ticket->created_at->toDateTimeString());
+        $this->assertEquals($id, Alert::where('ticket_id', $ticket->id)->first()->huntress_record_id);
     }
 
     private function assertResolved(Ticket $ticket): void
@@ -167,7 +179,7 @@ class HuntressIncidentReconcileTest extends TestCase
 
     // ── correspondence: host + window (the majority, hash source_alert_id) ──
 
-    public function test_resolves_incident_ticket_on_host_and_window_correspondence(): void
+    public function test_host_and_window_without_signed_link_never_resolves(): void
     {
         $client = $this->mappedClient(42);
         $ticket = $this->incidentTicket($client, 'DESKTOP-ARL0EQ1');
@@ -178,9 +190,9 @@ class HuntressIncidentReconcileTest extends TestCase
 
         $result = $this->service($incidents)->reconcile();
 
-        $this->assertResolved($ticket);
-        $this->assertSame(1, $result->updated);
-        $this->assertSame(AlertStatus::Resolved, Alert::where('ticket_id', $ticket->id)->first()->status);
+        $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
+        $this->assertSame(0, $result->updated);
+        $this->assertSame(AlertStatus::Ticketed, Alert::where('ticket_id', $ticket->id)->first()->status);
     }
 
     /** BLOCKER 1: escalation / ISPM / ITDR / notice tickets are never incident-backed. */
@@ -257,9 +269,10 @@ class HuntressIncidentReconcileTest extends TestCase
             $this->incidentRow(750, 42, 'dismissed', $ticket->created_at, 'Dismissed benign detection on HOST-D.'),
         ]];
 
-        $this->service($incidents)->reconcile();
+        $this->bind($ticket, 750);
+        $this->service([], [750 => $incidents[42][0]])->reconcile();
 
-        $this->assertSame(TicketStatus::Resolved, $ticket->fresh()->status);
+        $this->assertResolved($ticket);
     }
 
     public function test_still_sent_incident_leaves_ticket_open(): void
@@ -272,15 +285,16 @@ class HuntressIncidentReconcileTest extends TestCase
             $this->incidentRow(760, 42, 'sent', $ticket->created_at, 'Active investigation on HOST-S.'),
         ]];
 
-        $result = $this->service($incidents)->reconcile();
+        $this->bind($ticket, 760);
+        $result = $this->service([], [760 => $incidents[42][0]])->reconcile();
 
         $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
         $this->assertSame(0, $result->updated);
     }
 
-    // ── exact-id fast path (the minority: source_alert_id carries an incident URL) ──
+    // ── explicit link versus legacy text id (the minority: source_alert_id carries an incident URL) ──
 
-    public function test_id_bearing_ticket_resolves_via_exact_get_incident_report(): void
+    public function test_text_id_without_signed_link_does_not_authorize_exact_get(): void
     {
         $client = $this->mappedClient(42);
         $ticket = $this->incidentTicket(
@@ -291,8 +305,8 @@ class HuntressIncidentReconcileTest extends TestCase
 
         $result = $this->service([], [555 => ['id' => 555, 'status' => 'closed']])->reconcile();
 
-        $this->assertResolved($ticket);
-        $this->assertSame(1, $result->updated);
+        $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
+        $this->assertSame(0, $result->updated);
     }
 
     public function test_id_bearing_ticket_with_still_open_incident_stays_open(): void
@@ -304,12 +318,13 @@ class HuntressIncidentReconcileTest extends TestCase
             sourceAlertUrl: 'https://dashboard.huntress.io/org/42/infection_reports/556',
         );
 
-        $this->service([], [556 => ['id' => 556, 'status' => 'sent']])->reconcile();
+        $this->bind($ticket, 556);
+        $this->service([], [556 => ['id' => 556, 'organization_id' => 42, 'status' => 'sent']])->reconcile();
 
         $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
     }
 
-    // ── guards (approved; exercised on the real correspondence path) ──
+    // ── lifecycle guards exercised through verified candidate promotion ──
 
     public function test_is_idempotent_across_runs(): void
     {
@@ -317,8 +332,9 @@ class HuntressIncidentReconcileTest extends TestCase
         $ticket = $this->incidentTicket($client, 'HOST-I');
         $incidents = [42 => [$this->incidentRow(770, 42, 'closed', $ticket->created_at, 'Done on HOST-I.')]];
 
-        $this->service($incidents)->reconcile();
-        $this->service($incidents)->reconcile();
+        $this->bind($ticket, 770);
+        $this->service([], [770 => $incidents[42][0]])->reconcile();
+        $this->service([], [770 => $incidents[42][0]])->reconcile();
 
         $resolveNotes = TicketNote::where('ticket_id', $ticket->id)
             ->where('status_to', TicketStatus::Resolved->value)
@@ -341,7 +357,9 @@ class HuntressIncidentReconcileTest extends TestCase
         ]);
 
         $incidents = [42 => [$this->incidentRow(780, 42, 'closed', $ticket->created_at, 'Done on HOST-H.')]];
-        $result = $this->service($incidents)->reconcile();
+        $this->bind($ticket, 780);
+        $result = $this->service([], [780 => $incidents[42][0]])->reconcile();
+        $this->assertSame(["#{$ticket->id}: human_touched"], $result->skippedMessages);
 
         $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
         $this->assertSame(0, $result->updated);
@@ -363,7 +381,9 @@ class HuntressIncidentReconcileTest extends TestCase
         ]);
 
         $incidents = [42 => [$this->incidentRow(790, 42, 'closed', $ticket->created_at, 'Done on HOST-E.')]];
-        $this->service($incidents)->reconcile();
+        $this->bind($ticket, 790);
+        $result = $this->service([], [790 => $incidents[42][0]])->reconcile();
+        $this->assertSame(["#{$ticket->id}: human_touched"], $result->skippedMessages);
 
         $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
     }
@@ -393,8 +413,8 @@ class HuntressIncidentReconcileTest extends TestCase
         $client = $this->mappedClient(42);
         $resolvable = $this->incidentTicket($client, 'HOST-R');
         $incidents = [42 => [$this->incidentRow(810, 42, 'closed', $resolvable->created_at, 'Done on HOST-R.')]];
-
-        $result = $this->service($incidents)->reconcile();
+        $this->bind($resolvable, 810);
+        $result = $this->service([], [810 => $incidents[42][0]])->reconcile();
 
         $this->assertSame(TicketStatus::InProgress, $stuck->fresh()->status);
         $this->assertSame(TicketStatus::Resolved, $resolvable->fresh()->status);
