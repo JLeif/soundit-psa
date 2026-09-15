@@ -9,14 +9,17 @@ use App\Services\Agent\Intake\EmailTriageWatch;
 use App\Services\Cipp\CippMcpCatalogSyncService;
 use App\Services\Graph\GraphClient;
 use App\Services\Graph\GraphWebhookManager;
+use App\Services\Hdb\HdbAuthClient;
 use App\Services\Level\LevelClient;
 use App\Services\Ninja\NinjaBackupSyncService;
 use App\Services\Ninja\NinjaClient;
 use App\Support\AiConfig;
 use App\Support\AppRiverConfig;
 use App\Support\AppTimezone;
+use App\Support\BenjiPaysConfig;
 use App\Support\CippConfig;
 use App\Support\ControlDConfig;
+use App\Support\HdbPortalConfig;
 use App\Support\HuntressConfig;
 use App\Support\LevelConfig;
 use App\Support\MeshConfig;
@@ -47,13 +50,6 @@ class IntegrationsController extends Controller
      * with the mask. Matches the existing convention used elsewhere in this controller.
      */
     private const SECRET_MASK = '••••••••';
-
-    /**
-     * Host the HelpDesk Buttons report portal is reached on. Applied on READ when the
-     * setting is empty rather than being written into it, so clearing the field returns
-     * the operator to the default instead of leaving the fetch pointed at nothing.
-     */
-    private const HDB_DEFAULT_BASE_URL = 'https://beta.helpdeskbuttons.com';
 
     /**
      * Vendor master switches that ALSO gate the vendor's AI tool surface (psa-wzjzz),
@@ -123,6 +119,9 @@ class IntegrationsController extends Controller
         $stripeMode = StripeConfig::get('mode');
         $stripeConnected = (bool) $fmtTs(Setting::getValue('stripe_connected_at'));
         $stripeAutoPush = Setting::getValue('stripe_auto_push_invoices') === '1';
+
+        // BenjiPays
+        $benjipaysConfigured = BenjiPaysConfig::isConfigured();
 
         // Level
         $levelHasApiKey = (bool) (Setting::getValue('level_api_key') ?? config('services.level.api_key'));
@@ -326,10 +325,13 @@ class IntegrationsController extends Controller
         // mask placeholder and nothing else.
         // The form renders this as the field's value, so it must be the STORED value —
         // resolving the default here would echo it back on the next save and write it
-        // into the setting, which is exactly what HDB_DEFAULT_BASE_URL promises not to
-        // happen. The default travels separately and is shown as a placeholder.
+        // into the setting, which is exactly what the blank-means-default contract
+        // promises not to happen. The default travels separately, shown as a
+        // placeholder. It now lives on the read path that applies it
+        // ({@see HdbPortalConfig}) rather than in a private const here, so the form
+        // and the client cannot drift to two different hosts — psa #1352.
         $hdbBaseUrl = trim((string) Setting::getValue('hdb_base_url', ''));
-        $hdbDefaultBaseUrl = self::HDB_DEFAULT_BASE_URL;
+        $hdbDefaultBaseUrl = HdbPortalConfig::DEFAULT_BASE_URL;
         $hdbEmail = (string) Setting::getValue('hdb_email', '');
         $hdbHasPassword = trim((string) Setting::getEncrypted('hdb_password', '')) !== '';
         $hdbHasTotpSecret = trim((string) Setting::getEncrypted('hdb_totp_secret', '')) !== '';
@@ -528,6 +530,7 @@ class IntegrationsController extends Controller
         return view('settings.integrations', compact(
             'qboClientId', 'qboHasSecret', 'qboEnvironment', 'qboRealmId', 'qboConnected', 'qboTokenExpiresAt', 'qboAutoPush', 'qboHasWebhookToken', 'qboDefaultIncomeId', 'qboDefaultExpenseId', 'qboIncomeAccounts', 'qboExpenseAccounts',
             'stripeConfigured', 'stripeMode', 'stripeConnected', 'stripeAutoPush', 'stripeEnabled',
+            'benjipaysConfigured',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
@@ -684,6 +687,44 @@ class IntegrationsController extends Controller
 
         return redirect()->route('settings.integrations')
             ->with('success', 'Stripe credentials saved.');
+    }
+
+    // --- BenjiPays ---
+
+    /**
+     * Store the BenjiPays API key encrypted at rest. Blank, or the masked
+     * placeholder echoed back from the form, means "keep the stored key" — the
+     * same blank-preserves rule every other operator secret in this controller
+     * follows. Nothing reads the key back out: the form never renders it and the
+     * flash names the outcome only.
+     */
+    public function updateBenjiPays(Request $request)
+    {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->only('api_key'), [
+            // Our settings.value TEXT storage bound after encryption, not a BenjiPays contract: vendor documents no key length as of 2026-09-13.
+            'api_key' => 'nullable|string|min:1|max:4096',
+        ]);
+
+        if ($validator->fails()) {
+            // Do not flash submitted credentials into the session on rejection.
+            return redirect()->route('settings.integrations')->withErrors($validator);
+        }
+
+        $validated = $validator->validated();
+
+        $submitted = trim((string) ($validated['api_key'] ?? ''));
+
+        if ($submitted !== '' && $submitted !== self::SECRET_MASK) {
+            Setting::setEncrypted('benjipays_api_key', $submitted);
+
+            return redirect()->route('settings.integrations')
+                ->with('success', 'BenjiPays API key saved.');
+        }
+
+        return redirect()->route('settings.integrations')
+            ->with('success', BenjiPaysConfig::isConfigured()
+                ? 'BenjiPays API key unchanged.'
+                : 'No BenjiPays API key entered.');
     }
 
     public function testStripe()
@@ -1999,16 +2040,38 @@ class IntegrationsController extends Controller
 
     public function updateT2t(Request $request)
     {
-        $validated = $request->validate([
+        // The four HDB fields below choose WHERE the decrypted service-subaccount
+        // password and a live one-time code are POSTed, so writing them is gated
+        // exactly like spending them ({@see testHdb()}): admin only. The URL rule
+        // that follows can prove "https, public hostname" and nothing more — no
+        // check on a URL can prove the host is the vendor's — so on its own it
+        // left any authenticated user (psa #1344 is still open for the rest of
+        // this page) able to point the next admin Test Connection at a server
+        // they own and collect the credential.
+        $isAdmin = $request->user()?->isAdmin() === true;
+
+        $rules = [
             'api_key' => 'nullable|string|min:1|max:500',
             'company_id' => 'nullable|string|max:100',
             'callback_url' => 'nullable|url|max:500',
             'system_user_id' => 'nullable|integer|exists:users,id',
-            'hdb_base_url' => 'nullable|url|max:255',
-            'hdb_email' => 'nullable|email|max:255',
-            'hdb_password' => 'nullable|string|max:1024',
-            'hdb_totp_secret' => 'nullable|string|max:255',
-        ]);
+        ];
+
+        if ($isAdmin) {
+            // Still validated now that it is admin-only: an admin can type an
+            // internal address as easily as anyone, and the read path applies
+            // the same predicate — one predicate, both paths.
+            $rules['hdb_base_url'] = ['nullable', 'url', 'max:255', function (string $attribute, mixed $value, \Closure $fail) {
+                if (trim((string) $value) !== '' && ! HdbPortalConfig::isPostableBaseUrl((string) $value)) {
+                    $fail('The portal URL must be an https:// address with a public hostname.');
+                }
+            }];
+            $rules['hdb_email'] = 'nullable|email|max:255';
+            $rules['hdb_password'] = 'nullable|string|max:1024';
+            $rules['hdb_totp_secret'] = 'nullable|string|max:255';
+        }
+
+        $validated = $request->validate($rules);
 
         if (! empty($validated['api_key'])) {
             Setting::setEncrypted('t2t_api_key', $validated['api_key']);
@@ -2026,11 +2089,26 @@ class IntegrationsController extends Controller
 
         // --- HDB report portal credentials ---
         //
-        // Entry surface only: nothing in the app reads these yet. They exist so the
-        // TOTP seed — which the vendor displays exactly once, at enrollment — has a
-        // sanctioned destination the moment it is minted.
+        // Read back by {@see HdbPortalConfig} and spent by {@see HdbAuthClient} from
+        // testHdb() below. The seed field predates both: it exists so the seed — which
+        // the vendor displays exactly once, at enrollment — had a sanctioned
+        // destination the moment it was minted. The report fetch itself is still
+        // separate work; this form still writes, it does not fetch.
+        //
+        // A non-admin never reaches these writes, and returning before them is
+        // what makes that safe rather than destructive: the fields are neither
+        // rendered nor validated for them, so falling through would write the
+        // blanks their form did not carry — and clearing the Portal URL is a
+        // real action (it selects the default host), not a no-op.
+        if (! $isAdmin) {
+            return redirect()->route('settings.integrations')
+                ->with('success', 'Tier2Tickets settings saved.');
+        }
 
-        // Non-secret. Written even when blank: an empty setting means "use the default
+        // Non-secret, but NOT unchecked: it names the host the stored password is
+        // posted to, so the rule above refuses anything
+        // {@see HdbPortalConfig::isPostableBaseUrl()} would not spend a credential
+        // on. Written even when blank: an empty setting means "use the default
         // host", which the read path applies, so clearing the field is a real action.
         Setting::setValue('hdb_base_url', trim((string) ($validated['hdb_base_url'] ?? '')));
         Setting::setValue('hdb_email', trim((string) ($validated['hdb_email'] ?? '')));
@@ -2055,6 +2133,65 @@ class IntegrationsController extends Controller
 
         return redirect()->route('settings.integrations')
             ->with('success', 'Tier2Tickets settings saved.');
+    }
+
+    /**
+     * Prove the stored HDB report-portal credentials still sign in.
+     *
+     * Deliberately unlike its siblings on this page in two ways, both of which a
+     * reviewer should read as intentional:
+     *
+     * 1. **Nothing the vendor said reaches this response.** testLevel() above
+     *    interpolates `$e->getMessage()` into the operator's message, and the
+     *    integrations page assigns a test result through `innerHTML` — so that
+     *    pattern hands a remote host a write primitive on the DOM. This action
+     *    returns only {@see HdbAuthResult::message()}, a fixed string chosen by
+     *    symbol, and audits only the closed-vocabulary reason code.
+     * 2. **It is admin-only.** It is the one action here that spends a live
+     *    credential against a third party, so it fails closed rather than
+     *    inheriting the page's auth-only middleware. That middleware gap is psa
+     *    #1344 and this guard does NOT close it — every other action on this page
+     *    is still reachable by any authenticated user.
+     */
+    public function testHdb(Request $request)
+    {
+        abort_unless($request->user()?->isAdmin() === true, 403);
+
+        $startedAt = hrtime(true);
+        $result = (new HdbAuthClient)->authenticate();
+        $durationMs = (int) round((hrtime(true) - $startedAt) / 1_000_000);
+
+        if ($result->ok()) {
+            Setting::setValue('hdb_connected_at', now()->toDateTimeString());
+        }
+
+        // Audit who/when/outcome on the settings-surface audit sink (parity with
+        // unbindPersonaConversation below). Fail-soft — an audit hiccup must never
+        // sink the operator's test. `error_message` carries the reason SYMBOL, not
+        // vendor text: this row is read back in a UI too.
+        try {
+            \App\Models\McpAuditLog::create([
+                'server_name' => 'staff',
+                'method' => 'hdb/test_connection',
+                'tool_name' => 'hdb_report_portal',
+                'arguments' => [
+                    'base_url' => HdbPortalConfig::baseUrl(),
+                    'requests' => $result->requests,
+                ],
+                'status' => $result->ok() ? 'success' : 'error',
+                'error_message' => $result->ok() ? null : $result->reason,
+                'duration_ms' => $durationMs,
+                'actor_label' => mb_substr('web:'.((string) ($request->user()?->email ?? $request->user()?->id ?? 'unknown')), 0, 100),
+                'source_ip' => $request->ip(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('[Settings/Integrations] HDB connection test audit write failed: '.$e->getMessage());
+        }
+
+        return response()->json([
+            'success' => $result->ok(),
+            'message' => $result->message(),
+        ]);
     }
 
     public function generateT2tKey()

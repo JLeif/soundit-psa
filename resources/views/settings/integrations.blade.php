@@ -371,6 +371,48 @@
             </div>
         </div>
 
+        {{-- BenjiPays Card --}}
+        <div class="card card-static shadow-sm mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <i class="bi bi-credit-card me-2"></i>BenjiPays
+                </div>
+                @if($benjipaysConfigured ?? false)
+                    <span class="badge bg-success">Key stored</span>
+                @else
+                    <span class="badge bg-secondary">Not configured</span>
+                @endif
+            </div>
+            <div class="card-body">
+                <p class="text-muted small mb-3">
+                    Store the API key generated in your BenjiPays account. The key is encrypted at rest and is
+                    never shown again after saving; enter a new one to replace it, or leave the field blank to keep it.
+                </p>
+
+                <form method="POST" action="{{ route('settings.integrations.benjipays.update') }}">
+                    @csrf
+
+                    <div class="row">
+                        <div class="col-md-8 mb-3">
+                            <label for="benjipays_api_key" class="form-label">API Key</label>
+                            <input type="password"
+                                   class="form-control @error('api_key') is-invalid @enderror"
+                                   id="benjipays_api_key"
+                                   name="api_key"
+                                   value=""
+                                   autocomplete="off"
+                                   placeholder="{{ ($benjipaysConfigured ?? false) ? '••••••••' : 'Enter API key' }}">
+                            @error('api_key')
+                                <div class="invalid-feedback">{{ $message }}</div>
+                            @enderror
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-sm">Save BenjiPays Settings</button>
+                </form>
+            </div>
+        </div>
+
         </div>{{-- /billing tab --}}
 
         {{-- ============================================================ --}}
@@ -2984,10 +3026,21 @@
                         <p class="text-muted small mb-3">
                             Credentials for the service account that reads per-press diagnostic reports
                             back from HelpDesk Buttons. Use a dedicated subaccount scoped to reports only
-                            &mdash; never a technician's own login. Nothing reads these yet; the fetch is
-                            built separately.
+                            &mdash; never a technician's own login. Save first, then use <strong>Test
+                            Connection</strong> below to confirm the subaccount still signs in. The
+                            report fetch itself is built separately; the test only proves the login.
                         </p>
 
+                        {{--
+                            Admin-only as a whole, not just the Test Connection button below.
+                            The Portal URL names the host the stored password and a live
+                            one-time code are posted to, and "https with a public hostname" is
+                            the most any URL check can prove — never "this is the vendor" — so
+                            a non-admin able to write it would collect the credential on the
+                            next admin test. updateT2t() enforces the same gate on the save;
+                            this only stops offering fields that save would ignore.
+                        --}}
+                        @if(auth()->user()?->isAdmin())
                         <div class="mb-3">
                             <label for="hdb_base_url" class="form-label">Portal URL</label>
                             <input type="url"
@@ -2999,7 +3052,11 @@
                             @error('hdb_base_url')
                                 <div class="invalid-feedback">{{ $message }}</div>
                             @enderror
-                            <div class="form-text">Leave blank to use the default portal host.</div>
+                            <div class="form-text">
+                                Leave blank to use the default portal host. Must be an
+                                <code>https://</code> address with a public hostname &mdash; the stored
+                                password is posted to it.
+                            </div>
                         </div>
 
                         <div class="mb-3">
@@ -3049,6 +3106,32 @@
                                 the current seed.
                             </div>
                         </div>
+
+                        {{--
+                            The button spends the stored password against the vendor, so it sits
+                            inside the same admin branch as the fields above; the action enforces
+                            it too (403). It does not close psa #1344 — every other card on this
+                            page is still reachable by any authenticated user.
+                        --}}
+                            <div class="d-flex gap-2">
+                                {{--
+                                    Labelled exactly like every other test button on this page on
+                                    purpose: testConnection()'s finally() restores that literal
+                                    string, so a custom label here would silently change after the
+                                    first click.
+                                --}}
+                                <button type="button" class="btn btn-outline-secondary btn-sm" id="test-hdb-btn"
+                                        onclick="testConnection('hdb')">
+                                    <i class="bi bi-plug me-1"></i>Test Connection
+                                </button>
+                            </div>
+                            <div id="test-result-hdb" class="alert mt-2" style="display:none;"></div>
+                        @else
+                            <p class="text-muted small mb-0">
+                                <i class="bi bi-lock me-1"></i>These credentials name where a stored
+                                password is sent, so only an administrator can view or change them.
+                            </p>
+                        @endif
                     </fieldset>
 
                     <div class="d-flex gap-2">
@@ -4846,6 +4929,7 @@ function testConnection(service) {
         graph: '{{ route("settings.integrations.graph.test") }}',
         ai: '{{ route("settings.integrations.ai.test") }}',
         transcription: '{{ route("settings.integrations.transcription.test") }}',
+        hdb: '{{ route("settings.integrations.hdb.test") }}',
     };
 
     fetch(routes[service], {
