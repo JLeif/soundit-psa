@@ -998,6 +998,7 @@ class CippRestWriteClient
             'tenants' => 'api/ListTenants',
             'users' => 'api/ListUsers',
             'scheduled' => 'api/ListScheduledItems',
+            'progress' => 'api/ListOffboardingProgress',
             default => throw new CippClientException('Unsupported offboarding verification read'),
         };
         $body = $this->sendGet($endpoint, $query, requireArrayBody: true);

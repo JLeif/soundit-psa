@@ -107,7 +107,7 @@ class CippOffboardingAdmissionTest extends TestCase
         $run = $this->staged();
         $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $scope = Mockery::mock(OffboardingScope::class)->makePartial();
-        $scope->shouldReceive('approver')->with($user->id)->andReturnNull();
+        $scope->shouldReceive('approver')->with($user->id, $run)->andReturnNull();
         $scope->shouldReceive('token')->never();
         $this->app->instance(OffboardingScope::class, $scope);
         foreach ([[], ['revision' => '2', 'plan_hash' => $run->content_hash, 'actions' => ['revoke_sessions']], ['revision' => '1', 'plan_hash' => $run->content_hash, 'actions' => ['disable_sign_in']]] as $approval) {
@@ -122,7 +122,7 @@ class CippOffboardingAdmissionTest extends TestCase
         $original = $this->staged();
         $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $scope = Mockery::mock(OffboardingScope::class)->makePartial();
-        $scope->shouldReceive('approver')->with($user->id)->andReturnNull();
+        $scope->shouldReceive('approver')->with($user->id, Mockery::type(TechnicianRun::class))->andReturnNull();
         $scope->shouldReceive('token')->never();
         $this->app->instance(OffboardingScope::class, $scope);
         foreach (['content', 'actions', 'revision', 'plan_hash'] as $field) {
@@ -173,6 +173,45 @@ class CippOffboardingAdmissionTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('scheduler task blocks admission');
         app(OffboardingScope::class)->dependenciesAndScheduler($snapshot);
+    }
+
+    public function test_explicit_client_mismatch_cannot_stage_or_send(): void
+    {
+        $this->reads();
+        $other = Client::factory()->create();
+        $result = $this->invokeTool($this->token(), [...$this->input, 'client_id' => $other->id]);
+        $this->assertTrue($result['result']['isError'] ?? false, json_encode($result));
+        $this->assertDatabaseCount('technician_runs', 0);
+        $this->assertDatabaseCount('cipp_offboarding_operations', 0);
+    }
+
+    public function test_approver_requires_assigned_same_client_staff_and_separate_requester(): void
+    {
+        $run = $this->staged();
+        $scope = app(OffboardingScope::class);
+        $tech = User::factory()->create(['role' => 'tech', 'is_active' => true]);
+        $ticket = Ticket::findOrFail($run->ticket_id);
+        $ticket->update(['assignee_id' => $tech->id, 'created_by' => null]);
+        $scope->approver($tech->id, $run);
+        $this->addToAssertionCount(1);
+        foreach (['unassigned', 'requester', 'foreign_ticket', 'inactive', 'billing'] as $case) {
+            $ticket->update(['assignee_id' => $tech->id, 'created_by' => null, 'client_id' => $run->client_id]);
+            $tech->update(['role' => 'tech', 'is_active' => true]);
+            match ($case) {
+                'unassigned' => $ticket->update(['assignee_id' => null]),
+                'requester' => $ticket->update(['created_by' => $tech->id]),
+                'foreign_ticket' => $ticket->update(['client_id' => Client::factory()->create()->id]),
+                'inactive' => $tech->update(['is_active' => false]),
+                'billing' => $tech->update(['role' => 'billing']),
+            };
+            $declined = false;
+            try {
+                $scope->approver($tech->id, $run);
+            } catch (\RuntimeException) {
+                $declined = true;
+            }
+            $this->assertTrue($declined, $case);
+        }
     }
 
     public function test_dynamic_relay_cannot_shadow_wizard(): void

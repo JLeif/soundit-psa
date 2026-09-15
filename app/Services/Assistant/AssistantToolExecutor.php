@@ -2674,6 +2674,14 @@ class AssistantToolExecutor
      */
     private function getStagedActionStatus(array $input): array
     {
+        if (array_key_exists('run_id', $input)) {
+            if (! is_int($input['run_id']) || $input['run_id'] < 1
+                || array_intersect(array_keys($input), ['state', 'action_type', 'ticket_id', 'limit'])) {
+                return ['error' => 'Detail requires a positive integer run_id without listing filters.'];
+            }
+
+            return app(\App\Services\Cipp\Offboarding\OffboardingStatus::class)->detail($input['run_id'], $this->clientId);
+        }
         $scoped = TechnicianRun::query()->whereIn('state', CockpitQuery::PENDING_STATES);
 
         // client_id is the constructor-derived scope, never a raw $input argument.

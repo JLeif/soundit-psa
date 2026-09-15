@@ -30,7 +30,7 @@ return new class extends Migration
             $table->timestamps();
         });
         Schema::create('cipp_offboarding_target_fences', function (Blueprint $table) {
-            // HMAC namespace keys include installation/integration/canonical tenant,
+            // Unkeyed SHA-256 namespace keys include installation/integration/canonical tenant,
             // never ticket or requester. Separate immutable-id AND UPN reservations.
             $table->char('fence_key', 64)->primary();
             $table->uuid('operation_id');
