@@ -33,7 +33,7 @@ use Tests\TestCase;
  * A CLIENT-scoped Tactical custom field is read by automation for every agent
  * under that client, and for a deployment field (controld_org_id, the first key)
  * the write IS the deploy trigger. Everything this suite asserts follows from
- * that: the verb is staged-only by construction, the upstream client must resolve
+ * that: immediate execution requires explicit trust, the upstream client must resolve
  * to EXACTLY ONE name match or the call is refused, an unconfigured field id is a
  * refusal rather than a default, and approval re-resolves both against live state.
  */
@@ -155,7 +155,7 @@ class TacticalSetClientCustomFieldTest extends TestCase
 
     // ---- surface / grant shape ------------------------------------------------
 
-    public function test_the_verb_is_a_sensitive_grantable_staged_only_tactical_admin_tool(): void
+    public function test_the_verb_is_a_sensitive_explicit_grant_tactical_admin_tool(): void
     {
         $this->configureTactical();
 
@@ -203,27 +203,128 @@ class TacticalSetClientCustomFieldTest extends TestCase
         );
     }
 
-    public function test_the_immediate_lane_does_not_exist_and_never_reaches_upstream(): void
+    public function test_explicit_immediate_grant_writes_exact_target_and_audits_actor_without_a_proposal(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
         $fixture = $this->fixture();
+        $client = $this->mockTactical();
+        $client->shouldReceive('getClients')->once()->andReturn($this->upstreamClients());
+        $client->shouldReceive('setClientCustomField')->once()->with(7, self::FIELD_ID, 'org-abc123');
 
-        // No expectations at all: any upstream call here is a failure.
-        $this->mockTactical();
-
-        // A bare grant resolves to :immediate — the one path that could bypass the
-        // cockpit. The executor has no immediate implementation to reach.
         $response = $this->callTool(
-            $this->token(['tactical_set_client_custom_field']),
+            $this->token(['tactical_set_client_custom_field:immediate']),
             'tactical_set_client_custom_field',
-            $this->stageArgs($fixture),
+            $this->stageArgs($fixture, ['staged' => false]),
         );
 
         $response->assertOk();
-        $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('staged-only', (string) $response->json('result.content.0.text'));
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $this->assertTrue($this->decodedResult($response)['success']);
         $this->assertSame(0, TechnicianRun::count());
+        $log = TechnicianActionLog::where('action_type', 'tactical_set_client_custom_field')->where('result_status', 'executed')->sole();
+        $this->assertSame('mcp-staff:opsbot', $log->actor_label);
+        $this->assertSame($fixture['client']->id, $log->client_id);
+        $this->assertNull($log->run_id);
+    }
+
+    public function test_staged_grant_downgrades_staged_false_and_immediate_grant_honors_staged_true(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+        $client = $this->mockTactical();
+        $client->shouldReceive('getClients')->andReturn($this->upstreamClients());
+        $client->shouldNotReceive('setClientCustomField');
+
+        foreach ([false, true] as $staged) {
+            $token = $staged ? $this->token(['tactical_set_client_custom_field:immediate']) : $this->grantedToken();
+            $response = $this->callTool($token, 'tactical_set_client_custom_field', $this->stageArgs($fixture, ['staged' => $staged]));
+            $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+            $this->assertNotEmpty($this->decodedResult($response)['run_id'] ?? null, (string) $response->json('result.content.0.text'));
+        }
+        $this->assertSame(1, TechnicianRun::where('state', TechnicianRunState::AwaitingApproval)->count());
+        $this->assertSame(McpToolModes::MODE_STAGED, McpToolModes::effectiveMode(null, 'tactical_set_client_custom_field'));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function immediateRefusals(): array
+    {
+        return array_combine(
+            ['switch', 'field', 'missing', 'ambiguous', 'duplicate_exact', 'kill'],
+            array_map(fn ($case) => [$case], ['switch', 'field', 'missing', 'ambiguous', 'duplicate_exact', 'kill']),
+        );
+    }
+
+    #[DataProvider('immediateRefusals')]
+    public function test_immediate_guard_refuses_without_writing(string $case): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+        $expected = match ($case) {
+            'switch' => 'Control D integration is disabled',
+            'field' => 'is not configured',
+            'missing' => 'was not found',
+            'ambiguous', 'duplicate_exact' => 'ambiguous',
+            'kill' => 'kill-switch',
+        };
+        if ($case === 'switch') {
+            Setting::setValue('controld_enabled', '0');
+        } elseif ($case === 'field') {
+            Setting::setValue(ControlDConfig::TACTICAL_CLIENT_ORG_FIELD_SETTING, '');
+        } elseif ($case === 'kill') {
+            Setting::setValue('technician_kill_switch', '1');
+        }
+        $reads = 0;
+        $writes = 0;
+        $client = $this->mockTactical();
+        $client->shouldReceive('getClients')->andReturnUsing(function () use ($case, &$reads): array {
+            $reads++;
+
+            return $this->upstreamClients(match ($case) {
+                'missing' => ['Globex'],
+                'ambiguous' => ['ACME', 'acme'],
+                'duplicate_exact' => ['Acme', 'Acme'],
+                default => ['Acme'],
+            });
+        });
+        $client->shouldReceive('setClientCustomField')->andReturnUsing(function () use (&$writes): void {
+            $writes++;
+        });
+        $response = $this->callTool($this->token(['tactical_set_client_custom_field:immediate']), 'tactical_set_client_custom_field', $this->stageArgs($fixture, ['staged' => false]));
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString($expected, (string) $response->json('result.content.0.text'));
+        $this->assertSame(0, $writes);
+        if (in_array($case, ['switch', 'field', 'kill'], true)) {
+            $this->assertSame(0, $reads);
+        }
+        $this->assertSame(0, TechnicianRun::count());
+    }
+
+    public function test_immediate_cooldown_and_24_hour_duplicate_suppression(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+        $client = $this->mockTactical();
+        $client->shouldReceive('getClients')->andReturn($this->upstreamClients());
+        $client->shouldReceive('setClientCustomField')->once()->with(7, self::FIELD_ID, 'org-abc123');
+        $client->shouldReceive('setClientCustomField')->once()->with(7, self::FIELD_ID, 'org-replacement');
+        $token = $this->token(['tactical_set_client_custom_field:immediate']);
+        $args = $this->stageArgs($fixture, ['staged' => false]);
+        $first = $this->callTool($token, 'tactical_set_client_custom_field', $args);
+        $this->assertTrue($this->decodedResult($first)['success']);
+        $second = $this->callTool($token, 'tactical_set_client_custom_field', $args);
+        $this->assertStringContainsString('cooldown active', (string) $second->json('result.content.0.text'));
+        $this->travel(6)->minutes();
+        $args['value'] = 'org-replacement';
+        $duplicate = $this->callTool($token, 'tactical_set_client_custom_field', $args);
+        $this->assertTrue($this->decodedResult($duplicate)['idempotent'] ?? false, 'Repeat inside 24 hours must be suppressed');
+        $this->travel(24)->hours();
+        $later = $this->callTool($token, 'tactical_set_client_custom_field', $args);
+        $this->assertTrue($this->decodedResult($later)['success']);
+        $this->assertArrayNotHasKey('idempotent', $this->decodedResult($later));
     }
 
     // ---- fail-closed refusals -------------------------------------------------

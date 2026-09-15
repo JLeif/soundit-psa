@@ -193,13 +193,9 @@ class StaffTacticalAdminToolExecutor
         // Upstream this call UNINSTALLS the RMM agent from the machine; re-enrolment
         // mints a new agent id and nothing about it is undoable from the API side.
         'tactical_stage_remove_agent' => 'tactical_remove_agent',
-        // tactical_set_client_custom_field is STAGED-ONLY BY CONSTRUCTION, the same
-        // shape as tactical_remove_agent above: the canonical name has no immediate
-        // implementation, execute() answers it with a refusal naming the staged
-        // grant, and McpToolModes::IMMEDIATE_REQUIRES_EXPLICIT_GRANT carries the
-        // second lock. The reason is fan-out, not deletion — a CLIENT custom field
-        // is read by Tactical automation across every agent under that client, so
-        // one write is a fleet-wide change rather than a per-endpoint one.
+        // Immediate execution requires an explicit grant in McpToolModes; staged
+        // callers retain cockpit approval and its pinned upstream target. Both
+        // lanes share the guarded write because this field fans out client-wide.
         'tactical_stage_set_client_custom_field' => 'tactical_set_client_custom_field',
     ];
 
@@ -382,7 +378,7 @@ class StaffTacticalAdminToolExecutor
             'tactical_delete_patch_policy' => $this->deletePatchPolicy($arguments, (int) $clientId, $actorLabel),
             'tactical_reset_patch_policies' => $this->resetPatchPolicies($arguments, (int) $clientId, $actorLabel),
             'tactical_remove_agent' => $this->immediateAgentRemovalRefused($arguments, $clientId, $actorLabel),
-            'tactical_set_client_custom_field' => $this->immediateClientCustomFieldRefused($arguments, $clientId, $actorLabel),
+            'tactical_set_client_custom_field' => $this->immediateClientCustomField($arguments, $clientId, $actorLabel),
             default => ['error' => "Unknown Tactical admin tool: {$name}"],
         };
         TicketToolActivityContext::current()?->finish($result);
@@ -3150,26 +3146,33 @@ class StaffTacticalAdminToolExecutor
         return null;
     }
 
-    /**
-     * The immediate lane for tactical_set_client_custom_field, which deliberately
-     * does not exist. Reaching it means a token holds the bare (`:immediate`)
-     * grant and called without staged=true; the answer is a refusal that names the
-     * grant that works, never an upstream call.
-     *
-     * @return array<string, mixed>
-     */
-    private function immediateClientCustomFieldRefused(array $arguments, ?int $clientId, string $actorLabel): array
+    /** @return array<string, mixed> */
+    private function immediateClientCustomField(array $arguments, ?int $clientId, string $actorLabel): array
     {
-        $message = 'tactical_set_client_custom_field is staged-only: it always requires cockpit approval. '
-            .'Re-grant it as `tactical_set_client_custom_field:staged` (or call `tactical_stage_set_client_custom_field`) and pass a ticket_id. No upstream call was made.';
-        $this->auditAttempt('tactical_set_client_custom_field', 'rejected', $clientId, $this->contentHash('tactical_set_client_custom_field', $clientId, 'immediate-refused', $arguments), $message, $actorLabel);
+        $tool = 'tactical_set_client_custom_field';
+        $guard = $this->baseGuard($tool, $arguments, $clientId, $actorLabel);
+        if (isset($guard['error'])) {
+            return ['error' => $guard['error']];
+        }
 
-        return ['error' => $message];
+        $client = Client::find($clientId);
+        if (! $client) {
+            $this->auditAttempt($tool, 'rejected', $clientId, $this->contentHash($tool, $clientId, 'client-field', $arguments), 'Client not found.', $actorLabel);
+
+            return ['error' => 'Client not found'];
+        }
+
+        if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
+            $this->auditAttempt($tool, 'blocked', $clientId, $this->contentHash($tool, $clientId, 'client-field', $arguments), 'Tactical client custom-field cooldown active.', $actorLabel);
+
+            return ['error' => 'tactical_set_client_custom_field cooldown active for this client; no upstream call was made.'];
+        }
+
+        return $this->executeClientCustomField($arguments, $client, $actorLabel);
     }
 
     /**
-     * Stage a Tactical CLIENT custom-field write for cockpit approval. There is no
-     * immediate lane: see the STAGED_TO_DIRECT note.
+     * Stage a Tactical CLIENT custom-field write for cockpit approval.
      *
      * @return array<string, mixed>
      */
@@ -3357,8 +3360,8 @@ class StaffTacticalAdminToolExecutor
     }
 
     /**
-     * Execute an approved Tactical CLIENT custom-field write. Only reachable
-     * through approveStagedRun().
+     * Shared write for explicit-grant immediate calls and approved proposals.
+     * Only proposals require the upstream target pin read by their approver.
      *
      * @return array<string, mixed>
      */
@@ -3394,7 +3397,7 @@ class StaffTacticalAdminToolExecutor
         // proposal carrying no pinned id is refused too: it cannot show that the
         // target the approver read and the one resolved now are the same client.
         $stagedClientId = $this->positiveInteger($arguments['staged_upstream_client_id'] ?? null);
-        if ($stagedClientId !== $target['upstream_client_id']) {
+        if ($run !== null && $stagedClientId !== $target['upstream_client_id']) {
             $message = $stagedClientId === null
                 ? 'This proposal recorded no upstream Tactical client id, so the approved target cannot be confirmed; no upstream call was made. Deny it in the cockpit, then stage the write again: a proposal awaiting approval is never rewritten in place, so the replacement is read and approved on its own proposal.'
                 : "The approved proposal targeted Tactical client #{$stagedClientId}, but '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is what this PSA client's mapping resolves to now; the approved target changed and no upstream call was made. Deny this proposal in the cockpit, then stage the write again so '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is read and approved on its own proposal.";
@@ -6258,7 +6261,7 @@ class StaffTacticalAdminToolExecutor
         return self::tool(
             'tactical_set_client_custom_field',
             'Set one allowlisted PSA-owned Tactical CLIENT-scoped custom field for the server-derived PSA client, using PUT clients/{id}/. '
-            .'STAGED ONLY: every call is held as a cockpit approval proposal. There is no immediate implementation — a bare (immediate) grant is refused with a pointer to `tactical_set_client_custom_field:staged`. '
+            .'An explicit :immediate grant permits immediate execution with staged=false; staged grants and staged=true retain cockpit approval. '
             .'A CLIENT custom field is read by Tactical automation for every agent under that client, so one write is a fleet-wide change rather than a per-endpoint one. '
             .'The upstream client is resolved by NAME from the stored PSA mapping at call time and must match EXACTLY ONE Tactical client: upstream names are unique only case-sensitively, and an ambiguous or missing name is refused rather than guessed. '
             .'Arbitrary field IDs and upstream client IDs are rejected; the field id comes from the PSA setting for that key and an unconfigured id is a refusal. '
@@ -6274,7 +6277,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_stage_set_client_custom_field',
-            'Stage the Tactical CLIENT custom-field write for cockpit approval. This is the only lane the verb has: approval re-resolves the field id and the upstream client against LIVE state before PUT clients/{id}/, because the configured field id can change and a second Tactical client with a case-differing name can appear between staging and approval. '
+            'Stage the Tactical CLIENT custom-field write for cockpit approval. Approval re-resolves the field id and the upstream client against LIVE state before PUT clients/{id}/, because the configured field id can change and a second Tactical client with a case-differing name can appear between staging and approval. '
             .'The write is fleet-wide for the client and, for deployment fields, is itself the deploy trigger. Requires a ticket, reason, an allowlisted field_key with a configured field id, an unambiguous upstream client name match, explicit grant, kill-switch, dedup, and cooldown.',
             self::clientCustomFieldProperties(),
             ['reason', 'ticket_id', 'field_key', 'value'],
