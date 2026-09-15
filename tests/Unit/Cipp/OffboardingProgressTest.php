@@ -63,10 +63,11 @@ class OffboardingProgressTest extends TestCase
         $row = self::progress();
         $row['Steps'][1]['Message'] = 'Error hidden behind overall success';
         $this->assertSame('reported_failed', OffboardingProgress::parse([$row], self::snapshot(), self::task()['RowKey'])['execution']);
-        foreach (['missing', 'duplicate', 'notify', 'unknown_status', 'wrong_name', 'wrong_tenant', 'wrong_task', 'wrong_source', 'multiple', 'message_type'] as $case) {
+        foreach (['missing', 'extra', 'duplicate', 'notify', 'unknown_status', 'wrong_name', 'wrong_tenant', 'wrong_task', 'wrong_source', 'multiple', 'message_type'] as $case) {
             $row = self::progress();
             match ($case) {
                 'missing' => array_pop($row['Steps']),
+                'extra' => $row['Steps'][] = ['Title' => 'Notify via PSA', 'Status' => 'succeeded', 'Message' => 'Unexpected work'],
                 'duplicate' => $row['Steps'][1] = $row['Steps'][0],
                 'notify' => $row['Steps'][1]['Kind'] = 'notify',
                 'unknown_status' => $row['Steps'][1]['Status'] = 'done',
