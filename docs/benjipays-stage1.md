@@ -25,9 +25,10 @@ redirects. Stored control characters are refused before transport.
 `BenjiPaysInvoiceBalance::read(Invoice)` returns an `InvoiceBalance` projection:
 nullable integer `balanceCents`, bounded `status`, nullable ISO-shaped `currency`,
 and a safe `reason` on unavailable/invalid data. Missing IDs cause no call.
-Unknown/missing/null/invalid balances never become zero. JSON numeric values
-are converted through their decimal representation, with at most two fractional
-digits and twelve whole digits; excess precision/unsupported magnitude is
+Unknown/missing/null/invalid balances never become zero. JSON numeric values are
+converted through a fixed two-fractional-digit decimal rendering that does not
+depend on the runtime `precision` ini setting, bounded to twelve whole digits;
+a value carrying more precision than cents, or an unsupported magnitude, is
 refused rather than silently rounded. The DTO is not a payment authorization.
 
 ## Public schema sources

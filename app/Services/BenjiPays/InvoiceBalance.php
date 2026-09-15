@@ -27,16 +27,21 @@ final readonly class InvoiceBalance
         if ($balance === null) {
             return new self(null, $status, $currency, 'balance_unavailable');
         }
-        // JSON numbers only. Convert the shortest decimal representation to minor units,
-        // not a binary-float comparison/multiplication. Refuse excess precision/overflow.
+        // JSON numbers only. Convert to minor units through a fixed two-digit decimal
+        // rendering, never a (string) cast: that cast formats with the `precision` ini
+        // directive, so the same valid balance would convert here and be refused on a
+        // host configured differently. sprintf('%.2F') is locale- and ini-independent;
+        // a value that does not survive the round-trip carries more precision than cents
+        // and is refused rather than silently rounded. Magnitude is bounded as before.
         if ((! is_int($balance) && ! is_float($balance)) || ! is_finite((float) $balance)) {
             return new self(null, $status, $currency, 'invalid_balance');
         }
-        $decimal = (string) $balance;
-        if (! preg_match('/^(-?)(\d{1,12})(?:\.(\d{1,2}))?$/D', $decimal, $parts)) {
+        $decimal = sprintf('%.2F', $balance);
+        if ((float) $decimal !== (float) $balance
+            || ! preg_match('/^(-?)(\d{1,12})\.(\d{2})$/D', $decimal, $parts)) {
             return new self(null, $status, $currency, 'invalid_balance');
         }
-        $cents = ((int) $parts[2] * 100 + (int) str_pad($parts[3] ?? '', 2, '0')) * ($parts[1] === '-' ? -1 : 1);
+        $cents = ((int) $parts[2] * 100 + (int) $parts[3]) * ($parts[1] === '-' ? -1 : 1);
 
         return new self($cents, $status, $currency);
     }

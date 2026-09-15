@@ -150,6 +150,23 @@ class BenjiPaysClientTest extends TestCase
             [1.001, null, 'invalid_balance'], [1e20, null, 'invalid_balance']];
     }
 
+    public function test_balance_conversion_does_not_depend_on_the_precision_ini_setting(): void
+    {
+        $original = (string) ini_get('precision');
+        try {
+            ini_set('precision', '17');
+            $result = InvoiceBalance::fromInvoice(array_replace(self::invoiceFixture(), ['balance' => 20.01]));
+            $this->assertSame(2001, $result->balanceCents);
+            $this->assertNull($result->reason);
+            $this->assertSame(29, InvoiceBalance::fromInvoice(
+                array_replace(self::invoiceFixture(), ['balance' => 0.29]))->balanceCents);
+            $this->assertSame('invalid_balance', InvoiceBalance::fromInvoice(
+                array_replace(self::invoiceFixture(), ['balance' => 1.001]))->reason);
+        } finally {
+            ini_set('precision', $original);
+        }
+    }
+
     public function test_missing_balance_and_invalid_status_are_not_accepted(): void
     {
         $data = self::invoiceFixture();
