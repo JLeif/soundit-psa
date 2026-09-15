@@ -37,7 +37,9 @@ class HuntressService
      */
     public function createTicketFromCw(array $data): array
     {
-        $cwReceivedAt = now()->toDateTimeString();
+        // The link window compares this anchor against UTC-normalized event times,
+        // so it must be stamped in UTC regardless of the app display timezone.
+        $cwReceivedAt = now('UTC')->toDateTimeString();
 
         // Serialize the dedup read, ticket creation, alert upsert and immutable capture
         // with promotion/polling. An upsert must never reassign an alert between the

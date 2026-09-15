@@ -111,8 +111,10 @@ abstract class HuntressLinkedReconcileService
             return;
         }
         $status = strtolower((string) ($record['status'] ?? ''));
+        // A reopened incident can retain closed_at, so only the current status is
+        // authority here — a stale timestamp must never auto-close an open incident.
         $resolved = $this->recordType() === 'incident_report'
-            ? in_array($status, ['closed', 'dismissed'], true) || ! empty($record['closed_at'])
+            ? in_array($status, ['closed', 'dismissed'], true)
             : $status === 'resolved' || ! empty($record['resolved_at']);
         if (! $resolved) {
             $result->recordSkipped("#{$ticket->id}: still_open");
