@@ -289,6 +289,77 @@ class HuntressLinkPersistenceTest extends TestCase
         $this->assertNull($pair[0]->fresh()->huntress_record_id);
     }
 
+    public function test_capture_does_not_rescan_all_unlinked_competitors(): void
+    {
+        $first = $this->pair();
+        $this->capture($first);
+        $second = $this->pair();
+        $this->capture($second);
+        $third = $this->pair();
+        DB::enableQueryLog();
+        $this->capture($third);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+        // No signed event exists, hence every competitor is already dark. Only
+        // the new candidate needs loading; repeated COUNT scans are bounded too.
+        $alertReads = array_filter($queries, fn ($q) => str_contains($q['query'], 'select * from "alerts"'));
+        $this->assertCount(1, $alertReads);
+        $this->assertNull($third[0]->fresh()->huntress_event_id);
+        $this->assertSame('ambiguous_binding', $third[0]->fresh()->huntress_link_refusal);
+    }
+
+    public static function authorityCases(): array
+    {
+        $cases = [];
+        foreach (['incident_report', 'escalation'] as $type) {
+            foreach (['account', 'null_account', 'empty_org', 'foreign_org', 'null_mapping', 'dark', 'late_duplicate'] as $case) {
+                $cases[$type.'_'.$case] = [$type, $case];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('authorityCases')]
+    public function test_both_types_refuse_unproven_authority(string $type, string $case): void
+    {
+        $overrides = match ($case) {
+            'account' => ['account_id' => 12],
+            'null_account' => ['account_id' => null],
+            'empty_org' => ['organization_ids' => '[]'],
+            'foreign_org' => ['organization_ids' => '[43]'],
+            default => [],
+        };
+        $this->event($type, $overrides);
+        $pair = $this->pair();
+        $pair[1]->update(['status' => \App\Enums\TicketStatus::New]);
+        if ($case === 'null_mapping') {
+            $pair[1]->client->update(['huntress_organization_id' => null]);
+            $pair[1]->unsetRelation('client');
+        }
+        if ($case === 'dark') {
+            Setting::setValue('huntress_webhooks_enabled', '0');
+        }
+        $path = $type === 'escalation' ? 'escalations/9182' : 'incident_reports/9182';
+        $this->capture($pair, $path);
+        if ($case === 'late_duplicate') {
+            $this->assertNotNull($pair[0]->fresh()->huntress_event_id);
+            $other = $this->pair();
+            $this->capture($other, $path);
+            $this->assertNull($other[0]->fresh()->huntress_event_id);
+        }
+        $this->assertNull($pair[0]->fresh()->huntress_event_id, $case);
+        $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+        $client->shouldReceive('getIncidentReport', 'getIncidentReports', 'getEscalation', 'getEscalations')->never();
+        $class = $type === 'escalation'
+            ? \App\Services\Huntress\HuntressEscalationReconcileService::class
+            : \App\Services\Huntress\HuntressIncidentReconcileService::class;
+        $result = (new $class($client, app(\App\Services\TicketService::class), app(\App\Services\AlertService::class)))->reconcile();
+        $this->assertSame(0, $result->checked);
+        $this->assertSame(0, $result->updated);
+        $this->assertSame(\App\Enums\TicketStatus::New, $pair[1]->fresh()->status);
+    }
+
     public function test_conflicting_candidates_are_never_promoted(): void
     {
         $this->event();

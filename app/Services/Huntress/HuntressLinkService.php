@@ -37,10 +37,16 @@ class HuntressLinkService
             $scope = DB::table('huntress_link_candidates')->where(function ($query) use ($stored, $alert) {
                 $query->where('alert_id', $alert->id);
                 if ($stored->record_id !== null) {
-                    $query->orWhere(fn ($q) => $q->where('record_type', $stored->record_type)->where('record_id', $stored->record_id));
+                    // Only an already-linked competitor needs synchronous revocation.
+                    // Other candidates are already dark and repair visits them in chunks.
+                    // The validated record/org unique key bounds this to one competitor.
+                    $query->orWhere(fn ($q) => $q->where('record_type', $stored->record_type)
+                        ->where('record_id', $stored->record_id)->where('organization_id', $stored->organization_id)
+                        ->whereExists(fn ($a) => $a->selectRaw('1')->from('alerts')
+                            ->whereColumn('alerts.id', 'huntress_link_candidates.alert_id')->whereNotNull('huntress_event_id')));
                 }
             });
-            $this->clearOrphans($stored->record_type, $stored->record_id, $alert->id);
+            $this->clearOrphans($stored->record_type, $stored->record_id, $stored->organization_id, $alert->id);
             $this->promoteLocked($scope);
         }, 3);
     }
@@ -71,12 +77,13 @@ class HuntressLinkService
         });
     }
 
-    private function clearOrphans(?string $type, ?int $id, int $alertId): void
+    private function clearOrphans(?string $type, ?int $id, ?int $orgId, int $alertId): void
     {
-        $this->clearOrphanQuery(DB::table('alerts')->where(function ($query) use ($type, $id, $alertId) {
+        $this->clearOrphanQuery(DB::table('alerts')->where(function ($query) use ($type, $id, $orgId, $alertId) {
             $query->where('id', $alertId);
             if ($type !== null && $id !== null) {
-                $query->orWhere(fn ($q) => $q->where('huntress_record_type', $type)->where('huntress_record_id', $id));
+                $query->orWhere(fn ($q) => $q->where('huntress_record_type', $type)->where('huntress_record_id', $id)
+                    ->where('huntress_org_id', $orgId));
             }
         }));
     }
@@ -123,10 +130,10 @@ class HuntressLinkService
             $event = null;
             // All captured competitors count, not just the first one to link.
             // Revocation on late duplicates prevents arrival order choosing a winner.
-            if ($this->liveCandidates()->where('alert_id', $candidate->alert_id)->count() > 1
+            if ($this->liveCandidates()->where('alert_id', $candidate->alert_id)->limit(2)->pluck('id')->count() > 1
                 || ($candidate->record_id !== null && $this->liveCandidates()
                     ->where('record_type', $candidate->record_type)->where('record_id', $candidate->record_id)
-                    ->where('organization_id', $candidate->organization_id)->count() > 1)) {
+                    ->where('organization_id', $candidate->organization_id)->limit(2)->pluck('id')->count() > 1)) {
                 $reason = 'ambiguous_binding';
             }
             if (! $reason && ((int) $alert->ticket_id !== (int) $ticket->id
@@ -140,7 +147,7 @@ class HuntressLinkService
             if (! $reason) {
                 $reason = 'unvalidated_candidate';
                 $events = DB::table('huntress_webhook_events')->where('record_type', $candidate->record_type)
-                    ->where('record_id', $candidate->record_id)->orderBy('id')->get();
+                    ->where('record_id', $candidate->record_id)->orderBy('id')->lazyById(100);
                 foreach ($events as $row) {
                     $evidence = (array) $row;
                     $evidence['record_id'] = (int) $row->record_id;
