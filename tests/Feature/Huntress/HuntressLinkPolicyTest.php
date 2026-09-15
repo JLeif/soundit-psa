@@ -28,6 +28,11 @@ class HuntressLinkPolicyTest extends TestCase
             'organization_ids' => [42], 'agent_id' => null, 'correlation_at' => '2026-09-14 12:00:00'];
         $check = fn ($e, $account = 11, $alertOrg = 42, $ticketOrg = 42) => $policy->refusal($candidate, $e, $account, $alertOrg, $ticketOrg, '2026-09-14 12:00:00');
         $this->assertNull($check($event));
+        // A matching signed org and client mapping cannot launder a different
+        // organization embedded in the immutable candidate locator.
+        $this->assertSame('scope_or_identity_mismatch', $policy->refusal(
+            array_replace($candidate, ['organization_id' => 43]), $event, 11, 42, 42, '2026-09-14 12:00:00'));
+        $this->assertSame('scope_or_identity_mismatch', $check($event, 11, 42, null));
         $this->assertSame('unvalidated_candidate', $check(array_replace($event, ['record_id' => 9182])));
         foreach ([['account_id' => null], ['account_id' => 12], ['organization_ids' => []], ['organization_ids' => [43]]] as $change) {
             $this->assertSame('scope_or_identity_mismatch', $check(array_replace($event, $change)));
