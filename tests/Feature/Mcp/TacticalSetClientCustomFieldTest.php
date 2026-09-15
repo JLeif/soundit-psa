@@ -203,6 +203,22 @@ class TacticalSetClientCustomFieldTest extends TestCase
         );
     }
 
+    public function test_bare_grant_resolves_immediate_while_alias_and_staged_grants_stay_staged(): void
+    {
+        $tool = 'tactical_set_client_custom_field';
+        foreach ([
+            $tool => McpToolModes::MODE_IMMEDIATE,
+            $tool.':immediate' => McpToolModes::MODE_IMMEDIATE,
+            $tool.':staged' => McpToolModes::MODE_STAGED,
+            'tactical_stage_set_client_custom_field' => McpToolModes::MODE_STAGED,
+        ] as $grant => $mode) {
+            $this->assertSame([$tool, $mode], McpToolModes::parseGrantEntry($grant), $grant);
+            $token = McpConfig::resolveStaffToken($this->token([$grant]));
+            $this->assertNotNull($token, $grant);
+            $this->assertSame($mode, McpToolModes::effectiveMode($token, $tool), $grant);
+        }
+    }
+
     public function test_explicit_immediate_grant_writes_exact_target_and_audits_actor_without_a_proposal(): void
     {
         $this->configureTactical();
