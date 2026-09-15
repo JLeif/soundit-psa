@@ -303,4 +303,21 @@ class PhoneCallResolutionTest extends TestCase
         $this->assertDatabaseCount('technician_action_logs', 0);
         $this->assertNull($call->fresh()->client_id);
     }
+
+    public function test_a_proposal_staged_under_the_old_snapshot_shape_still_approves(): void
+    {
+        [$call, $contact, $ticket, $args] = $this->fixture();
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $token = McpConfig::rotateStaffToken(allowedTools: ['resolve_phone_call:staged']);
+        $r = $this->decoded($this->callTool($token, $args));
+        $proposal = PhoneCallResolutionProposal::findOrFail($r['proposal_id']);
+        $payload = $proposal->payload;
+        // Pre-deploy shape: the stored snapshot also carried updated_at.
+        $payload['snapshot']['updated_at'] = (string) $call->fresh()->updated_at;
+        $proposal->update(['payload' => $payload, 'content_hash' => hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR))]);
+        $this->actingAs($admin)->postJson(route('phone-call-resolutions.approve', $proposal->id))
+            ->assertOk()->assertJsonPath('person_id', $contact->id);
+        $this->assertSame($ticket->id, $call->fresh()->ticket_id);
+        $this->assertDatabaseHas('phone_call_resolution_proposals', ['id' => $proposal->id, 'state' => 'done']);
+    }
 }

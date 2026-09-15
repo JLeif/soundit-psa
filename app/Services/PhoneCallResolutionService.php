@@ -81,7 +81,7 @@ class PhoneCallResolutionService
                     throw new \DomainException('Proposal binding changed; re-stage.');
                 }
                 $call = $this->validatedCall($payload);
-                if (($payload['snapshot'] ?? null) !== $this->snapshot($call)) {
+                if (! $this->snapshotMatches($payload['snapshot'] ?? null, $call)) {
                     throw new \DomainException('Call identity or ticket association changed; re-stage.');
                 }
             } catch (\DomainException $e) {
@@ -154,6 +154,29 @@ class PhoneCallResolutionService
     {
         return ['client_id' => $call->client_id, 'person_id' => $call->person_id,
             'person_confirmed' => (bool) $call->person_confirmed, 'ticket_id' => $call->ticket_id];
+    }
+
+    /**
+     * Compare EXACTLY the four identity columns above, key by key. A proposal staged
+     * before the snapshot narrowed still carries the old `updated_at` key in its
+     * encrypted payload; a whole-array strict comparison could never match the new
+     * four-key shape, so every proposal pending across the deploy would be consumed
+     * as stale with the same false "identity or ticket changed" message this snapshot
+     * was narrowed to eliminate. Extra legacy keys are ignored; a missing or differing
+     * identity key still fails closed.
+     */
+    private function snapshotMatches(mixed $stored, PhoneCall $call): bool
+    {
+        if (! is_array($stored)) {
+            return false;
+        }
+        foreach ($this->snapshot($call) as $key => $value) {
+            if (! array_key_exists($key, $stored) || $stored[$key] !== $value) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function apply(PhoneCall $call, array $payload, string $actor, ?int $approver = null): array
