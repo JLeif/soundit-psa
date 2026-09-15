@@ -260,6 +260,7 @@ class McpStaffController extends Controller
      */
     private const PSA_READ_TOOLS = [
         'get_ticket_tool_history',
+        'get_ticket_timeline',
         'list_client_contracts',
         'get_contract',
         'list_email_items',
@@ -1066,8 +1067,9 @@ class McpStaffController extends Controller
         $activity = new \App\Services\Mcp\TicketToolActivityContext;
         $request->attributes->set(\App\Services\Mcp\TicketToolActivityContext::class, $activity);
         try {
-            if ($name === 'get_ticket_tool_history') {
-                $result = app(\App\Services\Mcp\TicketToolHistoryTool::class)->execute($arguments, $clientId);
+            if (in_array($name, ['get_ticket_tool_history', 'get_ticket_timeline'], true)) {
+                $tool = $name === 'get_ticket_timeline' ? \App\Services\Mcp\TicketTimelineTool::class : \App\Services\Mcp\TicketToolHistoryTool::class;
+                $result = app($tool)->execute($arguments, $clientId);
             } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {

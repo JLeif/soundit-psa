@@ -138,26 +138,17 @@ class TicketController extends Controller
                 ->get(['id', 'name', 'asset_type']);
         }
 
-        // Build merged timeline: notes + phone calls + AI conversations, sorted newest-first
-        $conversations = \App\Models\AssistantConversation::where('context_type', 'ticket')
-            ->where('context_id', $ticket->id)
-            ->with(['user:id,name', 'messages'])
-            ->get();
-
-        $timeline = $ticket->notes
-            ->concat($ticket->phoneCalls)
-            ->concat($conversations)
-            ->sortByDesc(function ($item) {
-                if ($item instanceof \App\Models\PhoneCall) {
-                    return $item->started_at;
-                }
-                if ($item instanceof \App\Models\AssistantConversation) {
-                    return $item->created_at;
-                }
-
-                return $item->noted_at;
-            })
-            ->values();
+        $timelineInput = request()->validate([
+            'before' => 'sometimes|string|max:4096', 'after' => 'sometimes|string|max:4096',
+            'types' => 'sometimes|array|min:1|max:5', 'types.*' => 'string|in:note,call,email,ai_chat,tool',
+        ]);
+        try {
+            $timelinePage = app(\App\Services\Mcp\TicketTimeline::class)->page($ticket, $timelineInput, models: true);
+        } catch (\InvalidArgumentException $e) {
+            abort(422, $e->getMessage());
+        }
+        $timeline = collect($timelinePage['items'])->map(fn ($entry) => in_array($entry['kind'], ['tool', 'email'], true) || $entry['model'] === null
+                ? (object) $entry : $entry['model']);
 
         // Contacts for the ticket's client (for contact reassignment dropdown)
         $clientContacts = $ticket->client
@@ -171,7 +162,7 @@ class TicketController extends Controller
         return view('tickets.show', [
             'ticket' => $ticket,
             'timeline' => $timeline,
-            'toolActivity' => app(\App\Services\Mcp\TicketToolActivity::class)->page($ticket, 20, (int) request()->query('tool_offset', 0)),
+            'timelinePage' => $timelinePage,
             'users' => User::active()->orderBy('name')->get(['id', 'name']),
             'statuses' => TicketStatus::cases(),
             'priorities' => TicketPriority::cases(),

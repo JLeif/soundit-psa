@@ -1223,6 +1223,7 @@ class McpToolRegistry
     {
         return [
             \App\Services\Mcp\TicketToolHistoryTool::definition(),
+            \App\Services\Mcp\TicketTimelineTool::definition(),
             self::listClientContractsTool(),
             self::getContractTool(),
             self::listEmailItemsTool(),
@@ -1343,7 +1344,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'list_email_items',
-            'description' => 'List inbound/outbound email items (metadata + short body_preview only; never full bodies). Staff-class, cross-client. Filter by direction, unlinked (no ticket), client_id, since.',
+            'description' => 'List inbound/outbound email items (metadata + short body_preview only; never full bodies). Staff-class, cross-client. Filter by direction, unlinked (no ticket), client_id, since. Returns has_more/truncated and opaque before/after/next_cursor values. before reads older entries; after reads the nearest newer page, always newest-first. Keep scope/filters unchanged when using cursors; inserts do not shift pages.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -1351,6 +1352,8 @@ class McpToolRegistry
                     'unlinked' => ['type' => 'boolean', 'description' => 'Only items not yet linked to a ticket.'],
                     'client_id' => ['type' => 'integer', 'description' => 'Optional: scope to one client. Omit for cross-client triage of unresolved items.'],
                     'since' => ['type' => 'string', 'description' => 'ISO-8601; only items received at/after this time.'],
+                    'before' => ['type' => 'string', 'description' => 'Opaque older-page cursor from this read.'],
+                    'after' => ['type' => 'string', 'description' => 'Opaque newer-page cursor; cannot combine with before.'],
                     'limit' => ['type' => 'integer', 'description' => 'Max rows (default 25, cap 50).'],
                 ],
                 'required' => [],

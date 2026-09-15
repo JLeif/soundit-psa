@@ -886,15 +886,17 @@ class AssistantToolExecutor
         // Latest notes, not oldest: fetch the newest 20 then present them
         // chronologically. The old ASC+limit dropped the tail on busy tickets,
         // so "what did the client say last" could be absent entirely (psa-m7re).
-        $notes = TicketNote::where('ticket_id', $ticket->id)
-            ->with('attachments')
-            ->orderByDesc('noted_at')
-            ->limit(20)
-            ->get()
-            ->sortBy('noted_at')
-            ->values();
+        $query = TicketNote::where('ticket_id', $ticket->id);
+        try {
+            $page = \App\Support\HistoryPage::read($query, 'noted_at', 'note',
+                'notes:'.$ticket->id.':'.$this->clientId, $input, 20);
+        } catch (\InvalidArgumentException $e) {
+            return ['error' => $e->getMessage()];
+        }
+        $byId = $query->with('attachments', 'author')->whereIn('id', $page['ids'])->get()->keyBy('id');
+        $notes = collect($page['ids'])->map(fn ($id) => $byId->get($id))->filter()->reverse()->values();
 
-        return $notes->map(fn (TicketNote $n) => [
+        $items = $notes->map(fn (TicketNote $n) => [
             'type' => $n->note_type?->value,
             'author' => $n->author?->name ?? $n->author_name ?? 'System',
             // Generous cap: a full final client message must not be clipped
@@ -904,6 +906,18 @@ class AssistantToolExecutor
             'is_private' => $n->is_private,
             'attachments' => $this->attachmentRefs($n->attachments),
         ])->toArray();
+
+        // The shared cursor metadata describes the newest-first page SELECTION, but
+        // the notes array above is reversed to oldest-first for reading. Restate the
+        // two order fields so the envelope cannot misdescribe its own payload.
+        $metadata = $page['metadata'];
+        $metadata['order'] = 'pages selected newest first; notes within this page are oldest first (at ASC)';
+        $metadata['pagination'] = 'before means older; after means newer (nearest page first). Pages are selected newest first, but the notes array within a page is ordered oldest first. Timestamps UTC. Cursors bind scope and filters; inserts do not shift pages. Edits to event timestamps can reposition entries.';
+
+        // Preserve the legacy list shape unless the caller explicitly requests paging.
+        return ! empty($input['paginate']) || isset($input['before']) || isset($input['after'])
+            ? ['notes' => $items, 'count' => count($items)] + $metadata + ['notes_order' => 'oldest first within this page']
+            : $items;
     }
 
     /**
@@ -1865,9 +1879,18 @@ class AssistantToolExecutor
             }
         }
 
-        $items = $query->limit($limit)->get();
+        $scope = 'emails:'.($this->clientId ?? 'staff').':'.hash('sha256', json_encode([
+            $input['direction'] ?? null, ! empty($input['unlinked']), $input['since'] ?? null,
+        ]));
+        try {
+            $page = \App\Support\HistoryPage::read($query, 'received_at', 'email', $scope, $input, $limit);
+        } catch (\InvalidArgumentException $e) {
+            return ['error' => $e->getMessage()];
+        }
+        $byId = $query->reorder()->whereIn('id', $page['ids'])->get()->keyBy('id');
+        $items = collect($page['ids'])->map(fn ($id) => $byId->get($id))->filter()->values();
 
-        return [
+        return $page['metadata'] + [
             'count' => $items->count(),
             'email_items' => $items->map(fn (Email $e) => [
                 'id' => $e->id,
