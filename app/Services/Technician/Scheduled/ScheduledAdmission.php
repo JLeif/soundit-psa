@@ -49,7 +49,15 @@ final class ScheduledAdmission
             if ($existing) {
                 $row = DB::table('scheduled_authorizations')->find($existing->authorization_id);
                 $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
+                // A repeat admission is idempotent only if EVERY sealed field matches this
+                // confirmation; a changed content revision/action/binding must refuse here,
+                // not be returned as a success sealed against the old proposal.
                 if ($row->approver_user_id != $approverId || $row->local_start !== $start || $row->local_end !== $end || $row->display_timezone !== $zone
+                    || ! hash_equals((string) $row->content_hash, $expectedHash)
+                    || $row->action_type !== $locked->action_type || $row->direct_tool !== $direct
+                    || $row->client_id != $locked->client_id || $row->ticket_id != $locked->ticket_id
+                    || $row->originating_mcp_token_id != $tokenId
+                    || ($sealed['provenance'] ?? null) !== $meta
                     || ApprovalEnvelope::canonical($sealed['binding']) !== ApprovalEnvelope::canonical($binding)) {
                     throw new InvalidArgumentException('existing_authorization_conflict');
                 }
