@@ -1278,11 +1278,12 @@ class TacticalClient
      * expiry; we request 7 days so the URL stays valid for a reasonable
      * window for an end user to click through the portal download page.
      *
-     * Research (verified against TRMM v1.4.0 OpenAPI schema + source):
+     * Source: tacticalrmm 1e786d37 agents/views.py and agents/utils.py:
      *   - Endpoint: POST /agents/installer/ (amidaware/tacticalrmm agents/views.py :: install_agent)
      *   - Required body: installMethod, expires, client, site, goarch, plat, api, agenttype, rdp, ping, power
      *   - For installMethod in {"manual", "mac"}, the server returns JSON {"cmd": ..., "url": ...}
-     *     where "url" is the pre-signed installer binary download URL we can hand to the user.
+     *     where "url" is the signed agent URL when the signing token is valid,
+     *     or the public release URL otherwise (get_agent_url).
      *   - installMethod "exe" returns a generated .exe (FileResponse) rather than JSON.
      *   - installMethod "bash" returns a generated .sh script (FileResponse).
      *   - We pick "manual" for Windows and "mac" for mac/linux so we always get JSON back.
@@ -1295,12 +1296,12 @@ class TacticalClient
      *   - windows ("manual"): the Inno silent-install invocation for the downloaded
      *     file, then `ping 127.0.0.1 -n 7`, then the installed binary with
      *     `-m install --api ... --client-id ... --site-id ... --agent-type ... --auth <token>`.
-     *     It assumes the file is already present in the working directory under the
-     *     name TRMM built it with, so the download is still step one of two.
+     *     Upstream assumes the named file is already in the working directory.
+     *     We translate this strict grammar into a self-downloading PowerShell command.
      *   - mac/linux ("mac"): self-contained — `curl -L -o <file> '<url>' && chmod +x
      *     <file> && sudo ./<file> -m install ...` — so it carries its own download.
-     * We now return "cmd" as InstallerInfo::$installScript (shape 3 in that DTO) and
-     * describe the real two-step flow instead of promising self-registration.
+     * InstallerInfo::$installScript carries the composed PowerShell for Windows
+     * or the original self-contained command for mac/linux; check-in is not implied.
      *
      * "cmd" CARRIES A LIVE ENROLMENT TOKEN (`--auth`). Treat it exactly like the
      * signed URL: hand it to the caller once, never log it, never persist it.
