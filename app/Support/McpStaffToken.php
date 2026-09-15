@@ -18,7 +18,8 @@ final class McpStaffToken
         public readonly ?int $id = null,
         public readonly ?string $directive = null,
         public readonly bool $aiActor = false,
-        public readonly bool $requireExplicitClientScope = false,
+        // Deprecated, ignored argument retained for positional/named caller compatibility.
+        bool $requireExplicitClientScope = false,
         public readonly array $toolModes = [],
     ) {}
 

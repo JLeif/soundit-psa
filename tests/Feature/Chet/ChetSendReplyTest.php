@@ -97,7 +97,7 @@ class ChetSendReplyTest extends TestCase
         $tool = collect($this->tools($this->chetToken()))->firstWhere('name', 'send_reply');
 
         $this->assertNotNull($tool);
-        $this->assertSame(['ticket_id', 'reason', 'client_id'], $tool['inputSchema']['required']);
+        $this->assertSame(['ticket_id', 'reason'], $tool['inputSchema']['required']);
         $this->assertArrayHasKey('body', $tool['inputSchema']['properties']);
         $this->assertArrayNotHasKey('to', $tool['inputSchema']['properties']);
     }
@@ -170,7 +170,7 @@ class ChetSendReplyTest extends TestCase
         $this->assertSame('technician-drafter', $run->proposed_meta['drafted_by']);
     }
 
-    public function test_chet_send_reply_requires_client_scope_and_ticket_ownership(): void
+    public function test_chet_send_reply_derives_omitted_scope_but_checks_supplied_scope(): void
     {
         $token = $this->chetToken();
         $client = Client::factory()->create();
@@ -183,8 +183,8 @@ class ChetSendReplyTest extends TestCase
             'body' => 'This should not be held.',
         ]);
         $missing->assertOk();
-        $this->assertTrue((bool) $missing->json('result.isError'));
-        $this->assertStringContainsString('client_id is required', (string) $missing->json('result.content.0.text'));
+        $this->assertFalse((bool) $missing->json('result.isError'));
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $otherTicket->id)->where('state', TechnicianRunState::AwaitingApproval)->count());
 
         $malformed = $this->callTool($token, 'send_reply', [
             'client_id' => 'abc',
@@ -205,7 +205,7 @@ class ChetSendReplyTest extends TestCase
         $crossClient->assertOk();
         $this->assertTrue((bool) $crossClient->json('result.isError'));
         $this->assertStringContainsString('different client', (string) $crossClient->json('result.content.0.text'));
-        $this->assertSame(0, TechnicianRun::where('ticket_id', $otherTicket->id)->where('action_type', 'send_reply')->count());
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $otherTicket->id)->where('action_type', 'send_reply')->count());
 
         $errorAudits = McpAuditLog::where('method', 'tools/call')
             ->where('tool_name', 'send_reply')

@@ -72,7 +72,6 @@ class McpTokensController extends Controller
         $this->audit($request, 'token/mint', $label, [
             'tools' => [],
             'ai_actor' => false,
-            'require_explicit_client_scope' => true,
             'draft' => true,
         ]);
 
@@ -221,7 +220,6 @@ class McpTokensController extends Controller
     {
         $request->validate([
             'ai_actor' => ['sometimes', 'boolean'],
-            'require_explicit_client_scope' => ['sometimes', 'boolean'],
         ]);
 
         $flags = $this->trustFlagsFromRequest($request, $token);
@@ -371,20 +369,15 @@ class McpTokensController extends Controller
             ->get();
     }
 
-    /** @return array{ai_actor: bool, require_explicit_client_scope: bool} */
+    /** @return array{ai_actor: bool} Retired trust keys are ignored, never persisted. */
     private function trustFlagsFromRequest(Request $request, ?McpToken $existingToken = null): array
     {
         $aiActor = $request->has('ai_actor')
             ? $request->boolean('ai_actor')
             : (bool) ($existingToken?->ai_actor ?? false);
 
-        $requireExplicitClientScope = $request->has('require_explicit_client_scope')
-            ? $request->boolean('require_explicit_client_scope')
-            : ($existingToken !== null ? (bool) $existingToken->require_explicit_client_scope : true);
-
         return [
             'ai_actor' => $aiActor,
-            'require_explicit_client_scope' => $requireExplicitClientScope,
         ];
     }
 

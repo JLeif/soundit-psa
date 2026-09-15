@@ -60,7 +60,7 @@ class UnlinkedTicketTrustFlagTest extends TestCase
                 ->assertDontSee('allow_unlinked_tickets', false)
                 ->assertDontSee('Allow unlinked-ticket triage')
                 ->assertSee('data-flag="ai_actor"', false)
-                ->assertSee('data-flag="require_explicit_client_scope"', false);
+                ->assertDontSee('data-flag="require_explicit_client_scope"', false);
         }
     }
 }
