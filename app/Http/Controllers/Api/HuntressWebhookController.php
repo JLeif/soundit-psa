@@ -69,7 +69,7 @@ class HuntressWebhookController extends Controller
         // Event durability owns the response, not the promotion outcome. A replay
         // retries promotion; the polling fallback also repairs a failed promotion.
         try {
-            app(\App\Services\Huntress\HuntressLinkService::class)->promote();
+            app(\App\Services\Huntress\HuntressLinkService::class)->promote($event['record_type'], $event['record_id']);
         } catch (\Throwable) {
             Log::warning('Huntress link promotion failed', ['delivery_id' => $delivery]);
         }

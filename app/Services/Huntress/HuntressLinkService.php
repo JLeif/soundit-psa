@@ -33,17 +33,76 @@ class HuntressLinkService
                     'received_at' => $receivedAt,
                 ]);
             }
-            $this->promoteLocked();
+            $stored = DB::table('huntress_link_candidates')->where('ticket_id', $ticket->id)->first();
+            $scope = DB::table('huntress_link_candidates')->where(function ($query) use ($stored, $alert) {
+                $query->where('alert_id', $alert->id);
+                if ($stored->record_id !== null) {
+                    $query->orWhere(fn ($q) => $q->where('record_type', $stored->record_type)->where('record_id', $stored->record_id));
+                }
+            });
+            $this->clearOrphans($stored->record_type, $stored->record_id, $alert->id);
+            $this->promoteLocked($scope);
         }, 3);
     }
 
-    /** Called after durable event commit, including on a duplicate delivery. */
-    public function promote(): void
+    /** Arrival work is record-scoped; polling repair uses bounded transactions. */
+    public function promote(?string $recordType = null, ?int $recordId = null): void
     {
-        DB::transaction(function () {
-            $this->lock();
-            $this->promoteLocked();
-        }, 3);
+        $alerts = DB::table('alerts')->whereNotNull('huntress_event_id');
+        $candidates = DB::table('huntress_link_candidates');
+        if ($recordType !== null && $recordId !== null) {
+            $alerts->where('huntress_record_type', $recordType)->where('huntress_record_id', $recordId);
+            $candidates->where('record_type', $recordType)->where('record_id', $recordId);
+        }
+        // Snapshot high-water marks: concurrent arrivals do their own scoped work.
+        $alertMax = (clone $alerts)->max('id');
+        $candidateMax = (clone $candidates)->max('id');
+        $alerts->where('id', '<=', $alertMax ?? 0)->chunkById(100, function ($rows) {
+            DB::transaction(function () use ($rows) {
+                $this->lock();
+                $this->clearOrphanQuery(DB::table('alerts')->whereIn('id', $rows->pluck('id')));
+            }, 3);
+        });
+        $candidates->where('id', '<=', $candidateMax ?? 0)->chunkById(100, function ($rows) {
+            DB::transaction(function () use ($rows) {
+                $this->lock();
+                $this->promoteLocked(DB::table('huntress_link_candidates')->whereIn('id', $rows->pluck('id')));
+            }, 3);
+        });
+    }
+
+    private function clearOrphans(?string $type, ?int $id, int $alertId): void
+    {
+        $this->clearOrphanQuery(DB::table('alerts')->where(function ($query) use ($type, $id, $alertId) {
+            $query->where('id', $alertId);
+            if ($type !== null && $id !== null) {
+                $query->orWhere(fn ($q) => $q->where('huntress_record_type', $type)->where('huntress_record_id', $id));
+            }
+        }));
+    }
+
+    private function clearOrphanQuery(\Illuminate\Database\Query\Builder $query): void
+    {
+        $query->whereNotNull('huntress_event_id')->whereNotExists(function ($q) {
+            $q->selectRaw('1')->from('huntress_link_candidates as candidate')
+                ->join('tickets', 'tickets.id', '=', 'candidate.ticket_id')
+                ->whereNull('tickets.deleted_at')
+                ->whereColumn('candidate.alert_id', 'alerts.id')
+                ->whereColumn('candidate.ticket_id', 'alerts.ticket_id');
+        })->update([
+            'huntress_account_id' => null, 'huntress_org_id' => null,
+            'huntress_record_type' => null, 'huntress_record_id' => null,
+            'huntress_event_id' => null, 'huntress_linked_at' => null,
+            'huntress_link_refusal' => 'orphaned_link',
+        ]);
+    }
+
+    private function liveCandidates(): \Illuminate\Database\Query\Builder
+    {
+        return DB::table('huntress_link_candidates')->whereExists(function ($query) {
+            $query->selectRaw('1')->from('tickets')
+                ->whereColumn('tickets.id', 'huntress_link_candidates.ticket_id')->whereNull('tickets.deleted_at');
+        });
     }
 
     private function lock(): void
@@ -52,9 +111,9 @@ class HuntressLinkService
         DB::table('huntress_link_mutex')->where('id', 1)->increment('version');
     }
 
-    private function promoteLocked(): void
+    private function promoteLocked(\Illuminate\Database\Query\Builder $candidates): void
     {
-        foreach (DB::table('huntress_link_candidates')->orderBy('id')->lazyById(100) as $candidate) {
+        foreach ($candidates->orderBy('id')->lazyById(100) as $candidate) {
             $alert = Alert::find($candidate->alert_id);
             $ticket = Ticket::find($candidate->ticket_id);
             if (! $alert || ! $ticket) {
@@ -64,8 +123,8 @@ class HuntressLinkService
             $event = null;
             // All captured competitors count, not just the first one to link.
             // Revocation on late duplicates prevents arrival order choosing a winner.
-            if (DB::table('huntress_link_candidates')->where('alert_id', $candidate->alert_id)->count() > 1
-                || ($candidate->record_id !== null && DB::table('huntress_link_candidates')
+            if ($this->liveCandidates()->where('alert_id', $candidate->alert_id)->count() > 1
+                || ($candidate->record_id !== null && $this->liveCandidates()
                     ->where('record_type', $candidate->record_type)->where('record_id', $candidate->record_id)
                     ->where('organization_id', $candidate->organization_id)->count() > 1)) {
                 $reason = 'ambiguous_binding';
@@ -111,7 +170,10 @@ class HuntressLinkService
                 'huntress_linked_at' => $event ? ($alert->huntress_linked_at ?? now()) : null,
                 'huntress_link_refusal' => $reason,
             ];
-            DB::table('alerts')->where('id', $alert->id)->update($values);
+            $alert->forceFill($values);
+            if ($alert->isDirty(array_keys($values))) {
+                DB::table('alerts')->where('id', $alert->id)->update($values);
+            }
         }
     }
 }

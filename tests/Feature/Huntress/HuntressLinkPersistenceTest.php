@@ -230,6 +230,65 @@ class HuntressLinkPersistenceTest extends TestCase
         }
     }
 
+    public function test_deleted_ticket_or_candidate_does_not_wedge_replacement_link(): void
+    {
+        foreach (['ticket', 'candidate'] as $deleted) {
+            $type = $deleted === 'ticket' ? 'incident_report' : 'escalation';
+            $path = $deleted === 'ticket' ? 'incident_reports/9182' : 'escalations/9182';
+            $event = $this->event($type);
+            $old = $this->pair();
+            $this->capture($old, $path);
+            $this->assertEquals($event, $old[0]->fresh()->huntress_event_id);
+            if ($deleted === 'ticket') {
+                $old[1]->delete();
+            } else {
+                DB::table('huntress_link_candidates')->where('ticket_id', $old[1]->id)->delete();
+            }
+            $replacement = $this->pair();
+            $this->capture($replacement, $path);
+            $this->assertNull($old[0]->fresh()->huntress_event_id);
+            $this->assertSame('orphaned_link', $old[0]->fresh()->huntress_link_refusal);
+            $this->assertEquals($event, $replacement[0]->fresh()->huntress_event_id);
+            app(HuntressLinkService::class)->promote($type, 9182);
+            $this->assertEquals($event, $replacement[0]->fresh()->huntress_event_id);
+        }
+    }
+
+    public function test_arrival_is_record_scoped_and_replay_does_not_write_unchanged_alerts(): void
+    {
+        $this->event();
+        $linked = $this->pair();
+        $this->capture($linked);
+        $other = $this->pair();
+        $this->capture($other, 'incident_reports/9999');
+        // A scoped event must not even read unrelated candidate rows.
+        DB::enableQueryLog();
+        app(HuntressLinkService::class)->promote('incident_report', 9182);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+        $updates = array_filter($queries, fn ($q) => str_starts_with($q['query'], 'update "alerts"')
+            && ! str_contains($q['query'], 'not exists'));
+        $this->assertCount(0, $updates, 'Replay must skip unchanged alert writes');
+        $candidateReads = array_filter($queries, fn ($q) => str_contains($q['query'], 'select * from "huntress_link_candidates"'));
+        $this->assertNotEmpty($candidateReads);
+        foreach ($candidateReads as $query) {
+            $this->assertTrue(str_contains($query['query'], '"record_id" = ?') || str_contains($query['query'], '"id" in ('), $query['query']);
+        }
+        $this->assertSame('unvalidated_candidate', $other[0]->fresh()->huntress_link_refusal);
+        $this->assertNotNull($linked[0]->fresh()->huntress_event_id);
+    }
+
+    public function test_polling_repair_clears_an_orphan_without_a_replacement_candidate(): void
+    {
+        $this->event();
+        $pair = $this->pair();
+        $this->capture($pair);
+        DB::table('huntress_link_candidates')->where('ticket_id', $pair[1]->id)->delete();
+        app(HuntressLinkService::class)->promote();
+        $this->assertNull($pair[0]->fresh()->huntress_event_id);
+        $this->assertNull($pair[0]->fresh()->huntress_record_id);
+    }
+
     public function test_conflicting_candidates_are_never_promoted(): void
     {
         $this->event();
