@@ -23,10 +23,10 @@ class HuntressReconcileIncidents extends Command
             return self::FAILURE;
         }
 
-        $client = new HuntressClient([
+        $client = app()->makeWith(HuntressClient::class, ['config' => [
             'api_key' => HuntressConfig::get('api_key'),
             'api_secret' => HuntressConfig::get('api_secret'),
-        ]);
+        ]]);
 
         $service = new HuntressIncidentReconcileService($client, $ticketService, $alertService);
 
