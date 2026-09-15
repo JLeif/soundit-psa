@@ -5,7 +5,7 @@
         @php($intent = $proposal->payload)
         <article class="card mb-2">
             <div class="card-body">
-                <h3 class="h6">Resolve sender backlog to {{ $proposal->client?->name ?? 'Missing client' }}</h3>
+                <h3 class="h6">{{ \App\Support\StagedActionLabels::humanLabel('stage_resolve_email_item') }} to {{ $proposal->client?->name ?? 'Missing client' }}</h3>
                 <p>Sender: {{ $intent['sender'] }} · <strong>{{ $proposal->email_count }} unresolved email(s)</strong></p>
                 <p>Exact email IDs: {{ implode(', ', $intent['email_ids']) }}. Target client #{{ $proposal->client_id }}.</p>
                 <p>Reason: {{ $intent['reason'] }}</p>

@@ -47,6 +47,7 @@ class StagedActionLabels
         // label matches propose_close ("Proposed close"). The alias needs its own curated
         // entry so StagedActionLabelsTest's every-stageable-type guard passes.
         'stage_close_ticket' => 'Proposed close',
+        'stage_resolve_email_item' => 'Resolve email sender backlog',
         'direct_close' => 'Closed directly',
 
         // Tactical
