@@ -61,9 +61,9 @@
 @elseif($info->hasScript() && ($platform !== 'windows' || ($info->expectedFilename && $info->hasDownload())))
     @if($platform === 'windows')
         <ol>
-            <li><a href="{{ $info->downloadUrl }}" rel="noreferrer">Download the required manual installer</a>. Save or rename it to exactly <strong>{{ $info->expectedFilename }}</strong>. This file alone does not register the computer.</li>
-            <li>Open <strong>Command Prompt as Administrator (not PowerShell)</strong>. Change to the folder containing the file using <code>cd /d "FULL PATH TO YOUR DOWNLOAD FOLDER"</code>, replacing the quoted placeholder with the actual folder path. Confirm the exact filename with <code>dir {{ $info->expectedFilename }}</code>.</li>
-            <li>Only after the file is present, copy and run the command below in that Command Prompt.</li>
+            <li>Open <strong>PowerShell as Administrator</strong> (Windows PowerShell 5.1 or later). No separate download or change of folder is needed.</li>
+            <li>Copy and paste the command below once. It downloads the selected architecture's installer as exactly <strong>{{ $info->expectedFilename }}</strong> into a new temporary folder, checks the download, then installs and enrolls. It stops on failure and removes the temporary installer.</li>
+            <li>If setup stops or a security policy blocks it, contact your technician. Do not disable protection or keep rerunning the command. A completed process is not proof of enrollment; have your technician verify intended-site check-in.</li>
         </ol>
     @else
         <p>Open Terminal and run the command below. It downloads the agent itself; enter your administrator password when requested.</p>

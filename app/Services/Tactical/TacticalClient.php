@@ -1278,11 +1278,12 @@ class TacticalClient
      * expiry; we request 7 days so the URL stays valid for a reasonable
      * window for an end user to click through the portal download page.
      *
-     * Research (verified against TRMM v1.4.0 OpenAPI schema + source):
+     * Source: tacticalrmm 1e786d37 agents/views.py and agents/utils.py:
      *   - Endpoint: POST /agents/installer/ (amidaware/tacticalrmm agents/views.py :: install_agent)
      *   - Required body: installMethod, expires, client, site, goarch, plat, api, agenttype, rdp, ping, power
      *   - For installMethod in {"manual", "mac"}, the server returns JSON {"cmd": ..., "url": ...}
-     *     where "url" is the pre-signed installer binary download URL we can hand to the user.
+     *     where "url" is the signed agent URL when the signing token is valid,
+     *     or the public release URL otherwise (get_agent_url).
      *   - installMethod "exe" returns a generated .exe (FileResponse) rather than JSON.
      *   - installMethod "bash" returns a generated .sh script (FileResponse).
      *   - We pick "manual" for Windows and "mac" for mac/linux so we always get JSON back.
@@ -1295,12 +1296,12 @@ class TacticalClient
      *   - windows ("manual"): the Inno silent-install invocation for the downloaded
      *     file, then `ping 127.0.0.1 -n 7`, then the installed binary with
      *     `-m install --api ... --client-id ... --site-id ... --agent-type ... --auth <token>`.
-     *     It assumes the file is already present in the working directory under the
-     *     name TRMM built it with, so the download is still step one of two.
+     *     Upstream assumes the named file is already in the working directory.
+     *     We translate this strict grammar into a self-downloading PowerShell command.
      *   - mac/linux ("mac"): self-contained — `curl -L -o <file> '<url>' && chmod +x
      *     <file> && sudo ./<file> -m install ...` — so it carries its own download.
-     * We now return "cmd" as InstallerInfo::$installScript (shape 3 in that DTO) and
-     * describe the real two-step flow instead of promising self-registration.
+     * InstallerInfo::$installScript carries the composed PowerShell for Windows
+     * or the original self-contained command for mac/linux; check-in is not implied.
      *
      * "cmd" CARRIES A LIVE ENROLMENT TOKEN (`--auth`). Treat it exactly like the
      * signed URL: hand it to the caller once, never log it, never persist it.
@@ -1354,13 +1355,19 @@ class TacticalClient
         // Never log $command and never fold it into an error string: it holds --auth.
         $command = $this->installerCommand($deployment['cmd'] ?? null);
 
+        $windows = $platform === 'windows' && $command !== null
+            ? WindowsInstallerCommand::build($command, $url, $goarch) : null;
+        if ($platform === 'windows') {
+            $command = $windows['script'] ?? null;
+        }
+
         return new \App\Services\Portal\InstallerInfo(
             downloadUrl: $url,
             installScript: $command,
-            instructions: self::installerInstructions($target['plat'], $command !== null),
-            expectedFilename: $platform === 'windows' && $command !== null
-                && preg_match('/\A(tacticalagent-v[0-9.]+-windows-(?:amd64|386)\.exe) /', $command, $match) === 1
-                    ? $match[1] : null,
+            instructions: $platform === 'windows' && $command !== null
+                ? 'Open PowerShell as Administrator and paste the command. It downloads the exact installer into a new temporary folder before installing and enrolling. A download alone does not register the computer; ask your technician to verify check-in.'
+                : self::installerInstructions($target['plat'], $command !== null),
+            expectedFilename: $windows['filename'] ?? null,
         );
     }
 
@@ -1396,7 +1403,9 @@ class TacticalClient
                 'sink' => $sink,
                 'timeout' => 120, 'connect_timeout' => 10,
                 'http_errors' => false, 'allow_redirects' => false,
-                'headers' => ['Accept' => 'application/octet-stream'],
+                // DRF negotiates its JSON renderer before the view returns FileResponse.
+                // An octet-stream-only Accept causes HTTP 406 before generation.
+                'headers' => ['Accept' => '*/*'],
                 'progress' => static function ($total, $downloaded): void {
                     if ($total > 32 * 1024 * 1024 || $downloaded > 32 * 1024 * 1024) {
                         throw new \RuntimeException('Installer exceeds size limit.');
@@ -1409,6 +1418,12 @@ class TacticalClient
             // Arbitrary vendor text may contain credentials, command lines or HTML.
             $error = json_decode($body, true);
             $message = is_string($error) ? $error : null;
+            if (is_array($error) && array_key_exists('ret', $error)) {
+                throw new InstallerGenerationException('The upstream installer service could not generate the guided setup. Use the manual fallback or contact your technician.');
+            }
+            if ($response->getStatusCode() === 406) {
+                throw new InstallerGenerationException('The upstream installer request was not accepted. Use the manual fallback or contact your technician.');
+            }
             if (in_array($message, [
                 "Not available in insecure mode. Please use the 'Manual' method.",
                 'Something went wrong. Check debug error log for exact error message',
