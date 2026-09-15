@@ -272,7 +272,7 @@ class AddTicketNoteToolTest extends TestCase
             $this->assertStringContainsString('not allowed for this token', (string) $response->json('result.content.0.text'));
         }
 
-        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $ticket = Ticket::factory()->create(['client_id' => $client->id, 'status' => \App\Enums\TicketStatus::New]);
         $propose = $this->callTool($token, 'propose_close', [
             'ticket_id' => $ticket->id,
             'reason' => 'Chet must not propose closes through this data-surface token.',
@@ -280,11 +280,9 @@ class AddTicketNoteToolTest extends TestCase
         ]);
 
         $propose->assertOk();
-        $this->assertTrue((bool) $propose->json('result.isError'));
-        // Spike-2: propose_close is scope-allowed for chet tokens but stays
-        // client-scoped — without client_id the write guard rejects it.
-        $this->assertStringContainsString('client_id is required', (string) $propose->json('result.content.0.text'));
-        $this->assertSame(0, \App\Models\TechnicianRun::count());
+        $this->assertFalse((bool) $propose->json('result.isError'));
+        // The granted held action derives client context from its ticket.
+        $this->assertSame(1, \App\Models\TechnicianRun::where('state', \App\Enums\TechnicianRunState::AwaitingApproval)->count());
     }
 
     public function test_chet_private_note_is_not_visible_in_client_portal(): void

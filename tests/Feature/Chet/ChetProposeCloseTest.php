@@ -87,10 +87,10 @@ class ChetProposeCloseTest extends TestCase
         $this->assertSame(TicketStatus::New, $ticket->fresh()->status);
     }
 
-    public function test_chet_propose_close_requires_client_id(): void
+    public function test_chet_propose_close_derives_omitted_client_id(): void
     {
         $client = Client::factory()->create();
-        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $ticket = Ticket::factory()->create(['client_id' => $client->id, 'status' => TicketStatus::New]);
         $token = $this->chetToken(['propose_close']);
 
         $response = $this->callTool($token, 'propose_close', [
@@ -100,16 +100,15 @@ class ChetProposeCloseTest extends TestCase
         ]);
 
         $response->assertOk();
-        $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('client_id is required', (string) $response->json('result.content.0.text'));
-        $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)->count());
+        $this->assertFalse((bool) $response->json('result.isError'));
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $ticket->id)->where('state', TechnicianRunState::AwaitingApproval)->count());
     }
 
     public function test_chet_propose_close_rejects_a_ticket_from_another_client(): void
     {
         $requestingClient = Client::factory()->create();
         $otherClient = Client::factory()->create();
-        $otherTicket = Ticket::factory()->create(['client_id' => $otherClient->id]);
+        $otherTicket = Ticket::factory()->create(['client_id' => $otherClient->id, 'status' => TicketStatus::New]);
         $token = $this->chetToken(['propose_close']);
 
         $response = $this->callTool($token, 'propose_close', [
@@ -125,11 +124,11 @@ class ChetProposeCloseTest extends TestCase
         $this->assertSame(0, TechnicianRun::where('ticket_id', $otherTicket->id)->count());
     }
 
-    public function test_non_chet_token_with_explicit_scope_requires_client_id_and_ticket_membership(): void
+    public function test_non_chet_token_with_legacy_argument_derives_scope_and_checks_membership(): void
     {
         $requestingClient = Client::factory()->create();
         $otherClient = Client::factory()->create();
-        $otherTicket = Ticket::factory()->create(['client_id' => $otherClient->id]);
+        $otherTicket = Ticket::factory()->create(['client_id' => $otherClient->id, 'status' => TicketStatus::New]);
         $token = McpConfig::rotateStaffToken(
             allowedTools: ['propose_close'],
             label: 'office-bot',
@@ -142,8 +141,7 @@ class ChetProposeCloseTest extends TestCase
             'confidence' => 0.95,
         ]);
         $missing->assertOk();
-        $this->assertTrue((bool) $missing->json('result.isError'));
-        $this->assertStringContainsString('client_id is required', (string) $missing->json('result.content.0.text'));
+        $this->assertFalse((bool) $missing->json('result.isError'));
 
         $crossClient = $this->callTool($token, 'propose_close', [
             'client_id' => $requestingClient->id,
@@ -154,13 +152,12 @@ class ChetProposeCloseTest extends TestCase
         $crossClient->assertOk();
         $this->assertTrue((bool) $crossClient->json('result.isError'));
         $this->assertStringContainsString('different client', (string) $crossClient->json('result.content.0.text'));
-        $this->assertSame(0, TechnicianRun::where('ticket_id', $otherTicket->id)->count());
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $otherTicket->id)->count());
     }
 
     public function test_non_chet_token_without_explicit_scope_keeps_derived_ticket_scope(): void
     {
         $ticket = Ticket::factory()->create(['status' => TicketStatus::New]);
-        $otherClient = Client::factory()->create();
         $token = McpConfig::rotateStaffToken(
             allowedTools: ['propose_close'],
             label: 'staff-trust',
@@ -168,7 +165,6 @@ class ChetProposeCloseTest extends TestCase
         );
 
         $response = $this->callTool($token, 'propose_close', [
-            'client_id' => $otherClient->id,
             'ticket_id' => $ticket->id,
             'reason' => 'Staff-trust token derives client from the ticket.',
             'confidence' => 0.95,
@@ -186,7 +182,7 @@ class ChetProposeCloseTest extends TestCase
     public function test_chet_token_without_propose_close_scope_is_denied(): void
     {
         $client = Client::factory()->create();
-        $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+        $ticket = Ticket::factory()->create(['client_id' => $client->id, 'status' => TicketStatus::New]);
         $token = $this->chetToken(['add_ticket_note']);
 
         $response = $this->callTool($token, 'propose_close', [
@@ -205,7 +201,7 @@ class ChetProposeCloseTest extends TestCase
     public function test_unpublished_chet_write_tools_remain_unavailable_even_when_scoped(): void
     {
         $client = Client::factory()->create();
-        Ticket::factory()->create(['client_id' => $client->id]);
+        Ticket::factory()->create(['client_id' => $client->id, 'status' => TicketStatus::New]);
 
         // frobnicate_ticket is a deliberately non-existent tool name (close_ticket is
         // now a real published tool, so it can no longer stand in as the fake here).

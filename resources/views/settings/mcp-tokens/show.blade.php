@@ -125,7 +125,7 @@
 @if($token->tools === null)
     <div class="alert alert-danger d-flex align-items-start" role="alert">
         <i class="bi bi-exclamation-triangle-fill me-2 mt-1"></i>
-        <div><strong>Legacy full surface.</strong> This token can call every tool. Grant specific tools below and save to scope it down.</div>
+        <div><strong>Legacy full surface.</strong> Legacy access does not grant tools that require explicit authorization. Grant specific tools below and save to restrict its surface.</div>
     </div>
 @endif
 
@@ -134,7 +134,7 @@
     <div class="alert alert-warning d-flex align-items-center shadow-sm" role="alert">
         <i class="bi bi-shield-lock-fill me-2 fs-5"></i>
         <div class="flex-grow-1">
-            <strong>This token is a draft.</strong> It is inactive and grants no tools, so it can't authenticate yet. Grant the tools it needs, set its behaviour, then activate it.
+            <strong>This token is a draft.</strong> It cannot authenticate, even if tools have been configured. Grant the tools it needs, set its behaviour, then activate it.
         </div>
         <form method="POST" action="{{ route('settings.mcp-tokens.activate', $token) }}" class="ms-3 flex-shrink-0">
             @csrf
@@ -382,20 +382,28 @@
                                 <input type="checkbox" class="form-check-input mcp-trust" id="flagAiActor" data-flag="ai_actor" @checked($token->ai_actor) @disabled($readOnly)>
                             </div>
                             <div>
-                                <label for="flagAiActor" class="fw-semibold mb-0">Attribute actions to an AI <code class="small text-muted">ai_actor</code></label>
-                                <div class="text-muted small">Notes, replies, and changes made with this token are recorded as performed by an AI assistant, not a staff member. Turn on for agent tokens so the audit trail and any client-facing attribution stay honest.</div>
+                                <label for="flagAiActor" class="fw-semibold mb-0">AI attribution for notes and wiki writes <code class="small text-muted">ai_actor</code></label>
+                                <div class="text-muted small">Uses the configured AI user for add_ticket_note, wiki_add_fact, wiki_create_page and wiki_update_page. On requires a valid configured AI user; off uses the service-account resolver, which may fall back to the first user. Assistant notes remain AI-authored in either case. This does not change attribution for replies or other tools and grants no permissions.</div>
+                                <div class="small text-muted mt-2">Saves automatically.</div>
+                            </div>
+                        </div>
+                        <div class="d-flex gap-3 py-2 border-bottom">
+                            <i class="bi bi-tools pt-1" aria-hidden="true"></i>
+                            <div>
+                                <div class="fw-semibold">Tool grants and execution modes</div>
+                                <div class="text-muted small">Tools controls which capabilities this token may call. A staged-only grant cannot execute immediately; immediate grants do not bypass confirmation or tool-specific restrictions.</div>
+                                <button type="button" class="btn btn-sm btn-link ps-0" id="mcpConfigureTools">Configure in Tools</button>
+                                <div class="text-muted small">Tokens are not bound to a client. For add_ticket_note, propose_close and send_reply, a supplied client must match the ticket; omission derives the ticket client where supported. Tools that require identifiers still require them.</div>
                             </div>
                         </div>
                         <div class="d-flex gap-3 py-2">
-                            <div class="form-check form-switch m-0 pt-1">
-                                <input type="checkbox" class="form-check-input mcp-trust" id="flagScope" data-flag="require_explicit_client_scope" @checked($token->require_explicit_client_scope) @disabled($readOnly)>
-                            </div>
+                            <i class="bi bi-key pt-1" aria-hidden="true"></i>
                             <div>
-                                <label for="flagScope" class="fw-semibold mb-0">Require explicit client scope <code class="small text-muted">require_explicit_client_scope</code> <span class="badge bg-success-subtle text-success-emphasis border rounded-pill ms-1">Recommended</span></label>
-                                <div class="text-muted small">Every tool call must name the client it acts on. The token can't read or act across all clients at once. Keep on for any token an agent drives.</div>
+                                <div class="fw-semibold">Lifecycle</div>
+                                <div class="text-muted small">Only active tokens can authenticate. Draft, paused and revoked tokens cannot call tools. Activate after configuration; pause to suspend access, resume to restore it, or revoke to retire the credential. Use the lifecycle controls above.</div>
+                                <div class="mt-2">Current state: @include('settings.mcp-tokens._state_badge', ['state' => $token->state()])</div>
                             </div>
                         </div>
-                        <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Saves automatically.</div>
                     </div>
                 </div>
             </div>
@@ -522,6 +530,12 @@
     if (copyBtn) copyBtn.addEventListener('click', () => {
         const inp = document.getElementById('mcpNewToken');
         if (inp && navigator.clipboard) navigator.clipboard.writeText(inp.value).then(() => toast('Secret copied'));
+    });
+
+    // Activate the existing nav-tab trigger, not a second trigger outside the nav.
+    document.getElementById('mcpConfigureTools')?.addEventListener('click', () => {
+        const trigger = root.querySelector('.nav-link[data-bs-target="#tab-tools"]');
+        if (trigger) { bootstrap.Tab.getOrCreateInstance(trigger).show(); trigger.focus(); }
     });
 
     if (cfg.readOnly) return; // revoked tokens are read-only

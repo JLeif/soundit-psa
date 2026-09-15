@@ -64,7 +64,6 @@ class McpConfig
             id: (int) $record->id,
             directive: $record->directiveOrDefault(),
             aiActor: (bool) $record->ai_actor,
-            requireExplicitClientScope: (bool) $record->require_explicit_client_scope,
             toolModes: $grants === null ? [] : $grants['modes'],
         );
     }
@@ -117,6 +116,7 @@ class McpConfig
      * shown once — caller is responsible for handing it to the bot operator).
      *
      * @param  array<int, string>|null  $allowedTools  Null rotates the legacy full-surface token.
+     * @param  bool|null  $requireExplicitClientScope  Deprecated, ignored compatibility argument. Ticket ownership is checked independently; this is not a client binding.
      */
     public static function rotateStaffToken(
         ?array $allowedTools = null,
@@ -149,9 +149,6 @@ class McpConfig
         if ($aiActor !== null || $useNewTokenTrustDefaults) {
             $record->ai_actor = $aiActor ?? false;
         }
-        if ($requireExplicitClientScope !== null || $useNewTokenTrustDefaults) {
-            $record->require_explicit_client_scope = $requireExplicitClientScope ?? true;
-        }
         // Programmatic / break-glass rotation yields a ready active token (the
         // new draft flow uses mintDraftToken instead). Rotating a revoked token
         // reactivates it, matching the pre-lifecycle behaviour.
@@ -181,7 +178,6 @@ class McpConfig
         $record->token_prefix = self::tokenPrefix($token);
         $record->tools = [];
         $record->ai_actor = false;
-        $record->require_explicit_client_scope = true;
         $record->activated_at = null;
         $record->paused_at = null;
         $record->revoked_at = null;

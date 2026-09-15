@@ -39,11 +39,11 @@ class McpConfigTokenStoreTest extends TestCase
 
         $row = McpToken::where('label', 'opsbot')->firstOrFail();
         $this->assertFalse($row->ai_actor);
-        $this->assertTrue($row->require_explicit_client_scope);
+        $this->assertSame(0, (int) $row->require_explicit_client_scope);
 
         $resolved = McpConfig::resolveStaffToken($plain);
         $this->assertFalse($resolved->aiActor);
-        $this->assertTrue($resolved->requireExplicitClientScope);
+        $this->assertFalse(property_exists($resolved, 'requireExplicitClientScope'));
     }
 
     public function test_scoped_rotate_can_store_explicit_trust_flags(): void
@@ -57,11 +57,11 @@ class McpConfigTokenStoreTest extends TestCase
 
         $row = McpToken::where('label', 'office-bot')->firstOrFail();
         $this->assertTrue($row->ai_actor);
-        $this->assertFalse($row->require_explicit_client_scope);
+        $this->assertSame(0, (int) $row->require_explicit_client_scope);
 
         $resolved = McpConfig::resolveStaffToken($plain);
         $this->assertTrue($resolved->aiActor);
-        $this->assertFalse($resolved->requireExplicitClientScope);
+        $this->assertFalse(property_exists($resolved, 'requireExplicitClientScope'));
     }
 
     public function test_resolve_carries_token_directive(): void
@@ -113,12 +113,12 @@ class McpConfigTokenStoreTest extends TestCase
         $row = McpToken::where('label', 'office-bot')->firstOrFail();
         $this->assertNull($row->revoked_at);
         $this->assertFalse($row->ai_actor);
-        $this->assertTrue($row->require_explicit_client_scope);
+        $this->assertSame(0, (int) $row->require_explicit_client_scope);
         $this->assertSame(['get_staff'], $row->tools);
 
         $resolved = McpConfig::resolveStaffToken($plain);
         $this->assertFalse($resolved->aiActor);
-        $this->assertTrue($resolved->requireExplicitClientScope);
+        $this->assertFalse(property_exists($resolved, 'requireExplicitClientScope'));
     }
 
     public function test_revoked_token_no_longer_resolves(): void
@@ -139,7 +139,7 @@ class McpConfigTokenStoreTest extends TestCase
         $this->assertNull($resolved->allowedTools, 'legacy token = full surface');
         $this->assertSame('mcp-legacy', $resolved->actorLabel(), 'legacy actor label is platform-neutral');
         $this->assertFalse($resolved->aiActor);
-        $this->assertFalse($resolved->requireExplicitClientScope);
+        $this->assertFalse(property_exists($resolved, 'requireExplicitClientScope'));
     }
 
     public function test_legacy_actor_label_does_not_collide_with_scoped_legacy_label(): void

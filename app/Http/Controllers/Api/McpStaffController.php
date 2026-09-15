@@ -90,13 +90,6 @@ class McpStaffController extends Controller
      */
     private const TOOL_SURFACE_DRIFT_HINT = "The token's allowed-tool surface may have changed since this client cached tools/list; whoami returns the current allowed tools, list_tool_surface classifies the full tool surface (granted / available_ungranted / unavailable_config), and your token directive governs how to proceed.";
 
-    /** Write tools that can be forced to carry an explicit client_id scope. */
-    private const EXPLICIT_CLIENT_SCOPE_WRITE_TOOLS = [
-        'add_ticket_note',
-        'propose_close',
-        'send_reply',
-    ];
-
     private const NOTE_BODY_AUDIT_PLACEHOLDER = '[note body withheld]';
 
     private const TICKET_DESCRIPTION_AUDIT_PLACEHOLDER = '[ticket description withheld]';
@@ -500,9 +493,8 @@ class McpStaffController extends Controller
         $clientIdOptionalFor = ['find_persons', 'find_assets', 'wiki_list_pages', 'wiki_search', 'wiki_get_page'];
 
         $toolInstructions = McpToolInstructions::all();
-        $translated = array_values(array_filter(array_map(function ($t) use ($request, $generalNames, $clientIdOptionalFor, $toolInstructions): ?array {
+        $translated = array_values(array_filter(array_map(function ($t) use ($generalNames, $clientIdOptionalFor, $toolInstructions): ?array {
             $schema = $t['input_schema'] ?? ['type' => 'object', 'properties' => new \stdClass];
-            $requiresExplicitClientScope = $this->requiresExplicitClientScope($request, (string) $t['name']);
             $isPsaActionTool = $this->isPsaActionTool((string) $t['name']);
             $isPsaTicketScopedTool = $this->isPsaTicketScopedTool((string) $t['name']);
             $isCippWriteTool = $this->isCippWriteTool((string) $t['name']);
@@ -510,11 +502,11 @@ class McpStaffController extends Controller
             $isTacticalAdminTool = $this->isTacticalAdminTool((string) $t['name']);
             $requiresTacticalAdminClientScope = $isTacticalAdminTool && StaffTacticalAdminToolExecutor::requiresClient((string) $t['name']);
             $requiresCippAdminClientScope = $this->isCippAdminTool((string) $t['name']) && StaffCippAdminToolExecutor::requiresClient((string) $t['name']);
-            $isClientScoped = ! isset($generalNames[$t['name']]) || $requiresExplicitClientScope || $isPsaActionTool || $isCippWriteTool || $isTacticalActionTool || $requiresTacticalAdminClientScope || $requiresCippAdminClientScope;
+            $isClientScoped = $t['name'] === 'add_ticket_note' || ! isset($generalNames[$t['name']]) || $isPsaActionTool || $isCippWriteTool || $isTacticalActionTool || $requiresTacticalAdminClientScope || $requiresCippAdminClientScope;
 
             if ($isClientScoped) {
                 $props = (array) ($schema['properties'] ?? []);
-                $clientIdRequired = $requiresExplicitClientScope || ($isPsaActionTool && ! $isPsaTicketScopedTool) || $isCippWriteTool || $isTacticalActionTool || $requiresTacticalAdminClientScope || $requiresCippAdminClientScope || ! in_array($t['name'], $clientIdOptionalFor, true);
+                $clientIdRequired = ($isPsaActionTool && ! $isPsaTicketScopedTool) || $isCippWriteTool || $isTacticalActionTool || $requiresTacticalAdminClientScope || $requiresCippAdminClientScope || ! in_array($t['name'], $clientIdOptionalFor, true);
                 if (! $isPsaTicketScopedTool) {
                     $props['client_id'] = [
                         'type' => 'integer',
@@ -702,6 +694,22 @@ class McpStaffController extends Controller
             ]);
         }
 
+        // Notes need client context at the executor. Held actions may derive it
+        // from the ticket only on omission, never from a malformed supplied ID.
+        if ($clientId === null && ($name === 'add_ticket_note' || ($this->isHeldTicketAction((string) $name) && $hasClientIdArgument))) {
+            $message = "A positive integer client_id is required for {$name} when supplying client scope.";
+            $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
+
+            return response()->json([
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'result' => [
+                    'content' => [['type' => 'text', 'text' => $message]],
+                    'isError' => true,
+                ],
+            ]);
+        }
+
         if ($this->isWikiGlobalScopeWrite((string) $name, $arguments) && $hasClientIdArgument) {
             $message = 'client_id must be omitted for wiki_add_fact global-scope writes.';
             $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
@@ -750,20 +758,6 @@ class McpStaffController extends Controller
 
         if ($this->isWikiClientScopeWrite((string) $name, $arguments) && $clientId === null) {
             $message = 'client_id is required for wiki_add_fact client-scope writes.';
-            $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
-
-            return response()->json([
-                'jsonrpc' => '2.0',
-                'id' => $id,
-                'result' => [
-                    'content' => [['type' => 'text', 'text' => $message]],
-                    'isError' => true,
-                ],
-            ]);
-        }
-
-        if ($this->requiresExplicitClientScope($request, (string) $name) && $clientId === null) {
-            $message = "client_id is required for {$name} when explicit client scope is required.";
             $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
 
             return response()->json([
@@ -1035,11 +1029,9 @@ class McpStaffController extends Controller
             ]);
         }
 
-        // Held ticket actions validate a supplied client scope before execution.
-        // Tokens without explicit-scope enforcement may still use the legacy
-        // staff-trust path that derives client context from the ticket.
-        if ($this->requiresExplicitClientScope($request, (string) $name)
-            && $this->isHeldTicketAction((string) $name)
+        // A supplied client must match the ticket, independent of retired flags.
+        // Omission keeps the ticket-derived scope used by held ticket actions.
+        if ($this->isHeldTicketAction((string) $name)
             && $clientId !== null
         ) {
             if (! $this->ticketBelongsToClient($arguments, $clientId)) {
@@ -2598,15 +2590,6 @@ class McpStaffController extends Controller
         return $token instanceof McpStaffToken
             && $token->aiActor
             && (in_array($toolName, ['add_ticket_note'], true) || in_array($toolName, self::WIKI_WRITE_TOOLS, true));
-    }
-
-    private function requiresExplicitClientScope(Request $request, string $toolName): bool
-    {
-        $token = $request->attributes->get('mcp_staff_token');
-
-        return $token instanceof McpStaffToken
-            && $token->requireExplicitClientScope
-            && in_array($toolName, self::EXPLICIT_CLIENT_SCOPE_WRITE_TOOLS, true);
     }
 
     private function isHeldTicketAction(string $toolName): bool

@@ -22,7 +22,6 @@ class McpToken extends Model
         'tools',
         'directive',
         'ai_actor',
-        'require_explicit_client_scope',
         'activated_at',
         'paused_at',
         'last_used_at',
@@ -34,7 +33,6 @@ class McpToken extends Model
         return [
             'tools' => 'array',
             'ai_actor' => 'boolean',
-            'require_explicit_client_scope' => 'boolean',
             'activated_at' => 'datetime',
             'paused_at' => 'datetime',
             'last_used_at' => 'datetime',

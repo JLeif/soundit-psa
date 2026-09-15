@@ -84,10 +84,7 @@
                                 @if($token->ai_actor)
                                     <span class="badge rounded-pill bg-info-subtle text-info-emphasis border">AI actor</span>
                                 @endif
-                                @if($token->require_explicit_client_scope)
-                                    <span class="badge rounded-pill bg-light text-dark border">Client-scoped</span>
-                                @endif
-                                @unless($token->ai_actor || $token->require_explicit_client_scope)
+                                @unless($token->ai_actor)
                                     <span class="text-muted">Standard</span>
                                 @endunless
                             </td>

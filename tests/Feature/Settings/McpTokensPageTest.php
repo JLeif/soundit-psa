@@ -60,7 +60,7 @@ class McpTokensPageTest extends TestCase
         $this->assertNull($token->activated_at);
         $this->assertSame([], $token->tools);
         $this->assertFalse($token->ai_actor);
-        $this->assertTrue($token->require_explicit_client_scope);
+        $this->assertSame(0, (int) $token->require_explicit_client_scope);
         $this->assertStringStartsWith('untitled', $token->label);
 
         $this->assertDatabaseHas('mcp_audit_logs', [
@@ -255,7 +255,7 @@ class McpTokensPageTest extends TestCase
             ->patchJson(route('settings.mcp-tokens.trust-flags', $token), ['ai_actor' => 1, 'require_explicit_client_scope' => 1])
             ->assertOk();
         $this->assertTrue($token->fresh()->ai_actor);
-        $this->assertTrue($token->fresh()->require_explicit_client_scope);
+        $this->assertSame(0, (int) $token->fresh()->require_explicit_client_scope);
     }
 
     public function test_regenerate_secret_replaces_active_token_secret_and_preserves_configuration(): void
@@ -291,7 +291,7 @@ class McpTokensPageTest extends TestCase
         $this->assertSame(['find_staff'], $fresh->tools);
         $this->assertSame('Use Chet rules.', $fresh->directive);
         $this->assertTrue($fresh->ai_actor);
-        $this->assertFalse($fresh->require_explicit_client_scope);
+        $this->assertSame(0, (int) $fresh->require_explicit_client_scope);
         $this->assertTrue($fresh->activated_at?->equalTo($activatedAt));
         $this->assertNull($fresh->last_used_at);
 
