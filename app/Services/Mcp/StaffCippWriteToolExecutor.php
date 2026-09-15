@@ -32,6 +32,7 @@ class StaffCippWriteToolExecutor
 
     /** @var array<string, string> */
     private const STAGED_TO_DIRECT = [
+        'cipp_stage_offboard_user' => 'cipp_offboard_user',
         'cipp_stage_reset_user_password' => 'cipp_reset_user_password',
         'cipp_stage_disable_user_sign_in' => 'cipp_disable_user_sign_in',
         'cipp_stage_enable_user_sign_in' => 'cipp_enable_user_sign_in',
@@ -597,6 +598,7 @@ class StaffCippWriteToolExecutor
     public static function definitions(): array
     {
         return [
+            ...\App\Services\Cipp\Offboarding\OffboardingTool::definitions(),
             self::disableSignInTool(),
             self::stageDisableSignInTool(),
             self::enableSignInTool(),
@@ -680,6 +682,16 @@ class StaffCippWriteToolExecutor
             return ['error' => 'CIPP is not enabled or configured'];
         }
 
+        if (in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true)) {
+            $token = request()->attributes->get('mcp_staff_token');
+            if (! $token instanceof \App\Support\McpStaffToken || ! $token->id || $token->allowedTools === null
+                || ! $token->allows('cipp_offboard_user')) {
+                return ['error' => 'An explicit active offboarding grant is required.'];
+            }
+
+            return app(\App\Services\Cipp\Offboarding\OffboardingAdmission::class)->stage($arguments, $clientId, $token->id);
+        }
+
         // Password reset keeps a DEDICATED pair of paths rather than falling through to
         // the generic stage/direct tail — but it is now shaped like every other family
         // (psa-g4y9f). The direct executor must stay bespoke because a reset is
@@ -736,6 +748,10 @@ class StaffCippWriteToolExecutor
 
     public function approveStagedRun(TechnicianRun $run, int $approverId, array $approvalInputs = []): TechnicianApprovalResult
     {
+        if ($run->action_type === 'cipp_stage_offboard_user') {
+            return app(\App\Services\Cipp\Offboarding\OffboardingAdmission::class)->approve($run, $approverId, $approvalInputs);
+        }
+
         if (! self::isStagedActionType($run->action_type) || ! $run->claimForExecution()) {
             return new TechnicianApprovalResult('already_handled');
         }

@@ -992,6 +992,43 @@ class CippRestWriteClient
      * @param  array<int|string, mixed>  $body
      * @return array<int|string, mixed>
      */
+    public function offboardingRead(string $kind, array $query = []): array
+    {
+        $endpoint = match ($kind) {
+            'tenants' => 'api/ListTenants',
+            'users' => 'api/ListUsers',
+            'scheduled' => 'api/ListScheduledItems',
+            default => throw new CippClientException('Unsupported offboarding verification read'),
+        };
+        $body = $this->sendGet($endpoint, $query, requireArrayBody: true);
+        CippQueueGuard::assertNotQueueBacked($body);
+        if (! array_is_list($body)) {
+            throw new CippClientException('Offboarding requires a complete, unwrapped row list');
+        }
+        foreach ($body as $row) {
+            if (! is_array($row) || array_is_list($row)) {
+                throw new CippClientException('Offboarding verification returned an invalid row');
+            }
+        }
+
+        return $body;
+    }
+
+    /** One HTTP attempt only. Admission must have committed send_intent before calling. */
+    public function submitOffboardingOnce(array $body): array
+    {
+        $url = $this->endpointUrl('api/ExecOffboardUser');
+        $options = $this->safeRequestOptions($url);
+        $options['allow_redirects'] = false;
+        $response = Http::timeout(60)->connectTimeout(10)->acceptJson()->asJson()
+            ->withOptions($options)->withToken($this->getToken())->post($url, $body);
+        if (strlen($response->body()) > 16384) {
+            return ['status' => $response->status(), 'body' => null];
+        }
+
+        return ['status' => $response->status(), 'body' => $response->json()];
+    }
+
     private function send(string $endpoint, array $body, bool $captureBody = false): array
     {
         $url = $this->endpointUrl($endpoint);

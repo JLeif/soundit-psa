@@ -91,6 +91,7 @@ class TechnicianCockpitController extends Controller
             'tactical_stage_run_policy_task_all',
             'tactical_stage_remove_agent',
             'tactical_stage_set_client_custom_field' => $service->approveStagedTacticalAdminAction($run, (int) auth()->id()),
+            'cipp_stage_offboard_user',
             'cipp_stage_reset_user_password',
             'cipp_stage_disable_user_sign_in',
             'cipp_stage_enable_user_sign_in',
@@ -138,6 +139,7 @@ class TechnicianCockpitController extends Controller
 
         $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline'], true);
         $message = match ($result->status) {
+            'offboarding_admission' => $result->message ?? 'Offboarding admission recorded; execution and effects remain unverified.',
             'sent' => 'Reply approved and sent.',
             'closed' => 'Ticket closed.',
             // psa-d9ayt: a staged close_ticket(status=resolved) resolves, not closes — name it.
@@ -464,6 +466,14 @@ class TechnicianCockpitController extends Controller
     /** @return array<string, mixed> */
     private function cippApprovalInputs(Request $request, TechnicianRun $run): array
     {
+        if ($run->action_type === 'cipp_stage_offboard_user') {
+            return $request->validate([
+                'revision' => ['required', 'string', 'in:1'],
+                'plan_hash' => ['required', 'string', 'size:64'],
+                'actions' => ['required', 'array', 'min:1', 'max:11'],
+                'actions.*' => ['required', 'string', 'distinct'],
+            ]);
+        }
         $inputs = (array) ($run->proposed_meta['sensitive_inputs'] ?? []);
         $rules = [];
 

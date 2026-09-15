@@ -179,7 +179,8 @@ final class OffboardingLedger
 
     private function key(array $value): string
     {
-        return hash_hmac('sha256', OffboardingPlan::canonical($value), (string) config('app.key'));
+        // Must survive application encryption-key rotation: fences are permanent.
+        return hash('sha256', OffboardingPlan::canonical($value));
     }
 
     private function audit(string $id, string $event): void
@@ -206,7 +207,9 @@ final class OffboardingLedger
         }
         if (! is_array($snapshot['namespace']) || count($snapshot['namespace']) !== 3
             || array_filter($snapshot['namespace'], fn ($v) => ! is_string($v) || trim($v) === '')
-            || ! is_string($snapshot['target_id']) || $snapshot['target_id'] === '') {
+            || ! is_string($snapshot['target_id']) || $snapshot['target_id'] === ''
+            || ($snapshot['successor_id'] !== null && (! is_string($snapshot['successor_id'])
+                || $snapshot['successor_id'] === '' || strcasecmp($snapshot['successor_id'], $snapshot['target_id']) === 0))) {
             throw new LogicException('Canonical offboarding namespace and target are required.');
         }
         $expected = OffboardingPlan::serialize($snapshot['input'], $snapshot['body']['tenantFilter'], $snapshot['target_upn'], $snapshot['successor_upn'] ?? null, $snapshot['body']['reference']);
