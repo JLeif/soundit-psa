@@ -65,6 +65,7 @@ class McpConfig
             directive: $record->directiveOrDefault(),
             aiActor: (bool) $record->ai_actor,
             requireExplicitClientScope: (bool) $record->require_explicit_client_scope,
+            allowUnlinkedTickets: (bool) $record->allow_unlinked_tickets,
             toolModes: $grants === null ? [] : $grants['modes'],
         );
     }
