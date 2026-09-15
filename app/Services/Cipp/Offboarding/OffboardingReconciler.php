@@ -98,7 +98,16 @@ class OffboardingReconciler
         if (str_contains($new['evidence'], 'conflict') || str_contains($new['evidence'], 'multiple')) {
             return true;
         }
-        $ranks = ['queued' => 0, 'running' => 1, 'terminal_reported' => 2, 'reported_succeeded' => 3, 'reported_failed' => 3];
+        // An unavailable read is absence of evidence, not contradictory evidence. It is still
+        // retained as its own observation, but it never outranks or invalidates an earlier one,
+        // so a transient vendor outage cannot latch the sticky conflict.
+        if ($new['evidence'] === 'read_unavailable') {
+            return false;
+        }
+        // partial_or_incomplete is ordinary in-progress evidence, ranked with other terminal-row
+        // evidence: queued/running may advance into it, but a reported terminal state may not.
+        $ranks = ['queued' => 0, 'running' => 1, 'terminal_reported' => 2, 'partial_or_incomplete' => 2,
+            'reported_succeeded' => 3, 'reported_failed' => 3];
         if (isset($ranks[$old['execution'] ?? '']) && ($ranks[$new['execution']] ?? -1) < $ranks[$old['execution']]) {
             return true;
         }

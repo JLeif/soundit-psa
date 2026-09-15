@@ -141,6 +141,50 @@ class OffboardingReconcilerTest extends TestCase
         $this->assertSame('reported_succeeded', json_decode(Crypt::decryptString($old->observation), true)['execution']);
     }
 
+    public function test_transient_unavailability_is_not_a_regression_and_never_poisons_later_reads(): void
+    {
+        $this->nameReads([Fixture::task()]);
+        $this->progressReads([Fixture::progress()]);
+        $this->assertSame('reported_succeeded', $this->reconcile()['execution']);
+        $id = ['tenantFilter' => 'example.test', 'Id' => Fixture::task()['RowKey']];
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', $id)->once()->andThrow(new \RuntimeException('synthetic timeout'));
+        $unavailable = $this->reconcile();
+        $this->assertSame('read_unavailable', $unavailable['evidence']);
+        $this->assertSame(0, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', $id)->once()->andReturn([Fixture::task()]);
+        $this->progressReads([Fixture::progress()]);
+        $recovered = $this->reconcile();
+        $this->assertSame('progress_bound', $recovered['evidence']);
+        $this->assertSame('reported_succeeded', $recovered['execution']);
+        $this->assertSame('unverified', $recovered['verification']);
+        $this->assertDatabaseCount('cipp_offboarding_observations', 3);
+        $this->assertSame(0, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+        $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
+    }
+
+    public function test_normal_queued_to_in_progress_advance_is_not_a_conflict(): void
+    {
+        $planned = Fixture::task();
+        $planned['TaskState'] = 'Planned';
+        $planned['Parameters']['DeploymentId'] = null;
+        $this->nameReads([$planned]);
+        $first = $this->reconcile();
+        $this->assertSame('queued', $first['execution']);
+        $running = Fixture::task();
+        $running['TaskState'] = 'Running';
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', ['tenantFilter' => 'example.test', 'Id' => $running['RowKey']])->once()->andReturn([$running]);
+        $row = Fixture::progress();
+        $row['Status'] = 'running';
+        $row['Steps'][1]['Status'] = 'pending';
+        $this->progressReads([$row]);
+        $second = $this->reconcile();
+        $this->assertSame('progress_bound', $second['evidence']);
+        $this->assertSame('partial_or_incomplete', $second['execution']);
+        $this->assertSame('unverified', $second['verification']);
+        $this->assertDatabaseCount('cipp_offboarding_observations', 2);
+        $this->assertSame(0, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+    }
+
     public function test_scoped_detail_can_read_terminal_receipt_without_any_network_or_foreign_disclosure(): void
     {
         $this->run->update(['state' => TechnicianRunState::Done]);
