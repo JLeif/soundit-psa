@@ -1,0 +1,65 @@
+<?php
+
+// Synthetic MariaDB controls only; never reads deployment configuration.
+require __DIR__.'/../../vendor/autoload.php';
+$app = require __DIR__.'/../../bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$job = json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);
+$socket = getenv('SCHEDULED_TEST_SOCKET');
+if (! $socket || ! str_ends_with($socket, '/test.sock') || ! is_file(dirname($socket).'/db-launch.pid')) {
+    exit(90);
+}
+config(['database.default' => 'scheduled_synthetic', 'database.connections.scheduled_synthetic' => [
+    'driver' => 'mysql', 'unix_socket' => $socket, 'database' => 'scheduled_synthetic_test',
+    'username' => 'root', 'password' => '', 'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci', 'prefix' => '', 'strict' => true,
+], 'app.key' => getenv('SCHEDULED_CHILD_KEY'), 'scheduled_approvals.enabled' => true]);
+$db = Illuminate\Support\Facades\DB::connection();
+if ($db->selectOne('SELECT DATABASE() AS d, @@skip_networking AS n')->d !== 'scheduled_synthetic_test' || (int) $db->selectOne('SELECT @@skip_networking AS n')->n !== 1) {
+    exit(91);
+}
+$app->instance(App\Services\Technician\Scheduled\ScheduledClock::class, new class extends App\Services\Technician\Scheduled\ScheduledClock
+{
+    public function now(): Carbon\CarbonImmutable
+    {
+        return Carbon\CarbonImmutable::parse('2026-09-15 01:00:00', 'UTC');
+    }
+
+    public function healthy(): bool
+    {
+        return true;
+    }
+});
+file_put_contents($job['ready'], 'ready');
+$deadline = microtime(true) + 15;
+while (! file_exists($job['go']) && microtime(true) < $deadline) {
+    usleep(10000);
+}
+if (! file_exists($job['go'])) {
+    exit(92);
+}
+$coordinator = app(App\Services\Technician\Scheduled\ScheduledCoordinator::class);
+if ($job['operation'] === 'claim') {
+    $result = $coordinator->claim($job['id']);
+} elseif ($job['operation'] === 'cancel') {
+    $result = $coordinator->cancel($job['id'], $job['user']);
+} elseif ($job['operation'] === 'outbox') {
+    if ($job['crash'] ?? false) {
+        $db->listen(function ($query) {
+            if (str_starts_with(strtolower($query->sql), 'insert into `ticket_notes`')) {
+                // Hard death between insert and acknowledgement. Connection rollback is the guard.
+                posix_kill(getmypid(), SIGKILL);
+            }
+        });
+    }
+    $result = app(App\Services\Technician\Scheduled\ScheduledOutbox::class)->deliver($job['id']);
+} elseif ($job['operation'] === 'recover') {
+    $coordinator->recover($job['id']);
+    $result = true;
+} elseif ($job['operation'] === 'crash-claim') {
+    $result = $coordinator->claim($job['id']);
+    file_put_contents($job['result'], json_encode($result));
+    posix_kill(getmypid(), SIGKILL);
+} else {
+    exit(93);
+}
+file_put_contents($job['result'], json_encode($result));

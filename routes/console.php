@@ -416,6 +416,13 @@ Schedule::command('technician:emergency-sweep')
     ->runInBackground()
     ->when(fn () => TechnicianConfig::emergencyBackstopEnabled());
 
+// Scheduled approvals: default-off substrate. No mutation adapters are installed.
+Schedule::command('technician:scheduled-sweep')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->when(fn () => (bool) config('scheduled_approvals.enabled'));
+
 // AI Technician — stale-claim reaper (psa-xz0z): return runs stranded in 'executing' by a
 // process death or a DEPLOY (PHP-FPM restart mid-approval) to the approval queue, so an
 // approvable action is never silently lost behind an "already handled" message. NOT config-gated:
