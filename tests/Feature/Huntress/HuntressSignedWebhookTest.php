@@ -86,6 +86,31 @@ class HuntressSignedWebhookTest extends TestCase
         $this->travelBack();
     }
 
+    public function test_cw_capture_failure_rolls_back_ticket_alert_and_notes(): void
+    {
+        \Illuminate\Support\Facades\Queue::fake();
+        $user = \App\Models\User::factory()->create();
+        Setting::setValue('huntress_system_user_id', (string) $user->id);
+        $client = \App\Models\Client::factory()->create(['huntress_organization_id' => 42]);
+        $this->mock(\App\Services\Huntress\HuntressLinkService::class, function ($mock) {
+            $mock->shouldReceive('capture')->once()->andThrow(new \RuntimeException('synthetic capture interruption'));
+        });
+        try {
+            app(\App\Services\Huntress\HuntressService::class)->createTicketFromCw([
+                'summary' => 'HIGH - Incident on SYNTHETIC (Synthetic)',
+                'initialDescription' => 'https://synthetic.huntress.io/org/42/incident_reports/9182',
+                'company' => ['id' => $client->id],
+            ]);
+            $this->fail('Capture interruption must propagate');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('synthetic capture interruption', $e->getMessage());
+        }
+        $this->assertDatabaseCount('tickets', 0);
+        $this->assertDatabaseCount('alerts', 0);
+        $this->assertDatabaseCount('ticket_notes', 0);
+        $this->assertDatabaseCount('huntress_link_candidates', 0);
+    }
+
     public function test_valid_event_is_committed_once_and_conflicting_replay_refuses(): void
     {
         $body = json_encode($this->payload());
