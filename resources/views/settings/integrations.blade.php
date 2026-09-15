@@ -438,6 +438,56 @@
         {{-- ============================================================ --}}
         <div class="tab-pane fade" id="rmm" role="tabpanel">
 
+        {{-- AutoElevate: stage 1, no polling or elevation writes --}}
+        <div class="card card-static shadow-sm mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>AutoElevate</span>
+                <span class="badge {{ $autoelevateConfigured ? 'bg-success' : 'bg-secondary' }}">{{ $autoelevateConfigured ? 'Key stored' : 'Not configured' }}</span>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Bearer API key only. Encrypted at rest and never shown after saving. Leave blank to keep the stored key.</p>
+                <details class="mb-3">
+                    <summary>AutoElevate setup guide</summary>
+                    <ol class="small mt-2">
+                        <li>In msp.autoelevate.com, open <strong>Users → Add User</strong>, choose <strong>Service</strong> as the user type (for example, “SoundPSA integration”). Users requires the Administrator role.</li>
+                        <li>Open that user → <strong>API Keys → Add API Key</strong>. Choose <strong>AE-BEARER</strong>, read-only permissions (companyView, locationView, computerView, elevatedSessionView, eventView, requestView, ruleView), an expiration, then <strong>Generate</strong>.</li>
+                        <li>The secret is shown once. Paste it below, <strong>Save</strong>, then <strong>Test connection</strong>.</li>
+                        <li>If Service or API Keys is missing, check your Administrator role or email support@autoelevate.com to request Partner API (Beta) access.</li>
+                    </ol>
+                </details>
+                @if(auth()->user()->isAdmin())
+                    <form method="POST" action="{{ route('settings.integrations.autoelevate.update') }}">
+                        @csrf
+                        <label for="autoelevate_api_key" class="form-label">API Key</label>
+                        <input type="password" class="form-control @error('api_key') is-invalid @enderror"
+                               id="autoelevate_api_key" name="api_key" value="" autocomplete="off"
+                               placeholder="{{ $autoelevateConfigured ? '••••••••' : 'Enter API key' }}">
+                        @error('api_key')<div class="invalid-feedback">{{ $message }}</div>@enderror
+                        <button type="submit" class="btn btn-primary btn-sm mt-2">Save AutoElevate Settings</button>
+                    </form>
+                    <form method="POST" action="{{ route('settings.integrations.autoelevate.test') }}" class="mt-3">
+                        @csrf
+                        <button type="submit" class="btn btn-outline-primary btn-sm">Test connection</button>
+                        <span class="text-muted small">Reads one company (companyView). No polling, elevation changes, or verification of other scopes.</span>
+                    </form>
+                @endif
+                @if($autoelevateLastVerifiedAt)
+                    <p class="small mt-2 mb-0">Last connection attempt: {{ $autoelevateLastVerifiedAt }}.
+                        Outcome: {{ in_array($autoelevateLastOutcome, ['ok', '400', '401', '403', '406', '429', 'configuration', 'transport', 'error'], true) ? $autoelevateLastOutcome : 'error' }}.
+                        @switch($autoelevateLastOutcome)
+                            @case('401') Check the Bearer key and its expiration. @break
+                            @case('403') Check companyView, MSP scope and tenant access. @break
+                            @case('400') Request rejected; check Partner API beta compatibility. @break
+                            @case('406') API version or response format not accepted. @break
+                            @case('429') Rate limited; wait before trying again. @break
+                            @case('configuration') Save a valid Bearer API key first. @break
+                            @case('transport') Connection unavailable; try again later. @break
+                        @endswitch
+                    </p>
+                @endif
+            </div>
+        </div>
+
         {{-- NinjaRMM Card --}}
         <div class="card card-static shadow-sm mb-4">
             <div class="card-header d-flex justify-content-between align-items-center">
