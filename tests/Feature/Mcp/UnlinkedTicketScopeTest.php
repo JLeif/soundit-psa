@@ -14,16 +14,19 @@ use App\Models\User;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
+use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
 
 class UnlinkedTicketScopeTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function token(array $tools, bool $flag = true): string
+    private function token(array $tools, ?bool $flag = null): string
     {
         $token = McpConfig::rotateStaffToken(allowedTools: $tools, label: 'synthetic-triage');
-        McpToken::where('label', 'synthetic-triage')->update(['allow_unlinked_tickets' => $flag]);
+        if ($flag !== null) {
+            McpToken::where('label', 'synthetic-triage')->update(['allow_unlinked_tickets' => $flag]);
+        }
 
         return $token;
     }
@@ -52,12 +55,13 @@ class UnlinkedTicketScopeTest extends TestCase
     {
         $audit = McpAuditLog::where('tool_name', $tool)->latest('id')->firstOrFail();
         $this->assertSame('success', $audit->status);
+        $this->assertArrayHasKey('ticket_scope', $audit->arguments);
         $this->assertSame('unlinked', $audit->arguments['ticket_scope']);
         $this->assertArrayHasKey('client_id', $audit->arguments);
         $this->assertNull($audit->arguments['client_id']);
     }
 
-    public function test_flagged_close_succeeds_and_audits_unlinked_scope(): void
+    public function test_new_token_close_succeeds_and_audits_unlinked_scope(): void
     {
         $ticket = $this->ticket();
         $r = $this->callTool($this->token(['close_ticket']), 'close_ticket', $this->closeArgs($ticket));
@@ -66,11 +70,14 @@ class UnlinkedTicketScopeTest extends TestCase
         $this->assertUnlinkedAudit('close_ticket');
     }
 
-    public function test_flagged_move_requires_confirmation_then_succeeds_with_original_unlinked_audit(): void
+    #[TestWith([null])]
+    #[TestWith([false])]
+    #[TestWith([true])]
+    public function test_move_requires_confirmation_then_succeeds_with_original_unlinked_audit(?bool $legacy): void
     {
         $ticket = $this->ticket();
         $client = Client::factory()->create(['name' => 'Synthetic Destination']);
-        $token = $this->token(['move_ticket_to_client']);
+        $token = $this->token(['move_ticket_to_client'], $legacy);
         $args = ['ticket_id' => $ticket->id, 'new_client_id' => $client->id, 'reason' => 'Synthetic linking'];
         $this->callTool($token, 'move_ticket_to_client', $args)->assertJsonPath('result.isError', true);
         $this->assertNull($ticket->fresh()->client_id);
@@ -80,20 +87,21 @@ class UnlinkedTicketScopeTest extends TestCase
         $this->assertUnlinkedAudit('move_ticket_to_client');
     }
 
-    public function test_unflagged_granted_token_denied_actionably(): void
+    public function test_legacy_flag_values_do_not_affect_granted_close(): void
     {
-        $ticket = $this->ticket();
-        $r = $this->callTool($this->token(['close_ticket'], false), 'close_ticket', $this->closeArgs($ticket));
-        $r->assertJsonPath('result.isError', true);
-        $this->assertStringContainsString('not granted unlinked-ticket access', $r->json('result.content.0.text'));
-        $this->assertStringContainsString('move_ticket_to_client (confirm_client_name required)', $r->json('result.content.0.text'));
-        $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status);
+        foreach ([false, true] as $flag) {
+            $ticket = $this->ticket();
+            $r = $this->callTool($this->token(['close_ticket'], $flag), 'close_ticket', $this->closeArgs($ticket));
+            $this->assertFalse((bool) $r->json('result.isError'), (string) $r->json('result.content.0.text'));
+            $this->assertSame(TicketStatus::Closed, $ticket->fresh()->status);
+            $this->assertUnlinkedAudit('close_ticket');
+        }
     }
 
     public function test_flag_does_not_grant_a_verb(): void
     {
         $ticket = $this->ticket();
-        $this->callTool($this->token(['move_ticket_to_client']), 'close_ticket', $this->closeArgs($ticket))->assertJsonPath('result.isError', true);
+        $this->callTool($this->token(['move_ticket_to_client'], true), 'close_ticket', $this->closeArgs($ticket))->assertJsonPath('result.isError', true);
         $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status);
     }
 
@@ -103,7 +111,7 @@ class UnlinkedTicketScopeTest extends TestCase
         foreach (['set_ticket_contact', 'update_ticket', 'set_ticket_status', 'assign_ticket', 'assign_asset', 'unassign_asset'] as $tool) {
             $r = $this->callTool($this->token([$tool]), $tool, ['ticket_id' => $ticket->id]);
             $r->assertJsonPath('result.isError', true);
-            $this->assertStringContainsString('move_ticket_to_client (confirm_client_name required)', $r->json('result.content.0.text'));
+            $this->assertSame("ticket {$ticket->id} is not linked to a client; link it with move_ticket_to_client (confirm_client_name required)", $r->json('result.content.0.text'));
         }
         $this->assertNull($ticket->fresh()->client_id);
     }
@@ -126,7 +134,7 @@ class UnlinkedTicketScopeTest extends TestCase
         $this->assertStringContainsString('client_id must be omitted', $r->json('result.content.0.text'));
     }
 
-    public function test_staged_grant_cannot_execute_immediately_even_when_flagged(): void
+    public function test_staged_grant_cannot_execute_immediately_without_extra_flag(): void
     {
         $ticket = $this->ticket();
         $token = $this->token(['close_ticket:staged']);
@@ -154,12 +162,13 @@ class UnlinkedTicketScopeTest extends TestCase
         $this->assertSame(TicketStatus::PendingClient, $ticket->fresh()->status);
     }
 
-    public function test_staged_close_requires_flag_and_stays_held(): void
+    #[TestWith([null])]
+    #[TestWith([false])]
+    #[TestWith([true])]
+    public function test_staged_close_needs_no_extra_flag_and_stays_held(?bool $legacy): void
     {
         $ticket = $this->ticket();
-        $this->callTool($this->token(['close_ticket:staged'], false), 'stage_close_ticket', $this->closeArgs($ticket))->assertJsonPath('result.isError', true);
-        $this->assertSame(0, TechnicianRun::count());
-        $r = $this->callTool($this->token(['close_ticket:staged']), 'stage_close_ticket', $this->closeArgs($ticket));
+        $r = $this->callTool($this->token(['close_ticket:staged'], $legacy), 'stage_close_ticket', $this->closeArgs($ticket));
         $this->assertFalse((bool) $r->json('result.isError'), (string) $r->json('result.content.0.text'));
         $run = TechnicianRun::firstOrFail();
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);

@@ -8,61 +8,59 @@ use App\Models\User;
 use App\Support\McpConfig;
 use App\Support\McpStaffToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 class UnlinkedTicketTrustFlagTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_existing_and_new_tokens_default_denied_and_migration_is_additive(): void
+    public function test_legacy_column_is_retained_but_not_a_runtime_or_mass_assignable_flag(): void
     {
-        McpConfig::rotateStaffToken(allowedTools: ['close_ticket'], label: 'synthetic');
-        $row = McpToken::where('label', 'synthetic')->firstOrFail();
-        $migration = require database_path('migrations/2026_09_15_000001_add_unlinked_ticket_permission_to_mcp_tokens.php');
-        $migration->down();
-        $migration->up();
-        $this->assertFalse($row->fresh()->allow_unlinked_tickets);
-        $this->assertSame(['close_ticket'], $row->fresh()->tools);
-        McpConfig::rotateStaffToken(allowedTools: ['close_ticket'], label: 'another-synthetic');
-        $this->assertFalse(McpToken::where('label', 'another-synthetic')->firstOrFail()->allow_unlinked_tickets);
-        $row->update(['allow_unlinked_tickets' => true]);
-        $migration->up();
-        $this->assertTrue($row->fresh()->allow_unlinked_tickets);
-        $this->assertFalse((new McpStaffToken)->allowUnlinkedTickets);
+        $this->assertTrue(Schema::hasColumn('mcp_tokens', 'allow_unlinked_tickets'));
+        $this->assertFalse(property_exists(McpStaffToken::class, 'allowUnlinkedTickets'));
+        $this->assertNotContains('allow_unlinked_tickets', (new McpToken)->getFillable());
+        $this->assertArrayNotHasKey('allow_unlinked_tickets', (new McpToken)->getCasts());
+        foreach ([false, true] as $legacy) {
+            $bearer = McpConfig::rotateStaffToken(allowedTools: ['close_ticket'], label: 'synthetic');
+            $row = McpToken::where('label', 'synthetic')->firstOrFail();
+            DB::table('mcp_tokens')->where('id', $row->id)->update(['allow_unlinked_tickets' => $legacy]);
+            $this->assertFalse(property_exists(McpConfig::resolveStaffToken($bearer), 'allowUnlinkedTickets'));
+            McpConfig::rotateStaffToken(allowedTools: ['close_ticket'], label: 'synthetic');
+            $this->assertSame($legacy, (bool) DB::table('mcp_tokens')->where('id', $row->id)->value('allow_unlinked_tickets'));
+        }
     }
 
-    public function test_trust_update_requires_web_auth_not_a_bearer_and_validates_boolean(): void
+    public function test_retired_input_is_ignored_without_weakening_web_auth_or_other_flags(): void
     {
         $bearer = McpConfig::rotateStaffToken(allowedTools: ['close_ticket'], label: 'synthetic');
         $row = McpToken::where('label', 'synthetic')->firstOrFail();
         $route = route('settings.mcp-tokens.trust-flags', $row);
         $this->patchJson($route, ['allow_unlinked_tickets' => true])->assertUnauthorized();
         $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->patchJson($route, ['allow_unlinked_tickets' => true])->assertUnauthorized();
-        $this->assertFalse($row->fresh()->allow_unlinked_tickets);
-        $this->actingAs(User::factory()->create())->patchJson($route, ['allow_unlinked_tickets' => 'invalid'])->assertUnprocessable();
-        $this->assertFalse($row->fresh()->allow_unlinked_tickets);
-        $this->patchJson($route, ['allow_unlinked_tickets' => true])->assertOk();
-        $this->assertTrue($row->fresh()->allow_unlinked_tickets);
-        $this->assertTrue(McpConfig::resolveStaffToken($bearer)->allowUnlinkedTickets);
-        $audit = McpAuditLog::where('method', 'token/trust_flags')->latest('id')->firstOrFail();
-        $this->assertTrue($audit->arguments['allow_unlinked_tickets']);
-        $this->patchJson($route, ['ai_actor' => true])->assertOk();
-        $this->assertTrue($row->fresh()->allow_unlinked_tickets, 'Omitted flag is preserved');
-        $this->patchJson($route, ['allow_unlinked_tickets' => false])->assertOk();
-        $this->assertFalse(McpConfig::resolveStaffToken($bearer)->allowUnlinkedTickets);
+        $this->actingAs(User::factory()->create())->patchJson($route, ['ai_actor' => 'invalid'])->assertUnprocessable();
+        foreach ([false, true] as $legacy) {
+            DB::table('mcp_tokens')->where('id', $row->id)->update(['allow_unlinked_tickets' => $legacy]);
+            $this->patchJson($route, ['allow_unlinked_tickets' => ! $legacy, 'ai_actor' => true])->assertOk();
+            $this->assertSame($legacy, (bool) DB::table('mcp_tokens')->where('id', $row->id)->value('allow_unlinked_tickets'));
+            $this->assertTrue($row->fresh()->ai_actor);
+            $audit = McpAuditLog::where('method', 'token/trust_flags')->latest('id')->firstOrFail();
+            $this->assertArrayNotHasKey('allow_unlinked_tickets', $audit->arguments);
+        }
     }
 
-    public function test_settings_shows_default_denied_flag_and_draft_does_not_grant_it(): void
+    public function test_settings_has_no_retired_switch_for_new_or_legacy_tokens(): void
     {
         $this->actingAs(User::factory()->create())->post(route('settings.mcp-tokens.store'));
         $row = McpToken::latest('id')->firstOrFail();
-        $this->assertFalse($row->allow_unlinked_tickets);
-        $this->get(route('settings.mcp-tokens.show', $row))->assertOk()
-            ->assertSee('data-flag="allow_unlinked_tickets"', false)
-            ->assertSee('Default denied.')
-            ->assertSee('destination name confirmation');
-        $row->update(['allow_unlinked_tickets' => true]);
-        $this->get(route('settings.mcp-tokens.show', $row))->assertOk()
-            ->assertSee('data-flag="allow_unlinked_tickets" checked', false);
+        foreach ([false, true] as $legacy) {
+            DB::table('mcp_tokens')->where('id', $row->id)->update(['allow_unlinked_tickets' => $legacy]);
+            $this->get(route('settings.mcp-tokens.show', $row))->assertOk()
+                ->assertDontSee('allow_unlinked_tickets', false)
+                ->assertDontSee('Allow unlinked-ticket triage')
+                ->assertSee('data-flag="ai_actor"', false)
+                ->assertSee('data-flag="require_explicit_client_scope"', false);
+        }
     }
 }

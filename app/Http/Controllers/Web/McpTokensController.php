@@ -73,7 +73,6 @@ class McpTokensController extends Controller
             'tools' => [],
             'ai_actor' => false,
             'require_explicit_client_scope' => true,
-            'allow_unlinked_tickets' => false,
             'draft' => true,
         ]);
 
@@ -223,7 +222,6 @@ class McpTokensController extends Controller
         $request->validate([
             'ai_actor' => ['sometimes', 'boolean'],
             'require_explicit_client_scope' => ['sometimes', 'boolean'],
-            'allow_unlinked_tickets' => ['sometimes', 'boolean'],
         ]);
 
         $flags = $this->trustFlagsFromRequest($request, $token);
@@ -373,7 +371,7 @@ class McpTokensController extends Controller
             ->get();
     }
 
-    /** @return array{ai_actor: bool, require_explicit_client_scope: bool, allow_unlinked_tickets: bool} */
+    /** @return array{ai_actor: bool, require_explicit_client_scope: bool} */
     private function trustFlagsFromRequest(Request $request, ?McpToken $existingToken = null): array
     {
         $aiActor = $request->has('ai_actor')
@@ -387,9 +385,6 @@ class McpTokensController extends Controller
         return [
             'ai_actor' => $aiActor,
             'require_explicit_client_scope' => $requireExplicitClientScope,
-            'allow_unlinked_tickets' => $request->has('allow_unlinked_tickets')
-                ? $request->boolean('allow_unlinked_tickets')
-                : (bool) ($existingToken?->allow_unlinked_tickets ?? false),
         ];
     }
 

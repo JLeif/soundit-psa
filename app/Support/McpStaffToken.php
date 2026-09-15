@@ -20,7 +20,6 @@ final class McpStaffToken
         public readonly bool $aiActor = false,
         public readonly bool $requireExplicitClientScope = false,
         public readonly array $toolModes = [],
-        public readonly bool $allowUnlinkedTickets = false,
     ) {}
 
     public function allows(string $toolName): bool

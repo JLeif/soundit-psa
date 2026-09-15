@@ -799,13 +799,9 @@ class McpStaffController extends Controller
                 $ticketScope = UnlinkedTicketScope::Unlinked;
                 // Server-derived, retained even if linking changes the ticket.
                 $request->attributes->set('mcp_ticket_scope', $ticketScope);
-                $token = $request->attributes->get('mcp_staff_token');
-                $granted = $token instanceof McpStaffToken && $token->allowUnlinkedTickets;
-                if (! $granted || ! UnlinkedTicketScope::admits((string) $name)) {
+                // Ordinary verb/mode grants admit triage; other writes require linking first.
+                if (! UnlinkedTicketScope::admits((string) $name)) {
                     $message = "ticket {$ticketId} is not linked to a client; link it with move_ticket_to_client (confirm_client_name required)";
-                    if (! $granted) {
-                        $message .= '; this token is not granted unlinked-ticket access';
-                    }
                 }
             }
             if (! $ticket) {
