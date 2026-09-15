@@ -23,10 +23,10 @@ class HuntressReconcileEscalations extends Command
             return self::FAILURE;
         }
 
-        $client = new HuntressClient([
+        $client = app()->makeWith(HuntressClient::class, ['config' => [
             'api_key' => HuntressConfig::get('api_key'),
             'api_secret' => HuntressConfig::get('api_secret'),
-        ]);
+        ]]);
 
         $service = new HuntressEscalationReconcileService($client, $ticketService, $alertService);
 
@@ -34,9 +34,11 @@ class HuntressReconcileEscalations extends Command
 
         $result = $service->reconcile();
 
-        $summary = "{$result->updated} resolved".($result->errors > 0 ? ", {$result->errors} errors" : '');
+        $summary = $result->summary();
         $this->info("Done: {$summary}.");
 
-        return $result->errors > 0 ? self::FAILURE : self::SUCCESS;
+        // Dark/unlinked runs are clean no-ops, not outages. Eligible zero-check
+        // runs and all errors remain failures.
+        return $result->failed() ? self::FAILURE : self::SUCCESS;
     }
 }

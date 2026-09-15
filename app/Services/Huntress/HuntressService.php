@@ -37,6 +37,23 @@ class HuntressService
      */
     public function createTicketFromCw(array $data): array
     {
+        // The link window compares this anchor against UTC-normalized event times,
+        // so it must be stamped in UTC regardless of the app display timezone.
+        $cwReceivedAt = now('UTC')->toDateTimeString();
+
+        // Serialize the dedup read, ticket creation, alert upsert and immutable capture
+        // with promotion/polling. An upsert must never reassign an alert between the
+        // poller's final authority check and resolution, or commit without its candidate.
+        // This is local database work only; no vendor request is made under the mutex.
+        return DB::transaction(function () use ($data, $cwReceivedAt) {
+            DB::table('huntress_link_mutex')->where('id', 1)->increment('version');
+
+            return $this->createTicketFromCwLocked($data, $cwReceivedAt);
+        }, 3);
+    }
+
+    private function createTicketFromCwLocked(array $data, string $cwReceivedAt): array
+    {
         $rawSubject = $data['summary'] ?? 'Huntress Incident Report';
         $subject = $this->sanitizeString($rawSubject, 255);
         $description = $this->sanitizeString($data['initialDescription'] ?? '', 65535);
@@ -64,8 +81,8 @@ class HuntressService
 
         // Dedup: extract incident report ID from body URL, fall back to subject hash.
         // BOTH URL forms count: `infection_reports/{id}` is the legacy spelling and
-        // `incident_reports/{id}` the current one — same pair HuntressIncidentReconcileService
-        // ::extractIncidentId accepts. Matching only the legacy form left current-form incident
+        // `incident_reports/{id}` the current one. These are ingest dedup locators,
+        // not polling authority. Matching only the legacy form left current-form incident
         // reports without a dedup key, without an alert source id, and without a type signal.
         // Host is matched the same way as the record-path guard below: huntress.io or a
         // subdomain of it, never a host that merely ends in that string (`phish-huntress.io`).
@@ -76,10 +93,9 @@ class HuntressService
             $incidentReportUrl = $m[1];
         }
 
-        // Capture an escalation id if the payload carries an escalations URL. This makes an
-        // escalation ticket reconcilable by EXACT id (HuntressEscalationReconcileService's id
-        // fast path) rather than the weaker org+subject correspondence. Most escalation
-        // payloads (e.g. account-level "Failed to Deliver") carry none — a no-op then.
+        // Retain the legacy escalation locator as metadata for display/diagnostics only.
+        // Polling cannot trust it: HuntressLinkService separately captures an immutable
+        // candidate and requires signed-event correlation before it can authorize a read.
         $escalationId = null;
         if (preg_match('#escalations/(\d+)#', $description, $m)) {
             $escalationId = (int) $m[1];
@@ -145,6 +161,7 @@ class HuntressService
         $duplicate = null;
         if ($incidentReportUrl) {
             $duplicate = Ticket::where('source', TicketSource::Huntress->value)
+                ->where('client_id', $client->id)
                 ->where('description', 'like', '%'.$incidentReportUrl.'%')
                 ->first();
         } else {
@@ -270,6 +287,8 @@ class HuntressService
             'status' => AlertStatus::Ticketed,
             'ticket_id' => $ticket->id,
         ]);
+
+        app(HuntressLinkService::class)->capture($alert, $ticket, $data['initialDescription'] ?? '', $cwReceivedAt);
 
         Log::info('[Huntress CW] Created ticket and alert', [
             'ticket_id' => $ticket->id,
