@@ -16,6 +16,7 @@ use App\Services\Ninja\NinjaClient;
 use App\Support\AiConfig;
 use App\Support\AppRiverConfig;
 use App\Support\AppTimezone;
+use App\Support\AutoElevateConfig;
 use App\Support\BenjiPaysConfig;
 use App\Support\CippConfig;
 use App\Support\ControlDConfig;
@@ -119,6 +120,10 @@ class IntegrationsController extends Controller
         $stripeMode = StripeConfig::get('mode');
         $stripeConnected = (bool) $fmtTs(Setting::getValue('stripe_connected_at'));
         $stripeAutoPush = Setting::getValue('stripe_auto_push_invoices') === '1';
+
+        $autoelevateConfigured = AutoElevateConfig::isConfigured();
+        $autoelevateLastVerifiedAt = $fmtTs(Setting::getValue('autoelevate_last_verified_at'));
+        $autoelevateLastOutcome = Setting::getValue('autoelevate_last_verification_outcome');
 
         // BenjiPays
         $benjipaysConfigured = BenjiPaysConfig::isConfigured();
@@ -535,6 +540,9 @@ class IntegrationsController extends Controller
         return view('settings.integrations', compact(
             'qboClientId', 'qboHasSecret', 'qboEnvironment', 'qboRealmId', 'qboConnected', 'qboTokenExpiresAt', 'qboAutoPush', 'qboHasWebhookToken', 'qboDefaultIncomeId', 'qboDefaultExpenseId', 'qboIncomeAccounts', 'qboExpenseAccounts',
             'stripeConfigured', 'stripeMode', 'stripeConnected', 'stripeAutoPush', 'stripeEnabled',
+            'autoelevateConfigured',
+            'autoelevateLastVerifiedAt',
+            'autoelevateLastOutcome',
             'benjipaysConfigured',
             'benjipaysLastVerifiedAt',
             'benjipaysLastOutcome',
@@ -695,6 +703,43 @@ class IntegrationsController extends Controller
 
         return redirect()->route('settings.integrations')
             ->with('success', 'Stripe credentials saved.');
+    }
+
+    // --- AutoElevate: Bearer-only stage 1 ---
+
+    public function testAutoElevate(\App\Services\AutoElevate\AutoElevateClient $client)
+    {
+        $outcome = $client->checkConnection();
+        Setting::setValue('autoelevate_last_verified_at', now()->toIso8601String());
+        Setting::setValue('autoelevate_last_verification_outcome', $outcome);
+
+        return redirect()->route('settings.integrations')
+            ->with($outcome === 'ok' ? 'success' : 'error', $outcome === 'ok'
+                ? 'AutoElevate companies connection check succeeded. Other permissions were not tested.'
+                : 'AutoElevate connection check failed. See the recorded status for guidance.');
+    }
+
+    public function updateAutoElevate(Request $request)
+    {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->only('api_key'), [
+            // Local encrypted TEXT storage bound, not a vendor key-length contract.
+            'api_key' => ['nullable', 'string', 'max:4096', 'not_regex:/[\\x00-\\x1F\\x7F]/'],
+        ]);
+        if ($validator->fails()) {
+            // Never flash submitted credentials, including invalid values.
+            return redirect()->route('settings.integrations')->withErrors($validator);
+        }
+        $submitted = trim((string) ($validator->validated()['api_key'] ?? ''));
+        if ($submitted !== '' && $submitted !== self::SECRET_MASK) {
+            Setting::setEncrypted('autoelevate_api_key', $submitted);
+            // A result for an old key must not appear to verify its replacement.
+            Setting::setValue('autoelevate_last_verified_at', null);
+            Setting::setValue('autoelevate_last_verification_outcome', null);
+
+            return redirect()->route('settings.integrations')->with('success', 'AutoElevate API key saved.');
+        }
+
+        return redirect()->route('settings.integrations')->with('success', 'AutoElevate API key unchanged.');
     }
 
     // --- BenjiPays ---
