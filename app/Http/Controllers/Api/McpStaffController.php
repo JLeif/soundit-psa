@@ -345,6 +345,8 @@ class McpStaffController extends Controller
     private const INTAKE_MANAGE_TOOLS = [
         'link_email_to_ticket',
         'create_ticket_from_email',
+        'resolve_email_item',
+        'stage_resolve_email_item',
         'dismiss_email_item',
         'link_call_to_ticket',
         'create_ticket_from_call',
@@ -573,6 +575,11 @@ class McpStaffController extends Controller
         $offboarding = in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true);
         if ($offboarding && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
             return $this->error($id, -32602, 'Offboarding requires staged=true and an explicit positive integer client_id; immediate calls are refused, not downgraded.');
+        }
+
+        if (in_array($name, ['resolve_email_item', 'stage_resolve_email_item'], true)
+            && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
+            return $this->error($id, -32602, 'Email resolution requires staged=true and an explicit positive integer client_id; immediate execution is unavailable.');
         }
 
         // Unified staged/immediate boundary. Retired stage_* names remain
@@ -1384,6 +1391,18 @@ class McpStaffController extends Controller
     /** @return array<string, mixed> */
     private function auditArguments(?string $tool, array $args): array
     {
+        if (in_array($tool, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
+            $safe = [];
+            foreach (['email_id', 'client_id'] as $key) {
+                if (is_int($args[$key] ?? null)) {
+                    $safe[$key] = $args[$key];
+                }
+            }
+            $safe['reason_length'] = is_string($args['reason'] ?? null) ? mb_strlen($args['reason']) : 0;
+
+            return $safe;
+        }
+
         if ($tool === 'send_reply') {
             return $this->auditSendReplyArguments($args);
         }

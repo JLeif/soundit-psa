@@ -1121,6 +1121,31 @@ PROMPT;
     }
 
     /**
+     * Native sender-wide client resolution, shared by the cockpit and held MCP
+     * approval. Lock in stable ID order like ticket creation. An approval may
+     * bind an exact cohort; never resolve an unseen newer email under that seal.
+     *
+     * @return array<int, int>
+     */
+    public function linkSenderClient(Email $email, int $clientId, ?array $expectedIds = null): array
+    {
+        return DB::transaction(function () use ($email, $clientId, $expectedIds): array {
+            Client::findOrFail($clientId);
+            $rows = Email::where('from_address', $email->from_address)
+                ->whereNull('client_id')->orderBy('id')->lockForUpdate()->get();
+            $ids = $rows->modelKeys();
+            if (! in_array($email->id, $ids, true) || ($expectedIds !== null && $ids !== $expectedIds)) {
+                throw new \DomainException('Sender backlog changed; re-stage resolution for a fresh approval.');
+            }
+            // ID-bound write, not a second open-ended sender query: a new arrival
+            // between selection and update cannot be swept into this approval.
+            Email::whereIn('id', $ids)->whereNull('client_id')->update(['client_id' => $clientId]);
+
+            return $ids;
+        });
+    }
+
+    /**
      * Resolve the sender to a person and/or client.
      */
     public function resolveSender(Email $email): Email

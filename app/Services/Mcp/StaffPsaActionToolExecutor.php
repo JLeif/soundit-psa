@@ -127,6 +127,8 @@ class StaffPsaActionToolExecutor
             'set_primary_asset_user' => $this->setPrimaryAssetUser($arguments, $actorLabel),
             'link_email_to_ticket' => $this->linkEmailToTicket($arguments, $actorLabel),
             'create_ticket_from_email' => $this->createTicketFromEmail($arguments, $actorLabel),
+            'resolve_email_item' => ['error' => 'Email resolution is held-only; use staged=true.'],
+            'stage_resolve_email_item' => app(\App\Services\Email\EmailResolutionService::class)->stage($arguments, (int) $clientId, $actorLabel),
             'dismiss_email_item' => $this->dismissEmailItem($arguments, $actorLabel),
             'link_call_to_ticket' => $this->linkCallToTicket($arguments, $actorLabel),
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),

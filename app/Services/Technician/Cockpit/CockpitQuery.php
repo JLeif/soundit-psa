@@ -68,7 +68,8 @@ class CockpitQuery
     public function pendingCount(): int
     {
         // Matches counts()'s pending/total fold-in.
-        return TechnicianRun::whereIn('state', self::PENDING_STATES)->count();
+        return TechnicianRun::whereIn('state', self::PENDING_STATES)->count()
+            + \App\Models\EmailResolutionProposal::where('state', 'pending')->count();
     }
 
     /** @return array{replies:int,closures:int,actions:int,intake:int,flagged:int,needs:int,queued:int,pending:int,total:int} */
@@ -100,7 +101,8 @@ class CockpitQuery
             ->whereIn('state', [TechnicianRunState::QueuedOffline->value, TechnicianRunState::Expired->value])
             ->count();
 
-        $pending = $replies + $closures + $actions + $intake + $flagged + $queued;
+        $pending = $replies + $closures + $actions + $intake + $flagged + $queued
+            + \App\Models\EmailResolutionProposal::where('state', 'pending')->count();
         $total = $pending + $needs;
 
         return [

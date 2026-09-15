@@ -96,7 +96,7 @@ class McpToolRegistry
             $meshAdmin = self::shape(self::withoutStagedAliases(self::meshAdminTools()));
             $psaRecords = self::shape(self::psaRecordsTools());
             $psaRead = self::shape(self::psaReadTools());
-            $intakeManage = self::shape(self::intakeManageTools());
+            $intakeManage = self::shape(self::withoutStagedAliases(self::intakeManageTools()));
             $taxonomy = self::shape(self::taxonomyTools());
             // Split the calendar surface into reads + writes so the grant catalog shows a write as
             // a WRITE, never under a "Reads" tier (psa-lulgh — a mislabelled tier is how an operator
@@ -1552,9 +1552,30 @@ class McpToolRegistry
         return [
             self::linkEmailToTicketTool(),
             self::createTicketFromEmailTool(),
+            self::resolveEmailItemTool(),
+            self::resolveEmailItemTool(true),
             self::dismissEmailItemTool(),
             self::linkCallToTicketTool(),
             self::createTicketFromCallTool(),
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function resolveEmailItemTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_resolve_email_item' : 'resolve_email_item',
+            'description' => 'Propose sender-wide client resolution for an unmatched email. Held-only: requires staged=true and an explicit resolve_email_item:staged grant. Shows the exact unresolved sender backlog IDs/count and target client for cockpit approval; any backlog change requires a new proposal. No ticket or contact is created. Default-ungranted.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'email_id' => ['type' => 'integer', 'minimum' => 1],
+                    'client_id' => ['type' => 'integer', 'minimum' => 1],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 1000],
+                ],
+                'required' => ['email_id', 'client_id', 'reason'],
+                'additionalProperties' => false,
+            ],
         ];
     }
 
