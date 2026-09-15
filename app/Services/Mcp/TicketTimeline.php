@@ -94,7 +94,10 @@ final class TicketTimeline
                 $entry['direction'] = $model?->direction?->value;
                 $entry['email_id'] = (int) $row->id;
             } else {
-                $model = AssistantConversation::with('user', 'messages')->where('context_type', 'ticket')->where('context_id', $ticket->id)->find($row->id);
+                $model = AssistantConversation::with('user')->where('context_type', 'ticket')->where('context_id', $ticket->id)->find($row->id);
+                if ($models && $model) {
+                    $model->load(['messages' => fn ($q) => $q->whereIn('role', ['user', 'assistant'])]);
+                }
                 $entry['actor'] = $model?->user?->name ?? 'Assistant';
                 // No assistant message/tool payloads in the API projection.
                 $entry['summary'] = $this->text($model?->title ?? 'AI conversation');

@@ -73,7 +73,10 @@ class TicketTimelineTest extends TestCase
         $ticket = $this->ticket();
         $at = '2026-01-01 10:00:00';
         $this->note($ticket, $at);
-        $this->action($ticket, $at);
+        $action = $this->action($ticket, $at);
+        McpAuditLog::forceCreate(['id' => $action->id, 'ticket_id' => $ticket->id, 'client_id' => $ticket->client_id,
+            'server_name' => 'staff', 'method' => 'tools/call', 'tool_name' => 'synthetic_read', 'actor_label' => 'Synthetic reader',
+            'status' => 'success', 'activity_kind' => 'read', 'duration_ms' => 1, 'created_at' => $at]);
         $this->email($ticket, $at);
         $this->email($ticket, $at, 'outbound');
         PhoneCall::forceCreate(['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id, 'call_uuid' => (string) Str::uuid(),
@@ -82,13 +85,16 @@ class TicketTimelineTest extends TestCase
             'user_id' => User::factory()->create()->id, 'title' => 'Synthetic chat', 'created_at' => $at]);
         $timeline = app(TicketTimeline::class);
         $all = $timeline->page($ticket);
-        $this->assertCount(6, $all['items']);
+        $this->assertCount(7, $all['items']);
+        $this->assertContains('tool_call:'.$action->id, array_column($all['items'], 'id'));
+        $this->assertContains('tool_action:'.$action->id, array_column($all['items'], 'id'));
         $this->assertEqualsCanonicalizing(TicketTimeline::TYPES, array_unique(array_column($all['items'], 'kind')));
         $this->assertEqualsCanonicalizing(['inbound', 'outbound'], array_column(array_filter($all['items'], fn ($e) => $e['kind'] === 'email'), 'direction'));
         $seen = [];
         $input = ['limit' => 1];
         do {
             $page = $timeline->page($ticket, $input);
+            $this->assertSame([], array_intersect($seen, array_column($page['items'], 'id')), 'Cursor must make progress without repeating IDs');
             array_push($seen, ...array_column($page['items'], 'id'));
             $input['before'] = $page['next_cursor'];
         } while ($page['has_more']);
@@ -97,6 +103,7 @@ class TicketTimelineTest extends TestCase
         $input = ['limit' => 1, 'after' => $page['after']];
         do {
             $page = $timeline->page($ticket, $input);
+            $this->assertSame([], array_intersect($seen, array_column($page['items'], 'id')), 'Cursor must make progress without repeating IDs');
             array_push($seen, ...array_column($page['items'], 'id'));
             $input['after'] = $page['next_cursor'];
         } while ($page['has_more']);
@@ -138,6 +145,20 @@ class TicketTimelineTest extends TestCase
             ->assertSee('Awaiting approval; not executed.')->assertDontSee('RAW-SECRET-PAYLOAD');
         $this->get(route('tickets.show', ['ticket' => $ticket, 'types' => ['tool']]))->assertOk()
             ->assertSee('synthetic_timeline_tool')->assertDontSee('Newest synthetic note marker');
+    }
+
+    public function test_ai_chat_projection_never_renders_raw_tool_messages(): void
+    {
+        $ticket = $this->ticket();
+        $user = User::factory()->create();
+        $chat = AssistantConversation::create(['context_type' => 'ticket', 'context_id' => $ticket->id,
+            'user_id' => $user->id, 'title' => 'Synthetic conversation']);
+        $chat->messages()->create(['role' => 'tool', 'content' => 'RAW-TOOL-MESSAGE-MARKER']);
+        $chat->messages()->create(['role' => 'assistant', 'content' => 'Safe synthetic assistant text']);
+        $page = app(TicketTimeline::class)->page($ticket, ['types' => ['ai_chat']]);
+        $this->assertStringNotContainsString('RAW-TOOL-MESSAGE-MARKER', json_encode($page));
+        $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()
+            ->assertDontSee('RAW-TOOL-MESSAGE-MARKER')->assertSee('Safe synthetic assistant text');
     }
 
     public function test_grant_discovery_self_noise_scope_and_state_legend(): void
