@@ -1354,13 +1354,19 @@ class TacticalClient
         // Never log $command and never fold it into an error string: it holds --auth.
         $command = $this->installerCommand($deployment['cmd'] ?? null);
 
+        $windows = $platform === 'windows' && $command !== null
+            ? WindowsInstallerCommand::build($command, $url, $goarch) : null;
+        if ($platform === 'windows') {
+            $command = $windows['script'] ?? null;
+        }
+
         return new \App\Services\Portal\InstallerInfo(
             downloadUrl: $url,
             installScript: $command,
-            instructions: self::installerInstructions($target['plat'], $command !== null),
-            expectedFilename: $platform === 'windows' && $command !== null
-                && preg_match('/\A(tacticalagent-v[0-9.]+-windows-(?:amd64|386)\.exe) /', $command, $match) === 1
-                    ? $match[1] : null,
+            instructions: $platform === 'windows' && $command !== null
+                ? 'Open PowerShell as Administrator and paste the command. It downloads the exact installer into a new temporary folder before installing and enrolling. A download alone does not register the computer; ask your technician to verify check-in.'
+                : self::installerInstructions($target['plat'], $command !== null),
+            expectedFilename: $windows['filename'] ?? null,
         );
     }
 
@@ -1396,7 +1402,9 @@ class TacticalClient
                 'sink' => $sink,
                 'timeout' => 120, 'connect_timeout' => 10,
                 'http_errors' => false, 'allow_redirects' => false,
-                'headers' => ['Accept' => 'application/octet-stream'],
+                // DRF negotiates its JSON renderer before the view returns FileResponse.
+                // An octet-stream-only Accept causes HTTP 406 before generation.
+                'headers' => ['Accept' => '*/*'],
                 'progress' => static function ($total, $downloaded): void {
                     if ($total > 32 * 1024 * 1024 || $downloaded > 32 * 1024 * 1024) {
                         throw new \RuntimeException('Installer exceeds size limit.');
@@ -1409,6 +1417,12 @@ class TacticalClient
             // Arbitrary vendor text may contain credentials, command lines or HTML.
             $error = json_decode($body, true);
             $message = is_string($error) ? $error : null;
+            if (is_array($error) && array_key_exists('ret', $error)) {
+                throw new InstallerGenerationException('The upstream installer service could not generate the guided setup. Use the manual fallback or contact your technician.');
+            }
+            if ($response->getStatusCode() === 406) {
+                throw new InstallerGenerationException('The upstream installer request was not accepted. Use the manual fallback or contact your technician.');
+            }
             if (in_array($message, [
                 "Not available in insecure mode. Please use the 'Manual' method.",
                 'Something went wrong. Check debug error log for exact error message',

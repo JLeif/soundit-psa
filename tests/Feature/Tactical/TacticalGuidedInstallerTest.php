@@ -64,6 +64,30 @@ class TacticalGuidedInstallerTest extends TestCase
         return ['platform' => 'windows', 'method' => 'exe', 'goarch' => '386', 'nonce' => $matches[1]];
     }
 
+    public function test_rendered_fallback_contains_actual_self_downloading_command(): void
+    {
+        [$client, $mock] = $this->portal();
+        $command = 'tacticalagent-v2.9.1-windows-386.exe /VERYSILENT /SUPPRESSMSGBOXES && ping 127.0.0.1 -n 7'
+            .' && "C:\\Program Files\\TacticalAgent\\tacticalrmm.exe" -m install --api https://rmm.example.test'
+            .' --client-id 3 --site-id 5 --agent-type workstation --auth synthetic-token';
+        $transport = $this->transport(new Response(200, [], json_encode(['url' => 'https://downloads.example.test/agent?token=synthetic', 'cmd' => $command])));
+        $mock->shouldReceive('getInstallerInfo')->once()->with('Example|Test', 'windows', '386')
+            ->andReturnUsing(fn () => $transport->getInstallerInfo('Example|Test', 'windows', '386'));
+        $page = $this->post('/setup/'.$client->portal_install_token.'/command', [
+            'platform' => 'windows', 'method' => 'manual', 'goarch' => '386',
+        ])->assertOk();
+        $page->assertSee('PowerShell as Administrator')->assertSee('Invoke-WebRequest -UseBasicParsing')
+            ->assertSee('tacticalagent-v2.9.1-windows-386.exe')->assertSee('-OutFile $file -ErrorAction Stop')
+            ->assertSee('$process.ExitCode -ne 0')->assertSee('$LASTEXITCODE -ne 0')
+            ->assertDontSee('Download the required manual installer')->assertDontSee('Command Prompt');
+        $this->assertStringContainsString('no-store', $page->headers->get('Cache-Control'));
+        $this->assertCount(2, $this->history, 'No hidden secondary mint or URL validation request');
+        $payload = json_decode((string) $this->history[1]['request']->getBody(), true);
+        $this->assertSame('386', $payload['goarch']);
+        $this->assertSame('manual', $payload['installMethod']);
+        $this->assertStringNotContainsString('synthetic-token', (string) PortalInstallAudit::all()->toJson());
+    }
+
     public function test_binary_request_contract_and_memory_only_sink(): void
     {
         $binary = 'MZ'.str_repeat('x', 2048);
@@ -71,6 +95,7 @@ class TacticalGuidedInstallerTest extends TestCase
         $this->assertSame($binary, $client->generateWindowsInstaller('Example|Test', '386'));
         $this->assertCount(2, $this->history);
         $request = $this->history[1];
+        $this->assertSame('*/*', $request['request']->getHeaderLine('Accept'), 'DRF negotiates before FileResponse; octet-stream-only is a 406');
         $this->assertSame('POST', $request['request']->getMethod());
         $this->assertSame('/agents/installer/', $request['request']->getUri()->getPath());
         $payload = json_decode((string) $request['request']->getBody(), true);
@@ -113,6 +138,8 @@ class TacticalGuidedInstallerTest extends TestCase
         $generator = 'Something went wrong. Check debug error log for exact error message';
 
         return [
+            'negotiation refusal' => [406, 'application/json', '{"detail":"sensitive upstream text"}', 'The upstream installer request was not accepted. Use the manual fallback or contact your technician.'],
+            'generator ret never echoed' => [200, 'application/octet-stream', '{"ret":"--auth private-token https://example.test/?secret=value"}', 'The upstream installer service could not generate the guided setup. Use the manual fallback or contact your technician.'],
             'error returned as binary' => [200, 'application/octet-stream', str_repeat('error', 300), $invalid],
             'tiny MZ' => [200, 'application/octet-stream', 'MZ', $invalid],
             'wrong type' => [200, 'text/html', 'MZ'.str_repeat('x', 2048), $invalid],
@@ -174,12 +201,12 @@ class TacticalGuidedInstallerTest extends TestCase
         $page = $this->post('/setup/'.$client->portal_install_token.'/command', [
             'platform' => 'windows', 'method' => 'manual', 'goarch' => '386',
         ])->assertOk();
-        $page->assertSee($filename)->assertSee('Command Prompt as Administrator (not PowerShell)')
-            ->assertSee('cd /d "FULL PATH TO YOUR DOWNLOAD FOLDER"', false)->assertSee('dir '.$filename)
-            ->assertSee('This file alone does not register the computer');
+        $page->assertSee($filename)->assertSee('PowerShell as Administrator')
+            ->assertSee('No separate download or change of folder is needed')
+            ->assertSee('stops on failure')->assertSee('not proof of enrollment')
+            ->assertDontSee('Command Prompt')->assertDontSee('Download the required manual installer');
         $html = $page->getContent();
-        $this->assertLessThan(strpos($html, 'Command Prompt as Administrator'), strpos($html, 'Download the required manual installer'));
-        $this->assertLessThan(strpos($html, 'Only after the file is present'), strpos($html, 'Command Prompt as Administrator'));
+        $this->assertLessThan(strpos($html, 'Copy and paste the command'), strpos($html, 'PowerShell as Administrator'));
         $page->assertDontSee('/download?');
     }
 

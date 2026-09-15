@@ -100,7 +100,10 @@ class TacticalInstallerCommandTest extends TestCase
 
         $this->assertNotNull($info);
         $this->assertTrue($info->hasScript(), 'the cmd TRMM returned must not be discarded');
-        $this->assertSame(self::WINDOWS_CMD, $info->installScript);
+        $this->assertStringContainsString('Invoke-WebRequest -UseBasicParsing', $info->installScript);
+        $this->assertStringContainsString(self::DOWNLOAD_URL, $info->installScript);
+        $this->assertStringContainsString("'--auth','3f9c1e7b-enrolment-token'", $info->installScript);
+        $this->assertStringNotContainsString('&&', $info->installScript);
         $this->assertSame(self::DOWNLOAD_URL, $info->downloadUrl);
     }
 
@@ -462,7 +465,7 @@ class TacticalInstallerCommandTest extends TestCase
         $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
     }
 
-    public function test_windows_instructions_do_not_send_the_user_to_powershell(): void
+    public function test_windows_instructions_name_powershell_for_the_self_downloading_command(): void
     {
         $this->configureTactical();
 
@@ -470,9 +473,8 @@ class TacticalInstallerCommandTest extends TestCase
             ->getInstallerInfo('Acme|Main', 'windows');
 
         $this->assertNotNull($info);
-        // The command is cmd.exe syntax; Windows PowerShell 5.1 rejects `&&`.
-        $this->assertStringContainsString('Command Prompt', (string) $info->instructions);
-        $this->assertStringContainsString('not PowerShell', (string) $info->instructions);
+        $this->assertStringContainsString('PowerShell as Administrator', (string) $info->instructions);
+        $this->assertStringNotContainsString('Command Prompt', (string) $info->instructions);
     }
 
     // ── 3a. #860 — download only through a signed URL ────────────────────────
