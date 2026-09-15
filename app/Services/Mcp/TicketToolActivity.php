@@ -19,6 +19,7 @@ final class TicketToolActivity
                     ->whereRaw('(a.client_id = m.client_id OR (a.client_id IS NULL AND m.client_id IS NULL))');
             })
             ->where('m.server_name', 'staff')->where('m.method', 'tools/call')
+            ->where('m.tool_name', '!=', 'get_ticket_tool_history')
             ->where('m.ticket_id', $ticket->id)->where('m.client_id', $ticket->client_id)
             ->selectRaw("m.id, 'call' as source, m.tool_name as tool, m.actor_label as actor, m.created_at, m.ticket_id, m.result_summary, m.activity_kind, a.result_status, m.status as call_status");
         // Preserve independent approvals/execution and historical actions without duplicating linked rows.
@@ -28,6 +29,7 @@ final class TicketToolActivity
                 $q->selectRaw('1')->from('mcp_audit_logs as m')->whereColumn('m.action_log_id', 'a.id')
                     ->whereColumn('m.ticket_id', 'a.ticket_id')->whereColumn('m.correlation_id', 'a.correlation_id')
                     ->where('m.server_name', 'staff')->where('m.method', 'tools/call')
+                    ->where('m.tool_name', '!=', 'get_ticket_tool_history')
                     ->whereRaw('(a.client_id = m.client_id OR (a.client_id IS NULL AND m.client_id IS NULL))');
             })
             ->selectRaw("a.id, 'action' as source, a.action_type as tool, a.actor_label as actor, a.created_at, a.ticket_id, NULL as result_summary, NULL as activity_kind, a.result_status, NULL as call_status");

@@ -105,6 +105,47 @@ class TicketToolHistoryTest extends TestCase
         $this->get(route('tickets.show', $ticket))->assertRedirect(route('login'));
     }
 
+    public function test_action_ticket_wins_over_multiple_validations_and_cli_is_inert(): void
+    {
+        $first = $this->ticket();
+        $second = $this->ticket();
+        $this->assertNull(\App\Services\Mcp\TicketToolActivityContext::current());
+        $cli = $this->action($first, 'executed');
+        $this->assertTrue($cli->exists);
+        $context = new \App\Services\Mcp\TicketToolActivityContext;
+        request()->attributes->set(\App\Services\Mcp\TicketToolActivityContext::class, $context);
+        try {
+            $context->validated($first);
+            $context->validated($second);
+            $action = $this->action($first, 'executed');
+            $context->validated($second);
+            $this->assertSame($first->id, $context->ticketId);
+            $this->assertSame($action->id, $context->actionLogId);
+            $this->assertSame($action->correlation_id, $context->correlationId);
+        } finally {
+            request()->attributes->remove(\App\Services\Mcp\TicketToolActivityContext::class);
+        }
+    }
+
+    public function test_self_reads_remain_audited_but_not_projected_and_absent_context_has_null_columns(): void
+    {
+        $ticket = $this->ticket();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['get_ticket_tool_history', 'list_clients']);
+        foreach ([1, 2] as $attempt) {
+            $page = $this->decoded($this->callTool($token, 'get_ticket_tool_history', ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id]));
+            $this->assertSame([], $page['items']);
+        }
+        $this->assertSame(2, McpAuditLog::where('tool_name', 'get_ticket_tool_history')->where('ticket_id', $ticket->id)->count());
+        $this->callTool($token, 'list_clients', []);
+        $audit = McpAuditLog::latest('id')->firstOrFail();
+        foreach (['ticket_id', 'client_id', 'action_log_id', 'correlation_id', 'activity_kind', 'result_summary'] as $column) {
+            $this->assertNull($audit->$column, $column);
+        }
+        $indexes = \Illuminate\Support\Facades\Schema::getIndexes('mcp_audit_logs');
+        $this->assertTrue(collect($indexes)->contains(fn ($index) => $index['columns'] === ['action_log_id']));
+        $this->assertSame('varchar', \Illuminate\Support\Facades\Schema::getColumnType('mcp_audit_logs', 'correlation_id'));
+    }
+
     public function test_execution_failure_and_pending_are_not_call_success(): void
     {
         $actor = User::factory()->create();

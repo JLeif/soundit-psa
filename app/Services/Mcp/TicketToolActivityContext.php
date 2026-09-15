@@ -29,6 +29,9 @@ final class TicketToolActivityContext
 
     public function validated(Ticket $ticket): void
     {
+        if ($this->actionLogId !== null) {
+            return;
+        }
         $this->ticketId = $ticket->id;
         $this->clientId = $ticket->client_id;
     }
@@ -42,7 +45,8 @@ final class TicketToolActivityContext
         if (! $ticket || $ticket->client_id !== $log->client_id) {
             return;
         }
-        $this->validated($ticket);
+        $this->ticketId = $ticket->id;
+        $this->clientId = $ticket->client_id;
         $this->actionLogId = $log->id;
         $this->correlationId = $log->correlation_id;
     }

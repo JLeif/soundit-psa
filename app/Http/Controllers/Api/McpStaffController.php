@@ -1338,6 +1338,9 @@ class McpStaffController extends Controller
     private function audit(string $method, ?string $tool, mixed $args, string $status, ?string $error, float $start, Request $request): void
     {
         $activity = $request->attributes->get(\App\Services\Mcp\TicketToolActivityContext::class);
+        if ($activity?->ticketId === null) {
+            $activity = null;
+        }
         try {
             McpAuditLog::create([
                 'ticket_id' => $activity?->ticketId,
