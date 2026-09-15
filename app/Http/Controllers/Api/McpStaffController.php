@@ -347,9 +347,10 @@ class McpStaffController extends Controller
         'create_ticket_from_email',
         // ROUTING ONLY for the email-resolution pair (#1293): membership here sends
         // them to StaffPsaActionToolExecutor and keeps the legacy full-surface token
-        // out. It confers NOTHING — the explicit `resolve_email_item:staged` gate in
-        // toolAllowed() runs above every family branch, so an intake-tier grant (bare
-        // names, e.g. the catalog's bulk "Grant shown" click) cannot reach them.
+        // out. It confers NOTHING — the explicit staged-mode gate in toolAllowed() runs
+        // above every family branch, so an intake-tier grant (bare names, e.g. the
+        // catalog's bulk "Grant shown" click, which normalizes to the immediate mode)
+        // cannot reach them.
         'resolve_email_item',
         'stage_resolve_email_item',
         'dismiss_email_item',
@@ -2450,15 +2451,29 @@ class McpStaffController extends Controller
         }
 
         // Email resolution (#1293) is DEFAULT-UNGRANTED and held-only, exactly as the
-        // tool description promises: the token must name it with the explicit `:staged`
-        // mode suffix. A BARE `resolve_email_item` entry — what a bulk tier grant of the
-        // intake surface produces — is deliberately NOT enough, so intake-manage
-        // membership (routing only) can never confer a sender-wide client reassignment
-        // the operator did not grant by name. Placed above every family branch so no
-        // family default, and no full-surface token, can outrun it.
+        // tool description promises: the token must grant it in the `staged` MODE. The
+        // grant is read the way every other gate reads one — through the resolved token
+        // (allows() + modeFor()), never by string-matching a raw `tool:mode` entry:
+        // McpConfig resolves grants through McpToolModes::parseGrants(), which strips the
+        // suffix into toolModes, so allowedTools holds plain canonical names and a literal
+        // `resolve_email_item:staged` comparison matches NO token at all — including the
+        // documented `:staged` grant, which is how this gate hid the tool from everyone.
+        //
+        // A BARE `resolve_email_item` entry — what a bulk tier grant of the intake surface
+        // produces, and which normalizeGrantEntries() stores as the `:immediate` mode — is
+        // deliberately NOT enough, so intake-manage membership (routing only) can never
+        // confer a sender-wide client reassignment the operator did not grant by name.
+        // That is also why the immediate mode is refused rather than treated as a superset
+        // here: accepting it would let the tier's bulk "Grant shown" click confer this
+        // tool, and the capability has no immediate lane to confer anyway (callTool
+        // refuses staged !== true). Placed above every family branch so no family default,
+        // and no full-surface token, can outrun it.
         if (in_array($toolName, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
+            $canonical = McpToolModes::canonicalForAlias($toolName) ?? $toolName;
+
             return $token->allowedTools !== null
-                && in_array($toolName.':'.McpToolModes::MODE_STAGED, $token->allowedTools, true);
+                && $token->allows($canonical)
+                && $token->modeFor($canonical) === McpToolModes::MODE_STAGED;
         }
 
         // High-scope curated CIPP reads: explicit grant only, never auto-inherited by the
