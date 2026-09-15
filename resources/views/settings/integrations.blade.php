@@ -1805,6 +1805,35 @@
                     <div id="test-result-huntress" class="alert mt-2" style="display:none;"></div>
                 </form>
 
+                @if(auth()->user()->isAdmin())
+                <hr>
+                <h6>Signed webhook linking</h6>
+                <p class="text-muted small">Separate from API sync and ConnectWise incident intake. Saving credentials does not enable linking unless you select the switch below. Configure the Huntress endpoint only after your administrator approves activation.</p>
+                <form method="POST" action="{{ route('settings.integrations.huntress-webhooks.update') }}">
+                    @csrf
+                    <div class="mb-3">
+                        <label for="huntress_webhook_signing_secret" class="form-label">Webhook signing secret</label>
+                        <input type="password" class="form-control" id="huntress_webhook_signing_secret"
+                               name="signing_secret" value="" maxlength="4096" autocomplete="new-password"
+                               placeholder="{{ $huntressWebhookSecretStored ? '••••••••' : 'Enter Svix signing secret' }}">
+                        <div class="form-text">{{ $huntressWebhookSecretStored ? 'Secret stored. ' : '' }}Encrypted at rest. Leave blank to preserve the stored secret.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="huntress_webhook_account_id" class="form-label">Expected Huntress account ID</label>
+                        <input type="text" inputmode="numeric" class="form-control" id="huntress_webhook_account_id"
+                               name="account_id" value="{{ $huntressWebhookAccountId }}" maxlength="19">
+                    </div>
+                    <input type="hidden" name="webhooks_enabled" value="0">
+                    <div class="form-check form-switch mb-3">
+                        <input type="checkbox" class="form-check-input" id="huntress_webhooks_enabled"
+                               name="webhooks_enabled" value="1" @checked($huntressWebhooksEnabled)>
+                        <label class="form-check-label" for="huntress_webhooks_enabled">Webhook linking enabled</label>
+                        <div class="form-text">Requires a signing secret and expected account ID. Off by default.</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm">Save Webhook Settings</button>
+                </form>
+                @endif
+
                 @if($huntressConnected ?? false)
                 <div class="mt-3 pt-3 border-top">
                     <a href="{{ route('settings.huntress-orgs.index') }}" class="btn btn-outline-primary btn-sm">
