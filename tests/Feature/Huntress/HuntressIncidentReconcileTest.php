@@ -292,6 +292,22 @@ class HuntressIncidentReconcileTest extends TestCase
         $this->assertSame(0, $result->updated);
     }
 
+    public function test_reopened_incident_with_retained_closed_timestamp_stays_open(): void
+    {
+        $ticket = $this->incidentTicket($this->mappedClient(42), 'SYNTHETIC-REOPENED');
+        $this->bind($ticket, 761);
+        $result = $this->service([], [761 => [
+            'id' => 761, 'organization_id' => 42, 'status' => 'sent',
+            'closed_at' => now()->subHour()->toIso8601String(),
+        ]])->reconcile();
+        $this->assertSame(TicketStatus::InProgress, $ticket->fresh()->status);
+        $this->assertSame(1, $result->eligible);
+        $this->assertSame(1, $result->checked);
+        $this->assertSame(0, $result->updated);
+        $this->assertSame(0, $result->errors);
+        $this->assertSame(['still_open' => 1], $result->refusals);
+    }
+
     // ── explicit link versus legacy text id (the minority: source_alert_id carries an incident URL) ──
 
     public function test_text_id_without_signed_link_does_not_authorize_exact_get(): void

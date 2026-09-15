@@ -116,7 +116,8 @@ Route::prefix('tier2tickets/v4_6_release/apis/3.0')
     });
 
 // Svix-signed raw-body endpoint, separate from the CW Basic-auth shim.
-Route::post('huntress/webhooks', \App\Http\Controllers\Api\HuntressWebhookController::class);
+Route::post('huntress/webhooks', \App\Http\Controllers\Api\HuntressWebhookController::class)
+    ->middleware(['throttle:120,1']);
 
 // ConnectWise Manage API compatibility layer (for Huntress incident reports)
 // Huntress sends incident reports via CW-format webhooks.

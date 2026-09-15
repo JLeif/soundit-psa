@@ -94,6 +94,9 @@ abstract class HuntressLinkedReconcileService
 
             return;
         }
+        // Count only tickets admitted by the real validated-link predicate, before
+        // the network read. Refusals/skips are not evidence of eligibility.
+        $result->eligible++;
         try {
             $record = $this->recordType() === 'incident_report'
                 ? $this->client->getIncidentReport((int) $alert->huntress_record_id)

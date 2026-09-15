@@ -54,7 +54,14 @@ class HuntressSignedWebhookTest extends TestCase
     public function test_real_cw_ingest_and_signed_arrival_link_in_both_orders(): void
     {
         \Illuminate\Support\Facades\Queue::fake();
-        $this->travelTo(\Carbon\Carbon::parse('2026-09-14T12:01:00Z'));
+        // Exercise the real ingest anchor with a non-UTC display timezone.
+        config(['app.timezone' => 'America/Los_Angeles']);
+        // Laravel sets PHP's timezone during bootstrap; changing config alone
+        // after bootstrap would leave now() in UTC and make this guard vacuous.
+        $originalTimezone = date_default_timezone_get();
+        $this->beforeApplicationDestroyed(fn () => date_default_timezone_set($originalTimezone));
+        date_default_timezone_set('America/Los_Angeles');
+        $this->travelTo(\Carbon\Carbon::parse('2026-09-14T05:01:00-07:00'));
         $user = \App\Models\User::factory()->create();
         Setting::setValue('huntress_system_user_id', (string) $user->id);
         Setting::setValue('huntress_webhook_account_id', '11');
@@ -72,6 +79,8 @@ class HuntressSignedWebhookTest extends TestCase
                 'company' => ['id' => $client->id],
             ]);
             $alert = \App\Models\Alert::where('ticket_id', $result['id'])->firstOrFail();
+            $this->assertSame('2026-09-14 12:01:00', DB::table('huntress_link_candidates')
+                ->where('ticket_id', $result['id'])->value('received_at'));
             if (! $eventFirst) {
                 $this->assertNull($alert->huntress_event_id);
                 $this->deliver(json_encode($payload), 'msg_'.$id)->assertOk();
@@ -131,6 +140,25 @@ class HuntressSignedWebhookTest extends TestCase
         $this->deliver($body, timestamp: time() + 600)->assertStatus(401);
         $this->postJson('/api/huntress/webhooks', $this->payload())->assertStatus(400);
         $this->assertDatabaseCount('huntress_webhook_events', 0);
+    }
+
+    public function test_actual_webhook_route_enforces_120_requests_per_minute_even_dark(): void
+    {
+        \Illuminate\Support\Facades\Cache::flush();
+        $route = app('router')->getRoutes()->match(\Illuminate\Http\Request::create('/api/huntress/webhooks', 'POST'));
+        $this->assertContains('throttle:120,1', $route->gatherMiddleware());
+        Setting::setValue('huntress_webhooks_enabled', '0');
+        for ($i = 0; $i < 120; $i++) {
+            $this->postJson('/api/huntress/webhooks', [])->assertStatus(503)
+                ->assertHeader('X-RateLimit-Limit', '120');
+        }
+        $this->postJson('/api/huntress/webhooks', [])->assertStatus(429)
+            ->assertHeader('Retry-After');
+        $this->assertDatabaseCount('huntress_webhook_events', 0);
+        $this->travel(61)->seconds();
+        $this->postJson('/api/huntress/webhooks', [])->assertStatus(503);
+        $this->travelBack();
+        \Illuminate\Support\Facades\Cache::flush();
     }
 
     public function test_default_off_and_missing_secret_refuse(): void

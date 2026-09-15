@@ -37,7 +37,8 @@ class HuntressReconcileEscalations extends Command
         $summary = $result->summary();
         $this->info("Done: {$summary}.");
 
-        // A zero-check run is visible as non-success, not a clean bill of health.
-        return $result->errors > 0 || $result->checked === 0 ? self::FAILURE : self::SUCCESS;
+        // Dark/unlinked runs are clean no-ops, not outages. Eligible zero-check
+        // runs and all errors remain failures.
+        return $result->failed() ? self::FAILURE : self::SUCCESS;
     }
 }
