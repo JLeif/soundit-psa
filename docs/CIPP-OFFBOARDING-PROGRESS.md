@@ -73,7 +73,10 @@ progress contradictions and task/deployment conflicts remain uncertain. No vendo
 is available, so this is deliberately conservative; it is not a global ordering guarantee. An
 unavailable read is absence of evidence, not contradiction: it is retained as its own
 observation but is never scored as a regression, so a transient vendor outage cannot latch the
-sticky conflict. A normal queued/running advance into reported-but-incomplete steps ranks with
+sticky conflict. It is equally never used as the regression baseline: the next read is scored
+against the last observation that carried evidence, so a terminal-step or terminal-state
+regression arriving after an outage is still flagged instead of being cleared by the
+intervening placeholder. A normal queued/running advance into reported-but-incomplete steps ranks with
 terminal-row evidence and is likewise not a regression; only a reported terminal state moving
 backwards is. Unavailability/regression does not delete older observations. Audit and observation commit
 atomically. Neither admission/send intent/generation nor run state/fences/spent plans change.

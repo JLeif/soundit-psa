@@ -33,6 +33,7 @@ class OffboardingReconciler
         $started = now();
         $prior = DB::table('cipp_offboarding_observations')->where('operation_id', $op->id)->orderByDesc('id')->first();
         $previous = $prior ? json_decode(Crypt::decryptString($prior->observation), true, flags: JSON_THROW_ON_ERROR) : [];
+        $baseline = $this->lastEvidenced($op->id, $prior, $previous);
         $taskId = $previous['task_id'] ?? null;
         $deploymentId = $previous['deployment_id'] ?? null;
         if ($op->receipt !== null) {
@@ -76,11 +77,11 @@ class OffboardingReconciler
         $observation['deployment_id'] ??= $deploymentId;
         $this->scope->reader($observerId, $run->fresh());
 
-        DB::transaction(function () use ($op, $prior, $previous, $observation, $observerId, $started): void {
+        DB::transaction(function () use ($op, $prior, $baseline, $observation, $observerId, $started): void {
             DB::table('cipp_offboarding_operations')->where('id', $op->id)->lockForUpdate()->first();
             $current = DB::table('cipp_offboarding_observations')->where('operation_id', $op->id)->orderByDesc('id')->first();
             $conflict = ($current?->id !== $prior?->id) || ($current?->conflict ?? false)
-                || $this->regresses($previous, $observation);
+                || $this->regresses($baseline, $observation);
             DB::table('cipp_offboarding_observations')->insert([
                 'operation_id' => $op->id, 'observer_id' => $observerId, 'prior_observation_id' => $prior?->id,
                 'observation' => Crypt::encryptString(OffboardingPlan::canonical($observation)),
@@ -91,6 +92,25 @@ class OffboardingReconciler
         }, 1);
 
         return app(OffboardingStatus::class)->detail($runId, $clientId);
+    }
+
+    /**
+     * An unavailable read is absence of evidence, so it is never the regression baseline either:
+     * scoring the next read against its empty placeholder would let one transient outage erase an
+     * earlier terminal report and silently clear a genuine step or state regression. Walk back to
+     * the last observation that actually carried evidence; unavailable rows are retained untouched.
+     */
+    private function lastEvidenced(string $operationId, ?object $prior, array $previous): array
+    {
+        $row = $prior;
+        $observation = $previous;
+        while ($row !== null && ($observation['evidence'] ?? null) === 'read_unavailable') {
+            $row = DB::table('cipp_offboarding_observations')->where('operation_id', $operationId)
+                ->where('id', '<', $row->id)->orderByDesc('id')->first();
+            $observation = $row ? json_decode(Crypt::decryptString($row->observation), true, flags: JSON_THROW_ON_ERROR) : [];
+        }
+
+        return $observation;
     }
 
     private function regresses(array $old, array $new): bool

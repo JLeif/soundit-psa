@@ -162,6 +162,33 @@ class OffboardingReconcilerTest extends TestCase
         $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
     }
 
+    public function test_regression_after_a_transient_outage_is_scored_against_the_last_evidenced_read(): void
+    {
+        $this->nameReads([Fixture::task()]);
+        $this->progressReads([Fixture::progress()]);
+        $this->assertSame('reported_succeeded', $this->reconcile()['execution']);
+        $id = ['tenantFilter' => 'example.test', 'Id' => Fixture::task()['RowKey']];
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', $id)->once()->andThrow(new \RuntimeException('synthetic timeout'));
+        $this->assertSame('read_unavailable', $this->reconcile()['evidence']);
+        $this->assertSame(0, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+        $task = Fixture::task();
+        $task['TaskState'] = 'Running';
+        $this->vendor->shouldReceive('offboardingRead')->with('scheduled', $id)->once()->andReturn([$task]);
+        $row = Fixture::progress();
+        $row['Status'] = 'running';
+        $row['Steps'][0]['Status'] = 'failed';
+        $this->progressReads([$row]);
+        $result = $this->reconcile();
+        $this->assertSame('conflicting_observations', $result['evidence']);
+        $this->assertSame('unknown', $result['execution']);
+        $this->assertSame('unverified', $result['verification']);
+        $this->assertDatabaseCount('cipp_offboarding_observations', 3);
+        $this->assertSame(1, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+        $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
+        $this->assertDatabaseCount('cipp_offboarding_target_fences', 1);
+        $this->assertDatabaseCount('cipp_offboarding_spent_plans', 1);
+    }
+
     public function test_normal_queued_to_in_progress_advance_is_not_a_conflict(): void
     {
         $planned = Fixture::task();
