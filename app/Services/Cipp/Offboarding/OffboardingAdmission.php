@@ -107,11 +107,19 @@ class OffboardingAdmission
             // body, receipt-persist failure) and 'already_claimed' — are unconfirmed, still
             // non-replayable sends: they carry a distinct status so the cockpit renders them as a
             // fault and the operator reconciles instead of reading a green banner.
-            $status = ($result['admission'] ?? null) === 'accepted'
-                ? 'offboarding_admission'
-                : 'offboarding_admission_unconfirmed';
+            $accepted = ($result['admission'] ?? null) === 'accepted';
+            $status = $accepted ? 'offboarding_admission' : 'offboarding_admission_unconfirmed';
 
-            return new TechnicianApprovalResult($status, message: 'Operation '.$operation['operation_id'].': '.$result['admission'].'. This is admission evidence, not completed offboarding. No replay is permitted; progress/reconciliation is a separate capability.');
+            // Only the accepted arm has a correlated receipt, so only it may claim admission
+            // evidence. The unconfirmed arm ('ambiguous' transport throw/uncorrelated body/
+            // receipt-persist failure, or 'already_claimed') has no receipt to stand on: it must
+            // say so and name reconciliation, or the operator files an unknown-receipt send as a
+            // recorded admission.
+            return new TechnicianApprovalResult($status, message: 'Operation '.$operation['operation_id'].': '.$result['admission'].'. '
+                .($accepted
+                    ? 'This is admission evidence, not completed offboarding.'
+                    : 'The single send was committed but its receipt is unknown — it may or may not have been accepted, and there is no admission evidence for it. Do not retry; reconcile this operation.')
+                .' No replay is permitted; progress/reconciliation is a separate capability.');
         } catch (\Throwable $e) {
             // Only ledger conflict text is safe to expose (local IDs/date, no source values).
             $message = str_starts_with($e->getMessage(), 'Already attempted or reserved: operation ')
