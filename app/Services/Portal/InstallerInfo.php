@@ -21,6 +21,7 @@ final class InstallerInfo
         public readonly ?string $registrationKey = null,
         public readonly ?string $installScript = null,
         public readonly ?string $instructions = null,
+        public readonly ?string $expectedFilename = null,
     ) {}
 
     public function hasScript(): bool

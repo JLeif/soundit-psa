@@ -135,7 +135,9 @@
         @foreach($package->platforms as $platform => $info)
             <div class="platform-panel" data-platform-panel="{{ $platform }}" style="display: none;">
 
-                @if($info === null)
+                @if($isTactical ?? ($package->rmmLabel === 'Tactical RMM Agent'))
+                    @include('portal.install.tactical')
+                @elseif($info === null)
                     {{-- Availability only — no credential exists yet (#857). Both steps
                          stay visible; the command appears after an explicit request. --}}
                     <div class="mb-3">

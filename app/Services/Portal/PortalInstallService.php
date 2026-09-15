@@ -79,14 +79,14 @@ class PortalInstallService
      * explicit "show my install command" POST and the signed download
      * redirect — never a bare page GET.
      */
-    public function buildInstaller(Client $client, string $platform): ?InstallerInfo
+    public function buildInstaller(Client $client, string $platform, string $goarch = 'amd64'): ?InstallerInfo
     {
         $rmm = $client->effectiveInstallRmm();
         if (! $rmm || ! in_array($platform, self::PLATFORMS, true)) {
             return null;
         }
 
-        return $this->resolveInstaller($client, $rmm, $platform);
+        return $this->resolveInstaller($client, $rmm, $platform, $goarch);
     }
 
     /**
@@ -130,13 +130,13 @@ class PortalInstallService
         }
     }
 
-    private function resolveInstaller(Client $client, string $rmm, string $platform): ?InstallerInfo
+    private function resolveInstaller(Client $client, string $rmm, string $platform, string $goarch): ?InstallerInfo
     {
         try {
             return match ($rmm) {
                 'level' => app(LevelClient::class)->getInstallerInfo((string) $client->level_group_id, $platform),
                 'ninja' => app(NinjaClient::class)->getInstallerInfo((int) $client->ninja_org_id, $platform),
-                'tactical' => app(TacticalClient::class)->getInstallerInfo((string) $client->tactical_site_id, $platform),
+                'tactical' => app(TacticalClient::class)->getInstallerInfo((string) $client->tactical_site_id, $platform, $goarch),
                 default => null,
             };
         } catch (\Throwable $e) {
@@ -144,7 +144,7 @@ class PortalInstallService
                 'client_id' => $client->id,
                 'rmm' => $rmm,
                 'platform' => $platform,
-                'error' => $e->getMessage(),
+                'error_type' => get_class($e),
             ]);
 
             return null;

@@ -358,6 +358,7 @@ class TacticalInstallerCommandTest extends TestCase
             downloadUrl: self::DOWNLOAD_URL,
             installScript: $cmd,
             instructions: 'Two steps.',
+            expectedFilename: 'tacticalagent-v2.4.9-windows-amd64.exe',
         );
     }
 
@@ -381,10 +382,10 @@ class TacticalInstallerCommandTest extends TestCase
         $response->assertOk();
         $response->assertDontSee(self::WINDOWS_CMD, escape: true);
         $response->assertDontSee('--auth');
-        $response->assertSee('Show my install command');
+        $response->assertSee('Download guided Windows setup');
         // The honest two-step framing from #841 survives the gate: the page
         // still explains that the download alone does not register the device.
-        $response->assertSee('does not register your device');
+        $response->assertSee('not proof of enrollment');
     }
 
     public function test_the_download_shortcut_no_longer_redirects_off_the_bare_page(): void
@@ -405,7 +406,7 @@ class TacticalInstallerCommandTest extends TestCase
         [$client, $tactical] = $this->portalClient();
         $tactical->shouldReceive('getInstallerInfo')
             ->once()
-            ->with('Acme|Main', 'windows')
+            ->with('Acme|Main', 'windows', 'amd64')
             ->andReturn($this->mintedInfo(self::WINDOWS_CMD));
 
         $response = $this->post('/setup/'.$client->portal_install_token.'/command', [
@@ -488,23 +489,14 @@ class TacticalInstallerCommandTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_a_signed_download_url_redirects_and_audits_the_mint(): void
+    public function test_a_legacy_signed_tactical_download_no_longer_mints(): void
     {
         [$client, $tactical] = $this->portalClient();
-        $tactical->shouldReceive('getInstallerInfo')
-            ->once()
-            ->with('Acme|Main', 'windows')
-            ->andReturn($this->mintedInfo(self::WINDOWS_CMD));
-
+        $tactical->shouldReceive('getInstallerInfo')->never();
+        $tactical->shouldReceive('generateWindowsInstaller')->never();
         $this->get($this->signedDownloadUrl($client, 'windows'))
-            ->assertRedirect(self::DOWNLOAD_URL);
-
-        // For Tactical the vendor URL is itself minted, so the download is a
-        // mint and gets its audit row too.
-        $this->assertDatabaseHas('portal_install_audits', [
-            'client_id' => $client->id,
-            'platform' => 'windows',
-        ]);
+            ->assertRedirect(route('portal.install.show', ['token' => $client->portal_install_token]));
+        $this->assertDatabaseCount('portal_install_audits', 0);
     }
 
     public function test_the_route_guards_are_wired(): void
@@ -541,13 +533,13 @@ class TacticalInstallerCommandTest extends TestCase
     {
         [, $tactical] = $this->portalClient(['portal_install_token_expires_at' => now()->addDay()]);
         $tactical->shouldReceive('getInstallerInfo')->never();
-        $this->get('/setup/abcdef0123456789abcdef')->assertOk()->assertSee('Show my install command');
+        $this->get('/setup/abcdef0123456789abcdef')->assertOk()->assertSee('Download guided Windows setup');
 
         // NULL is the deliberate per-row "no expiry" exception, set by hand on
         // request — never the default for a new or backfilled link.
         Client::where('portal_install_token', 'abcdef0123456789abcdef')
             ->update(['portal_install_token_expires_at' => null]);
-        $this->get('/setup/abcdef0123456789abcdef')->assertOk()->assertSee('Show my install command');
+        $this->get('/setup/abcdef0123456789abcdef')->assertOk()->assertSee('Download guided Windows setup');
     }
 
     public function test_generating_a_link_stamps_the_default_thirty_day_expiry(): void

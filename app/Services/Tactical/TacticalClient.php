@@ -1308,10 +1308,11 @@ class TacticalClient
      * @param  string  $siteId  Format: "ClientName|SiteName" from clients.tactical_site_id
      * @param  string  $platform  One of: 'windows', 'mac', 'linux'
      */
-    public function getInstallerInfo(string $siteId, string $platform): ?\App\Services\Portal\InstallerInfo
+    public function getInstallerInfo(string $siteId, string $platform, string $goarch = 'amd64'): ?\App\Services\Portal\InstallerInfo
     {
         $target = $this->parseInstallTarget($siteId, $platform);
-        if ($target === null) {
+        $architectures = $platform === 'windows' ? ['amd64', '386'] : ['amd64', 'arm64'];
+        if ($target === null || ! in_array($goarch, $architectures, true)) {
             return null;
         }
 
@@ -1332,7 +1333,7 @@ class TacticalClient
                 'power' => 0,
                 'ping' => 0,
                 'rdp' => 0,
-                'goarch' => 'amd64',
+                'goarch' => $goarch,
                 'api' => \App\Support\TacticalConfig::apiUrl(),
                 'plat' => $target['plat'],
             ]);
@@ -1340,7 +1341,6 @@ class TacticalClient
             Log::warning('[TacticalClient] installer fetch failed', [
                 'site_id' => $siteId,
                 'platform' => $platform,
-                'error' => $e->getMessage(),
             ]);
 
             return null;
@@ -1358,7 +1358,81 @@ class TacticalClient
             downloadUrl: $url,
             installScript: $command,
             instructions: self::installerInstructions($target['plat'], $command !== null),
+            expectedFilename: $platform === 'windows' && $command !== null
+                && preg_match('/\A(tacticalagent-v[0-9.]+-windows-(?:amd64|386)\.exe) /', $command, $match) === 1
+                    ? $match[1] : null,
         );
+    }
+
+    /**
+     * Generate an enrollment-bearing Windows wrapper. Memory-only bounded sink:
+     * Guzzle's default php://temp can spill secrets to disk. Never retry a mint.
+     * Source: tacticalrmm 1e786d37, agents/views.py and tacticalrmm/utils.py.
+     */
+    public function generateWindowsInstaller(string $siteId, string $goarch): string
+    {
+        if (! in_array($goarch, ['amd64', '386'], true)) {
+            throw new TacticalClientException('Choose a supported Windows architecture.');
+        }
+        $sink = fopen('php://memory', 'w+b');
+        try {
+            $target = $this->parseInstallTarget($siteId, 'windows');
+            $ids = $target !== null ? $this->lookupSiteIds($target['client'], $target['site']) : null;
+            if ($target === null || $ids === null) {
+                throw new InstallerGenerationException('Installer site is unavailable. Contact your technician.');
+            }
+            $response = $this->http->request('POST', 'agents/installer/', [
+                'json' => [
+                    // `plat` is required by install_agent for EVERY installMethod:
+                    // it is read from request.data before the method branch, so
+                    // omitting it 500s upstream on the primary EXE path.
+                    'installMethod' => 'exe', 'fileName' => 'workstation-setup.exe',
+                    'client' => $ids['client'], 'site' => $ids['site'],
+                    'expires' => 168, 'agenttype' => 'workstation',
+                    'power' => 0, 'ping' => 0, 'rdp' => 0,
+                    'goarch' => $goarch, 'plat' => $target['plat'],
+                    'api' => TacticalConfig::apiUrl(),
+                ],
+                'sink' => $sink,
+                'timeout' => 120, 'connect_timeout' => 10,
+                'http_errors' => false, 'allow_redirects' => false,
+                'headers' => ['Accept' => 'application/octet-stream'],
+                'progress' => static function ($total, $downloaded): void {
+                    if ($total > 32 * 1024 * 1024 || $downloaded > 32 * 1024 * 1024) {
+                        throw new \RuntimeException('Installer exceeds size limit.');
+                    }
+                },
+            ]);
+            $body = (string) $response->getBody();
+            $type = strtolower(trim(explode(';', $response->getHeaderLine('Content-Type'))[0]));
+            // Only exact, source-verified public diagnostics can leave this layer.
+            // Arbitrary vendor text may contain credentials, command lines or HTML.
+            $error = json_decode($body, true);
+            $message = is_string($error) ? $error : null;
+            if (in_array($message, [
+                "Not available in insecure mode. Please use the 'Manual' method.",
+                'Something went wrong. Check debug error log for exact error message',
+            ], true)) {
+                throw new InstallerGenerationException($message);
+            }
+            if ($response->getStatusCode() !== 200
+                || ! in_array($type, ['application/octet-stream', 'application/x-msdownload', 'application/x-msdos-program', 'application/vnd.microsoft.portable-executable'], true)
+                || strlen($body) < 1024 || strlen($body) > 32 * 1024 * 1024
+                || ! str_starts_with($body, 'MZ')) {
+                throw new InstallerGenerationException('The installer could not be validated. Use the manual fallback or contact your technician.');
+            }
+
+            return $body;
+        } catch (InstallerGenerationException $e) {
+            throw $e;
+        } catch (\Throwable) {
+            // No raw transport message, response or chained exception: token-bearing.
+            throw new InstallerGenerationException('The installer could not be prepared. Use the manual fallback or contact your technician.');
+        } finally {
+            if (is_resource($sink)) {
+                fclose($sink);
+            }
+        }
     }
 
     /**
