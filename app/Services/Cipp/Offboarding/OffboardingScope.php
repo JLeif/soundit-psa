@@ -6,6 +6,8 @@ use App\Models\Client;
 use App\Models\McpToken;
 use App\Models\Person;
 use App\Models\Setting;
+use App\Models\TechnicianRun;
+use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Cipp\CippRestWriteClient;
 use App\Services\Cipp\CippWriteScopeResolver;
@@ -31,13 +33,38 @@ class OffboardingScope
         return $token;
     }
 
-    public function approver(int $id): void
+    public function approver(int $id, TechnicianRun $run): void
     {
-        $user = User::find($id);
-        if (! $user || ! $user->is_active || (! $user->isAdmin() && ! $user->isTech())) {
-            throw new RuntimeException('An active staff approver is required.');
+        $this->reader($id, $run);
+        $ticket = Ticket::find($run->ticket_id);
+        // Bearer-token proposals and human approval are separate principal types. Also
+        // refuse the ticket's recorded human requester; never compare token IDs to user IDs.
+        if ($ticket->created_by === $id) {
+            throw new RuntimeException('A separate human approver is required.');
         }
         $this->enabled();
+    }
+
+    /** Local staff ACL: admins, or the technician assigned to this same-client ticket. */
+    public function reader(int $id, TechnicianRun $run): void
+    {
+        $user = User::find($id);
+        $ticket = Ticket::find($run->ticket_id);
+        if (! $user || ! $user->is_active || ! $ticket || ! $run->client_id
+            || $ticket->client_id !== $run->client_id
+            || (! $user->isAdmin() && (! $user->isTech() || $ticket->assignee_id !== $id))) {
+            throw new RuntimeException('An authorized same-client staff reader is required.');
+        }
+    }
+
+    public function recoveryIntegration(array $snapshot): void
+    {
+        $integration = hash('sha256', OffboardingPlan::canonical([
+            CippConfig::get('api_url'), CippConfig::get('tenant_id'), CippConfig::get('client_id'), CippConfig::get('application_id'),
+        ]));
+        if (! hash_equals($snapshot['namespace'][1], $integration)) {
+            throw new RuntimeException('Original CIPP integration is unavailable; do not retarget recovery.');
+        }
     }
 
     public function enabled(): void

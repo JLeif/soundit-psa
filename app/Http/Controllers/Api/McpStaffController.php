@@ -1083,7 +1083,9 @@ class McpStaffController extends Controller
                 $result = app(ChetDataSurfaceToolExecutor::class)->execute((string) $name, $arguments, $clientId);
             } elseif ($this->isCippWriteTool((string) $name)) {
                 if ($offboarding) {
-                    $arguments['client_id'] = (int) $clientId;
+                    if (($arguments['client_id'] ?? null) !== (int) $clientId) {
+                        throw new \RuntimeException('Offboarding requires matching explicit client scope.');
+                    }
                     $arguments['staged'] = true;
                 }
                 $result = app(StaffCippWriteToolExecutor::class)->execute(

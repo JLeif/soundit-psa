@@ -1279,10 +1279,11 @@ class McpToolRegistry
     {
         return [
             'name' => 'get_staged_action_status',
-            'description' => 'List staged/held actions that are still awaiting a human decision, with their current state. Read-only visibility over the approval queue: what was proposed, on which ticket, and whether it is awaiting approval, flagged, queued for an offline device, or expired and needing re-confirmation. Returns metadata only, never the drafted message body. Filter by state, action_type, ticket_id, or client_id.',
+            'description' => 'List staged/held actions that are still awaiting a human decision, with their current state. Read-only visibility over the approval queue: what was proposed, on which ticket, and whether it is awaiting approval, flagged, queued for an offline device, or expired and needing re-confirmation. Returns metadata only, never the drafted message body. Filter by state, action_type, ticket_id, or client_id. Alternatively supply run_id and explicit client_id for local-only offboarding detail, including terminal receipts. Detail never polls, retries or verifies effects.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
+                    'run_id' => ['type' => 'integer', 'minimum' => 1, 'description' => 'Offboarding detail mode; requires client_id and excludes listing filters.'],
                     'state' => [
                         'type' => 'string',
                         'enum' => ['awaiting_approval', 'flagged', 'queued_offline', 'expired'],

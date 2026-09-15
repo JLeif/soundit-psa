@@ -74,7 +74,7 @@ class OffboardingAdmission
     public function approve(TechnicianRun $run, int $approverId, array $approval): TechnicianApprovalResult
     {
         try {
-            $this->scope->approver($approverId);
+            $this->scope->approver($approverId, $run);
             $snapshot = $this->snapshot($run);
             if (($approval['revision'] ?? null) !== '1' || ($approval['plan_hash'] ?? null) !== $run->content_hash
                 || ($approval['actions'] ?? null) !== $snapshot['input']['actions']) {
@@ -90,7 +90,7 @@ class OffboardingAdmission
             $ledger = new OffboardingLedger(DB::connection());
             $operation = $ledger->prepare($run->id, $approverId, $snapshot, $run->content_hash);
             $result = $ledger->dispatch($operation['operation_id'], function (array $sealed) use ($approverId, $run): bool {
-                $this->scope->approver($approverId);
+                $this->scope->approver($approverId, $run);
                 $this->scope->token($sealed['token_id']);
                 $current = $this->scope->resolve($sealed['input'], $sealed['body']['reference']);
                 $current['token_id'] = $sealed['token_id'];
