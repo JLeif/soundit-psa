@@ -5477,6 +5477,8 @@ class StaffTacticalAdminToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        TicketToolActivityContext::current()?->validated($ticket);
+
         return $ticket;
     }
 

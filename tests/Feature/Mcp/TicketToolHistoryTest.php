@@ -105,6 +105,49 @@ class TicketToolHistoryTest extends TestCase
         $this->get(route('tickets.show', $ticket))->assertRedirect(route('login'));
     }
 
+    public function test_execution_failure_and_pending_are_not_call_success(): void
+    {
+        $actor = User::factory()->create();
+        Setting::setValue('triage_system_user_id', (string) $actor->id);
+        $ticket = $this->ticket();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['update_ticket', 'get_ticket_attachment']);
+        $args = ['ticket_id' => $ticket->id, 'reason' => 'Synthetic change', 'subject' => 'Changed synthetic subject'];
+        $response = $this->callTool($token, 'update_ticket', $args);
+        $this->assertFalse($response['result']['isError'], json_encode($response));
+        $audit = McpAuditLog::latest('id')->firstOrFail();
+        $this->assertNotNull($audit->action_log_id);
+        $this->assertSame('executed', app(TicketToolActivity::class)->page($ticket)['items'][0]['state']);
+        $failure = $this->callTool($token, 'get_ticket_attachment', ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id, 'attachment_id' => 99999]);
+        $this->assertTrue($failure['result']['isError']);
+        $audit = McpAuditLog::latest('id')->firstOrFail();
+        $this->assertSame($ticket->id, $audit->ticket_id);
+        $this->assertSame('failure', $audit->activity_kind);
+        $this->assertSame('failure', collect(app(TicketToolActivity::class)->page($ticket)['items'])->firstWhere('tool', 'get_ticket_attachment')['state']);
+        // A returned write without a produced action row must not become executed.
+        $context = new \App\Services\Mcp\TicketToolActivityContext;
+        $context->finish(['success' => true, 'secret' => 'SECRET-RAW-PAYLOAD']);
+        $this->assertSame('pending', $context->kind);
+        $this->assertStringNotContainsString('SECRET-RAW-PAYLOAD', $context->summary);
+        $this->assertNull(\App\Services\Mcp\TicketToolActivityContext::current());
+    }
+
+    public function test_history_discovery_limits_and_explicit_grant(): void
+    {
+        $ticket = $this->ticket();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['get_ticket_tool_history']);
+        $list = $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/mcp/staff', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => [],
+        ])->assertOk()->json('result.tools');
+        $this->assertContains('get_ticket_tool_history', array_column($list, 'name'));
+        foreach ([['limit' => 51], ['limit' => 0], ['offset' => -1], ['offset' => 10001], ['limit' => '2']] as $invalid) {
+            $response = $this->callTool($token, 'get_ticket_tool_history', $invalid + ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id]);
+            $this->assertTrue($response['result']['isError']);
+        }
+        $legacy = McpConfig::rotateStaffToken();
+        $this->assertTrue($this->callTool($legacy, 'get_ticket_tool_history', ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id])['result']['isError']);
+        $this->assertTrue($this->callTool($token, 'get_ticket_tool_history', ['ticket_id' => $ticket->id])['result']['isError']);
+    }
+
     public function test_projection_pagination_action_precedence_and_redaction(): void
     {
         $ticket = $this->ticket();
@@ -118,6 +161,10 @@ class TicketToolHistoryTest extends TestCase
             'action_log_id' => $foreign->id, 'correlation_id' => $foreign->correlation_id,
             'result_summary' => 'SECRET-RAW-PAYLOAD', 'arguments' => ['secret' => 'SECRET-RAW-PAYLOAD'],
             'error_message' => 'SECRET-RAW-PAYLOAD']);
+        // A moved ticket's old-client call remains invisible, even with the same ticket id.
+        McpAuditLog::create(['ticket_id' => $ticket->id, 'client_id' => $foreign->client_id,
+            'server_name' => 'staff', 'method' => 'tools/call', 'tool_name' => 'old-client',
+            'actor_label' => 'reader', 'status' => 'success', 'duration_ms' => 0]);
         $service = app(TicketToolActivity::class);
         $page = $service->page($ticket, 2);
         $this->assertCount(2, $page['items']);

@@ -275,7 +275,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'get_ticket_notes',
-                'description' => 'Get the notes and conversation history for a specific ticket. Useful for understanding how a past issue was resolved. Each note carries an attachments list of metadata refs (attachment_id, filename, mime_type, size_bytes, is_inline — inline means an image embedded in an email body, e.g. a pasted screenshot); pass an attachment_id to get_ticket_attachment to see the file itself.',
+                'description' => 'Get the notes and conversation history for a specific ticket. Staff MCP callers can separately use get_ticket_tool_history for tool calls and action outcomes (explicit grant required). Useful for understanding how a past issue was resolved. Each note carries an attachments list of metadata refs (attachment_id, filename, mime_type, size_bytes, is_inline — inline means an image embedded in an email body, e.g. a pasted screenshot); pass an attachment_id to get_ticket_attachment to see the file itself.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
