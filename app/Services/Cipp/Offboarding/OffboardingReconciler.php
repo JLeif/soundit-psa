@@ -98,7 +98,7 @@ class OffboardingReconciler
         }
         foreach ($old['steps'] ?? [] as $index => $step) {
             if (in_array($step['reported_status'], ['succeeded', 'failed', 'skipped'], true)
-                && ($new['steps'][$index] ?? null) !== $step) {
+                && OffboardingPlan::canonical($new['steps'][$index] ?? []) !== OffboardingPlan::canonical($step)) {
                 return true;
             }
         }

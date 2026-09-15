@@ -655,7 +655,8 @@ class McpStaffController extends Controller
         $rawClientIdArgument = $arguments['client_id'] ?? null;
         $ticketScopedPsaTool = $this->isPsaTicketScopedTool((string) $name);
         $ticketScope = null;
-        $clientId = $this->positiveIntegerArgument($arguments['client_id'] ?? null);
+        $explicitClientArgument = $arguments['client_id'] ?? null;
+        $clientId = $this->positiveIntegerArgument($explicitClientArgument);
         unset($arguments['client_id']);
         $auditArguments = $arguments;
         if ((string) $name === 'create_ticket' && $clientId !== null) {
@@ -1083,9 +1084,10 @@ class McpStaffController extends Controller
                 $result = app(ChetDataSurfaceToolExecutor::class)->execute((string) $name, $arguments, $clientId);
             } elseif ($this->isCippWriteTool((string) $name)) {
                 if ($offboarding) {
-                    if (($arguments['client_id'] ?? null) !== (int) $clientId) {
+                    if ($explicitClientArgument !== (int) $clientId) {
                         throw new \RuntimeException('Offboarding requires matching explicit client scope.');
                     }
+                    $arguments['client_id'] = $explicitClientArgument;
                     $arguments['staged'] = true;
                 }
                 $result = app(StaffCippWriteToolExecutor::class)->execute(
