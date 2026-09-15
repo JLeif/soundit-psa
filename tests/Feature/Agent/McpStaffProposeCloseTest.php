@@ -98,7 +98,7 @@ class McpStaffProposeCloseTest extends TestCase
         $this->assertSame(0.99, $audit->arguments['confidence']);
     }
 
-    public function test_legacy_mcp_propose_close_keeps_derived_scope_when_caller_supplies_mismatched_client_id(): void
+    public function test_legacy_mcp_propose_close_rejects_mismatched_supplied_client_id(): void
     {
         $client = Client::factory()->create();
         $otherClient = Client::factory()->create();
@@ -115,10 +115,10 @@ class McpStaffProposeCloseTest extends TestCase
         ]);
 
         $response->assertOk();
-        $this->assertFalse((bool) $response->json('result.isError'), $this->toolText($response));
-        $this->assertStringContainsString('held for approval', $this->toolText($response));
+        $this->assertTrue((bool) $response->json('result.isError'), $this->toolText($response));
+        $this->assertStringContainsString('different client', $this->toolText($response));
 
-        $this->assertSame(1, TechnicianRun::where('ticket_id', $ticket->id)
+        $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)
             ->where('action_type', 'propose_close')
             ->count());
         $this->assertSame(TicketStatus::PendingThirdParty, $ticket->refresh()->status);
