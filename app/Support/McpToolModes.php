@@ -85,6 +85,11 @@ class McpToolModes
         return array_flip(self::stagedToCanonical());
     }
 
+    /** Capabilities whose bare grant holds; explicit :immediate is still supported. */
+    private const BARE_GRANT_DEFAULTS_STAGED = [
+        'resolve_phone_call',
+    ];
+
     /**
      * Capabilities whose IMMEDIATE lane did not exist before the staged/immediate
      * unification: merge_ticket / merge_asset shipped only as cockpit-approved
@@ -101,11 +106,6 @@ class McpToolModes
      *
      * @var array<int, string>
      */
-    /** Capabilities whose bare grant holds; explicit :immediate is still supported. */
-    private const BARE_GRANT_DEFAULTS_STAGED = [
-        'resolve_phone_call',
-    ];
-
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
         'resolve_email_item',
         'resolve_phone_call',
