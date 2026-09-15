@@ -155,6 +155,18 @@ class OffboardingReconcilerTest extends TestCase
         $this->assertDatabaseCount('cipp_offboarding_observations', 0);
     }
 
+    public function test_scheduler_failure_conflicting_with_success_progress_stays_uncertain(): void
+    {
+        $task = Fixture::task();
+        $task['TaskState'] = 'Failed';
+        $this->nameReads([$task]);
+        $this->progressReads([Fixture::progress()]);
+        $result = $this->reconcile();
+        $this->assertSame('conflicting_observations', $result['evidence']);
+        $this->assertSame('unknown', $result['execution']);
+        $this->assertSame('unverified', $result['verification']);
+    }
+
     public function test_failed_hidden_partition_is_unavailable_not_empty(): void
     {
         $q = ['tenantFilter' => 'example.test', 'Name' => 'Offboarding: leaver@example.test', 'Type' => 'Invoke-CIPPOffboardingJob'];

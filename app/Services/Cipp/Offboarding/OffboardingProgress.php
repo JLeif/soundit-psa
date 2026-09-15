@@ -101,7 +101,7 @@ final class OffboardingProgress
             $step = $steps[$index];
             if (! is_array($step) || ($step['Title'] ?? null) !== $expected[$action]
                 || ! in_array($step['Kind'] ?? null, [null, ''], true)
-                || ! in_array($step['Status'] ?? null, ['pending', 'running', 'succeeded', 'failed', 'skipped'], true)
+                || ! in_array($step['Status'] ?? null, ['pending', 'running', 'succeeded', 'failed'], true)
                 || ! is_string($step['Message'] ?? null)) {
                 return self::unknown('step_contract_conflict');
             }
@@ -118,7 +118,7 @@ final class OffboardingProgress
             return self::unknown('unknown_progress_state');
         }
         $statuses = array_column($result, 'reported_status');
-        $execution = in_array('failed', $statuses, true) ? 'reported_failed'
+        $execution = ($overall === 'failed' || in_array('failed', $statuses, true)) ? 'reported_failed'
             : (($overall === 'succeeded' && count(array_unique($statuses)) === 1 && $statuses[0] === 'succeeded')
                 ? 'reported_succeeded' : 'partial_or_incomplete');
 

@@ -35,6 +35,29 @@ class OffboardingTransportTest extends TestCase
         }
     }
 
+    public function test_progress_uses_only_bound_get_and_rejects_unwrapped_contract_drift(): void
+    {
+        foreach ([[['Name' => 'synthetic']], ['value' => []], ['queued' => true], ['not-a-row']] as $body) {
+            Cache::flush();
+            Http::swap(new \Illuminate\Http\Client\Factory);
+            Http::preventStrayRequests();
+            Http::fake([
+                'login.microsoftonline.com/*' => Http::response(['access_token' => 'synthetic-token']),
+                'cipp.example.test/api/ListOffboardingProgress*' => Http::response($body),
+            ]);
+            $client = new CippRestWriteClient(['api_url' => 'https://cipp.example.test', 'tenant_id' => 'synthetic-tenant', 'client_id' => 'synthetic-client', 'client_secret' => 'synthetic-secret'], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+            $failed = false;
+            try {
+                $rows = $client->offboardingRead('progress', ['DeploymentId' => '55555555-5555-4555-8555-555555555555']);
+            } catch (\App\Services\Cipp\CippClientException) {
+                $failed = true;
+            }
+            $this->assertSame($body !== [['Name' => 'synthetic']], $failed);
+            Http::assertSent(fn ($r) => $r->method() === 'GET' && $r->url() === 'https://cipp.example.test/api/ListOffboardingProgress?DeploymentId=55555555-5555-4555-8555-555555555555');
+            Http::assertSentCount(2);
+        }
+    }
+
     public function test_scheduler_permission_error_is_not_empty(): void
     {
         Cache::flush();

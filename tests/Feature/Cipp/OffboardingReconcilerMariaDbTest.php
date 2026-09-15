@@ -83,6 +83,72 @@ class OffboardingReconcilerMariaDbTest extends OffboardingReconcilerTest
         $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
     }
 
+    private function child(array $extra = []): array
+    {
+        $dir = dirname(getenv('CIPP_PROGRESS_TEST_SOCKET')).'/recovery-children';
+        if (! is_dir($dir)) {
+            mkdir($dir, 0700);
+        }
+        $prefix = $dir.'/'.\Illuminate\Support\Str::uuid();
+        $job = $extra + ['run_id' => $this->run->id, 'client_id' => $this->run->client_id, 'observer_id' => $this->observer->id,
+            'task' => Fixture::task(), 'progress' => Fixture::progress(), 'marker' => $prefix.'.marker',
+            'posts' => $prefix.'.posts', 'result' => $prefix.'.result'];
+        file_put_contents($prefix.'.json', json_encode($job, JSON_THROW_ON_ERROR));
+        $extensions = getenv('CIPP_TEST_EXTENSION_DIR');
+        $command = [PHP_BINARY, '-d', 'extension='.$extensions.'/mysqlnd.so', '-d', 'extension='.$extensions.'/pdo_mysql.so', base_path('tests/Fixtures/offboarding-reconcile-child.php'), $prefix.'.json'];
+        $process = proc_open($command, [0 => ['file', '/dev/null', 'r'], 1 => ['file', $prefix.'.out', 'w'], 2 => ['file', $prefix.'.err', 'w']], $pipes, base_path(), array_merge(getenv(), ['CIPP_CHILD_KEY' => config('app.key')]));
+        $this->assertIsResource($process);
+
+        return [$process, $job];
+    }
+
+    private function marker(string $path): void
+    {
+        $deadline = microtime(true) + 20;
+        while (! file_exists($path) && microtime(true) < $deadline) {
+            usleep(10000);
+        }
+        $this->assertFileExists($path);
+    }
+
+    public function test_fresh_process_crashes_keep_evidence_and_restart_has_zero_posts(): void
+    {
+        foreach (['during_read', 'observation_before_commit', 'audit_before_commit', 'after_commit_before_status'] as $point) {
+            $before = DB::table('cipp_offboarding_observations')->count();
+            [$process, $job] = $this->child(['kill_at' => $point]);
+            $this->marker($job['marker']);
+            $this->assertNotSame(0, proc_close($process));
+            $this->assertFileDoesNotExist($job['posts']);
+            $this->assertSame($before + ($point === 'after_commit_before_status' ? 1 : 0), DB::table('cipp_offboarding_observations')->count());
+            $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
+            $this->assertDatabaseCount('cipp_offboarding_target_fences', 1);
+            $this->assertDatabaseCount('cipp_offboarding_spent_plans', 1);
+            [$restart, $read] = $this->child();
+            $this->assertSame(0, proc_close($restart));
+            $this->assertFileDoesNotExist($read['posts']);
+            $result = json_decode(file_get_contents($read['result']), true);
+            $this->assertSame('send_intent', $result['admission']);
+            $this->assertSame('unverified', $result['verification']);
+        }
+    }
+
+    public function test_two_fresh_process_readers_cannot_silently_replace_each_other(): void
+    {
+        $barrier = dirname(getenv('CIPP_PROGRESS_TEST_SOCKET')).'/barrier-'.\Illuminate\Support\Str::uuid();
+        [$one, $a] = $this->child(['barrier' => $barrier]);
+        [$two, $b] = $this->child(['barrier' => $barrier]);
+        $this->marker($a['marker']);
+        $this->marker($b['marker']);
+        touch($barrier);
+        $this->assertSame(0, proc_close($one));
+        $this->assertSame(0, proc_close($two));
+        $this->assertDatabaseCount('cipp_offboarding_observations', 2);
+        $this->assertSame(1, DB::table('cipp_offboarding_observations')->where('conflict', true)->count());
+        $this->assertFileDoesNotExist($a['posts']);
+        $this->assertFileDoesNotExist($b['posts']);
+        $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
+    }
+
     public function test_outer_transaction_cannot_hide_durable_observation(): void
     {
         DB::beginTransaction();

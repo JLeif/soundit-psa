@@ -59,7 +59,13 @@ class OffboardingReconciler
             $observation = OffboardingProgress::task($rows, $snapshot, $taskId, $deploymentId);
             if (($observation['task_persisted'] ?? false) && $observation['deployment_id'] !== null) {
                 $progress = $this->vendor->offboardingRead('progress', ['DeploymentId' => $observation['deployment_id']]);
-                $observation = [...$observation, ...OffboardingProgress::parse($progress, $snapshot, $observation['task_id'])];
+                $parsed = OffboardingProgress::parse($progress, $snapshot, $observation['task_id']);
+                if (($observation['scheduler_state'] === 'Failed' && $parsed['execution'] === 'reported_succeeded')
+                    || (in_array($observation['scheduler_state'], ['Planned', 'Running'], true)
+                        && $parsed['execution'] === 'reported_succeeded')) {
+                    $parsed = OffboardingProgress::unknown('scheduler_progress_conflict');
+                }
+                $observation = [...$observation, ...$parsed];
             }
         } catch (\Throwable) {
             // No exception text or foreign vendor rows cross the client boundary.
