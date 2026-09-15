@@ -56,6 +56,77 @@ class HuntressLinkPersistenceTest extends TestCase
             'https://synthetic.huntress.io/org/'.$org.'/'.$path, '2026-09-14 12:01:00');
     }
 
+    public function test_event_history_is_bounded_and_repair_reaches_evidence_after_the_first_page(): void
+    {
+        foreach (['incident_report', 'escalation'] as $type) {
+            for ($i = 0; $i < 201; $i++) {
+                $this->event($type, ['account_id' => 12]);
+            }
+            $valid = $this->event($type);
+            $pair = $this->pair();
+            $path = $type === 'escalation' ? 'escalations/9182' : 'incident_reports/9182';
+            DB::enableQueryLog();
+            $this->capture($pair, $path);
+            $history = collect(DB::getQueryLog())->filter(fn ($q) => str_contains($q['query'], 'select * from "huntress_webhook_events"'));
+            DB::disableQueryLog();
+            DB::flushQueryLog();
+            $this->assertCount(1, $history);
+            $this->assertStringContainsString('limit 101', $history->first()['query']);
+            $this->assertNull($pair[0]->fresh()->huntress_event_id);
+            $this->assertSame('event_history_pending', $pair[0]->fresh()->huntress_link_refusal);
+            $cursor = DB::table('huntress_link_candidates')->where('alert_id', $pair[0]->id)->value('event_scan_after_id');
+            $this->assertGreaterThan(0, $cursor);
+            app(HuntressLinkService::class)->promote($type, 9182);
+            $this->assertNull($pair[0]->fresh()->huntress_event_id);
+            $this->assertGreaterThan($cursor, DB::table('huntress_link_candidates')->where('alert_id', $pair[0]->id)->value('event_scan_after_id'));
+            app(HuntressLinkService::class)->promote($type, 9182);
+            $this->assertEquals($valid, $pair[0]->fresh()->huntress_event_id);
+            // The valid binding is past page one; a later repair must not revoke it.
+            app(HuntressLinkService::class)->promote($type, 9182);
+            $this->assertEquals($valid, $pair[0]->fresh()->huntress_event_id);
+            $this->assertSame(0, DB::table('huntress_link_candidates')->where('alert_id', $pair[0]->id)->value('event_scan_after_id'));
+        }
+    }
+
+    public function test_history_cursor_and_link_roll_back_together_and_new_arrival_is_not_lost(): void
+    {
+        for ($i = 0; $i < 101; $i++) {
+            $this->event(overrides: ['account_id' => 12]);
+        }
+        $pair = $this->pair();
+        $this->capture($pair);
+        $cursor = DB::table('huntress_link_candidates')->value('event_scan_after_id');
+        $this->assertGreaterThan(0, $cursor);
+        DB::beginTransaction();
+        app(HuntressLinkService::class)->promote('incident_report', 9182);
+        $this->assertSame(0, DB::table('huntress_link_candidates')->value('event_scan_after_id'));
+        DB::rollBack();
+        $this->assertEquals($cursor, DB::table('huntress_link_candidates')->value('event_scan_after_id'));
+        $valid = $this->event();
+        app(HuntressLinkService::class)->promote('incident_report', 9182);
+        $this->assertEquals($valid, $pair[0]->fresh()->huntress_event_id);
+        // A new competitor must revoke synchronously, regardless of history cursor.
+        $other = $this->pair($pair[1]->client);
+        $this->capture($other);
+        foreach ([$pair, $other] as $p) {
+            $this->assertNull($p[0]->fresh()->huntress_event_id);
+            $this->assertSame('ambiguous_binding', $p[0]->fresh()->huntress_link_refusal);
+        }
+    }
+
+    public function test_completed_history_wraps_to_recheck_changed_client_scope(): void
+    {
+        $valid = $this->event();
+        $pair = $this->pair();
+        $this->capture($pair);
+        $pair[1]->client->update(['huntress_organization_id' => 43]);
+        app(HuntressLinkService::class)->promote('incident_report', 9182);
+        $this->assertNull($pair[0]->fresh()->huntress_event_id);
+        $pair[1]->client->update(['huntress_organization_id' => 42]);
+        app(HuntressLinkService::class)->promote('incident_report', 9182);
+        $this->assertEquals($valid, $pair[0]->fresh()->huntress_event_id);
+    }
+
     public function test_both_arrival_orders_promote_once_and_capture_is_immutable(): void
     {
         foreach (['incident_report', 'escalation'] as $type) {

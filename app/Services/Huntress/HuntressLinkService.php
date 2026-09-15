@@ -146,9 +146,24 @@ class HuntressLinkService
             }
             if (! $reason) {
                 $reason = 'unvalidated_candidate';
+                // Bound history work, not merely hydration memory. The durable cursor
+                // advances only with the link/refusal in this mutex transaction. A
+                // retry resumes; a completed unsuccessful pass wraps for later scope
+                // changes. Never discard history or treat a partial pass as authority.
                 $events = DB::table('huntress_webhook_events')->where('record_type', $candidate->record_type)
-                    ->where('record_id', $candidate->record_id)->orderBy('id')->lazyById(100);
-                foreach ($events as $row) {
+                    ->where('record_id', $candidate->record_id);
+                $bound = $alert->huntress_event_id
+                    ? (clone $events)->where('id', $alert->huntress_event_id)->first() : null;
+                $page = (clone $events)->where('id', '>', $candidate->event_scan_after_id)
+                    ->orderBy('id')->limit(101)->get();
+                $rows = $page->take(100);
+                // A previously validated event is always rechecked, even when it is
+                // behind the scan cursor. Later history cannot displace a valid link.
+                if ($bound) {
+                    $rows->prepend($bound);
+                }
+                $ticketOrg = Client::find($ticket->client_id)?->huntress_organization_id;
+                foreach ($rows as $row) {
                     $evidence = (array) $row;
                     $evidence['record_id'] = (int) $row->record_id;
                     $evidence['account_id'] = $row->account_id === null ? null : (int) $row->account_id;
@@ -160,12 +175,20 @@ class HuntressLinkService
                         'organization_id' => (int) $candidate->candidate_org_id,
                     ], $evidence, (int) HuntressConfig::get('webhook_account_id'),
                         $candidate->organization_id === null ? null : (int) $candidate->organization_id,
-                        ($org = Client::find($ticket->client_id)?->huntress_organization_id) === null ? null : (int) $org,
+                        $ticketOrg === null ? null : (int) $ticketOrg,
                         $candidate->received_at);
                     if ($reason === null) {
                         $event = $row;
                         break;
                     }
+                }
+                $after = ! $event && $page->count() > 100 ? $page[99]->id : 0;
+                if ($after !== 0) {
+                    $reason = 'event_history_pending';
+                }
+                if ((int) $candidate->event_scan_after_id !== (int) $after) {
+                    DB::table('huntress_link_candidates')->where('id', $candidate->id)
+                        ->update(['event_scan_after_id' => $after]);
                 }
             }
             $values = [
