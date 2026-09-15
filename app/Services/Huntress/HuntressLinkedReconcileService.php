@@ -11,7 +11,6 @@ use App\Models\Alert;
 use App\Models\Ticket;
 use App\Models\TicketNote;
 use App\Services\AlertService;
-use App\Services\SyncResult;
 use App\Services\TicketService;
 use App\Support\HuntressConfig;
 use Illuminate\Support\Facades\DB;
@@ -27,14 +26,16 @@ abstract class HuntressLinkedReconcileService
         private readonly AlertService $alertService,
     ) {}
 
-    public function reconcile(): SyncResult
+    public function reconcile(): HuntressReconcileResult
     {
-        $result = new SyncResult;
+        $result = new HuntressReconcileResult;
         // Repairs a durable event whose post-commit promotion failed, without requiring
         // another vendor delivery. Promotion itself never resolves tickets.
         try {
             app(HuntressLinkService::class)->promote();
         } catch (\Throwable) {
+            // Fail closed for the whole run: failed repair can leave a formerly
+            // valid link awaiting revocation. Do not poll that uncertain snapshot.
             $result->recordError('link_repair_failed');
 
             return $result;
@@ -85,7 +86,7 @@ abstract class HuntressLinkedReconcileService
         return $alert;
     }
 
-    private function poll(Ticket $ticket, SyncResult $result): void
+    private function poll(Ticket $ticket, HuntressReconcileResult $result): void
     {
         $alert = $this->link($ticket);
         if (! $alert) {
@@ -102,6 +103,7 @@ abstract class HuntressLinkedReconcileService
 
             return;
         }
+        $result->checked++;
         $result->details[] = "#{$ticket->id}: checked";
         if (! $this->upstreamScope($record, $alert)) {
             $result->recordSkipped("#{$ticket->id}: upstream_scope_mismatch");

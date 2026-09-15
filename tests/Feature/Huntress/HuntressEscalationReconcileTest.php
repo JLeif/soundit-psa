@@ -41,14 +41,10 @@ use Tests\TestCase;
  * CW-Manage status webhook, so the bridged PSA ticket strands open — the escalation analogue
  * of the incident gap (psa-kq1u). This service resolves it, under the SAME safety discipline.
  *
- * SAFETY (from real prod data + psa-shej escalation-shape probes):
- *  - SCOPE: only ESCALATION-backed source=Huntress tickets are eligible (subject carries an
- *    "Escalation" marker and NOT "Incident on <host>"). Incidents / product-notices sharing
- *    the source must never be touched here.
- *  - CORRESPONDENCE: resolve ONLY on positive ticket↔escalation correspondence — an exact
- *    escalation id (ingest-captured), OR a unique org+subject match within the creation
- *    window. Account-level "Failed to Deliver" escalations (no org, no id) are skipped, never
- *    guessed. Bare time-window matching is a mis-close vector and is NOT a resolve trigger.
+ * Only immutable CW candidates correlated with verified events authorize polling.
+ * Former subject/window and text-id positives remain refusal controls; lifecycle,
+ * retry and human-touch controls use real candidate/event promotion.
+ * Subject text and legacy metadata are not authority.
  *
  * Only the Huntress HTTP boundary is faked; reconcile/scope/correspondence/guards are real.
  */
@@ -148,16 +144,36 @@ class HuntressEscalationReconcileTest extends TestCase
     private function service(array $escalationsByOrg = [], array $escalationsById = []): HuntressEscalationReconcileService
     {
         $client = Mockery::mock(HuntressClient::class);
-        $client->shouldReceive('getEscalations')
-            ->andReturnUsing(fn (array $p) => $escalationsByOrg[$p['organization_id'] ?? 0] ?? []);
-        $client->shouldReceive('getEscalation')
-            ->andReturnUsing(fn (int $id) => $escalationsById[$id] ?? ['id' => $id, 'status' => 'sent']);
+        $client->shouldReceive('getEscalations')->never();
+        if ($escalationsById === []) {
+            $client->shouldReceive('getEscalation')->never();
+        } else {
+            $client->shouldReceive('getEscalation')
+                ->andReturnUsing(fn (int $id) => $escalationsById[$id] ?? throw new \LogicException('Unexpected synthetic id'));
+        }
 
         return new HuntressEscalationReconcileService(
             $client,
             app(TicketService::class),
             app(AlertService::class),
         );
+    }
+
+    private function bind(Ticket $ticket, int $id): void
+    {
+        Setting::setValue('huntress_webhooks_enabled', '1');
+        Setting::setValue('huntress_webhook_account_id', '11');
+        \Illuminate\Support\Facades\DB::table('huntress_webhook_events')->insert([
+            'delivery_id' => 'synthetic-'.$ticket->id, 'content_hash' => str_repeat('a', 64),
+            'event_type' => 'escalation.created', 'record_type' => 'escalation',
+            'record_id' => $id, 'account_id' => 11, 'organization_ids' => '[42]',
+            'resolved' => false, 'record_created_at' => $ticket->created_at,
+            'correlation_at' => $ticket->created_at, 'received_at' => now(),
+        ]);
+        app(\App\Services\Huntress\HuntressLinkService::class)->capture(
+            Alert::where('ticket_id', $ticket->id)->firstOrFail(), $ticket,
+            'https://synthetic.huntress.io/org/42/escalations/'.$id, $ticket->created_at->toDateTimeString());
+        $this->assertEquals($id, Alert::where('ticket_id', $ticket->id)->first()->huntress_record_id);
     }
 
     private function assertResolved(Ticket $ticket): void
@@ -180,7 +196,7 @@ class HuntressEscalationReconcileTest extends TestCase
 
     // ── correspondence: org + subject + window (the legacy no-id path) ──
 
-    public function test_resolves_on_unique_org_subject_window_correspondence(): void
+    public function test_unique_org_subject_window_without_signed_link_never_resolves(): void
     {
         $client = $this->mappedClient(42);
         $ticket = $this->escalationTicket($client);
@@ -191,9 +207,9 @@ class HuntressEscalationReconcileTest extends TestCase
 
         $result = $this->service($escalations)->reconcile();
 
-        $this->assertResolved($ticket);
-        $this->assertSame(1, $result->updated);
-        $this->assertSame(AlertStatus::Resolved, Alert::where('ticket_id', $ticket->id)->first()->status);
+        $this->assertStaysOpen($ticket);
+        $this->assertSame(0, $result->updated);
+        $this->assertSame(AlertStatus::Ticketed, Alert::where('ticket_id', $ticket->id)->first()->status);
     }
 
     public function test_resolves_when_only_resolved_at_is_set_status_absent(): void
@@ -205,7 +221,8 @@ class HuntressEscalationReconcileTest extends TestCase
             $this->escalationRow(702, 42, 'sent', $ticket->created_at, 'Endpoints Missing Key EDR Functionality', resolvedAt: now()->toIso8601String()),
         ]];
 
-        $this->service($escalations)->reconcile();
+        $this->bind($ticket, 702);
+        $this->service([], [702 => $escalations[42][0]])->reconcile();
 
         $this->assertSame(TicketStatus::Resolved, $ticket->fresh()->status);
     }
@@ -325,15 +342,15 @@ class HuntressEscalationReconcileTest extends TestCase
 
     // ── correspondence: exact id fast path (ingest-captured escalation id) ──
 
-    public function test_id_bearing_ticket_resolves_via_exact_get_escalation(): void
+    public function test_metadata_id_without_signed_link_never_resolves(): void
     {
         $client = $this->mappedClient(42);
         $ticket = $this->escalationTicket($client, metaEscalationId: 555);
 
-        $result = $this->service([], [555 => ['id' => 555, 'status' => 'resolved']])->reconcile();
+        $result = $this->service()->reconcile();
 
-        $this->assertResolved($ticket);
-        $this->assertSame(1, $result->updated);
+        $this->assertStaysOpen($ticket);
+        $this->assertSame(0, $result->updated);
     }
 
     public function test_id_bearing_ticket_with_still_open_escalation_stays_open(): void
@@ -341,7 +358,8 @@ class HuntressEscalationReconcileTest extends TestCase
         $client = $this->mappedClient(42);
         $ticket = $this->escalationTicket($client, metaEscalationId: 556);
 
-        $this->service([], [556 => ['id' => 556, 'status' => 'sent']])->reconcile();
+        $this->bind($ticket, 556);
+        $this->service([], [556 => ['id' => 556, 'status' => 'sent', 'organizations' => [['id' => 42]]]])->reconcile();
 
         $this->assertStaysOpen($ticket);
     }
@@ -350,6 +368,7 @@ class HuntressEscalationReconcileTest extends TestCase
     {
         Log::spy();
         $ticket = $this->escalationTicket($this->mappedClient(), metaEscalationId: 555);
+        $this->bind($ticket, 555);
         $history = [];
         $stack = HandlerStack::create(new MockHandler([
             new Response(404, [], '{}'),
@@ -369,12 +388,8 @@ class HuntressEscalationReconcileTest extends TestCase
         $this->assertSame(AlertStatus::Ticketed, Alert::where('ticket_id', $ticket->id)->first()->status);
         $this->assertCount(1, $history, 'a stale id must not reach the org listing');
         $this->assertSame('/v1/escalations/555', $history[0]['request']->getUri()->getPath());
-        // Warning, not info: 404 is the one status this code cannot attribute, and its
-        // systemic causes hit every ticket at once. See the catch block's comment.
-        Log::shouldHaveReceived('warning')->with(
-            '[HuntressEscalationReconcile] getEscalation(555) returned 404; skipping — a stale id cannot fall back to org+subject+window matching',
-            ['ticket_id' => $ticket->id],
-        )->once();
+        $this->assertSame(1, $result->errors);
+        $this->assertContains("#{$ticket->id}: fetch_failed", $result->errorMessages);
         // No tombstone: the next run retries the id (a purge may be reversed upstream).
         $this->assertSame(0, $service->reconcile()->updated);
         $this->assertCount(2, $history);
@@ -399,6 +414,7 @@ class HuntressEscalationReconcileTest extends TestCase
     {
         $ticket = $this->escalationTicket($this->mappedClient(), metaEscalationId: 555);
         $client = Mockery::mock(HuntressClient::class);
+        $this->bind($ticket, 555);
         $client->shouldReceive('getEscalation')->once()->with(555)->andThrow(new HuntressClientException('Not found', 404));
         $client->shouldNotReceive('getEscalations');
 
@@ -410,32 +426,28 @@ class HuntressEscalationReconcileTest extends TestCase
     }
 
     #[DataProvider('non404Failures')]
-    public function test_other_throwables_still_warn_and_skip_without_fallback(\Throwable $failure): void
+    public function test_other_throwables_count_errors_and_skip_without_fallback(\Throwable $failure): void
     {
         Log::spy();
         $ticket = $this->escalationTicket($this->mappedClient(), metaEscalationId: 555);
         $client = Mockery::mock(HuntressClient::class);
+        $this->bind($ticket, 555);
         $client->shouldReceive('getEscalation')->twice()->with(555)->andThrow($failure);
         $client->shouldNotReceive('getEscalations');
         $service = new HuntressEscalationReconcileService($client, app(TicketService::class), app(AlertService::class));
 
-        $this->assertSame(0, $service->reconcile()->updated);
-        $this->assertSame(0, $service->reconcile()->updated);
+        foreach (range(1, 2) as $attempt) {
+            $result = $service->reconcile();
+            $this->assertSame(0, $result->updated);
+            $this->assertSame(1, $result->errors);
+            $this->assertContains("#{$ticket->id}: fetch_failed", $result->errorMessages);
+            $this->assertStringNotContainsString($failure->getMessage(), implode(' ', $result->errorMessages));
+        }
 
         $this->assertStaysOpen($ticket);
         $this->assertSame(AlertStatus::Ticketed, Alert::where('ticket_id', $ticket->id)->first()->status);
-        Log::shouldHaveReceived('warning')->with(
-            "[HuntressEscalationReconcile] getEscalation(555) failed: {$failure->getMessage()}",
-            ['ticket_id' => $ticket->id],
-        )->twice();
-        // Scoped to the one line that must not appear, not to a whole log level: these rows
-        // take the generic-failure branch, so the 404 skip line is what proves they did not
-        // take the 404 branch. A bare shouldNotHaveReceived('warning') would now be false,
-        // and a bare shouldNotHaveReceived('info') would break on unrelated info logging.
-        Log::shouldNotHaveReceived('warning', [
-            '[HuntressEscalationReconcile] getEscalation(555) returned 404; skipping — a stale id cannot fall back to org+subject+window matching',
-            ['ticket_id' => $ticket->id],
-        ]);
+        // Vendor exception bodies must not enter diagnostics or logs.
+        Log::shouldNotHaveReceived('warning');
     }
 
     public static function non404Failures(): array
@@ -450,7 +462,7 @@ class HuntressEscalationReconcileTest extends TestCase
         ];
     }
 
-    public function test_id_recovered_from_escalations_url_in_source_alert_id_resolves(): void
+    public function test_source_alert_url_without_signed_link_never_resolves(): void
     {
         $client = $this->mappedClient(42);
         $ticket = $this->escalationTicket(
@@ -458,10 +470,10 @@ class HuntressEscalationReconcileTest extends TestCase
             sourceAlertId: 'https://dashboard.huntress.io/org/42/escalations/777',
         );
 
-        $result = $this->service([], [777 => ['id' => 777, 'status' => 'sent', 'resolved_at' => now()->toIso8601String()]])->reconcile();
+        $result = $this->service()->reconcile();
 
-        $this->assertResolved($ticket);
-        $this->assertSame(1, $result->updated);
+        $this->assertStaysOpen($ticket);
+        $this->assertSame(0, $result->updated);
     }
 
     // ── scope ──────────────────────────────────────────────────────────────
@@ -525,8 +537,9 @@ class HuntressEscalationReconcileTest extends TestCase
         $ticket = $this->escalationTicket($client);
         $escalations = [42 => [$this->escalationRow(810, 42, 'resolved', $ticket->created_at, 'Endpoints Missing Key EDR Functionality')]];
 
-        $this->service($escalations)->reconcile();
-        $this->service($escalations)->reconcile();
+        $this->bind($ticket, 810);
+        $this->service([], [810 => $escalations[42][0]])->reconcile();
+        $this->service([], [810 => $escalations[42][0]])->reconcile();
 
         $resolveNotes = TicketNote::where('ticket_id', $ticket->id)
             ->where('status_to', TicketStatus::Resolved->value)
@@ -549,7 +562,9 @@ class HuntressEscalationReconcileTest extends TestCase
         ]);
 
         $escalations = [42 => [$this->escalationRow(820, 42, 'resolved', $ticket->created_at, 'Endpoints Missing Key EDR Functionality')]];
-        $result = $this->service($escalations)->reconcile();
+        $this->bind($ticket, 820);
+        $result = $this->service([], [820 => $escalations[42][0]])->reconcile();
+        $this->assertContains("#{$ticket->id}: human_touched", $result->skippedMessages);
 
         $this->assertStaysOpen($ticket);
         $this->assertSame(0, $result->updated);
@@ -571,7 +586,9 @@ class HuntressEscalationReconcileTest extends TestCase
         ]);
 
         $escalations = [42 => [$this->escalationRow(830, 42, 'resolved', $ticket->created_at, 'Endpoints Missing Key EDR Functionality')]];
-        $this->service($escalations)->reconcile();
+        $this->bind($ticket, 830);
+        $result = $this->service([], [830 => $escalations[42][0]])->reconcile();
+        $this->assertContains("#{$ticket->id}: human_touched", $result->skippedMessages);
 
         $this->assertStaysOpen($ticket);
     }
@@ -585,7 +602,8 @@ class HuntressEscalationReconcileTest extends TestCase
         $resolvable = $this->escalationTicket($client);
         $escalations = [42 => [$this->escalationRow(840, 42, 'resolved', $resolvable->created_at, 'Endpoints Missing Key EDR Functionality')]];
 
-        $result = $this->service($escalations)->reconcile();
+        $this->bind($resolvable, 840);
+        $result = $this->service([], [840 => $escalations[42][0]])->reconcile();
 
         $this->assertStaysOpen($stuck);
         $this->assertSame(TicketStatus::Resolved, $resolvable->fresh()->status);

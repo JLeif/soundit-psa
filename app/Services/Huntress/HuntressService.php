@@ -65,8 +65,8 @@ class HuntressService
 
         // Dedup: extract incident report ID from body URL, fall back to subject hash.
         // BOTH URL forms count: `infection_reports/{id}` is the legacy spelling and
-        // `incident_reports/{id}` the current one — same pair HuntressIncidentReconcileService
-        // ::extractIncidentId accepts. Matching only the legacy form left current-form incident
+        // `incident_reports/{id}` the current one. These are ingest dedup locators,
+        // not polling authority. Matching only the legacy form left current-form incident
         // reports without a dedup key, without an alert source id, and without a type signal.
         // Host is matched the same way as the record-path guard below: huntress.io or a
         // subdomain of it, never a host that merely ends in that string (`phish-huntress.io`).
@@ -77,10 +77,9 @@ class HuntressService
             $incidentReportUrl = $m[1];
         }
 
-        // Capture an escalation id if the payload carries an escalations URL. This makes an
-        // escalation ticket reconcilable by EXACT id (HuntressEscalationReconcileService's id
-        // fast path) rather than the weaker org+subject correspondence. Most escalation
-        // payloads (e.g. account-level "Failed to Deliver") carry none — a no-op then.
+        // Retain the legacy escalation locator as metadata for display/diagnostics only.
+        // Polling cannot trust it: HuntressLinkService separately captures an immutable
+        // candidate and requires signed-event correlation before it can authorize a read.
         $escalationId = null;
         if (preg_match('#escalations/(\d+)#', $description, $m)) {
             $escalationId = (int) $m[1];

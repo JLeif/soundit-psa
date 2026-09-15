@@ -19,8 +19,8 @@ use Illuminate\Support\Facades\Log;
  *  - Organization METADATA is account-wide — the org↔client mapping helper must surface
  *    unmapped orgs so a human can map them (mirrors HuntressOrganizationController).
  *  - Incident/escalation SECURITY data is MAPPED-ORGS-ONLY — only orgs that map to a PSA
- *    client (clients.huntress_organization_id) are returned. This mirrors
- *    HuntressIncidentReconcileService so another MSP's incident bodies never reach Chet.
+ *    client (clients.huntress_organization_id) are returned. This read-only boundary
+ *    is distinct from polling, which additionally requires a validated ticket-record link.
  *    Account-level escalations with no org association (e.g. integration-health
  *    "Failed to Deliver") are kept — they are not another tenant's client data.
  *

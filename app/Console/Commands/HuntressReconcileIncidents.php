@@ -34,9 +34,10 @@ class HuntressReconcileIncidents extends Command
 
         $result = $service->reconcile();
 
-        $summary = "{$result->updated} resolved".($result->errors > 0 ? ", {$result->errors} errors" : '');
+        $summary = $result->summary();
         $this->info("Done: {$summary}.");
 
-        return $result->errors > 0 ? self::FAILURE : self::SUCCESS;
+        // A zero-check run is visible as non-success, not a clean bill of health.
+        return $result->errors > 0 || $result->checked === 0 ? self::FAILURE : self::SUCCESS;
     }
 }
