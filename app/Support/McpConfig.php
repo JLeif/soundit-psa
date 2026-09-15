@@ -65,6 +65,7 @@ class McpConfig
             directive: $record->directiveOrDefault(),
             aiActor: (bool) $record->ai_actor,
             requireExplicitClientScope: (bool) $record->require_explicit_client_scope,
+            allowUnlinkedTickets: (bool) $record->allow_unlinked_tickets,
             toolModes: $grants === null ? [] : $grants['modes'],
         );
     }
@@ -152,6 +153,11 @@ class McpConfig
         if ($requireExplicitClientScope !== null || $useNewTokenTrustDefaults) {
             $record->require_explicit_client_scope = $requireExplicitClientScope ?? true;
         }
+        // Same new-token trust defaults: a revived revoked row must not silently
+        // carry the unlinked-ticket grant the operator believes is defaulted off.
+        if ($useNewTokenTrustDefaults) {
+            $record->allow_unlinked_tickets = false;
+        }
         // Programmatic / break-glass rotation yields a ready active token (the
         // new draft flow uses mintDraftToken instead). Rotating a revoked token
         // reactivates it, matching the pre-lifecycle behaviour.
@@ -182,6 +188,7 @@ class McpConfig
         $record->tools = [];
         $record->ai_actor = false;
         $record->require_explicit_client_scope = true;
+        $record->allow_unlinked_tickets = false;
         $record->activated_at = null;
         $record->paused_at = null;
         $record->revoked_at = null;

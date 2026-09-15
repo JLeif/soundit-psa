@@ -35,6 +35,7 @@ use App\Services\Technician\TechnicianDisclosure;
 use App\Services\TicketService;
 use App\Support\EmailRedactor;
 use App\Support\TechnicianConfig;
+use App\Support\UnlinkedTicketScope;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -83,8 +84,12 @@ class StaffPsaActionToolExecutor
      * one resolves a Teams persona for the client-facing tagline (psa-u51h). Handlers
      * that emit no client-facing text take $actorLabel alone, as before.
      */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
+    public function execute(string $name, array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
+        if ($clientId instanceof UnlinkedTicketScope && ! UnlinkedTicketScope::admits($name)) {
+            return ['error' => 'Unlinked ticket: link with move_ticket_to_client (confirm_client_name required) before this action.'];
+        }
+
         return match ($name) {
             'create_ticket' => $this->createTicket($arguments, $clientId, $actorLabel),
             'send_email' => $this->sendEmail($arguments, $clientId, $actorLabel, $tokenLabel),
@@ -330,7 +335,7 @@ class StaffPsaActionToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function closeTicket(array $arguments, int $clientId, string $actorLabel): array
+    private function closeTicket(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
     {
         if ($error = $this->guardDirectAction()) {
             return $error;
@@ -430,7 +435,7 @@ class StaffPsaActionToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageClose(array $arguments, int $clientId, string $actorLabel): array
+    private function stageClose(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
     {
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
@@ -895,7 +900,7 @@ class StaffPsaActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function moveTicketToClient(array $arguments, int $clientId, string $actorLabel): array
+    private function moveTicketToClient(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
     {
         if ($error = $this->guardDirectAction()) {
             return $error;
@@ -3032,7 +3037,7 @@ class StaffPsaActionToolExecutor
     }
 
     /** @return Ticket|array<string, string> */
-    private function ticketForClient(mixed $ticketIdValue, int $clientId): Ticket|array
+    private function ticketForClient(mixed $ticketIdValue, int|UnlinkedTicketScope $clientId): Ticket|array
     {
         $ticketId = $this->positiveInteger($ticketIdValue);
         if ($ticketId === null) {
@@ -3040,7 +3045,9 @@ class StaffPsaActionToolExecutor
         }
 
         $ticket = Ticket::with(['contact', 'assets'])->find($ticketId);
-        if (! $ticket || (int) $ticket->client_id !== $clientId) {
+        if (! $ticket || ($clientId instanceof UnlinkedTicketScope
+            ? $ticket->client_id !== null
+            : ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
@@ -3350,7 +3357,7 @@ class StaffPsaActionToolExecutor
 
     private function auditDirectExecution(string $actionType, Ticket $ticket, string $actorLabel, string $contentHash, string $summary, ?int $actorId = null): void
     {
-        $this->recordActionLog($actionType, $ticket->id, (int) $ticket->client_id, $actorLabel, $contentHash, $summary, $actorId);
+        $this->recordActionLog($actionType, $ticket->id, $ticket->client_id, $actorLabel, $contentHash, $summary, $actorId);
     }
 
     /**

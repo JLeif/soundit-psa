@@ -370,6 +370,13 @@
 
     {{-- ===== TRUST & SCOPE ===== --}}
     <div class="tab-pane fade" id="tab-trust" role="tabpanel">
+        <div class="card card-body mb-3">
+            <div class="form-check form-switch">
+                <input type="checkbox" class="form-check-input mcp-trust" id="flagUnlinked" data-flag="allow_unlinked_tickets" @checked($token->allow_unlinked_tickets) @disabled($readOnly)>
+                <label for="flagUnlinked" class="fw-semibold">Allow unlinked-ticket triage <code>allow_unlinked_tickets</code></label>
+                <p class="text-muted mb-0">Default denied. Allows linking and closing tickets without a client, only with the corresponding tool/mode grant. Linking still requires destination name confirmation; other writes require linking first.</p>
+            </div>
+        </div>
         <div class="row g-4">
             <div class="col-lg-7">
                 <div class="card card-static shadow-sm">

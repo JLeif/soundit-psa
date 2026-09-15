@@ -37,6 +37,7 @@ use App\Support\McpToolModes;
 use App\Support\McpToolRegistry;
 use App\Support\McpToolSurface;
 use App\Support\TechnicianConfig;
+use App\Support\UnlinkedTicketScope;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -647,6 +648,7 @@ class McpStaffController extends Controller
         $hasClientIdArgument = array_key_exists('client_id', $arguments);
         $rawClientIdArgument = $arguments['client_id'] ?? null;
         $ticketScopedPsaTool = $this->isPsaTicketScopedTool((string) $name);
+        $ticketScope = null;
         $clientId = $this->positiveIntegerArgument($arguments['client_id'] ?? null);
         unset($arguments['client_id']);
         $auditArguments = $arguments;
@@ -769,9 +771,27 @@ class McpStaffController extends Controller
                 ]);
             }
 
-            $clientId = $this->ticketClientIdForArguments($arguments);
-            if ($clientId === null) {
+            $ticketId = $this->positiveIntegerArgument($arguments['ticket_id'] ?? null);
+            $ticket = $ticketId === null ? null : Ticket::find($ticketId);
+            $clientId = $ticket?->client_id;
+            $message = null;
+            if ($ticket && $clientId === null) {
+                $ticketScope = UnlinkedTicketScope::Unlinked;
+                // Server-derived, retained even if linking changes the ticket.
+                $request->attributes->set('mcp_ticket_scope', $ticketScope);
+                $token = $request->attributes->get('mcp_staff_token');
+                $granted = $token instanceof McpStaffToken && $token->allowUnlinkedTickets;
+                if (! $granted || ! UnlinkedTicketScope::admits((string) $name)) {
+                    $message = "ticket {$ticketId} is not linked to a client; link it with move_ticket_to_client (confirm_client_name required)";
+                    if (! $granted) {
+                        $message .= '; this token is not granted unlinked-ticket access';
+                    }
+                }
+            }
+            if (! $ticket) {
                 $message = 'ticket_id is required and must resolve to an existing ticket.';
+            }
+            if ($message !== null) {
                 $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
 
                 return response()->json([
@@ -1104,7 +1124,7 @@ class McpStaffController extends Controller
                 $result = app(StaffPsaActionToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
-                    (int) $clientId,
+                    $ticketScope ?? (int) $clientId,
                     $this->actorLabel($request),
                     $this->tokenLabel($request),
                 );
@@ -1314,7 +1334,11 @@ class McpStaffController extends Controller
                 'server_name' => 'staff',
                 'method' => $method,
                 'tool_name' => $tool,
-                'arguments' => is_array($args) ? $this->auditArguments($tool, $args) : null,
+                'arguments' => is_array($args) ? array_merge(
+                    $this->auditArguments($tool, $args),
+                    $request->attributes->get('mcp_ticket_scope') === UnlinkedTicketScope::Unlinked
+                        ? ['ticket_scope' => 'unlinked', 'client_id' => null] : [],
+                ) : null,
                 'status' => $status,
                 'error_message' => $error ? mb_substr($error, 0, 1000) : null,
                 'duration_ms' => (int) round((microtime(true) - $start) * 1000),
@@ -2293,18 +2317,6 @@ class McpStaffController extends Controller
         }
 
         return '('.gettype($value).')';
-    }
-
-    private function ticketClientIdForArguments(array $arguments): ?int
-    {
-        $ticketId = $this->positiveIntegerArgument($arguments['ticket_id'] ?? null);
-        if ($ticketId === null) {
-            return null;
-        }
-
-        $clientId = Ticket::whereKey($ticketId)->value('client_id');
-
-        return is_numeric($clientId) ? (int) $clientId : null;
     }
 
     /**
