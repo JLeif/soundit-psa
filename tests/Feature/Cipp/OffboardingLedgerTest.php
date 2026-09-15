@@ -187,6 +187,118 @@ class OffboardingLedgerTest extends TestCase
         $this->assertFalse($this->ledger->dispatch($op['operation_id'], fn () => true, fn () => $this->fail('Duplicate POST'))['sent']);
     }
 
+    private function child(array $job): array
+    {
+        $dir = dirname(getenv('CIPP_TEST_SOCKET')).'/children';
+        if (! is_dir($dir)) {
+            mkdir($dir, 0700);
+        }
+        $prefix = $dir.'/'.Str::uuid();
+        $job += ['marker' => $prefix.'.marker', 'posts' => $prefix.'.posts', 'result' => $prefix.'.result'];
+        file_put_contents($prefix.'.json', json_encode($job, JSON_THROW_ON_ERROR));
+        $extensions = getenv('CIPP_TEST_EXTENSION_DIR');
+        $this->assertNotFalse($extensions);
+        $command = [PHP_BINARY, '-d', 'extension='.$extensions.'/mysqlnd.so', '-d', 'extension='.$extensions.'/pdo_mysql.so', base_path('tests/Fixtures/offboarding-child.php'), $prefix.'.json'];
+        $env = array_merge(getenv(), ['APP_ENV' => 'testing', 'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CIPP_CHILD_KEY' => config('app.key')]);
+        $process = proc_open($command, [0 => ['file', '/dev/null', 'r'], 1 => ['file', $prefix.'.out', 'w'], 2 => ['file', $prefix.'.err', 'w']], $pipes, base_path(), $env);
+        $this->assertIsResource($process);
+
+        return [$process, $job, $prefix];
+    }
+
+    private function waitMarker(string $path): void
+    {
+        $deadline = microtime(true) + 10;
+        while (! file_exists($path) && microtime(true) < $deadline) {
+            usleep(10000);
+        }
+        $this->assertFileExists($path);
+    }
+
+    public function test_fresh_process_kill_before_prepare_commit_rolls_everything_back(): void
+    {
+        $snapshot = $this->snapshot();
+        $run = $this->runFor($snapshot);
+        [$child, $job] = $this->child(['snapshot' => $snapshot, 'run_id' => $run, 'kill_at' => 'before_prepared_commit']);
+        $this->assertNotSame(0, proc_close($child));
+        $this->assertFileExists($job['marker']);
+        $this->assertSame(0, DB::table('cipp_offboarding_operations')->count());
+        $this->assertSame(0, DB::table('cipp_offboarding_target_fences')->count());
+        $this->assertSame('awaiting_approval', DB::table('technician_runs')->where('id', $run)->value('state'));
+        $this->assertTrue($this->ledger->prepare($run, 1, $snapshot, OffboardingPlan::hash($snapshot))['created']);
+    }
+
+    public function test_fresh_process_kill_after_prepare_can_resume_once(): void
+    {
+        $snapshot = $this->snapshot();
+        $run = $this->runFor($snapshot);
+        [$child, $job] = $this->child(['snapshot' => $snapshot, 'run_id' => $run, 'kill_at' => 'after_prepared_commit']);
+        $this->assertNotSame(0, proc_close($child));
+        $id = DB::table('cipp_offboarding_operations')->value('id');
+        $this->assertSame('prepared', DB::table('cipp_offboarding_operations')->value('admission'));
+        [$retry, $retryJob] = $this->child(['operation_id' => $id, 'posts' => $job['posts']]);
+        $this->assertSame(0, proc_close($retry));
+        $this->assertCount(1, file($job['posts']));
+    }
+
+    public function test_every_post_intent_crash_boundary_retains_fence_and_never_resends(): void
+    {
+        foreach (['after_intent_before_network', 'after_bytes', 'after_vendor_persist', 'after_queue', 'after_response', 'after_receipt'] as $point) {
+            // Different synthetic identities permit independent operations without clearing evidence.
+            $snapshot = $this->snapshot();
+            $snapshot['target_id'] .= $point;
+            $snapshot['target_upn'] = $point.'@example.test';
+            $snapshot['input']['confirm_upn'] = $snapshot['target_upn'];
+            $snapshot['body']['user'][0]['value'] = $snapshot['target_upn'];
+            $run = $this->runFor($snapshot);
+            $op = $this->ledger->prepare($run, 1, $snapshot, OffboardingPlan::hash($snapshot));
+            [$child, $job] = $this->child(['operation_id' => $op['operation_id'], 'kill_at' => $point]);
+            $this->assertNotSame(0, proc_close($child));
+            $this->assertFileExists($job['marker']);
+            $before = file_exists($job['posts']) ? count(file($job['posts'])) : 0;
+            $this->assertSame($point === 'after_intent_before_network' ? 0 : 1, $before);
+            [$retry, $retryJob] = $this->child(['operation_id' => $op['operation_id'], 'posts' => $job['posts']]);
+            $this->assertSame(0, proc_close($retry));
+            $this->assertFalse(json_decode(file_get_contents($retryJob['result']), true)['sent']);
+            $this->assertSame($before, file_exists($job['posts']) ? count(file($job['posts'])) : 0);
+            $this->assertSame(2, DB::table('cipp_offboarding_target_fences')->where('operation_id', $op['operation_id'])->count());
+        }
+    }
+
+    public function test_two_fresh_workers_race_one_intent_winner(): void
+    {
+        $op = $this->prepare();
+        $prefix = dirname(getenv('CIPP_TEST_SOCKET')).'/barrier-'.Str::uuid();
+        $job = ['operation_id' => $op['operation_id'], 'barrier' => $prefix, 'posts' => $prefix.'.posts'];
+        [$a, $ja] = $this->child($job);
+        [$b, $jb] = $this->child($job);
+        $this->waitMarker($ja['marker']);
+        $this->waitMarker($jb['marker']);
+        touch($prefix);
+        $this->assertSame(0, proc_close($a));
+        $this->assertSame(0, proc_close($b));
+        $this->assertCount(1, file($job['posts']));
+        $this->assertSame(1, DB::table('cipp_offboarding_audit')->where('event', 'send_intent')->count());
+    }
+
+    public function test_expired_lease_during_network_hang_cannot_authorize_successor(): void
+    {
+        $op = $this->prepare();
+        [$sender, $job] = $this->child(['operation_id' => $op['operation_id'], 'hang' => true]);
+        $this->waitMarker($job['marker']);
+        DB::table('technician_runs')->update(['claimed_at' => now()->subYears(2)]);
+        [$a, $ja] = $this->child(['operation_id' => $op['operation_id'], 'posts' => $job['posts']]);
+        [$b, $jb] = $this->child(['operation_id' => $op['operation_id'], 'posts' => $job['posts']]);
+        $this->assertSame(0, proc_close($a));
+        $this->assertSame(0, proc_close($b));
+        $this->assertFalse(json_decode(file_get_contents($ja['result']), true)['sent']);
+        $this->assertFalse(json_decode(file_get_contents($jb['result']), true)['sent']);
+        proc_terminate($sender, SIGKILL);
+        proc_close($sender);
+        $this->assertCount(1, file($job['posts']));
+        $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->value('admission'));
+    }
+
     public function test_encryption_and_no_recovery_safe_reopen(): void
     {
         $this->prepare();
