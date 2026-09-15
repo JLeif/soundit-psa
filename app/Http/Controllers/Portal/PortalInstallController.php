@@ -68,7 +68,7 @@ class PortalInstallController extends Controller
      * no-store, so this unauthenticated response is returned no-store too: no
      * browser, proxy, or TLS-inspecting gateway may retain the credential.
      */
-    public function command(Request $request, string $token): View|Response|RedirectResponse
+    public function command(Request $request, string $token): View|Response|RedirectResponse|\Symfony\Component\HttpFoundation\StreamedResponse
     {
         $client = $this->service->findByToken($token);
         if (! $client) {
@@ -81,6 +81,43 @@ class PortalInstallController extends Controller
             return redirect()->route('portal.install.show', ['token' => $token]);
         }
 
+        $goarch = (string) $request->input('goarch', 'amd64');
+        if ($client->effectiveInstallRmm() === 'tactical') {
+            $allowed = $platform === 'windows' ? ['amd64', '386'] : ['amd64', 'arm64'];
+            if (! in_array($goarch, $allowed, true)) {
+                return $this->renderPage($client, $token, array_fill_keys($supported, null), null, 'Choose a supported architecture.');
+            }
+            if ($platform === 'windows' && $request->input('method') === 'exe') {
+                $nonce = $request->input('nonce');
+                $issued = $request->session()->get('tactical_installer_nonce');
+                if (! is_string($nonce) || ! is_array($issued)
+                    || ! is_string($issued['value'] ?? null) || ! is_int($issued['expires'] ?? null)
+                    || ($issued['client_id'] ?? null) !== $client->id
+                    || ! hash_equals($issued['value'], $nonce) || $issued['expires'] <= time()
+                    || ! \Illuminate\Support\Facades\Cache::add('tactical-installer-used:'.hash('sha256', $nonce), true, 3600)) {
+                    return $this->renderPage($client, $token, array_fill_keys($supported, null), null, 'This download request expired or was already used. Request a new installer.');
+                }
+                $this->auditMint($client, $platform, $request);
+                try {
+                    $binary = app(\App\Services\Tactical\TacticalClient::class)
+                        ->generateWindowsInstaller((string) $client->tactical_site_id, $goarch);
+                } catch (\App\Services\Tactical\InstallerGenerationException $e) {
+                    return $this->renderPage($client, $token, array_fill_keys($supported, null), 'windows', $e->getMessage());
+                } catch (\Throwable) {
+                    return $this->renderPage($client, $token, array_fill_keys($supported, null), 'windows', 'The installer could not be prepared. Use the manual fallback or contact your technician.');
+                }
+
+                return response()->streamDownload(static function () use ($binary): void {
+                    echo $binary;
+                }, 'workstation-setup.exe', [
+                    'Content-Type' => 'application/octet-stream',
+                    'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                    'Pragma' => 'no-cache', 'X-Content-Type-Options' => 'nosniff',
+                    'Referrer-Policy' => 'no-referrer',
+                ]);
+            }
+        }
+
         // The mint happens INSIDE buildInstaller(): TacticalClient POSTs
         // agents/installer/ (creating a live 168h enrolment token upstream)
         // before it can return null for a payload with no usable url/cmd. So
@@ -89,7 +126,7 @@ class PortalInstallController extends Controller
         // upstream credential with no row at all.
         $this->auditMint($client, $platform, $request);
 
-        $info = $this->service->buildInstaller($client, $platform);
+        $info = $this->service->buildInstaller($client, $platform, $goarch);
         if (! $info) {
             return $this->invalidPage(sprintf(
                 'We could not prepare your installer right now. Contact %s for assistance.',
@@ -121,6 +158,11 @@ class PortalInstallController extends Controller
             return redirect()->route('portal.install.show', ['token' => $token]);
         }
 
+        // Legacy signed GET must not mint Tactical enrollment credentials.
+        if ($client->effectiveInstallRmm() === 'tactical') {
+            return redirect()->route('portal.install.show', ['token' => $token]);
+        }
+
         $platform = $request->query('platform');
         if (! is_string($platform) || ! in_array($platform, $this->service->supportedPlatforms($client), true)) {
             return redirect()->route('portal.install.show', ['token' => $token]);
@@ -147,7 +189,7 @@ class PortalInstallController extends Controller
     /**
      * @param  array<string, \App\Services\Portal\InstallerInfo|null>  $platforms
      */
-    private function renderPage(Client $client, string $token, array $platforms, ?string $mintedPlatform = null): Response
+    private function renderPage(Client $client, string $token, array $platforms, ?string $mintedPlatform = null, ?string $installerError = null): Response
     {
         $package = $this->service->package($client, $platforms);
 
@@ -156,7 +198,7 @@ class PortalInstallController extends Controller
         // unauthenticated visitor (or crawler) can reach without asking. Only
         // the platform the visitor just explicitly minted gets one.
         $downloadUrls = [];
-        if ($mintedPlatform !== null) {
+        if ($mintedPlatform !== null && $client->effectiveInstallRmm() !== 'tactical') {
             $downloadUrls[$mintedPlatform] = URL::temporarySignedRoute(
                 'portal.install.download',
                 now()->addHour(),
@@ -164,15 +206,25 @@ class PortalInstallController extends Controller
             );
         }
 
+        $installerNonce = null;
+        if ($client->effectiveInstallRmm() === 'tactical') {
+            $installerNonce = bin2hex(random_bytes(32));
+            request()->session()->put('tactical_installer_nonce', ['value' => $installerNonce, 'expires' => time() + 3600, 'client_id' => $client->id]);
+        }
+
         return response()
             ->view('portal.install.show', [
+                'isTactical' => $client->effectiveInstallRmm() === 'tactical',
+                'installerNonce' => $installerNonce,
+                'installerError' => $installerError,
                 'package' => $package,
                 'token' => $token,
                 'downloadUrls' => $downloadUrls,
                 'mintedPlatform' => $mintedPlatform,
             ])
             ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-            ->header('Pragma', 'no-cache');
+            ->header('Pragma', 'no-cache')
+            ->header('Referrer-Policy', 'no-referrer');
     }
 
     private function auditMint(Client $client, string $platform, Request $request): void
