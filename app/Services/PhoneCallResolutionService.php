@@ -140,11 +140,20 @@ class PhoneCallResolutionService
         return $call;
     }
 
+    /**
+     * Identity and ticket association ONLY. Deliberately excludes updated_at: that
+     * column moves on ANY write to phone_calls (transcription, recording, follow-up
+     * flags, billing toggle), and a post-call vendor update is the normal case for a
+     * recently completed call. Folding it in here made approve() consume a valid
+     * proposal as stale with a false "identity or ticket changed" message, which
+     * broke the staged lane — the default for a bare grant. The four columns below
+     * are exactly what validatedCall() rules on, so they are exactly what approval
+     * must revalidate.
+     */
     private function snapshot(PhoneCall $call): array
     {
         return ['client_id' => $call->client_id, 'person_id' => $call->person_id,
-            'person_confirmed' => (bool) $call->person_confirmed, 'ticket_id' => $call->ticket_id,
-            'updated_at' => $call->getRawOriginal('updated_at')];
+            'person_confirmed' => (bool) $call->person_confirmed, 'ticket_id' => $call->ticket_id];
     }
 
     private function apply(PhoneCall $call, array $payload, string $actor, ?int $approver = null): array
