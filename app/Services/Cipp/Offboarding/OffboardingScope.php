@@ -124,14 +124,18 @@ class OffboardingScope
             throw new RuntimeException('Sequential compatibility evidence is stale or invalid.');
         }
         // A successful scoped Scheduler.Read is mandatory, not a boolean granting permission.
-        $rows = $this->client->offboardingRead('scheduled', [
-            'tenantFilter' => $snapshot['body']['tenantFilter'],
-            'Name' => 'Offboarding: '.$snapshot['target_upn'], 'Type' => 'Invoke-CIPPOffboardingJob',
-        ]);
-        foreach ($rows as $row) {
-            if (($row['Reference'] ?? null) === $snapshot['body']['reference']
-                || ! in_array($row['TaskState'] ?? null, ['Completed', 'Failed'], true)) {
-                throw new RuntimeException('An existing or unclassified scheduler task blocks admission; reconcile on a separate card.');
+        // Upstream ShowHidden selects ONLY hidden rows, not hidden plus visible.
+        foreach (['false', 'true'] as $hidden) {
+            $rows = $this->client->offboardingRead('scheduled', [
+                'tenantFilter' => $snapshot['body']['tenantFilter'],
+                'Name' => 'Offboarding: '.$snapshot['target_upn'], 'Type' => 'Invoke-CIPPOffboardingJob',
+                'ShowHidden' => $hidden,
+            ]);
+            foreach ($rows as $row) {
+                if (($row['Reference'] ?? null) === $snapshot['body']['reference']
+                    || ! in_array($row['TaskState'] ?? null, ['Completed', 'Failed'], true)) {
+                    throw new RuntimeException('An existing or unclassified scheduler task blocks admission; reconcile on a separate card.');
+                }
             }
         }
     }
