@@ -20,6 +20,6 @@ final class HistoryPage
         }
 
         return ['ids' => $rows->pluck('id')->all(),
-            'metadata' => TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']))];
+            'metadata' => TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']), $input['after'] ?? $input['before'] ?? null)];
     }
 }

@@ -111,7 +111,7 @@ final class TicketTimeline
 
         return ['items' => $items, 'states' => str_replace('failure =', 'failed =', TicketToolActivity::STATES),
             'coverage' => 'Ticket-associated records only. Tool outputs and arguments withheld; absence is not proof of no activity.']
-            + TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']));
+            + TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']), $input['after'] ?? $input['before'] ?? null);
     }
 
     /**

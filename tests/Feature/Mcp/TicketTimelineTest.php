@@ -125,8 +125,10 @@ class TicketTimelineTest extends TestCase
         $next = $timeline->page($ticket, ['limit' => 1, 'types' => ['note'], 'before' => $first['before']]);
         $this->assertSame(['note:'.$old->id], array_column($next['items'], 'id'));
         $this->assertFalse($next['has_more']);
-        $this->assertNull($first['after'], 'The newest page must not offer a newer page');
-        $this->assertNull($next['before'], 'The oldest page must not offer an older page');
+        $this->assertNotNull($first['after'], 'Newest page retains a poll anchor');
+        $this->assertNotNull($next['before'], 'Oldest page retains its oldest anchor');
+        $this->assertFalse($first['has_newer'], 'The newest page must not offer a newer navigation link');
+        $this->assertFalse($next['has_older'], 'The oldest page must not offer an older navigation link');
         $this->assertNotNull($next['after']);
         $tool = app(TicketTimelineTool::class);
         foreach ([['types' => ['tool'], 'before' => $first['before']], ['before' => 'bad'],
@@ -152,6 +154,53 @@ class TicketTimelineTest extends TestCase
             ->assertDontSee('>Newer<', false)->assertDontSee('>Older<', false);
         $this->get(route('tickets.show', ['ticket' => $ticket, 'types' => ['tool']]))->assertOk()
             ->assertSee('synthetic_timeline_tool')->assertDontSee('Newest synthetic note marker');
+    }
+
+    public function test_forward_polling_retains_anchors_on_nonempty_and_empty_filtered_pages(): void
+    {
+        $ticket = $this->ticket();
+        $this->note($ticket, '2026-01-01 10:00:00');
+        $timeline = app(TicketTimeline::class);
+        foreach ([[], ['types' => ['note']]] as $filter) {
+            $first = $timeline->page($ticket, $filter);
+            $this->assertNotNull($first['before']);
+            $this->assertNotNull($first['after']);
+            $empty = $timeline->page($ticket, $filter + ['after' => $first['after']]);
+            $this->assertSame([], $empty['items']);
+            $this->assertFalse($empty['has_more']);
+            $this->assertSame($first['after'], $empty['after']);
+            $this->assertSame($first['after'], $empty['before']);
+            $new = $this->note($ticket, '2026-01-01 12:00:00');
+            $page = $timeline->page($ticket, $filter + ['after' => $empty['after']]);
+            $this->assertSame(['note:'.$new->id], array_column($page['items'], 'id'));
+            $this->assertNotNull($page['before']);
+            $this->assertNotNull($page['after']);
+            $again = $timeline->page($ticket, $filter + ['after' => $page['after']]);
+            $this->assertSame([], $again['items']);
+            $this->assertSame($page['after'], $again['after']);
+            $new->delete();
+        }
+        $this->actingAs(User::factory()->create())->get(route('tickets.show', $ticket))->assertOk()
+            ->assertDontSee('>Newer</a>', false)->assertDontSee('>Older</a>', false);
+    }
+
+    public function test_existing_read_empty_polls_preserve_the_exact_request_anchor(): void
+    {
+        $ticket = $this->ticket();
+        $this->note($ticket, '2026-01-01 10:00:00');
+        $this->email($ticket, '2026-01-01 10:00:00');
+        $token = McpConfig::rotateStaffToken(allowedTools: ['get_ticket_notes', 'list_email_items']);
+        foreach (['get_ticket_notes' => ['ticket_id' => $ticket->id, 'paginate' => true], 'list_email_items' => ['direction' => 'inbound']] as $name => $args) {
+            $args['client_id'] = $ticket->client_id;
+            $first = $this->decoded($this->callTool($token, $name, $args));
+            $this->assertNotNull($first['after']);
+            $this->assertNotNull($first['before']);
+            $empty = $this->decoded($this->callTool($token, $name, $args + ['after' => $first['after']]));
+            $this->assertSame(0, $empty['count']);
+            $this->assertSame($first['after'], $empty['after']);
+            $this->assertSame($first['after'], $empty['before']);
+            $this->assertFalse($empty['has_more']);
+        }
     }
 
     public function test_ai_chat_projection_never_renders_raw_tool_messages(): void
