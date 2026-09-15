@@ -8,7 +8,9 @@
 # and by humans on demand.
 #
 # Gates:
-#   1. php artisan test          — the full PHPUnit suite must pass.
+#   1. php artisan test          — the full PHPUnit suite must pass without warnings.
+#      Risky tests and deprecations (including PHPUnit metadata deprecations)
+#      retain PHPUnit/config defaults; this gate does not newly fail on them.
 #   2. pint --test (changed PHP) — code style, scoped to the PHP files this
 #                                  branch changed vs main. The repo carries
 #                                  pre-existing style debt, so we hold only
@@ -33,9 +35,15 @@ for ref in origin/main main; do
     fi
 done
 
-echo "==> [1/3] php artisan test"
-php artisan config:clear --ansi >/dev/null
-php artisan test
+echo "==> [1/3] php artisan test --fail-on-warning"
+if ! php artisan config:clear --ansi >/dev/null; then
+    echo "==> gc-verify: FAIL (configuration clear)" >&2
+    exit 1
+fi
+if ! php artisan test --fail-on-warning; then
+    echo "==> gc-verify: FAIL (PHPUnit failed or reported warnings)" >&2
+    exit 1
+fi
 
 echo "==> [2/3] pint --test (changed PHP files)"
 changed_php() {
