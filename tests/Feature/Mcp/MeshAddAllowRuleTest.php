@@ -204,10 +204,11 @@ class MeshAddAllowRuleTest extends TestCase
         $fixture = $this->fixture();
         $this->mockWrite();
 
-        $response = $this->callTool($this->token(['mesh_add_allow_rule']), 'mesh_add_allow_rule', $this->stageArgs($fixture));
-        $response->assertOk();
-        $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('staged-only', (string) $response->json('result.content.0.text'));
+        // Bypass grant parsing to exercise the retained executor defence directly.
+        $result = app(\App\Services\Mcp\StaffMeshAdminToolExecutor::class)->execute(
+            'mesh_add_allow_rule', $this->stageArgs($fixture), null, 'synthetic-test'
+        );
+        $this->assertStringContainsString('staged-only', $result['error']);
 
         $this->assertSame(0, TechnicianRun::count());
         $this->assertSame(0, MeshAllowRule::count());

@@ -212,12 +212,11 @@ class TacticalRemoveAgentTest extends TestCase
         // No expectations at all: any upstream call here is a failure.
         $this->mockTactical();
 
-        // A bare grant resolves to :immediate — the one path that could bypass the
-        // cockpit. The executor has no immediate implementation to reach.
-        $response = $this->callTool($this->token(['tactical_remove_agent']), 'tactical_remove_agent', $this->stageArgs($fixture));
-        $response->assertOk();
-        $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('staged-only', (string) $response->json('result.content.0.text'));
+        // Bypass grant parsing to exercise the retained executor defence directly.
+        $result = app(\App\Services\Mcp\StaffTacticalAdminToolExecutor::class)->execute(
+            'tactical_remove_agent', $this->stageArgs($fixture), null, 'synthetic-test'
+        );
+        $this->assertStringContainsString('staged-only', $result['error']);
 
         $this->assertSame(0, TechnicianRun::count());
     }

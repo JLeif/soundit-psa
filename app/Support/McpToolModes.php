@@ -135,6 +135,20 @@ class McpToolModes
         'tactical_set_client_custom_field',
     ];
 
+    /** Capabilities with no immediate execution lane, regardless of grant. */
+    private const HELD_ONLY = [
+        'resolve_email_item',
+        'mesh_add_allow_rule',
+        'mesh_remove_allow_rule',
+        'mesh_edit_allow_rule',
+        'tactical_remove_agent',
+    ];
+
+    public static function isHeldOnly(string $name): bool
+    {
+        return in_array($name, self::HELD_ONLY, true);
+    }
+
     /**
      * Mode for a capability the token holds no explicit per-tool mode entry for.
      */
@@ -214,14 +228,20 @@ class McpToolModes
         }
 
         if (self::isStageable($entry)) {
-            // Bare canonical = legacy grant of the immediate variant.
-            return [$entry, self::MODE_IMMEDIATE];
+            // Held-only capabilities cannot inherit the legacy immediate lane.
+            return [$entry, self::isHeldOnly($entry) ? self::MODE_STAGED : self::MODE_IMMEDIATE];
         }
 
         foreach ([self::MODE_STAGED, self::MODE_IMMEDIATE] as $mode) {
             $suffix = ':'.$mode;
             if (str_ends_with($entry, $suffix)) {
                 $base = substr($entry, 0, -strlen($suffix));
+                $canonical = self::canonicalForAlias($base) ?? $base;
+                if ($mode === self::MODE_IMMEDIATE && self::isHeldOnly($canonical)) {
+                    // Reject as an unrecognized grant, including old stored values.
+                    // Do not throw during authentication or silently grant staged access.
+                    return [$entry, null];
+                }
                 if (($canonical = self::canonicalForAlias($base)) !== null) {
                     // A suffixed alias is nonsense; an alias grant is always staged.
                     return [$canonical, self::MODE_STAGED];
@@ -283,6 +303,16 @@ class McpToolModes
             $raw = trim((string) $raw);
             if ($raw === '') {
                 continue;
+            }
+
+            if (str_ends_with($raw, ':immediate')) {
+                $base = substr($raw, 0, -strlen(':immediate'));
+                $canonical = self::canonicalForAlias($base) ?? $base;
+                if (self::isHeldOnly($canonical)) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'tools' => $canonical.' is held-only; use '.$canonical.':staged. Immediate execution is not supported.',
+                    ]);
+                }
             }
 
             [$name, $mode] = self::parseGrantEntry($raw);
