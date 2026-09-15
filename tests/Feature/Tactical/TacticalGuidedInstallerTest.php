@@ -80,7 +80,10 @@ class TacticalGuidedInstallerTest extends TestCase
         $this->assertSame(168, $payload['expires']);
         $this->assertSame(3, $payload['client']);
         $this->assertSame(5, $payload['site']);
-        $this->assertArrayNotHasKey('plat', $payload);
+        // install_agent reads request.data['plat'] before branching on
+        // installMethod, so the EXE mint must send it exactly as the JSON
+        // sibling call does.
+        $this->assertSame('windows', $payload['plat']);
         $this->assertFalse($request['options']['allow_redirects']);
         // The request must explicitly supply a sink rather than Guzzle's
         // default php://temp, which can spill credentials to disk.

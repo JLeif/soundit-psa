@@ -1377,17 +1377,21 @@ class TacticalClient
         $sink = fopen('php://memory', 'w+b');
         try {
             $target = $this->parseInstallTarget($siteId, 'windows');
-            $ids = $target ? $this->lookupSiteIds($target['client'], $target['site']) : null;
-            if ($ids === null) {
+            $ids = $target !== null ? $this->lookupSiteIds($target['client'], $target['site']) : null;
+            if ($target === null || $ids === null) {
                 throw new InstallerGenerationException('Installer site is unavailable. Contact your technician.');
             }
             $response = $this->http->request('POST', 'agents/installer/', [
                 'json' => [
+                    // `plat` is required by install_agent for EVERY installMethod:
+                    // it is read from request.data before the method branch, so
+                    // omitting it 500s upstream on the primary EXE path.
                     'installMethod' => 'exe', 'fileName' => 'workstation-setup.exe',
                     'client' => $ids['client'], 'site' => $ids['site'],
                     'expires' => 168, 'agenttype' => 'workstation',
                     'power' => 0, 'ping' => 0, 'rdp' => 0,
-                    'goarch' => $goarch, 'api' => TacticalConfig::apiUrl(),
+                    'goarch' => $goarch, 'plat' => $target['plat'],
+                    'api' => TacticalConfig::apiUrl(),
                 ],
                 'sink' => $sink,
                 'timeout' => 120, 'connect_timeout' => 10,
