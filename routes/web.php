@@ -411,6 +411,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/settings/integrations/huntress/organizations', [\App\Http\Controllers\Web\HuntressOrganizationController::class, 'index'])->name('settings.huntress-orgs.index');
     Route::post('/settings/integrations/huntress/organizations', [\App\Http\Controllers\Web\HuntressOrganizationController::class, 'update'])->name('settings.huntress-orgs.update');
     Route::get('/settings/integrations/huntress/organizations/auto-match', [\App\Http\Controllers\Web\HuntressOrganizationController::class, 'autoMatch'])->name('settings.huntress-orgs.auto-match');
+    Route::post('/settings/integrations/huntress/account', [IntegrationsController::class, 'detectHuntressAccount'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.huntress.account');
     Route::post('/settings/integrations/huntress/webhooks', [IntegrationsController::class, 'updateHuntressWebhooks'])->middleware('admin')->name('settings.integrations.huntress-webhooks.update');
     Route::post('/settings/integrations/huntress', [IntegrationsController::class, 'updateHuntress'])->name('settings.integrations.huntress.update');
     Route::post('/settings/integrations/huntress/test', [IntegrationsController::class, 'testHuntress'])->name('settings.integrations.huntress.test');

@@ -1871,7 +1871,20 @@
                     <div class="mb-3">
                         <label for="huntress_webhook_account_id" class="form-label">Expected Huntress account ID</label>
                         <input type="text" inputmode="numeric" class="form-control" id="huntress_webhook_account_id"
-                               name="account_id" value="{{ $huntressWebhookAccountId }}" maxlength="19">
+                               name="account_id" value="{{ $huntressWebhookAccountId }}" maxlength="19"
+                               aria-describedby="huntress-account-help huntress-account-result">
+                        <div class="form-text" id="huntress-account-help">
+                            Use the numeric <code>account.id</code> from <code>GET https://api.huntress.io/v1/account</code>, authenticated with your Huntress API key and secret (HTTP Basic auth). This is the top-level account, not an organization ID, and is not shown on the Huntress webhook page.
+                            @if($huntressConfigured ?? false)
+                                Detect uses your saved API credentials and fills this field without saving settings or enabling linking. Saving a new account ID or enabling linking verifies it against the API; mismatches are rejected. An unchanged account can still be disabled without API access.
+                            @else
+                                Save Huntress API credentials above to use Detect, or ask your Huntress account administrator to retrieve <code>account.id</code> using that API endpoint and enter it here.
+                            @endif
+                        </div>
+                        @if($huntressConfigured ?? false)
+                            <button type="button" class="btn btn-outline-secondary btn-sm mt-2" id="detect-huntress-account" onclick="detectHuntressAccount(this)">Detect account ID</button>
+                        @endif
+                        <div id="huntress-account-result" class="form-text" role="status" aria-live="polite"></div>
                     </div>
                     <input type="hidden" name="webhooks_enabled" value="0">
                     <div class="form-check form-switch mb-3">
@@ -4996,6 +5009,36 @@ function previewCippSync(type) {
         c.btn.disabled = false;
         c.btn.innerHTML = c.icon;
     });
+}
+
+async function detectHuntressAccount(button) {
+    const field = document.getElementById('huntress_webhook_account_id');
+    const result = document.getElementById('huntress-account-result');
+    const original = field.value;
+    button.disabled = true;
+    result.textContent = 'Detecting account ID…';
+    try {
+        const response = await fetch(@json(route('settings.integrations.huntress.account')), {
+            method: 'POST',
+            headers: {'X-CSRF-TOKEN': @json(csrf_token()), 'Accept': 'application/json'}
+        });
+        const data = await response.json();
+        if (!response.ok || !/^[1-9][0-9]*$/.test(data.account_id || '')) {
+            throw new Error('detection failed');
+        }
+        if (field.value !== original) {
+            result.textContent = 'The field changed during detection. Detected account ID: ' + data.account_id + '. Review it before saving.';
+        } else if (original && original !== data.account_id) {
+            result.textContent = 'Mismatch: entered account ID differs from detected account ID ' + data.account_id + '. The field was not changed. Review it before saving.';
+        } else {
+            field.value = data.account_id;
+            result.textContent = 'Detected account ID ' + data.account_id + '. Not saved; linking is unchanged.';
+        }
+    } catch (_) {
+        result.textContent = 'Unable to detect the account ID. Check saved Huntress API credentials and try again. No settings were changed.';
+    } finally {
+        button.disabled = false;
+    }
 }
 
 function testConnection(service) {
