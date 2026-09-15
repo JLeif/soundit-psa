@@ -212,9 +212,8 @@ class CippWriteMailboxDelegateTest extends TestCase
         $this->assertTrue((bool) $mismatch->json('result.isError'));
         $this->assertStringContainsString('confirm_upn does not match', (string) $mismatch->json('result.content.0.text'));
 
-        // A second mailbox owner: the per-target cooldown is keyed on the owner,
-        // so grant and remove are exercised against distinct mailboxes. (Every
-        // permission/operation body shape is pinned in CippRestWriteClientTest.)
+        // Exercise server-derived scope for a second mailbox owner as well.
+        // Every permission/operation body shape is pinned in CippRestWriteClientTest.
         $owner2 = Person::create([
             'client_id' => $fixture['client']->id,
             'person_type' => PersonType::User,
@@ -326,6 +325,123 @@ class CippWriteMailboxDelegateTest extends TestCase
             'run_id' => $run->id,
             'approver_user_id' => $actor->id,
         ]);
+    }
+
+    public function test_distinct_delegates_stage_and_approve_back_to_back_while_duplicates_stay_idempotent(): void
+    {
+        $this->freezeTime();
+        $this->configureCipp();
+        $actor = $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $target2 = $fixture['target']->replicate();
+        $target2->fill(['email' => 'second@example.test', 'cipp_upn' => 'second@example.test', 'cipp_user_id' => 'second-id'])->save();
+        $token = $this->token(['cipp_set_mailbox_delegate:staged']);
+        $args = [
+            'client_id' => $fixture['client']->id,
+            'person_id' => $fixture['person']->id,
+            'permission' => 'full_access',
+            'operation' => 'grant',
+            'ticket_id' => $fixture['ticket']->id,
+            'confirm_upn' => 'alex@acme.example',
+            'reason' => 'Delegate coverage.',
+            'staged' => true,
+        ];
+        $blocked = Mockery::mock(CippRestWriteClient::class);
+        $blocked->shouldNotReceive('setMailboxDelegate');
+        $this->app->instance(CippRestWriteClient::class, $blocked);
+        $runs = [];
+        foreach ([$fixture['target'], $target2] as $target) {
+            $params = $args + ['delegate_person_id' => $target->id];
+            $response = $this->callTool($token, 'cipp_set_mailbox_delegate', $params);
+            $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+            $run = TechnicianRun::findOrFail($this->decodedResult($response)['run_id']);
+            $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+            $duplicate = $this->decodedResult($this->callTool($token, 'cipp_set_mailbox_delegate', $params));
+            $this->assertTrue($duplicate['idempotent']);
+            $this->assertSame($run->id, $duplicate['run_id']);
+            $runs[] = $run;
+        }
+        $this->assertNotSame($runs[0]->id, $runs[1]->id);
+        $this->assertSame(2, TechnicianRun::count());
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
+
+        $approveClient = Mockery::mock(CippRestWriteClient::class);
+        foreach ([$fixture['target'], $target2] as $target) {
+            $approveClient->shouldReceive('setMailboxDelegate')->once()
+                ->with('acme.onmicrosoft.com', 'alex@acme.example', $target->cipp_upn, 'full_access', 'grant', true)
+                ->andReturn(['success' => true, 'status' => 200]);
+        }
+        $this->app->instance(CippRestWriteClient::class, $approveClient);
+        foreach ($runs as $run) {
+            $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertRedirect(route('cockpit.index'));
+            $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        }
+        $duplicate = $this->decodedResult($this->callTool($token, 'cipp_set_mailbox_delegate', $args + ['delegate_person_id' => $target2->id]));
+        $this->assertTrue($duplicate['idempotent']);
+        $this->assertSame($runs[1]->id, $duplicate['run_id']);
+    }
+
+    public function test_distinct_direct_delegates_execute_back_to_back_without_reexecuting_duplicates(): void
+    {
+        $this->freezeTime();
+        $this->configureCipp();
+        $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $target2 = $fixture['target']->replicate();
+        $target2->fill(['email' => 'second@example.test', 'cipp_upn' => 'second@example.test', 'cipp_user_id' => 'second-id'])->save();
+        $token = $this->token(['cipp_set_mailbox_delegate']);
+        $client = Mockery::mock(CippRestWriteClient::class);
+        foreach ([$fixture['target'], $target2] as $target) {
+            $client->shouldReceive('setMailboxDelegate')->once()
+                ->with('acme.onmicrosoft.com', 'alex@acme.example', $target->cipp_upn, 'send_as', 'grant', true)
+                ->andReturn(['success' => true, 'status' => 200]);
+        }
+        $this->app->instance(CippRestWriteClient::class, $client);
+        foreach ([$fixture['target'], $target2] as $target) {
+            $args = [
+                'client_id' => $fixture['client']->id,
+                'person_id' => $fixture['person']->id,
+                'delegate_person_id' => $target->id,
+                'permission' => 'send_as',
+                'operation' => 'grant',
+                'ticket_id' => $fixture['ticket']->id,
+                'confirm_upn' => 'alex@acme.example',
+                'reason' => 'Delegate coverage.',
+            ];
+            $response = $this->callTool($token, 'cipp_set_mailbox_delegate', $args);
+            $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+            $this->assertSame('CIPP action executed.', $this->decodedResult($response)['message']);
+            $duplicate = $this->decodedResult($this->callTool($token, 'cipp_set_mailbox_delegate', $args));
+            $this->assertTrue($duplicate['idempotent']);
+        }
+        $this->assertSame(2, TechnicianActionLog::where('result_status', 'executed')->count());
+    }
+
+    public function test_delegate_cooldown_removal_does_not_bypass_token_authorization(): void
+    {
+        $this->configureCipp();
+        $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldNotReceive('setMailboxDelegate');
+        $this->app->instance(CippRestWriteClient::class, $client);
+        $token = $this->token(['get_ticket']);
+        foreach (['cipp_set_mailbox_delegate', 'cipp_stage_set_mailbox_delegate'] as $tool) {
+            $response = $this->callTool($token, $tool, [
+                'client_id' => $fixture['client']->id,
+                'person_id' => $fixture['person']->id,
+                'delegate_person_id' => $fixture['target']->id,
+                'permission' => 'full_access',
+                'operation' => 'grant',
+                'ticket_id' => $fixture['ticket']->id,
+                'confirm_upn' => 'alex@acme.example',
+                'reason' => 'Unauthorized request.',
+            ]);
+            $this->assertTrue((bool) $response->json('result.isError'));
+            $this->assertStringContainsString('not allowed for this token', (string) $response->json('result.content.0.text'));
+        }
+        $this->assertSame(0, TechnicianRun::count());
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
     }
 
     public function test_delegate_rejects_unknown_permission_and_operation(): void

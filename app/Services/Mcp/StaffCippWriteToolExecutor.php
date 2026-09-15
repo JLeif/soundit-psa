@@ -190,8 +190,10 @@ class StaffCippWriteToolExecutor
         'cipp_stage_set_mailbox_gal_visibility' => 300,
         'cipp_set_mailbox_out_of_office' => 300,
         'cipp_stage_set_mailbox_out_of_office' => 300,
-        'cipp_set_mailbox_delegate' => 300,
-        'cipp_stage_set_mailbox_delegate' => 300,
+        // Distinct delegates on one mailbox must not block each other. Exact-content
+        // deduplication still applies; zero disables only the mailbox-wide cooldown.
+        'cipp_set_mailbox_delegate' => 0,
+        'cipp_stage_set_mailbox_delegate' => 0,
         'cipp_remove_directory_role' => 300,
         'cipp_stage_remove_directory_role' => 300,
         'cipp_remove_mailbox_rule' => 300,
@@ -7323,7 +7325,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_mailbox_delegate',
-            'Grant or remove a Microsoft 365 mailbox delegate permission (FullAccess, Send-As, or Send-on-Behalf) immediately through CIPP for one server-derived mailbox owner (person_id) and one server-derived delegate (delegate_person_id, a different person). Delegate access exposes another user\'s mailbox and can enable impersonation or data exfiltration, so it is a sensitive write. confirm_upn must be the mailbox OWNER\'s UPN (person_id). Requires an explicit grant, reason, confirm_upn, kill-switch, cooldown, and audit.',
+            'Grant or remove a Microsoft 365 mailbox delegate permission (FullAccess, Send-As, or Send-on-Behalf) immediately through CIPP for one server-derived mailbox owner (person_id) and one server-derived delegate (delegate_person_id, a different person). Delegate access exposes another user\'s mailbox and can enable impersonation or data exfiltration, so it is a sensitive write. confirm_upn must be the mailbox OWNER\'s UPN (person_id). Requires an explicit grant, reason, confirm_upn, kill-switch, exact-content duplicate protection, and audit. Distinct delegates on the same mailbox do not impose an application cooldown on each other.',
             array_merge(self::personProperties(), self::delegateProperties()),
             ['person_id', 'delegate_person_id', 'permission', 'operation', 'confirm_upn', 'reason'],
         );
