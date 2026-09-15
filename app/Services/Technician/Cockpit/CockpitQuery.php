@@ -67,9 +67,12 @@ class CockpitQuery
 
     public function pendingCount(): int
     {
-        // Matches counts()'s pending/total fold-in.
-        return TechnicianRun::whereIn('state', self::PENDING_STATES)->count()
-            + \App\Models\EmailResolutionProposal::where('state', 'pending')->count();
+        // PENDING_STATES over TechnicianRun ONLY. The get_staged_action_status MCP read
+        // reports exactly this set, and the docblock above forbids this number drifting
+        // from it. Email-resolution proposals have no TechnicianRun and are surfaced by
+        // their own cockpit card, so they are deliberately not folded in here or in
+        // counts() — where they would also break the per-lane keys summing to pending.
+        return TechnicianRun::whereIn('state', self::PENDING_STATES)->count();
     }
 
     /** @return array{replies:int,closures:int,actions:int,intake:int,flagged:int,needs:int,queued:int,pending:int,total:int} */
@@ -101,8 +104,10 @@ class CockpitQuery
             ->whereIn('state', [TechnicianRunState::QueuedOffline->value, TechnicianRunState::Expired->value])
             ->count();
 
-        $pending = $replies + $closures + $actions + $intake + $flagged + $queued
-            + \App\Models\EmailResolutionProposal::where('state', 'pending')->count();
+        // Per-lane keys must sum to pending, and pending must match pendingCount() /
+        // the get_staged_action_status MCP read: email-resolution proposals are not
+        // folded in (see pendingCount()).
+        $pending = $replies + $closures + $actions + $intake + $flagged + $queued;
         $total = $pending + $needs;
 
         return [

@@ -345,6 +345,11 @@ class McpStaffController extends Controller
     private const INTAKE_MANAGE_TOOLS = [
         'link_email_to_ticket',
         'create_ticket_from_email',
+        // ROUTING ONLY for the email-resolution pair (#1293): membership here sends
+        // them to StaffPsaActionToolExecutor and keeps the legacy full-surface token
+        // out. It confers NOTHING — the explicit `resolve_email_item:staged` gate in
+        // toolAllowed() runs above every family branch, so an intake-tier grant (bare
+        // names, e.g. the catalog's bulk "Grant shown" click) cannot reach them.
         'resolve_email_item',
         'stage_resolve_email_item',
         'dismiss_email_item',
@@ -2442,6 +2447,18 @@ class McpStaffController extends Controller
 
         if ($token->allowedTools !== null && ! in_array($toolName, McpToolRegistry::allToolNames(), true)) {
             return false;
+        }
+
+        // Email resolution (#1293) is DEFAULT-UNGRANTED and held-only, exactly as the
+        // tool description promises: the token must name it with the explicit `:staged`
+        // mode suffix. A BARE `resolve_email_item` entry — what a bulk tier grant of the
+        // intake surface produces — is deliberately NOT enough, so intake-manage
+        // membership (routing only) can never confer a sender-wide client reassignment
+        // the operator did not grant by name. Placed above every family branch so no
+        // family default, and no full-surface token, can outrun it.
+        if (in_array($toolName, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
+            return $token->allowedTools !== null
+                && in_array($toolName.':'.McpToolModes::MODE_STAGED, $token->allowedTools, true);
         }
 
         // High-scope curated CIPP reads: explicit grant only, never auto-inherited by the

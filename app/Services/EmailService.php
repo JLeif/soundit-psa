@@ -836,15 +836,22 @@ PROMPT;
 
             // AI Technician (Plan 1B): a client reply re-opens drafting. The pipeline's
             // own substance/idempotency logic (Task 10) decides whether to actually draft.
+            // afterCommit: creation now runs inside the email-row transaction, and a
+            // worker must never pick this job up for a ticket a rollback removed.
             if (\App\Support\TechnicianConfig::enabled()) {
-                \App\Jobs\RunTechnicianLoop::dispatch($ticket->id);
+                \App\Jobs\RunTechnicianLoop::dispatch($ticket->id)->afterCommit();
             }
         }
 
         // Touch ticket so updated_at reflects latest activity
         $ticket->touch();
 
-        app(NotificationService::class)->notifyEmailAdded($ticket, $email);
+        // Notifications are not transactional: creation now runs inside the email-row
+        // transaction, and a deadlock/lock-wait rollback must not leave technicians
+        // notified about a ticket that does not exist (nor notify twice on retry).
+        // With no transaction open this runs immediately, so every other path is
+        // byte-identical in behaviour.
+        DB::afterCommit(fn () => app(NotificationService::class)->notifyEmailAdded($ticket, $email));
 
         // Auto-transition PendingClient or Resolved → InProgress when client replies
         $reopenable = [TicketStatus::PendingClient, TicketStatus::Resolved];
@@ -993,7 +1000,14 @@ PROMPT;
             // creation and linking on the durable email row, not that snapshot.
             $locked = Email::whereKey($email->getKey())->lockForUpdate()->firstOrFail();
             if ($locked->ticket_id !== null) {
-                return Ticket::findOrFail($locked->ticket_id);
+                // Ticket soft-deletes: a merged/cleaned-up ticket leaves the email
+                // unticketed again. Fall through and create a fresh one rather than
+                // failing this email forever on a dangling pointer (findOrFail would
+                // throw every poll cycle and the email could never be re-ticketed).
+                $existing = Ticket::find($locked->ticket_id);
+                if ($existing !== null) {
+                    return $existing;
+                }
             }
 
             return $this->createTicketFromLockedEmail($locked);

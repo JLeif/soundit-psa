@@ -140,6 +140,30 @@ class EmailResolutionTest extends TestCase
         }
     }
 
+    public function test_a_bulk_intake_tier_grant_does_not_confer_email_resolution(): void
+    {
+        $client = Client::factory()->create();
+        $email = $this->email();
+        // Exactly what the grant catalog's bulk "Grant shown" click on the intake
+        // tier produces: every tool in the tier, by BARE name. Email resolution is
+        // default-ungranted and must not ride along with it.
+        $tier = array_column(\App\Support\McpToolRegistry::groups()['intake_manage']['tools'], 'name');
+        $this->assertContains('link_email_to_ticket', $tier);
+
+        $response = $this->callResolve($tier, [
+            'email_id' => $email->id, 'client_id' => $client->id, 'reason' => 'Known sender', 'staged' => true,
+        ]);
+        $this->assertTrue($response->json('error') !== null || (bool) $response->json('result.isError'), $response->getContent());
+        $this->assertSame(0, EmailResolutionProposal::count());
+        $this->assertNull($email->fresh()->client_id);
+
+        $tools = collect($this->withHeaders(['Authorization' => 'Bearer '.McpConfig::rotateStaffToken(allowedTools: $tier)])
+            ->postJson('/api/mcp/staff', ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => []])
+            ->json('result.tools') ?? []);
+        $this->assertNull($tools->firstWhere('name', 'resolve_email_item'));
+        $this->assertNull($tools->firstWhere('name', 'stage_resolve_email_item'));
+    }
+
     public function test_resolution_failure_rolls_back_proposal_and_email_updates(): void
     {
         $client = Client::factory()->create();

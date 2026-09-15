@@ -128,7 +128,12 @@ class StaffPsaActionToolExecutor
             'link_email_to_ticket' => $this->linkEmailToTicket($arguments, $actorLabel),
             'create_ticket_from_email' => $this->createTicketFromEmail($arguments, $actorLabel),
             'resolve_email_item' => ['error' => 'Email resolution is held-only; use staged=true.'],
-            'stage_resolve_email_item' => app(\App\Services\Email\EmailResolutionService::class)->stage($arguments, (int) $clientId, $actorLabel),
+            // The scope argument is int|UnlinkedTicketScope. Casting the scope object
+            // to int yields 1, which would bind a whole sender backlog to client #1 —
+            // resolve it like every sibling arm instead of hard-casting it.
+            'stage_resolve_email_item' => $clientId instanceof UnlinkedTicketScope
+                ? ['error' => 'Unlinked intake scope carries no client; call with an explicit positive integer client_id.']
+                : app(\App\Services\Email\EmailResolutionService::class)->stage($arguments, $clientId, $actorLabel),
             'dismiss_email_item' => $this->dismissEmailItem($arguments, $actorLabel),
             'link_call_to_ticket' => $this->linkCallToTicket($arguments, $actorLabel),
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),
