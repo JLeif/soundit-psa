@@ -168,6 +168,19 @@ class TicketTimelineTest extends TestCase
             ->assertDontSee('RAW-TOOL-MESSAGE-MARKER')->assertSee('Safe synthetic assistant text');
     }
 
+    public function test_unlinked_ticket_keeps_records_whose_own_client_resolved(): void
+    {
+        // Intake ticket still without a client; the call's caller resolved later.
+        $ticket = Ticket::factory()->create(['client_id' => null]);
+        $resolved = Client::factory()->create();
+        PhoneCall::forceCreate(['ticket_id' => $ticket->id, 'client_id' => $resolved->id, 'call_uuid' => (string) Str::uuid(),
+            'from_number' => '5550188', 'direction' => 'inbound', 'started_at' => '2026-01-01 10:00:00']);
+        $this->email($ticket, '2026-01-01 10:05:00')->update(['client_id' => $resolved->id]);
+        $page = app(TicketTimeline::class)->page($ticket, ['types' => ['call', 'email']]);
+        $this->assertEqualsCanonicalizing(['call', 'email'], array_column($page['items'], 'kind'),
+            'A resolved-client call/email on an unlinked ticket must stay on the timeline');
+    }
+
     public function test_grant_discovery_self_noise_scope_and_state_legend(): void
     {
         $ticket = $this->ticket();

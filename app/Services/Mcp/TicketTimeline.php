@@ -120,10 +120,18 @@ final class TicketTimeline
      * resolution). Equality alone is never true for NULL, which silently dropped
      * rows the ticket_id relation used to show, so keep the cross-client fence
      * but let an unresolved client through.
+     *
+     * The ticket itself may equally be unlinked. orWhere('client_id', null)
+     * compiles to orWhereNull, so the group would degenerate to
+     * (client_id IS NULL OR client_id IS NULL) and drop every ticket-linked row
+     * whose own client was since resolved. With no ticket client there is no
+     * cross-client boundary to draw, so the ticket_id relation stands alone.
      */
     private function clientFence(Ticket $ticket): \Closure
     {
-        return fn ($q) => $q->whereNull('client_id')->orWhere('client_id', $ticket->client_id);
+        return $ticket->client_id === null
+            ? fn ($q) => $q
+            : fn ($q) => $q->whereNull('client_id')->orWhere('client_id', $ticket->client_id);
     }
 
     private function text(?string $text): string
