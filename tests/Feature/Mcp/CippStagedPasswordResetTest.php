@@ -542,6 +542,15 @@ class CippStagedPasswordResetTest extends TestCase
 
         $missing = [];
         foreach (array_keys(McpToolModes::stagedToCanonical()) as $stagedType) {
+            if ($stagedType === 'stage_resolve_email_item') {
+                // Email-native proposals deliberately never enter the ticket run
+                // badge map. Assert the separate included card instead.
+                $this->assertStringContainsString("@include('cockpit.partials.email-resolutions')", $blade);
+                $card = (string) file_get_contents(resource_path('views/cockpit/partials/email-resolutions.blade.php'));
+                $this->assertStringContainsString("StagedActionLabels::humanLabel('stage_resolve_email_item')", $card);
+
+                continue;
+            }
             if (! str_contains($blade, "'{$stagedType}'")) {
                 $missing[] = $stagedType;
             }
@@ -564,6 +573,16 @@ class CippStagedPasswordResetTest extends TestCase
 
         $missing = [];
         foreach (array_keys(McpToolModes::stagedToCanonical()) as $stagedType) {
+            if ($stagedType === 'stage_resolve_email_item') {
+                // No TechnicianRun FK for this pre-ticket operation. Exercise its
+                // real routed approval in EmailResolutionTest; require the route
+                // and dedicated controller here, not a fake run approve arm.
+                $route = app('router')->getRoutes()->getByName('email-resolutions.approve');
+                $this->assertNotNull($route);
+                $this->assertSame(\App\Http\Controllers\Web\EmailResolutionController::class.'@approve', $route->getActionName());
+
+                continue;
+            }
             if (! str_contains($controller, "'{$stagedType}'")) {
                 $missing[] = $stagedType;
             }

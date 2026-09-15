@@ -50,6 +50,7 @@ class McpToolModes
         'stage_email' => 'send_email',
         'stage_public_note' => 'write_public_note',
         'stage_close_ticket' => 'close_ticket',
+        'stage_resolve_email_item' => 'resolve_email_item',
         'propose_merge' => 'merge_ticket',
         'propose_asset_merge' => 'merge_asset',
     ];
@@ -100,6 +101,7 @@ class McpToolModes
      * @var array<int, string>
      */
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
+        'resolve_email_item',
         'merge_ticket',
         'merge_asset',
         // tactical_remove_agent has no immediate implementation at all
@@ -426,6 +428,12 @@ class McpToolModes
 
             $description = trim((string) ($direct['description'] ?? ''));
             $description .= ' Supports staged=true to hold the action for cockpit approval instead of executing immediately.';
+        }
+
+        if (($direct['name'] ?? null) === 'resolve_email_item') {
+            $schema['properties']['staged'] = ['type' => 'boolean', 'enum' => [true], 'description' => 'Required true. No immediate execution or automatic downgrade.'];
+            $schema['required'] = array_values(array_unique([...($schema['required'] ?? []), 'staged']));
+            $description = (string) $direct['description'];
         }
 
         $direct['description'] = $description;

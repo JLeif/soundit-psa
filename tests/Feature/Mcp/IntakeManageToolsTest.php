@@ -337,6 +337,60 @@ class IntakeManageToolsTest extends TestCase
         $this->assertStringNotContainsString('SECRET BODY 3', (string) json_encode(McpAuditLog::all()->toArray()));
     }
 
+    public function test_poll_then_mcp_refuses_existing_ticket_without_duplicate_or_audit(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['create_ticket_from_email']);
+        $email = Email::create([
+            'direction' => EmailDirection::Inbound,
+            'from_address' => 'sender@example.test',
+            'subject' => 'Ordinary inbound request',
+            'body_text' => 'PRIVATE FIXTURE BODY',
+            'received_at' => now(),
+            'client_id' => Client::factory()->create()->id,
+        ]);
+        $stale = $email->fresh();
+        $service = app(\App\Services\EmailService::class);
+        $first = $service->autoCreateTicketFromEmail($email);
+        $again = $service->autoCreateTicketFromEmail($stale);
+        $this->assertSame($first->id, $again->id);
+        $this->assertSame(1, Ticket::count());
+        $this->assertSame($first->id, $email->fresh()->ticket_id);
+
+        $response = $this->callTool($token, 'create_ticket_from_email', [
+            'email_id' => $email->id, 'reason' => 'Follow up',
+        ]);
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $result = $this->decodedResult($response);
+        $this->assertSame($first->id, $result['ticket_id']);
+        $this->assertStringContainsString('already linked', $result['error']);
+        $this->assertSame(1, Ticket::count());
+        $this->assertSame($first->id, $email->fresh()->ticket_id);
+        $this->assertSame(0, TechnicianActionLog::where('action_type', 'create_ticket_from_email')->count());
+        $this->assertStringNotContainsString('PRIVATE FIXTURE BODY', json_encode(McpAuditLog::all()->toArray()));
+    }
+
+    public function test_already_ticketed_email_returns_ticket_id_even_if_client_was_cleared(): void
+    {
+        $this->configureAiActor();
+        $token = $this->token(['create_ticket_from_email']);
+        $ticket = Ticket::factory()->create();
+        $email = Email::create([
+            'direction' => EmailDirection::Inbound,
+            'from_address' => 'sender@example.test',
+            'subject' => 'Previously handled',
+            'received_at' => now(),
+            'ticket_id' => $ticket->id,
+        ]);
+        $response = $this->callTool($token, 'create_ticket_from_email', [
+            'email_id' => $email->id, 'reason' => 'Check existing',
+        ]);
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertSame($ticket->id, $this->decodedResult($response)['ticket_id']);
+        $this->assertSame(1, Ticket::count());
+    }
+
     // ── dismiss_email_item ───────────────────────────────────────────────────
 
     public function test_dismiss_email_item_sets_dismissed_and_audits_reason(): void

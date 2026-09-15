@@ -127,6 +127,13 @@ class StaffPsaActionToolExecutor
             'set_primary_asset_user' => $this->setPrimaryAssetUser($arguments, $actorLabel),
             'link_email_to_ticket' => $this->linkEmailToTicket($arguments, $actorLabel),
             'create_ticket_from_email' => $this->createTicketFromEmail($arguments, $actorLabel),
+            'resolve_email_item' => ['error' => 'Email resolution is held-only; use staged=true.'],
+            // The scope argument is int|UnlinkedTicketScope. Casting the scope object
+            // to int yields 1, which would bind a whole sender backlog to client #1 —
+            // resolve it like every sibling arm instead of hard-casting it.
+            'stage_resolve_email_item' => $clientId instanceof UnlinkedTicketScope
+                ? ['error' => 'Unlinked intake scope carries no client; call with an explicit positive integer client_id.']
+                : app(\App\Services\Email\EmailResolutionService::class)->stage($arguments, $clientId, $actorLabel),
             'dismiss_email_item' => $this->dismissEmailItem($arguments, $actorLabel),
             'link_call_to_ticket' => $this->linkCallToTicket($arguments, $actorLabel),
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),
@@ -2081,11 +2088,14 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Email item not found'];
         }
 
-        if ($email->client_id === null) {
-            return ['error' => 'Email has no resolved client; resolve the sender to a client before creating a ticket.'];
-        }
-
-        $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket {
+        $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket|array {
+            $email = Email::whereKey($email->id)->lockForUpdate()->firstOrFail();
+            if ($email->ticket_id !== null) {
+                return ['error' => 'Email already linked to ticket #'.$email->ticket_id.'.', 'ticket_id' => $email->ticket_id];
+            }
+            if ($email->client_id === null) {
+                return ['error' => 'Email has no resolved client; resolve the sender before creating a ticket.'];
+            }
             $ticket = $this->email->autoCreateTicketFromEmail($email);
             $this->auditEntityExecution(
                 'create_ticket_from_email',
@@ -2100,6 +2110,10 @@ class StaffPsaActionToolExecutor
 
             return $ticket;
         });
+
+        if (is_array($ticket)) {
+            return $ticket;
+        }
 
         return [
             'success' => true,

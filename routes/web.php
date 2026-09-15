@@ -750,6 +750,9 @@ Route::middleware('auth')->group(function () {
         Route::get('/assistant/general', [AssistantController::class, 'general'])->name('assistant.general');
     });
 
+    Route::post('/cockpit/email-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\EmailResolutionController::class, 'approve'])->name('email-resolutions.approve')->middleware('throttle:30,1');
+    Route::post('/cockpit/email-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\EmailResolutionController::class, 'deny'])->name('email-resolutions.deny')->middleware('throttle:30,1');
+
     // AI Technician cockpit (Plan 1B)
     Route::get('/cockpit', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'index'])->name('cockpit.index');
     Route::post('/cockpit/undo', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'undo'])->name('cockpit.undo')->middleware('throttle:60,1');

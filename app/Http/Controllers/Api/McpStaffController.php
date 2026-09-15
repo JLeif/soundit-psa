@@ -345,6 +345,14 @@ class McpStaffController extends Controller
     private const INTAKE_MANAGE_TOOLS = [
         'link_email_to_ticket',
         'create_ticket_from_email',
+        // ROUTING ONLY for the email-resolution pair (#1293): membership here sends
+        // them to StaffPsaActionToolExecutor and keeps the legacy full-surface token
+        // out. It confers NOTHING — the explicit staged-mode gate in toolAllowed() runs
+        // above every family branch, so an intake-tier grant (bare names, e.g. the
+        // catalog's bulk "Grant shown" click, which normalizes to the immediate mode)
+        // cannot reach them.
+        'resolve_email_item',
+        'stage_resolve_email_item',
         'dismiss_email_item',
         'link_call_to_ticket',
         'create_ticket_from_call',
@@ -573,6 +581,11 @@ class McpStaffController extends Controller
         $offboarding = in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true);
         if ($offboarding && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
             return $this->error($id, -32602, 'Offboarding requires staged=true and an explicit positive integer client_id; immediate calls are refused, not downgraded.');
+        }
+
+        if (in_array($name, ['resolve_email_item', 'stage_resolve_email_item'], true)
+            && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
+            return $this->error($id, -32602, 'Email resolution requires staged=true and an explicit positive integer client_id; immediate execution is unavailable.');
         }
 
         // Unified staged/immediate boundary. Retired stage_* names remain
@@ -1384,6 +1397,18 @@ class McpStaffController extends Controller
     /** @return array<string, mixed> */
     private function auditArguments(?string $tool, array $args): array
     {
+        if (in_array($tool, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
+            $safe = [];
+            foreach (['email_id', 'client_id'] as $key) {
+                if (is_int($args[$key] ?? null)) {
+                    $safe[$key] = $args[$key];
+                }
+            }
+            $safe['reason_length'] = is_string($args['reason'] ?? null) ? mb_strlen($args['reason']) : 0;
+
+            return $safe;
+        }
+
         if ($tool === 'send_reply') {
             return $this->auditSendReplyArguments($args);
         }
@@ -2423,6 +2448,32 @@ class McpStaffController extends Controller
 
         if ($token->allowedTools !== null && ! in_array($toolName, McpToolRegistry::allToolNames(), true)) {
             return false;
+        }
+
+        // Email resolution (#1293) is DEFAULT-UNGRANTED and held-only, exactly as the
+        // tool description promises: the token must grant it in the `staged` MODE. The
+        // grant is read the way every other gate reads one — through the resolved token
+        // (allows() + modeFor()), never by string-matching a raw `tool:mode` entry:
+        // McpConfig resolves grants through McpToolModes::parseGrants(), which strips the
+        // suffix into toolModes, so allowedTools holds plain canonical names and a literal
+        // `resolve_email_item:staged` comparison matches NO token at all — including the
+        // documented `:staged` grant, which is how this gate hid the tool from everyone.
+        //
+        // A BARE `resolve_email_item` entry — what a bulk tier grant of the intake surface
+        // produces, and which normalizeGrantEntries() stores as the `:immediate` mode — is
+        // deliberately NOT enough, so intake-manage membership (routing only) can never
+        // confer a sender-wide client reassignment the operator did not grant by name.
+        // That is also why the immediate mode is refused rather than treated as a superset
+        // here: accepting it would let the tier's bulk "Grant shown" click confer this
+        // tool, and the capability has no immediate lane to confer anyway (callTool
+        // refuses staged !== true). Placed above every family branch so no family default,
+        // and no full-surface token, can outrun it.
+        if (in_array($toolName, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
+            $canonical = McpToolModes::canonicalForAlias($toolName) ?? $toolName;
+
+            return $token->allowedTools !== null
+                && $token->allows($canonical)
+                && $token->modeFor($canonical) === McpToolModes::MODE_STAGED;
         }
 
         // High-scope curated CIPP reads: explicit grant only, never auto-inherited by the

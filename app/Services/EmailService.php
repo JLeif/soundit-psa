@@ -836,15 +836,22 @@ PROMPT;
 
             // AI Technician (Plan 1B): a client reply re-opens drafting. The pipeline's
             // own substance/idempotency logic (Task 10) decides whether to actually draft.
+            // afterCommit: creation now runs inside the email-row transaction, and a
+            // worker must never pick this job up for a ticket a rollback removed.
             if (\App\Support\TechnicianConfig::enabled()) {
-                \App\Jobs\RunTechnicianLoop::dispatch($ticket->id);
+                \App\Jobs\RunTechnicianLoop::dispatch($ticket->id)->afterCommit();
             }
         }
 
         // Touch ticket so updated_at reflects latest activity
         $ticket->touch();
 
-        app(NotificationService::class)->notifyEmailAdded($ticket, $email);
+        // Notifications are not transactional: creation now runs inside the email-row
+        // transaction, and a deadlock/lock-wait rollback must not leave technicians
+        // notified about a ticket that does not exist (nor notify twice on retry).
+        // With no transaction open this runs immediately, so every other path is
+        // byte-identical in behaviour.
+        DB::afterCommit(fn () => app(NotificationService::class)->notifyEmailAdded($ticket, $email));
 
         // Auto-transition PendingClient or Resolved → InProgress when client replies
         $reopenable = [TicketStatus::PendingClient, TicketStatus::Resolved];
@@ -988,6 +995,27 @@ PROMPT;
      */
     public function autoCreateTicketFromEmail(Email $email): Ticket
     {
+        return DB::transaction(function () use ($email): Ticket {
+            // Callers may hold a stale resolved-but-unticketed model. Serialize
+            // creation and linking on the durable email row, not that snapshot.
+            $locked = Email::whereKey($email->getKey())->lockForUpdate()->firstOrFail();
+            if ($locked->ticket_id !== null) {
+                // Ticket soft-deletes: a merged/cleaned-up ticket leaves the email
+                // unticketed again. Fall through and create a fresh one rather than
+                // failing this email forever on a dangling pointer (findOrFail would
+                // throw every poll cycle and the email could never be re-ticketed).
+                $existing = Ticket::find($locked->ticket_id);
+                if ($existing !== null) {
+                    return $existing;
+                }
+            }
+
+            return $this->createTicketFromLockedEmail($locked);
+        });
+    }
+
+    private function createTicketFromLockedEmail(Email $email): Ticket
+    {
         $isMeshDeliveryRequest = MeshEmailParser::isMeshDeliveryRequest($email);
         $isZorusUnblockRequest = ZorusEmailParser::isZorusUnblockRequest($email);
         $isVendorRequest = $isMeshDeliveryRequest || $isZorusUnblockRequest;
@@ -1104,6 +1132,31 @@ PROMPT;
         ]);
 
         return $ticket;
+    }
+
+    /**
+     * Native sender-wide client resolution, shared by the cockpit and held MCP
+     * approval. Lock in stable ID order like ticket creation. An approval may
+     * bind an exact cohort; never resolve an unseen newer email under that seal.
+     *
+     * @return array<int, int>
+     */
+    public function linkSenderClient(Email $email, int $clientId, ?array $expectedIds = null): array
+    {
+        return DB::transaction(function () use ($email, $clientId, $expectedIds): array {
+            Client::findOrFail($clientId);
+            $rows = Email::where('from_address', $email->from_address)
+                ->whereNull('client_id')->orderBy('id')->lockForUpdate()->get();
+            $ids = $rows->modelKeys();
+            if (! in_array($email->id, $ids, true) || ($expectedIds !== null && $ids !== $expectedIds)) {
+                throw new \DomainException('Sender backlog changed; re-stage resolution for a fresh approval.');
+            }
+            // ID-bound write, not a second open-ended sender query: a new arrival
+            // between selection and update cannot be swept into this approval.
+            Email::whereIn('id', $ids)->whereNull('client_id')->update(['client_id' => $clientId]);
+
+            return $ids;
+        });
     }
 
     /**

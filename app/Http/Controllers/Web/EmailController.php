@@ -381,9 +381,11 @@ class EmailController extends Controller
             return back()->with('error', 'This email already has a client linked.');
         }
 
-        $count = Email::where('from_address', $email->from_address)
-            ->whereNull('client_id')
-            ->update(['client_id' => $request->client_id]);
+        try {
+            $count = count(app(EmailService::class)->linkSenderClient($email, (int) $request->client_id));
+        } catch (\DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
 
         return back()->with('success', "Client linked to {$count} email(s) from this sender.");
     }
