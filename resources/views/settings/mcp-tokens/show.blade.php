@@ -390,7 +390,7 @@
                             <div>
                                 <div class="fw-semibold">Tool grants and execution modes</div>
                                 <div class="text-muted small">Tools controls which capabilities this token may call. A staged-only grant cannot execute immediately; immediate grants do not bypass confirmation or tool-specific restrictions.</div>
-                                <button type="button" class="btn btn-sm btn-link ps-0" data-bs-toggle="tab" data-bs-target="#tab-tools">Configure in Tools</button>
+                                <button type="button" class="btn btn-sm btn-link ps-0" id="mcpConfigureTools">Configure in Tools</button>
                                 <div class="text-muted small">Tokens are not bound to a client. For add_ticket_note, propose_close and send_reply, a supplied client must match the ticket; omission derives the ticket client where supported. Tools that require identifiers still require them.</div>
                             </div>
                         </div>
@@ -528,6 +528,12 @@
     if (copyBtn) copyBtn.addEventListener('click', () => {
         const inp = document.getElementById('mcpNewToken');
         if (inp && navigator.clipboard) navigator.clipboard.writeText(inp.value).then(() => toast('Secret copied'));
+    });
+
+    // Activate the existing nav-tab trigger, not a second trigger outside the nav.
+    document.getElementById('mcpConfigureTools')?.addEventListener('click', () => {
+        const trigger = root.querySelector('.nav-link[data-bs-target="#tab-tools"]');
+        if (trigger) { bootstrap.Tab.getOrCreateInstance(trigger).show(); trigger.focus(); }
     });
 
     if (cfg.readOnly) return; // revoked tokens are read-only
