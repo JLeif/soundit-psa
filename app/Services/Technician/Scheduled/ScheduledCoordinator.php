@@ -53,6 +53,9 @@ final class ScheduledCoordinator
         }
         try {
             $approved = ApprovalEnvelope::open($row->ciphertext ?? '', $row->digest);
+            if (! is_array($approved['human_inputs'] ?? null)) {
+                throw new InvalidArgumentException('human_confirmation_missing');
+            }
             $run = TechnicianRun::findOrFail($row->run_id);
             $user = $this->policy->approver($row->approver_user_id);
             $live = $evidence->revalidate($run, $user, $approved['binding']);
@@ -75,6 +78,12 @@ final class ScheduledCoordinator
                 return false;
             }
             try {
+                // Evidence was evaluated against this exact envelope. Never authorize a
+                // ciphertext swapped while the read-only provider was running.
+                $lockedEnvelope = ApprovalEnvelope::open($row->ciphertext ?? '', $row->digest);
+                if (ApprovalEnvelope::canonical($lockedEnvelope) !== ApprovalEnvelope::canonical($approved)) {
+                    throw new InvalidArgumentException('envelope_changed_during_preflight');
+                }
                 $run = TechnicianRun::whereKey($row->run_id)->lockForUpdate()->firstOrFail();
                 $this->policy->approver($row->approver_user_id);
                 $this->policy->ticket($run);
