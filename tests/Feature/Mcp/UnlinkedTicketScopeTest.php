@@ -113,6 +113,8 @@ class UnlinkedTicketScopeTest extends TestCase
         $this->callTool($this->token(['close_ticket']), 'close_ticket', ['ticket_id' => 999999])
             ->assertJsonPath('result.isError', true)
             ->assertJsonPath('result.content.0.text', 'ticket_id is required and must resolve to an existing ticket.');
+        $audit = McpAuditLog::where('tool_name', 'close_ticket')->latest('id')->firstOrFail();
+        $this->assertArrayNotHasKey('ticket_scope', $audit->arguments, 'Missing is not an existing unlinked scope');
     }
 
     public function test_linked_ticket_rejects_supplied_wrong_client_scope(): void
