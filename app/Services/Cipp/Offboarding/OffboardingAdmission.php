@@ -29,6 +29,7 @@ class OffboardingAdmission
             $reference = 'soundpsa-offboard:'.$installation.':'.Str::uuid();
             $snapshot = $this->scope->resolve($input, $reference);
             $snapshot['token_id'] = $tokenId;
+            (new OffboardingLedger(DB::connection()))->assertAvailable($snapshot);
             $hash = OffboardingPlan::hash($snapshot);
             $run = DB::transaction(function () use ($snapshot, $hash): TechnicianRun {
                 // Lock the local ticket to coalesce same-ticket proposals without reviving spent rows.
@@ -58,7 +59,11 @@ class OffboardingAdmission
 
             return ['success' => true, 'run_id' => $run->id, 'revision' => 1, 'plan_hash' => $run->content_hash,
                 'admission' => 'awaiting_approval', 'message' => 'Sealed offboarding proposal held for approval. No job submitted; selected effects remain unverified.'];
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            if (str_starts_with($e->getMessage(), 'Already attempted or reserved: operation ')) {
+                return ['error' => $e->getMessage()];
+            }
+
             // Mapping, upstream and database exception strings can contain customer data.
             return ['error' => 'Offboarding could not be staged: verify explicit grant, client/ticket/identity mappings and installation prerequisites. No offboarding POST was made.'];
         }
@@ -112,7 +117,11 @@ class OffboardingAdmission
         }
         $snapshot = json_decode(Crypt::decryptString($run->proposed_meta['encrypted_payload'] ?? ''), true, flags: JSON_THROW_ON_ERROR);
         if (! is_array($snapshot) || ! hash_equals($run->content_hash, OffboardingPlan::hash($snapshot))
-            || $snapshot['input']['client_id'] !== $run->client_id || $snapshot['input']['ticket_id'] !== $run->ticket_id) {
+            || $snapshot['input']['client_id'] !== $run->client_id || $snapshot['input']['ticket_id'] !== $run->ticket_id
+            || $run->proposed_content !== $this->preview($snapshot)
+            || ($run->proposed_meta['revision'] ?? null) !== 1
+            || ($run->proposed_meta['plan_hash'] ?? null) !== $run->content_hash
+            || ($run->proposed_meta['actions'] ?? null) !== $snapshot['input']['actions']) {
             throw new RuntimeException('Offboarding snapshot integrity failure.');
         }
 

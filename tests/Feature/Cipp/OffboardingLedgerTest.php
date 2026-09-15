@@ -102,21 +102,43 @@ class OffboardingLedgerTest extends TestCase
     public function test_intent_is_committed_before_callback_and_redelivery_never_sends(): void
     {
         $op = $this->prepare();
+        $this->assertSame(2, DB::table('cipp_offboarding_target_fences')->count());
         $posts = 0;
-        $send = function () use (&$posts, $op): array {
+        $observed = [];
+        $send = function () use (&$posts, &$observed, $op): array {
             $posts++;
-            $this->assertSame(0, DB::transactionLevel());
-            $this->assertSame('send_intent', DB::table('cipp_offboarding_operations')->where('id', $op['operation_id'])->value('admission'));
-            $this->assertSame(2, DB::table('cipp_offboarding_target_fences')->count());
+            $observed = [DB::transactionLevel(), DB::table('cipp_offboarding_operations')->where('id', $op['operation_id'])->value('admission'), DB::table('cipp_offboarding_target_fences')->count()];
 
             return ['status' => 503, 'body' => []];
         };
         $first = $this->ledger->dispatch($op['operation_id'], fn () => true, $send);
-        $second = $this->ledger->dispatch($op['operation_id'], fn () => throw new \LogicException('Must not preflight'), $send);
+        $this->assertSame([0, 'send_intent', 2], $observed);
+        $preflights = 0;
+        $second = $this->ledger->dispatch($op['operation_id'], function () use (&$preflights) {
+            $preflights++;
+
+            return true;
+        }, $send);
+        $this->assertSame(0, $preflights);
         $this->assertSame('ambiguous', $first['admission']);
         $this->assertFalse($second['sent']);
         $this->assertSame(1, $posts);
         $this->assertSame('executing', DB::table('technician_runs')->value('state'));
+    }
+
+    public function test_staging_availability_surfaces_prior_operation_ticket_and_date(): void
+    {
+        $this->ledger->assertAvailable($this->snapshot());
+        $op = $this->prepare();
+        try {
+            $this->ledger->assertAvailable($this->snapshot(2));
+            $this->fail('Spent plan was offered as available.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString($op['operation_id'], $e->getMessage());
+            $this->assertStringContainsString('ticket 1', $e->getMessage());
+            $this->assertStringContainsString('UTC', $e->getMessage());
+            $this->assertStringContainsString('new card', $e->getMessage());
+        }
     }
 
     public function test_cross_ticket_fence_and_permanent_conflict_receipt(): void

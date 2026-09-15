@@ -170,6 +170,24 @@ final class OffboardingLedger
         return ['operation_id' => $id, 'admission' => $receipt['admission'], 'sent' => true, 'receipt_persisted' => true];
     }
 
+    /** Advisory staging check only; prepare's unique inserts remain the arbiter. */
+    public function assertAvailable(array $snapshot): void
+    {
+        $namespace = $snapshot['namespace'];
+        $planKey = $this->key(['plan', $namespace, strtolower($snapshot['target_id']),
+            $snapshot['input']['actions'], $snapshot['successor_id'], $snapshot['input']['keep_copy'] ?? null]);
+        $spent = $this->db->table('cipp_offboarding_spent_plans')->where('plan_key', $planKey)->first();
+        if ($spent) {
+            throw new RuntimeException($this->conflict($spent->operation_id, $snapshot['input']['client_id']));
+        }
+        foreach ([['target', $namespace, strtolower($snapshot['target_id'])], ['upn', $namespace, strtolower($snapshot['target_upn'])]] as $value) {
+            $fence = $this->db->table('cipp_offboarding_target_fences')->where('fence_key', $this->key($value))->first();
+            if ($fence) {
+                throw new RuntimeException($this->conflict($fence->operation_id, $snapshot['input']['client_id']));
+            }
+        }
+    }
+
     private function outsideTransaction(): void
     {
         if ($this->db->transactionLevel() !== 0) {

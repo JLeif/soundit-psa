@@ -12,6 +12,7 @@ use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Cipp\CippRestWriteClient;
 use App\Services\Cipp\Offboarding\OffboardingAdmission;
+use App\Services\Cipp\Offboarding\OffboardingScope;
 use App\Support\CippMcpToolPolicy;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -105,8 +106,35 @@ class CippOffboardingAdmissionTest extends TestCase
     {
         $run = $this->staged();
         $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
-        foreach ([[], ['revision' => '1', 'plan_hash' => $run->content_hash, 'actions' => ['disable_sign_in']]] as $approval) {
+        $scope = Mockery::mock(OffboardingScope::class)->makePartial();
+        $scope->shouldReceive('approver')->with($user->id)->andReturnNull();
+        $scope->shouldReceive('token')->never();
+        $this->app->instance(OffboardingScope::class, $scope);
+        foreach ([[], ['revision' => '2', 'plan_hash' => $run->content_hash, 'actions' => ['revoke_sessions']], ['revision' => '1', 'plan_hash' => $run->content_hash, 'actions' => ['disable_sign_in']]] as $approval) {
             $result = app(OffboardingAdmission::class)->approve($run, $user->id, $approval);
+            $this->assertSame('gate_declined', $result->status);
+        }
+        $this->assertDatabaseCount('cipp_offboarding_operations', 0);
+    }
+
+    public function test_changed_rendered_preview_or_metadata_declines_before_scope_reads(): void
+    {
+        $original = $this->staged();
+        $user = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $scope = Mockery::mock(OffboardingScope::class)->makePartial();
+        $scope->shouldReceive('approver')->with($user->id)->andReturnNull();
+        $scope->shouldReceive('token')->never();
+        $this->app->instance(OffboardingScope::class, $scope);
+        foreach (['content', 'actions', 'revision', 'plan_hash'] as $field) {
+            $run = clone $original;
+            if ($field === 'content') {
+                $run->proposed_content = 'Different displayed target';
+            } else {
+                $meta = $run->proposed_meta;
+                $meta[$field] = $field === 'actions' ? ['disable_sign_in'] : 'changed';
+                $run->proposed_meta = $meta;
+            }
+            $result = app(OffboardingAdmission::class)->approve($run, $user->id, ['revision' => '1', 'plan_hash' => $run->content_hash, 'actions' => ['revoke_sessions']]);
             $this->assertSame('gate_declined', $result->status);
         }
         $this->assertDatabaseCount('cipp_offboarding_operations', 0);
