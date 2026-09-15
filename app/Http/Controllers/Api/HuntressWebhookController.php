@@ -66,8 +66,14 @@ class HuntressWebhookController extends Controller
             }
         }
 
-        // Only acknowledge after commit. Promotion is a separate idempotent seam;
-        // this checkpoint stores evidence but cannot authorize ticket resolution.
+        // Event durability owns the response, not the promotion outcome. A replay
+        // retries promotion; the polling fallback also repairs a failed promotion.
+        try {
+            app(\App\Services\Huntress\HuntressLinkService::class)->promote();
+        } catch (\Throwable) {
+            Log::warning('Huntress link promotion failed', ['delivery_id' => $delivery]);
+        }
+
         return response()->json(['received' => true]);
     }
 }

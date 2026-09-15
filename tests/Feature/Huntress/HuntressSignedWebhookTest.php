@@ -51,6 +51,41 @@ class HuntressSignedWebhookTest extends TestCase
         ], $body);
     }
 
+    public function test_real_cw_ingest_and_signed_arrival_link_in_both_orders(): void
+    {
+        \Illuminate\Support\Facades\Queue::fake();
+        $this->travelTo(\Carbon\Carbon::parse('2026-09-14T12:01:00Z'));
+        $user = \App\Models\User::factory()->create();
+        Setting::setValue('huntress_system_user_id', (string) $user->id);
+        Setting::setValue('huntress_webhook_account_id', '11');
+        $client = \App\Models\Client::factory()->create(['huntress_organization_id' => 42, 'is_active' => true]);
+        foreach ([false, true] as $eventFirst) {
+            $id = $eventFirst ? 9183 : 9182;
+            $payload = $this->payload();
+            $payload['id'] = $id;
+            if ($eventFirst) {
+                $this->deliver(json_encode($payload), 'msg_'.$id)->assertOk();
+            }
+            $result = app(\App\Services\Huntress\HuntressService::class)->createTicketFromCw([
+                'summary' => 'HIGH - Incident on SYNTHETIC (Synthetic)',
+                'initialDescription' => 'https://synthetic.huntress.io/org/42/incident_reports/'.$id,
+                'company' => ['id' => $client->id],
+            ]);
+            $alert = \App\Models\Alert::where('ticket_id', $result['id'])->firstOrFail();
+            if (! $eventFirst) {
+                $this->assertNull($alert->huntress_event_id);
+                $this->deliver(json_encode($payload), 'msg_'.$id)->assertOk();
+            }
+            $this->assertEquals($id, $alert->fresh()->huntress_record_id);
+            $this->assertEquals(42, $alert->fresh()->huntress_org_id);
+            $this->deliver(json_encode($payload), 'msg_'.$id)->assertOk();
+            $this->assertEquals($id, $alert->fresh()->huntress_record_id);
+        }
+        $this->assertDatabaseCount('huntress_link_candidates', 2);
+        $this->assertDatabaseCount('huntress_webhook_events', 2);
+        $this->travelBack();
+    }
+
     public function test_valid_event_is_committed_once_and_conflicting_replay_refuses(): void
     {
         $body = json_encode($this->payload());

@@ -37,6 +37,7 @@ class HuntressService
      */
     public function createTicketFromCw(array $data): array
     {
+        $cwReceivedAt = now()->toDateTimeString();
         $rawSubject = $data['summary'] ?? 'Huntress Incident Report';
         $subject = $this->sanitizeString($rawSubject, 255);
         $description = $this->sanitizeString($data['initialDescription'] ?? '', 65535);
@@ -270,6 +271,8 @@ class HuntressService
             'status' => AlertStatus::Ticketed,
             'ticket_id' => $ticket->id,
         ]);
+
+        app(HuntressLinkService::class)->capture($alert, $ticket, $data['initialDescription'] ?? '', $cwReceivedAt);
 
         Log::info('[Huntress CW] Created ticket and alert', [
             'ticket_id' => $ticket->id,
