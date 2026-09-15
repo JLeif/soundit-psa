@@ -380,6 +380,7 @@ class IntakeManageToolsTest extends TestCase
             'direction' => EmailDirection::Inbound,
             'from_address' => 'sender@example.test',
             'subject' => 'Previously handled',
+            'received_at' => now(),
             'ticket_id' => $ticket->id,
         ]);
         $response = $this->callTool($token, 'create_ticket_from_email', [
