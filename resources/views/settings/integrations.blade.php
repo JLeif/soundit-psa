@@ -410,6 +410,24 @@
 
                     <button type="submit" class="btn btn-primary btn-sm">Save BenjiPays Settings</button>
                 </form>
+
+                @if(auth()->user()->isAdmin())
+                    <form method="POST" action="{{ route('settings.integrations.benjipays.test') }}" class="mt-3">
+                        @csrf
+                        <button type="submit" class="btn btn-outline-primary btn-sm">Test connection</button>
+                        <span class="text-muted small">Reads gateways only; does not verify invoice permissions or move money.</span>
+                    </form>
+                @endif
+                @if($benjipaysLastVerifiedAt ?? null)
+                    <p class="small mt-2 mb-0">Last connection attempt: {{ $benjipaysLastVerifiedAt }}.
+                        Outcome: {{ in_array($benjipaysLastOutcome, ['ok', '401', '403', 'error'], true) ? $benjipaysLastOutcome : 'error' }}.
+                        @if($benjipaysLastOutcome === '401')
+                            Check credentials and organization API access.
+                        @elseif($benjipaysLastOutcome === '403')
+                            Check scope, owner mapping permissions and trial/billing eligibility.
+                        @endif
+                    </p>
+                @endif
             </div>
         </div>
 
