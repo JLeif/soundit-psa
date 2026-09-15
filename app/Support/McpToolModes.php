@@ -101,6 +101,11 @@ class McpToolModes
      *
      * @var array<int, string>
      */
+    /** Capabilities whose bare grant holds; explicit :immediate is still supported. */
+    private const BARE_GRANT_DEFAULTS_STAGED = [
+        'resolve_phone_call',
+    ];
+
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
         'resolve_email_item',
         'resolve_phone_call',
@@ -215,8 +220,8 @@ class McpToolModes
             return [$canonical, self::MODE_STAGED];
         }
 
-        if ($entry === 'resolve_phone_call') {
-            // New single-call resolver: immediate requires an explicit :immediate grant.
+        if (in_array($entry, self::BARE_GRANT_DEFAULTS_STAGED, true)) {
+            // These capabilities require an explicit :immediate grant.
             return [$entry, self::MODE_STAGED];
         }
 

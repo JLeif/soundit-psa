@@ -3,6 +3,7 @@
     <h2 class="h5">Phone call identity approvals ({{ $phoneCallResolutions->count() }})</h2>
     @foreach($phoneCallResolutions as $proposal)
         <div class="card mb-2"><div class="card-body">
+            <span class="badge bg-info">{{ \App\Support\StagedActionLabels::humanLabel('stage_resolve_phone_call') }}</span>
             <strong>Call #{{ $proposal->phone_call_id }}</strong>
             → Client #{{ $proposal->client_id }}, contact #{{ $proposal->payload['contact_id'] ?? '?' }}
             <p class="mb-1">Ticket association is preserved. Approval revalidates identity and ownership.</p>

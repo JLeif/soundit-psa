@@ -551,6 +551,13 @@ class CippStagedPasswordResetTest extends TestCase
 
                 continue;
             }
+            if ($stagedType === 'stage_resolve_phone_call') {
+                $this->assertStringContainsString("@include('cockpit.partials.phone-call-resolutions')", $blade);
+                $card = (string) file_get_contents(resource_path('views/cockpit/partials/phone-call-resolutions.blade.php'));
+                $this->assertStringContainsString("StagedActionLabels::humanLabel('stage_resolve_phone_call')", $card);
+
+                continue;
+            }
             if (! str_contains($blade, "'{$stagedType}'")) {
                 $missing[] = $stagedType;
             }
@@ -580,6 +587,15 @@ class CippStagedPasswordResetTest extends TestCase
                 $route = app('router')->getRoutes()->getByName('email-resolutions.approve');
                 $this->assertNotNull($route);
                 $this->assertSame(\App\Http\Controllers\Web\EmailResolutionController::class.'@approve', $route->getActionName());
+
+                continue;
+            }
+            if ($stagedType === 'stage_resolve_phone_call') {
+                // Single-call proposals have their own routed approval, exercised
+                // through HTTP in PhoneCallResolutionTest, not a ticket run arm.
+                $route = app('router')->getRoutes()->getByName('phone-call-resolutions.approve');
+                $this->assertNotNull($route);
+                $this->assertSame(\App\Http\Controllers\Web\PhoneCallResolutionController::class.'@approve', $route->getActionName());
 
                 continue;
             }

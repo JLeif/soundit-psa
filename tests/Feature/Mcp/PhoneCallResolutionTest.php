@@ -97,7 +97,11 @@ class PhoneCallResolutionTest extends TestCase
         $this->assertSame(['resolve_phone_call', 'staged'], McpToolModes::parseGrantEntry('resolve_phone_call'));
         $this->assertSame(['resolve_phone_call:staged'], McpToolModes::normalizeGrantEntries(['resolve_phone_call'])['entries']);
         $this->assertSame('staged', McpToolModes::defaultMode('resolve_phone_call'));
-        foreach (['resolve_phone_call', 'resolve_phone_call:staged'] as $grant) {
+        $this->assertSame(['resolve_phone_call', 'immediate'], McpToolModes::parseGrantEntry('resolve_phone_call:immediate'));
+        $this->assertSame(['resolve_phone_call', 'staged'], McpToolModes::parseGrantEntry('resolve_phone_call:staged'));
+        $this->assertSame(['resolve_phone_call', 'staged'], McpToolModes::parseGrantEntry('stage_resolve_phone_call'));
+        $this->assertSame(['merge_ticket', 'immediate'], McpToolModes::parseGrantEntry('merge_ticket'));
+        foreach (['resolve_phone_call', 'resolve_phone_call:staged', 'stage_resolve_phone_call'] as $grant) {
             $token = McpConfig::rotateStaffToken(allowedTools: [$grant], label: 'same-synthetic-actor');
             $r = $this->decoded($this->callTool($token, $args + ['staged' => false]));
             $this->assertTrue($r['staged']);
@@ -213,6 +217,65 @@ class PhoneCallResolutionTest extends TestCase
         $this->actingAs($admin)->postJson(route('phone-call-resolutions.deny', $r['proposal_id']))->assertOk();
         $this->assertNull($call->fresh()->client_id);
         $this->assertDatabaseHas('phone_call_resolution_proposals', ['id' => $r['proposal_id'], 'state' => 'denied']);
+    }
+
+    public function test_approval_refuses_changed_identity_contact_ownership_and_binding(): void
+    {
+        [$call, $person, $ticket, $args] = $this->fixture();
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $token = McpConfig::rotateStaffToken(allowedTools: ['resolve_phone_call']);
+        $r = $this->decoded($this->callTool($token, $args));
+        $other = Person::create(['client_id' => $ticket->client_id, 'first_name' => 'Other', 'is_active' => true]);
+        $call->person_id = $other->id;
+        $call->person_confirmed = true;
+        $call->save();
+        $this->actingAs($admin)->postJson(route('phone-call-resolutions.approve', $r['proposal_id']))->assertStatus(409);
+        $this->assertSame($other->id, $call->fresh()->person_id);
+        $call->person_id = null;
+        $call->person_confirmed = false;
+        $call->save();
+        $r = $this->decoded($this->callTool($token, $args));
+        $person->update(['client_id' => Client::factory()->create()->id]);
+        $this->actingAs($admin)->postJson(route('phone-call-resolutions.approve', $r['proposal_id']))->assertStatus(409);
+        $this->assertNull($call->fresh()->person_id);
+        $person->update(['client_id' => $ticket->client_id]);
+        $r = $this->decoded($this->callTool($token, $args));
+        $proposal = PhoneCallResolutionProposal::findOrFail($r['proposal_id']);
+        $payload = $proposal->payload;
+        $payload['contact_id'] = $other->id;
+        $proposal->update(['payload' => $payload]);
+        $this->actingAs($admin)->postJson(route('phone-call-resolutions.approve', $r['proposal_id']))->assertStatus(409);
+        $this->assertNull($call->fresh()->person_id);
+        $this->assertDatabaseMissing('technician_action_logs', ['result_status' => 'executed']);
+    }
+
+    public function test_missing_trashed_inactive_targets_and_unlinked_call(): void
+    {
+        [$call, $person, $ticket, $args] = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['resolve_phone_call:immediate']);
+        $client = Client::findOrFail($ticket->client_id);
+        foreach (['inactive_client', 'trashed_client', 'trashed_contact', 'missing_ticket'] as $case) {
+            if ($case === 'inactive_client') {
+                $client->update(['is_active' => false]);
+            } elseif ($case === 'trashed_client') {
+                $client->delete();
+            } elseif ($case === 'trashed_contact') {
+                $person->delete();
+            } else {
+                $ticket->delete();
+            }
+            $this->assertTrue((bool) $this->callTool($token, $args)->json('result.isError'), $case);
+            $this->assertNull($call->fresh()->person_id);
+            $client->restore();
+            $client->update(['is_active' => true]);
+            $person->restore();
+        }
+        $call->update(['ticket_id' => null]);
+        $result = $this->decoded($this->callTool($token, $args));
+        $this->assertSame($person->id, $result['person_id']);
+        $this->assertNull($result['ticket_id']);
+        $this->assertDatabaseCount('ticket_notes', 0);
+        $this->assertDatabaseCount('prepay_transactions', 0);
     }
 
     public function test_refuses_mismatched_and_invalid_targets_without_mutation(): void

@@ -48,6 +48,7 @@ class StagedActionLabels
         // entry so StagedActionLabelsTest's every-stageable-type guard passes.
         'stage_close_ticket' => 'Proposed close',
         'stage_resolve_email_item' => 'Resolve email sender backlog',
+        'stage_resolve_phone_call' => 'Resolve phone call identity',
         'direct_close' => 'Closed directly',
 
         // Tactical
