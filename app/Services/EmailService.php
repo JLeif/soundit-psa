@@ -988,6 +988,20 @@ PROMPT;
      */
     public function autoCreateTicketFromEmail(Email $email): Ticket
     {
+        return DB::transaction(function () use ($email): Ticket {
+            // Callers may hold a stale resolved-but-unticketed model. Serialize
+            // creation and linking on the durable email row, not that snapshot.
+            $locked = Email::whereKey($email->getKey())->lockForUpdate()->firstOrFail();
+            if ($locked->ticket_id !== null) {
+                return Ticket::findOrFail($locked->ticket_id);
+            }
+
+            return $this->createTicketFromLockedEmail($locked);
+        });
+    }
+
+    private function createTicketFromLockedEmail(Email $email): Ticket
+    {
         $isMeshDeliveryRequest = MeshEmailParser::isMeshDeliveryRequest($email);
         $isZorusUnblockRequest = ZorusEmailParser::isZorusUnblockRequest($email);
         $isVendorRequest = $isMeshDeliveryRequest || $isZorusUnblockRequest;

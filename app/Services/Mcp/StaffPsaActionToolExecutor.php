@@ -2085,7 +2085,14 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Email has no resolved client; resolve the sender to a client before creating a ticket.'];
         }
 
-        $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket {
+        $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket|array {
+            $email = Email::whereKey($email->id)->lockForUpdate()->firstOrFail();
+            if ($email->ticket_id !== null) {
+                return ['error' => 'Email already linked to ticket #'.$email->ticket_id.'.', 'ticket_id' => $email->ticket_id];
+            }
+            if ($email->client_id === null) {
+                return ['error' => 'Email has no resolved client; resolve the sender before creating a ticket.'];
+            }
             $ticket = $this->email->autoCreateTicketFromEmail($email);
             $this->auditEntityExecution(
                 'create_ticket_from_email',
@@ -2100,6 +2107,10 @@ class StaffPsaActionToolExecutor
 
             return $ticket;
         });
+
+        if (is_array($ticket)) {
+            return $ticket;
+        }
 
         return [
             'success' => true,
