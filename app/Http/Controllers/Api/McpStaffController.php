@@ -353,6 +353,8 @@ class McpStaffController extends Controller
         // cannot reach them.
         'resolve_email_item',
         'stage_resolve_email_item',
+        'resolve_phone_call',
+        'stage_resolve_phone_call',
         'dismiss_email_item',
         'link_call_to_ticket',
         'create_ticket_from_call',
@@ -586,6 +588,12 @@ class McpStaffController extends Controller
         if (in_array($name, ['resolve_email_item', 'stage_resolve_email_item'], true)
             && (($arguments['staged'] ?? null) !== true || ! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1)) {
             return $this->error($id, -32602, 'Email resolution requires staged=true and an explicit positive integer client_id; immediate execution is unavailable.');
+        }
+
+        if (in_array($name, ['resolve_phone_call', 'stage_resolve_phone_call'], true)
+            && (! is_int($arguments['client_id'] ?? null) || $arguments['client_id'] < 1
+                || (array_key_exists('staged', $arguments) && ! is_bool($arguments['staged'])))) {
+            return $this->error($id, -32602, 'Caller resolution requires a positive integer client_id and boolean staged when supplied.');
         }
 
         // Unified staged/immediate boundary. Retired stage_* names remain
@@ -1166,9 +1174,8 @@ class McpStaffController extends Controller
                     $this->tokenLabel($request),
                 );
             } elseif ($this->isIntakeManageTool((string) $name)) {
-                // None of these carry client_id — scope lives on the targeted
-                // email/call/ticket ids themselves ($clientId is always null → 0,
-                // ignored by the handlers, mirroring create_client above).
+                // Identity resolvers require explicit client_id; the other intake
+                // handlers derive their scope from the targeted record IDs.
                 $result = app(StaffPsaActionToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
@@ -1396,6 +1403,18 @@ class McpStaffController extends Controller
         if (in_array($tool, ['resolve_email_item', 'stage_resolve_email_item'], true)) {
             $safe = [];
             foreach (['email_id', 'client_id'] as $key) {
+                if (is_int($args[$key] ?? null)) {
+                    $safe[$key] = $args[$key];
+                }
+            }
+            $safe['reason_length'] = is_string($args['reason'] ?? null) ? mb_strlen($args['reason']) : 0;
+
+            return $safe;
+        }
+
+        if (in_array($tool, ['resolve_phone_call', 'stage_resolve_phone_call'], true)) {
+            $safe = [];
+            foreach (['phone_call_id', 'client_id', 'contact_id'] as $key) {
                 if (is_int($args[$key] ?? null)) {
                     $safe[$key] = $args[$key];
                 }

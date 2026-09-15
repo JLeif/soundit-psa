@@ -99,6 +99,7 @@
 
 @section('content')
 @include('cockpit.partials.email-resolutions')
+@include('cockpit.partials.phone-call-resolutions')
 <div
     class="cockpit-shell"
     x-data="cockpitQueue({ counts: @js($counts), csrf: @js(csrf_token()) })"

@@ -1556,7 +1556,29 @@ class McpToolRegistry
             self::resolveEmailItemTool(true),
             self::dismissEmailItemTool(),
             self::linkCallToTicketTool(),
+            self::resolvePhoneCallTool(),
+            self::resolvePhoneCallTool(true),
             self::createTicketFromCallTool(),
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function resolvePhoneCallTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_resolve_phone_call' : 'resolve_phone_call',
+            'description' => 'Resolve one existing phone call to an existing active client/contact, even when already ticket-linked. contact_id is stored as person_id. Preserves the ticket and billing; rejects mismatched ownership or replacing a different resolved identity. Exact repeats are safe. Default-ungranted including legacy tokens. Bare or :staged grants hold for cockpit approval; only explicit :immediate permits immediate execution. Staged proposals revalidate current identity and ownership at approval. Read back both IDs with get_phone_call.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'client_id' => ['type' => 'integer', 'minimum' => 1],
+                    'contact_id' => ['type' => 'integer', 'minimum' => 1],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'client_id', 'contact_id', 'reason'],
+                'additionalProperties' => false,
+            ],
         ];
     }
 

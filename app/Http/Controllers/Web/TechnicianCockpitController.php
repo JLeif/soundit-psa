@@ -37,6 +37,8 @@ class TechnicianCockpitController extends Controller
             'drafts' => $drafts,
             'emailResolutions' => \App\Models\EmailResolutionProposal::where('state', 'pending')->with('client')->orderBy('id')->get(),
             'canApproveEmailResolution' => app(\App\Services\Email\EmailResolutionService::class)->canApprove(auth()->user()),
+            'phoneCallResolutions' => \App\Models\PhoneCallResolutionProposal::where('state', 'pending')->orderBy('id')->get(),
+            'canApprovePhoneCallResolution' => app(\App\Services\PhoneCallResolutionService::class)->canApprove(auth()->user()),
             'disclosurePreviews' => $drafts->mapWithKeys(fn ($run) => [
                 $run->id => $disclosure->dualBanner($run->drafterDisplayName(), $approverName),
             ]),

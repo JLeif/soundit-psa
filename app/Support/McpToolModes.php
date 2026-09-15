@@ -51,6 +51,7 @@ class McpToolModes
         'stage_public_note' => 'write_public_note',
         'stage_close_ticket' => 'close_ticket',
         'stage_resolve_email_item' => 'resolve_email_item',
+        'stage_resolve_phone_call' => 'resolve_phone_call',
         'propose_merge' => 'merge_ticket',
         'propose_asset_merge' => 'merge_asset',
     ];
@@ -102,6 +103,7 @@ class McpToolModes
      */
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
         'resolve_email_item',
+        'resolve_phone_call',
         'merge_ticket',
         'merge_asset',
         // tactical_remove_agent has no immediate implementation at all
@@ -211,6 +213,11 @@ class McpToolModes
 
         if (($canonical = self::canonicalForAlias($entry)) !== null) {
             return [$canonical, self::MODE_STAGED];
+        }
+
+        if ($entry === 'resolve_phone_call') {
+            // New single-call resolver: immediate requires an explicit :immediate grant.
+            return [$entry, self::MODE_STAGED];
         }
 
         if (self::isStageable($entry)) {
