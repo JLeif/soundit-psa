@@ -39,16 +39,86 @@ class HuntressSignedWebhookTest extends TestCase
             'status' => 'open', 'subject' => 'Synthetic', 'severity' => 'high']);
     }
 
-    private function deliver(string $body, string $id = 'msg_synthetic', ?int $timestamp = null, ?string $signedBody = null)
+    private function signedHeaders(string $body, string $id, string $family, ?int $timestamp = null): array
     {
         $timestamp ??= time();
-        $signature = base64_encode(hash_hmac('sha256', $id.'.'.$timestamp.'.'.($signedBody ?? $body), self::KEY, true));
+        $signature = base64_encode(hash_hmac('sha256', $id.'.'.$timestamp.'.'.$body, self::KEY, true));
+        $prefix = 'HTTP_'.strtoupper($family).'_';
 
+        return [$prefix.'ID' => $id, $prefix.'TIMESTAMP' => (string) $timestamp, $prefix.'SIGNATURE' => 'v1,'.$signature];
+    }
+
+    private function deliverHeaders(string $body, array $headers)
+    {
         return $this->call('POST', '/api/huntress/webhooks', [], [], [], [
             'CONTENT_TYPE' => 'application/json', 'HTTP_ACCEPT' => 'application/json',
-            'HTTP_SVIX_ID' => $id, 'HTTP_SVIX_TIMESTAMP' => (string) $timestamp,
-            'HTTP_SVIX_SIGNATURE' => 'v1,'.$signature,
-        ], $body);
+        ] + $headers, $body);
+    }
+
+    private function deliver(string $body, string $id = 'msg_synthetic', ?int $timestamp = null, ?string $signedBody = null, string $family = 'svix')
+    {
+        return $this->deliverHeaders($body, $this->signedHeaders($signedBody ?? $body, $id, $family, $timestamp));
+    }
+
+    public function test_both_header_families_verify_and_bind_the_persisted_delivery(): void
+    {
+        $body = json_encode($this->payload());
+        foreach (['svix', 'webhook'] as $family) {
+            $id = 'msg_'.$family;
+            $this->deliver($body, $id, family: $family)->assertOk();
+            $this->deliver($body, $id, family: $family)->assertOk();
+            $this->assertDatabaseHas('huntress_webhook_events', ['delivery_id' => $id, 'record_id' => 9182]);
+            $p = $this->payload();
+            $p['id'] = 9183;
+            $this->deliver(json_encode($p), $id, family: $family)->assertStatus(409);
+        }
+        $this->assertDatabaseCount('huntress_webhook_events', 2);
+    }
+
+    public function test_both_families_reject_tampering_expiry_and_invalid_delivery_ids(): void
+    {
+        $body = json_encode($this->payload());
+        foreach (['svix', 'webhook'] as $family) {
+            $this->deliver($body.' ', signedBody: $body, family: $family)->assertStatus(401);
+            $this->deliver($body, timestamp: time() - 600, family: $family)->assertStatus(401);
+            $this->deliver($body, timestamp: time() + 600, family: $family)->assertStatus(401);
+            foreach (['', 'invalid id', str_repeat('a', 256)] as $id) {
+                $this->deliver($body, $id, family: $family)->assertStatus(400)->assertExactJson(['error' => 'Invalid delivery']);
+            }
+        }
+        $this->deliverHeaders($body, [])->assertStatus(400)->assertExactJson(['error' => 'Invalid delivery']);
+        $this->assertDatabaseCount('huntress_webhook_events', 0);
+    }
+
+    public function test_vendor_complete_family_precedence_and_partial_svix_fallback(): void
+    {
+        $body = json_encode($this->payload());
+        $svix = $this->signedHeaders($body, 'msg_svix', 'svix');
+        $webhook = $this->signedHeaders($body, 'msg_webhook', 'webhook');
+        $this->deliverHeaders($body, $svix + $webhook)->assertOk();
+        $this->assertDatabaseHas('huntress_webhook_events', ['delivery_id' => 'msg_svix']);
+        $this->assertDatabaseMissing('huntress_webhook_events', ['delivery_id' => 'msg_webhook']);
+        // A present but incomplete svix family must not mask webhook headers.
+        unset($svix['HTTP_SVIX_SIGNATURE']);
+        $this->deliverHeaders($body, $svix + $webhook)->assertOk();
+        $this->assertDatabaseHas('huntress_webhook_events', ['delivery_id' => 'msg_webhook']);
+        $this->assertDatabaseCount('huntress_webhook_events', 2);
+    }
+
+    public function test_invalid_complete_svix_does_not_fall_back_and_mixed_fields_cannot_verify(): void
+    {
+        $body = json_encode($this->payload());
+        $svix = $this->signedHeaders($body, 'msg_svix', 'svix');
+        $webhook = $this->signedHeaders($body, 'msg_webhook', 'webhook');
+        foreach (['v1,invalid', ''] as $signature) {
+            $svix['HTTP_SVIX_SIGNATURE'] = $signature;
+            $this->deliverHeaders($body, $svix + $webhook)->assertStatus(401);
+        }
+        $mixed = $this->signedHeaders($body, 'msg_webhook', 'webhook');
+        $mixed['HTTP_SVIX_SIGNATURE'] = $mixed['HTTP_WEBHOOK_SIGNATURE'];
+        unset($mixed['HTTP_WEBHOOK_SIGNATURE']);
+        $this->deliverHeaders($body, $mixed)->assertStatus(401);
+        $this->assertDatabaseCount('huntress_webhook_events', 0);
     }
 
     public function test_real_cw_ingest_and_signed_arrival_link_in_both_orders(): void

@@ -22,16 +22,23 @@ class HuntressWebhookController extends Controller
             return response()->json(['error' => 'Unavailable'], 503);
         }
         $body = $request->getContent();
-        $delivery = $request->header('svix-id', '');
+        // Match Svix's complete-family precedence; never mix signed fields or
+        // persist an ID from a different family than the verifier selected.
+        $headers = [];
+        foreach (['svix', 'webhook'] as $family) {
+            foreach (['id', 'timestamp', 'signature'] as $field) {
+                $name = $family.'-'.$field;
+                $headers[$name] = $request->header($name);
+            }
+        }
+        $family = isset($headers['svix-id'], $headers['svix-timestamp'], $headers['svix-signature'])
+            ? 'svix' : 'webhook';
+        $delivery = $headers[$family.'-id'] ?? '';
         if (! preg_match('/^[A-Za-z0-9_-]{1,255}$/D', $delivery)) {
             return response()->json(['error' => 'Invalid delivery'], 400);
         }
         try {
-            (new Webhook($secret))->verify($body, [
-                'svix-id' => $delivery,
-                'svix-timestamp' => $request->header('svix-timestamp', ''),
-                'svix-signature' => $request->header('svix-signature', ''),
-            ]);
+            (new Webhook($secret))->verify($body, $headers);
         } catch (WebhookVerificationException) {
             return response()->json(['error' => 'Invalid signature'], 401);
         }
