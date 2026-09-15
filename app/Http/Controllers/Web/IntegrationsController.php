@@ -138,6 +138,9 @@ class IntegrationsController extends Controller
         $meshConnected = (bool) $fmtTs(Setting::getValue('mesh_connected_at'));
 
         // Huntress
+        $huntressWebhookSecretStored = filled(Setting::getValue('huntress_webhook_signing_secret'));
+        $huntressWebhookAccountId = HuntressConfig::get('webhook_account_id');
+        $huntressWebhooksEnabled = HuntressConfig::webhooksEnabled();
         $huntressConfigured = HuntressConfig::isConfigured();
         $huntressConnected = (bool) $fmtTs(Setting::getValue('huntress_connected_at'));
 
@@ -539,6 +542,7 @@ class IntegrationsController extends Controller
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
             'huntressConfigured', 'huntressConnected', 'huntressEnabled',
+            'huntressWebhookSecretStored', 'huntressWebhookAccountId', 'huntressWebhooksEnabled',
             'unifiConfigured', 'unifiConnected', 'unifiBaseUrl', 'unifiEnabled',
             'powerdmarcConfigured', 'powerdmarcConnected', 'powerdmarcBaseUrl', 'powerdmarcMsspBaseUrl', 'powerdmarcMsspWalkSeconds', 'powerdmarcEnabled',
             'servosityConfigured', 'servosityConnected', 'servosityConnectedAt', 'servosityEnabled',
@@ -1425,6 +1429,61 @@ class IntegrationsController extends Controller
     }
 
     // --- Huntress ---
+
+    public function updateHuntressWebhooks(Request $request)
+    {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->only([
+            'signing_secret', 'account_id', 'webhooks_enabled',
+        ]), [
+            // Application storage bound, not a vendor key-length contract.
+            'signing_secret' => 'nullable|string|max:4096',
+            // Consumers compare integer account IDs; reject lossy/overflowing values.
+            'account_id' => ['nullable', 'integer', 'min:1', 'max:'.PHP_INT_MAX, 'regex:/^[1-9][0-9]*$/D'],
+            'webhooks_enabled' => 'required|boolean',
+        ]);
+
+        if ($validator->fails()) {
+            // Never flash credentials, even on a different field's validation failure.
+            return redirect()->route('settings.integrations')->withErrors($validator);
+        }
+
+        $validated = $validator->validated();
+        $secret = trim((string) ($validated['signing_secret'] ?? ''));
+        $replaceSecret = $secret !== '' && $secret !== self::SECRET_MASK;
+        try {
+            $effectiveSecret = $replaceSecret ? $secret : (HuntressConfig::get('webhook_signing_secret') ?? '');
+        } catch (\Illuminate\Contracts\Encryption\DecryptException) {
+            // A broken stored credential must not prevent switching linking off.
+            $effectiveSecret = '';
+        }
+        $encoded = str_starts_with($effectiveSecret, 'whsec_') ? substr($effectiveSecret, 6) : $effectiveSecret;
+        $decoded = base64_decode($encoded, true);
+        $usableSecret = $decoded !== false && $decoded !== '';
+        $enabled = (bool) $validated['webhooks_enabled'];
+        $accountId = (string) ($validated['account_id'] ?? '');
+
+        if (($replaceSecret || $enabled) && ! $usableSecret) {
+            return redirect()->route('settings.integrations')->withErrors([
+                'signing_secret' => 'Enter a valid Svix signing secret before enabling webhook linking.',
+            ]);
+        }
+        if ($enabled && $accountId === '') {
+            return redirect()->route('settings.integrations')->withErrors([
+                'account_id' => 'An expected Huntress account ID is required to enable webhook linking.',
+            ]);
+        }
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($replaceSecret, $secret, $accountId, $enabled) {
+            if ($replaceSecret) {
+                Setting::setEncrypted('huntress_webhook_signing_secret', $secret);
+            }
+            Setting::setValue('huntress_webhook_account_id', $accountId);
+            Setting::setValue('huntress_webhooks_enabled', $enabled ? '1' : '0');
+        });
+
+        return redirect()->route('settings.integrations')
+            ->with('success', 'Huntress webhook settings saved.');
+    }
 
     public function updateHuntress(Request $request)
     {
