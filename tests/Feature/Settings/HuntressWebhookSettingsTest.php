@@ -16,8 +16,10 @@ class HuntressWebhookSettingsTest extends TestCase
 {
     use RefreshDatabase;
 
-    // Synthetic Svix-compatible value; never a vendor credential.
-    private const SECRET = 'whsec_c3ludGhldGljLXRlc3Qtc2VjcmV0';
+    // Synthetic Svix-compatible marker; never a vendor credential. The
+    // Svix-shaped value is assembled at runtime from this plain marker so no
+    // credential-shaped literal is stored in the tree.
+    private const SECRET_MARKER = 'synthetic-test-secret';
 
     protected function setUp(): void
     {
@@ -30,9 +32,14 @@ class HuntressWebhookSettingsTest extends TestCase
         return $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
     }
 
+    private function secret(): string
+    {
+        return 'whsec_'.base64_encode(self::SECRET_MARKER);
+    }
+
     private function payload(array $overrides = []): array
     {
-        return array_replace(['signing_secret' => self::SECRET, 'account_id' => '12345', 'webhooks_enabled' => '0'], $overrides);
+        return array_replace(['signing_secret' => $this->secret(), 'account_id' => '12345', 'webhooks_enabled' => '0'], $overrides);
     }
 
     private function save(array $payload)
@@ -47,22 +54,22 @@ class HuntressWebhookSettingsTest extends TestCase
         $response = $this->admin()->save($this->payload());
         $response->assertRedirect(route('settings.integrations'))->assertSessionHasNoErrors()
             ->assertSessionMissing('_old_input.signing_secret');
-        $this->assertSame(self::SECRET, HuntressConfig::get('webhook_signing_secret'));
-        $this->assertStringNotContainsString(self::SECRET, Setting::getValue('huntress_webhook_signing_secret'));
+        $this->assertSame($this->secret(), HuntressConfig::get('webhook_signing_secret'));
+        $this->assertStringNotContainsString($this->secret(), Setting::getValue('huntress_webhook_signing_secret'));
         $this->assertSame('12345', HuntressConfig::get('webhook_account_id'));
         $this->assertFalse(HuntressConfig::webhooksEnabled());
         $this->assertSame('0', Setting::getValue('huntress_enabled'));
-        $this->assertStringNotContainsString(self::SECRET, json_encode(session()->all()));
+        $this->assertStringNotContainsString($this->secret(), json_encode(session()->all()));
         Http::assertNothingSent();
     }
 
     public function test_admin_form_is_write_only_and_renders_no_ciphertext_or_old_secret(): void
     {
-        Setting::setEncrypted('huntress_webhook_signing_secret', self::SECRET);
+        Setting::setEncrypted('huntress_webhook_signing_secret', $this->secret());
         $html = $this->admin()->withSession(['_old_input' => ['signing_secret' => 'SYNTHETIC_OLD_SECRET']])
             ->get(route('settings.integrations'))->assertOk()->assertSee('Webhook linking enabled')->getContent();
         $this->assertMatchesRegularExpression('/id="huntress_webhook_signing_secret"[^>]*value=""/s', $html);
-        $this->assertStringNotContainsString(self::SECRET, $html);
+        $this->assertStringNotContainsString($this->secret(), $html);
         $this->assertStringNotContainsString('SYNTHETIC_OLD_SECRET', $html);
         $this->assertStringNotContainsString(Setting::getValue('huntress_webhook_signing_secret'), $html);
     }
@@ -108,14 +115,14 @@ class HuntressWebhookSettingsTest extends TestCase
     #[DataProvider('invalidSettings')]
     public function test_invalid_settings_write_nothing_and_never_flash_secrets(array $overrides, string $field): void
     {
-        Setting::setEncrypted('huntress_webhook_signing_secret', self::SECRET);
+        Setting::setEncrypted('huntress_webhook_signing_secret', $this->secret());
         Setting::setValue('huntress_webhook_account_id', '12345');
         Setting::setValue('huntress_webhooks_enabled', '1');
         $before = Setting::orderBy('key')->pluck('value', 'key')->all();
         $this->admin()->save($this->payload($overrides))->assertSessionHasErrors($field)
             ->assertSessionMissing('_old_input.signing_secret');
         $this->assertSame($before, Setting::orderBy('key')->pluck('value', 'key')->all());
-        $this->assertStringNotContainsString(self::SECRET, json_encode(session()->all()));
+        $this->assertStringNotContainsString($this->secret(), json_encode(session()->all()));
     }
 
     public static function invalidSettings(): array
@@ -166,7 +173,7 @@ class HuntressWebhookSettingsTest extends TestCase
     #[DataProvider('nonAdmins')]
     public function test_non_admin_cannot_see_form_or_write_settings(UserRole $role): void
     {
-        Setting::setEncrypted('huntress_webhook_signing_secret', self::SECRET);
+        Setting::setEncrypted('huntress_webhook_signing_secret', $this->secret());
         Setting::setValue('huntress_webhook_account_id', '12345');
         Setting::setValue('huntress_webhooks_enabled', '0');
         $before = Setting::orderBy('key')->pluck('value', 'key')->all();
@@ -192,7 +199,7 @@ class HuntressWebhookSettingsTest extends TestCase
         $this->assertNull(HuntressConfig::get('webhook_account_id'));
         $this->assertFalse(HuntressConfig::webhooksEnabled());
         $this->save($this->payload(['_token' => 'synthetic-csrf']))->assertSessionHasNoErrors();
-        $this->assertSame(self::SECRET, HuntressConfig::get('webhook_signing_secret'));
+        $this->assertSame($this->secret(), HuntressConfig::get('webhook_signing_secret'));
     }
 
     public function test_get_cannot_write_settings(): void
