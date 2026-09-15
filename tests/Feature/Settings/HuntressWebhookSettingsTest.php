@@ -89,7 +89,7 @@ class HuntressWebhookSettingsTest extends TestCase
     #[DataProvider('preservedSecrets')]
     public function test_blank_missing_or_mask_preserves_existing_secret(array $secret): void
     {
-        Setting::setEncrypted('huntress_webhook_signing_secret', self::SECRET);
+        Setting::setEncrypted('huntress_webhook_signing_secret', $this->secret());
         $ciphertext = Setting::getValue('huntress_webhook_signing_secret');
         $this->admin()->save(array_merge(['account_id' => '54321', 'webhooks_enabled' => '1'], $secret))->assertSessionHasNoErrors();
         $this->assertSame($ciphertext, Setting::getValue('huntress_webhook_signing_secret'));
