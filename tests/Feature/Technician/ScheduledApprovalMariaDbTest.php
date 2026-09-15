@@ -122,6 +122,61 @@ class ScheduledApprovalMariaDbTest extends ScheduledApprovalTest
         $this->assertFalse($c->intent($id, $old, $this->evidence));
     }
 
+    public function test_two_process_admission_creates_one_envelope_and_note(): void
+    {
+        $go = $this->go();
+        [$a, $ja] = $this->child('admit', $this->run->id, $go);
+        [$b, $jb] = $this->child('admit', $this->run->id, $go);
+        touch($go);
+        $this->assertSame(0, proc_close($a));
+        $this->assertSame(0, proc_close($b));
+        $this->assertSame(json_decode(file_get_contents($ja['result'])), json_decode(file_get_contents($jb['result'])));
+        $this->assertDatabaseCount('scheduled_authorizations', 1);
+        $this->assertDatabaseCount('scheduled_note_outbox', 1);
+    }
+
+    public function test_process_death_after_synthetic_intent_never_replays(): void
+    {
+        $id = $this->admit();
+        $go = $this->go();
+        [$p, $job] = $this->child('crash-intent', $id, $go);
+        touch($go);
+        $this->assertNotSame(0, proc_close($p));
+        $nonce = json_decode(file_get_contents($job['result']));
+        $this->time = $this->time->setTime(1, 5);
+        $c = app(ScheduledCoordinator::class);
+        $c->recover($id);
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertNull($c->claim($id));
+        $this->assertFalse($c->cancel($id, $this->user->id));
+        $this->assertFalse($c->settle($id, $nonce, 'completed'));
+        $this->assertSame('scheduled', $this->run->fresh()->state->value);
+    }
+
+    public function test_settlement_outbox_failure_preserves_intent_not_retry_state(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $c = app(ScheduledCoordinator::class);
+        $nonce = $c->claim($id);
+        DB::table('scheduled_authorizations')->where('id', $id)->update(['state' => 'dispatch_intent', 'intent_at' => $this->time]);
+        DB::unprepared("CREATE TRIGGER fail_scheduled_settle BEFORE INSERT ON scheduled_note_outbox FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'synthetic crash'");
+        try {
+            $c->settle($id, $nonce, 'completed');
+            $this->fail('settlement unexpectedly committed');
+        } catch (\Illuminate\Database\QueryException) {
+            $this->assertSame('dispatch_intent', DB::table('scheduled_authorizations')->value('state'));
+            $this->assertDatabaseCount('scheduled_target_fences', 1);
+            $this->assertDatabaseCount('scheduled_note_outbox', 1);
+            $this->assertNull($c->claim($id));
+        } finally {
+            DB::unprepared('DROP TRIGGER fail_scheduled_settle');
+        }
+        $this->time = $this->time->addMinutes(5);
+        $c->recover($id);
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+    }
+
     public function test_outbox_insert_fault_rolls_back_admission(): void
     {
         DB::unprepared("CREATE TRIGGER fail_scheduled_note BEFORE INSERT ON scheduled_note_outbox FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'synthetic crash'");

@@ -143,6 +143,48 @@ final class ScheduledCoordinator
         }, 3);
     }
 
+    /** Only explicit pre-dispatch availability reasons may defer an attempt. */
+    public function defer(int $id, string $nonce, string $reason, ?\Carbon\CarbonImmutable $cooldownUntil = null): bool
+    {
+        if (! in_array($reason, ['offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true)) {
+            throw new InvalidArgumentException('not_retryable');
+        }
+
+        return DB::transaction(function () use ($id, $nonce, $reason, $cooldownUntil) {
+            $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
+            if (! $row || $row->state !== 'claimed' || $row->nonce !== $nonce || $row->intent_at !== null) {
+                return false;
+            }
+            $now = $this->clock->now();
+            if ($now->gte($row->expires_at)) {
+                $this->transition($row, 'expired', 'window_closed');
+
+                return false;
+            }
+            if ($row->attempt >= 100) {
+                $this->transition($row, 'blocked', 'attempt_limit');
+
+                return false;
+            }
+            $delay = min(15, 2 ** min(4, max(0, $row->attempt - 1)));
+            $next = $now->addMinutes($delay);
+            if ($cooldownUntil && $cooldownUntil->gt($next)) {
+                $next = $cooldownUntil;
+            }
+            $next = min($next, \Carbon\CarbonImmutable::parse($row->expires_at, 'UTC'));
+            $sequence = $row->transition_sequence;
+            if ($row->reason !== $reason) {
+                $sequence++;
+                DB::table('scheduled_note_outbox')->insert(['authorization_id' => $id, 'transition_sequence' => $sequence,
+                    'event' => 'waiting', 'reason' => $reason, 'created_at' => $now]);
+            }
+            DB::table('scheduled_authorizations')->where('id', $id)->update(['state' => 'waiting', 'nonce' => null,
+                'claimed_at' => null, 'reason' => $reason, 'next_attempt_at' => $next, 'transition_sequence' => $sequence]);
+
+            return true;
+        }, 3);
+    }
+
     public function recover(int $id): void
     {
         DB::transaction(function () use ($id) {

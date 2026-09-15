@@ -230,6 +230,88 @@ class ScheduledApprovalTest extends TestCase
         $this->assertSame('ticket_missing', DB::table('scheduled_note_outbox')->where('id', $item)->value('delivery_error'));
     }
 
+    public function test_conflicting_target_reservation_rolls_back_new_run_but_other_tenant_does_not_collide(): void
+    {
+        $first = $this->admit();
+        $second = $this->run->replicate();
+        $second->state = TechnicianRunState::AwaitingApproval;
+        $second->content_hash = str_repeat('b', 64);
+        $second->save();
+        $this->run = $second;
+        try {
+            $this->admit();
+            $this->fail('duplicate target accepted');
+        } catch (\Illuminate\Database\QueryException) {
+            $this->assertDatabaseCount('scheduled_authorizations', 1);
+            $this->assertDatabaseCount('scheduled_note_outbox', 1);
+            $this->assertSame('awaiting_approval', $second->fresh()->state->value);
+        }
+        $this->evidence = new class implements ScheduledEvidence
+        {
+            public function approve(TechnicianRun $run, User $user, array $inputs): array
+            {
+                return ['payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'different-tenant', 'object_id' => 'synthetic-object']];
+            }
+
+            public function revalidate(TechnicianRun $run, User $user, array $approved): array
+            {
+                return $approved;
+            }
+        };
+        $this->assertNotSame($first, $this->admit());
+        $this->assertDatabaseCount('scheduled_target_fences', 2);
+    }
+
+    public function test_each_durable_outcome_has_exactly_one_private_system_note(): void
+    {
+        foreach (['completed', 'submitted', 'uncertain'] as $outcome) {
+            $id = $this->admit();
+            $this->time = $this->time->setTime(1, 0);
+            $c = app(ScheduledCoordinator::class);
+            $nonce = $c->claim($id);
+            DB::table('scheduled_authorizations')->where('id', $id)->update(['state' => 'dispatch_intent', 'intent_at' => $this->time]);
+            $this->assertTrue($c->settle($id, $nonce, $outcome));
+            $this->assertFalse($c->settle($id, $nonce, $outcome));
+            foreach (DB::table('scheduled_note_outbox')->where('authorization_id', $id)->pluck('id') as $item) {
+                $this->assertTrue(app(ScheduledOutbox::class)->deliver($item));
+                $this->assertTrue(app(ScheduledOutbox::class)->deliver($item));
+            }
+            $notes = TicketNote::where('ticket_id', $this->run->ticket_id)->get();
+            $this->assertCount(2, $notes);
+            $this->assertTrue($notes->every(fn ($note) => $note->is_private && $note->note_type->value === 'system'));
+            $this->assertStringContainsString(': '.$outcome.'.', $notes->last()->body);
+            // Fresh synthetic target/run for next outcome; uncertain reservations are not removed.
+            $client = Client::factory()->create();
+            $ticket = Ticket::factory()->create(['client_id' => $client->id]);
+            $next = $this->run->replicate();
+            $next->ticket_id = $ticket->id;
+            $next->client_id = $client->id;
+            $next->state = TechnicianRunState::AwaitingApproval;
+            $next->save();
+            $this->run = $next;
+            $this->time = $this->time->setTime(0, 0);
+        }
+    }
+
+    public function test_retry_backoff_obeys_cooldown_and_never_retries_intent(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $c = app(ScheduledCoordinator::class);
+        $nonce = $c->claim($id);
+        $this->assertTrue($c->defer($id, $nonce, 'cooldown', $this->time->addMinutes(10)));
+        $this->assertNull($c->claim($id));
+        $this->time = $this->time->addMinutes(9);
+        $this->assertNull($c->claim($id));
+        $this->time = $this->time->addMinute();
+        $next = $c->claim($id);
+        $this->assertNotNull($next);
+        $this->assertFalse($c->defer($id, $nonce, 'offline'));
+        DB::table('scheduled_authorizations')->where('id', $id)->update(['state' => 'dispatch_intent', 'intent_at' => $this->time]);
+        $this->assertFalse($c->defer($id, $next, 'read_unavailable'));
+        $this->assertDatabaseCount('scheduled_note_outbox', 2);
+    }
+
     public function test_clock_threshold_is_fixed_and_conservative(): void
     {
         $this->assertTrue(ScheduledClock::withinThreshold(100, 98, 102));
