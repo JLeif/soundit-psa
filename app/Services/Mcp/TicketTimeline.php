@@ -32,7 +32,7 @@ final class TicketTimeline
         $scope = 'timeline:'.$ticket->id.':'.$ticket->client_id.':'.implode(',', $types);
         $queries = [];
         if (in_array('note', $types, true)) {
-            $queries[] = TicketNote::query()->where('ticket_id', $ticket->id)
+            $queries[] = $this->noteQuery($models)->where('ticket_id', $ticket->id)
                 ->selectRaw("id, COALESCE(noted_at, created_at, '1970-01-01 00:00:00') as at, 'note' as source")->toBase();
         }
         if (in_array('call', $types, true)) {
@@ -40,8 +40,23 @@ final class TicketTimeline
                 ->selectRaw("id, COALESCE(started_at, created_at, '1970-01-01 00:00:00') as at, 'call' as source")->toBase();
         }
         if (in_array('email', $types, true)) {
-            $queries[] = Email::query()->where('ticket_id', $ticket->id)->where($this->clientFence($ticket))
-                ->selectRaw("id, COALESCE(received_at, created_at, '1970-01-01 00:00:00') as at, 'email' as source")->toBase();
+            $emails = Email::query()->where('ticket_id', $ticket->id)->where($this->clientFence($ticket));
+            if (in_array('note', $types, true)) {
+                // EmailService::linkEmailToTicket mirrors a ticket-linked email into a ticket
+                // note (email_id set, noted_at = received_at), so carrying both sources would
+                // show one message twice and spend two slots of the same page limit. The richer
+                // note wins; the bare envelope row survives only when notes are filtered out of
+                // this request. Only mirrors the note source actually returns count as a
+                // duplicate, so a trashed mirror still suppresses the email on the HTML page
+                // (which renders the deleted-note placeholder) but not in the MCP projection.
+                $emails->whereNotExists(function ($n) use ($ticket, $models): void {
+                    $n->selectRaw('1')->from('ticket_notes')
+                        ->whereColumn('ticket_notes.email_id', 'emails.id')
+                        ->where('ticket_notes.ticket_id', $ticket->id)
+                        ->when(! $models, fn ($q) => $q->whereNull('ticket_notes.deleted_at'));
+                });
+            }
+            $queries[] = $emails->selectRaw("id, COALESCE(received_at, created_at, '1970-01-01 00:00:00') as at, 'email' as source")->toBase();
         }
         if (in_array('ai_chat', $types, true)) {
             $queries[] = AssistantConversation::query()->where('context_type', 'ticket')->where('context_id', $ticket->id)
@@ -80,7 +95,7 @@ final class TicketTimeline
                     $entry['summary'] = 'Activity no longer available; execution not confirmed.';
                 }
             } elseif ($kind === 'note') {
-                $model = TicketNote::with('author', 'attachments', 'contract', 'email')->where('ticket_id', $ticket->id)->find($row->id);
+                $model = $this->noteQuery($models)->with('author', 'attachments', 'contract', 'email')->where('ticket_id', $ticket->id)->find($row->id);
                 $entry['actor'] = $model?->author?->name ?? $model?->author_name ?? 'System';
                 $entry['summary'] = $this->text($model?->body);
             } elseif ($kind === 'call') {
@@ -112,6 +127,19 @@ final class TicketTimeline
         return ['items' => $items, 'states' => str_replace('failure =', 'failed =', TicketToolActivity::STATES),
             'coverage' => 'Ticket-associated records only. Tool outputs and arguments withheld; absence is not proof of no activity.']
             + TimelineCursor::metadata($rows, $limit, $more, $scope, $after, isset($input['before']) || isset($input['after']), $input['after'] ?? $input['before'] ?? null);
+    }
+
+    /**
+     * The staff page composed its notes from Ticket::notes(), which is
+     * hasMany(...)->withTrashed(), and show.blade.php renders a soft-deleted note as a
+     * "Note deleted" placeholder. A raw TicketNote::query() applies the SoftDeletes
+     * scope, which would silently drop those audit placeholders, so the HTML
+     * projection keeps trashed rows. The MCP projection keeps the default scope:
+     * deleted note bodies are not a read that surface ever served.
+     */
+    private function noteQuery(bool $models): \Illuminate\Database\Eloquent\Builder
+    {
+        return $models ? TicketNote::withTrashed() : TicketNote::query();
     }
 
     /**

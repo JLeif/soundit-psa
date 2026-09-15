@@ -306,4 +306,26 @@ class TicketTimelineTest extends TestCase
         $this->assertTrue($this->callTool($token, 'list_email_items', array_replace($args, ['client_id' => $other->client_id, 'before' => $first['before']]))['result']['isError']);
         $this->assertTrue($this->callTool($token, 'list_email_items', array_replace($args, ['direction' => 'outbound', 'before' => $first['before']]))['result']['isError']);
     }
+
+    public function test_mirrored_email_lists_once_and_deleted_notes_keep_their_staff_placeholder(): void
+    {
+        $ticket = $this->ticket();
+        $email = $this->email($ticket, '2026-01-01 10:00:00');
+        // What EmailService::linkEmailToTicket writes: the emails row AND its note mirror.
+        TicketNote::create(['ticket_id' => $ticket->id, 'email_id' => $email->id, 'author_name' => 'Client',
+            'noted_at' => '2026-01-01 10:00:00', 'body' => 'Mirrored client correspondence', 'note_type' => 'reply']);
+        $deleted = $this->note($ticket, '2026-01-01 09:00:00', 'Deleted synthetic note');
+        $deleted->delete();
+        $timeline = app(TicketTimeline::class);
+        $page = $timeline->page($ticket);
+        $this->assertCount(1, $page['items'], 'A mirrored email must not also consume an email slot on the same page');
+        $this->assertSame('note:'.$page['items'][0]['id'] === null ? null : 'note', $page['items'][0]['kind']);
+        $this->assertSame(['email:'.$email->id],
+            array_column($timeline->page($ticket, ['types' => ['email']])['items'], 'id'),
+            'With notes filtered out the envelope row is the only record of the message');
+        $this->actingAs(User::factory()->create())->get(route('tickets.show', $ticket))->assertOk()
+            ->assertSee('Mirrored client correspondence')
+            ->assertSee('Note deleted')
+            ->assertDontSee('Synthetic correspondence');
+    }
 }
