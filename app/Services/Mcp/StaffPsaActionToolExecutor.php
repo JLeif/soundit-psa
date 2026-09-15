@@ -2081,10 +2081,6 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Email item not found'];
         }
 
-        if ($email->client_id === null) {
-            return ['error' => 'Email has no resolved client; resolve the sender to a client before creating a ticket.'];
-        }
-
         $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket|array {
             $email = Email::whereKey($email->id)->lockForUpdate()->firstOrFail();
             if ($email->ticket_id !== null) {

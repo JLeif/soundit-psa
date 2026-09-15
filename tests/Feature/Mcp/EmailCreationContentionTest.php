@@ -97,6 +97,7 @@ class EmailCreationContentionTest extends TestCase
                         app()->instance(NotificationService::class, $notifications);
                         $graph = \Mockery::mock(GraphClient::class); // No network method is allowed.
                         $service = new EmailService($graph, $tickets);
+                        file_put_contents($dir.'/attempting-'.$child, 'attempting');
                         $ticket = $service->autoCreateTicketFromEmail($email);
                         file_put_contents($dir.'/result-'.$child, json_encode(['id' => $ticket->id]));
                         exit(0);
@@ -112,6 +113,7 @@ class EmailCreationContentionTest extends TestCase
             touch($dir.'/go-1');
             $this->awaitFile($dir.'/creating-1');
             touch($dir.'/go-2');
+            $this->awaitFile($dir.'/attempting-2');
             usleep(400000);
             $blocked = ! file_exists($dir.'/creating-2') && ! file_exists($dir.'/result-2');
             touch($dir.'/release');
