@@ -54,7 +54,7 @@ class HuntressLinkService
 
     private function promoteLocked(): void
     {
-        foreach (DB::table('huntress_link_candidates')->orderBy('id')->get() as $candidate) {
+        foreach (DB::table('huntress_link_candidates')->orderBy('id')->lazyById(100) as $candidate) {
             $alert = Alert::find($candidate->alert_id);
             $ticket = Ticket::find($candidate->ticket_id);
             if (! $alert || ! $ticket) {

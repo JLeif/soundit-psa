@@ -122,6 +122,114 @@ class HuntressLinkPersistenceTest extends TestCase
         $this->assertSame('scope_or_identity_mismatch', $bound[0]->fresh()->huntress_link_refusal);
     }
 
+    public function test_bound_incident_and_escalation_resolve_once_by_exact_id(): void
+    {
+        \App\Models\User::factory()->create();
+        foreach (['incident_report', 'escalation'] as $type) {
+            $this->event($type);
+            $pair = $this->pair();
+            $pair[1]->update(['status' => \App\Enums\TicketStatus::New]);
+            $this->capture($pair, $type === 'escalation' ? 'escalations/9182' : 'incident_reports/9182');
+            $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+            $client->shouldReceive('getIncidentReports', 'getEscalations')->never();
+            $client->shouldReceive($type === 'escalation' ? 'getEscalation' : 'getIncidentReport')
+                ->once()->with(9182)->andReturn(['id' => 9182, 'organization_id' => '42',
+                    'organizations' => [['id' => '42']], 'status' => $type === 'escalation' ? 'resolved' : 'closed']);
+            $class = $type === 'escalation'
+                ? \App\Services\Huntress\HuntressEscalationReconcileService::class
+                : \App\Services\Huntress\HuntressIncidentReconcileService::class;
+            $service = new $class($client, app(\App\Services\TicketService::class), app(\App\Services\AlertService::class));
+            $this->assertSame(1, $service->reconcile()->updated);
+            $this->assertSame(\App\Enums\TicketStatus::Resolved, $pair[1]->fresh()->status);
+            $this->assertSame(0, $service->reconcile()->updated);
+        }
+    }
+
+    public function test_bound_ticket_with_human_touch_is_not_resolved(): void
+    {
+        $user = \App\Models\User::factory()->create();
+        $this->event();
+        $pair = $this->pair();
+        $pair[1]->update(['status' => \App\Enums\TicketStatus::New]);
+        $this->capture($pair);
+        \App\Models\TicketNote::create(['ticket_id' => $pair[1]->id, 'author_id' => $user->id,
+            'body' => 'Synthetic human reply', 'note_type' => \App\Enums\NoteType::StatusChange,
+            'who_type' => \App\Enums\WhoType::EndUser, 'noted_at' => now()]);
+        $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+        $client->shouldReceive('getIncidentReport')->once()->with(9182)
+            ->andReturn(['id' => 9182, 'organization_id' => 42, 'status' => 'closed']);
+        $result = (new \App\Services\Huntress\HuntressIncidentReconcileService($client,
+            app(\App\Services\TicketService::class), app(\App\Services\AlertService::class)))->reconcile();
+        $this->assertSame(0, $result->updated);
+        $this->assertSame(["#{$pair[1]->id}: human_touched"], $result->skippedMessages);
+        $this->assertSame(\App\Enums\TicketStatus::New, $pair[1]->fresh()->status);
+    }
+
+    public function test_polling_repairs_a_committed_event_without_another_delivery(): void
+    {
+        \App\Models\User::factory()->create();
+        $pair = $this->pair();
+        $pair[1]->update(['status' => \App\Enums\TicketStatus::New]);
+        $this->capture($pair);
+        $this->event(); // Simulate interruption after event commit, before promotion.
+        $this->assertNull($pair[0]->fresh()->huntress_event_id);
+        $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+        $client->shouldReceive('getIncidentReport')->once()->with(9182)
+            ->andReturn(['id' => 9182, 'organization_id' => 42, 'status' => 'closed']);
+        $result = (new \App\Services\Huntress\HuntressIncidentReconcileService($client,
+            app(\App\Services\TicketService::class), app(\App\Services\AlertService::class)))->reconcile();
+        $this->assertSame(1, $result->updated);
+        $this->assertNotNull($pair[0]->fresh()->huntress_event_id);
+        $this->assertSame(\App\Enums\TicketStatus::Resolved, $pair[1]->fresh()->status);
+    }
+
+    public function test_old_text_and_metadata_without_a_signed_link_never_fetch(): void
+    {
+        $pair = $this->pair();
+        $pair[1]->update(['status' => \App\Enums\TicketStatus::New,
+            'subject' => 'Huntress Escalation Incident on synthetic',
+            'description' => 'https://synthetic.huntress.io/org/42/incident_reports/9182 escalations/9182']);
+        $pair[0]->update(['metadata' => ['escalation_id' => 9182]]);
+        $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+        $client->shouldReceive('getIncidentReport', 'getIncidentReports', 'getEscalation', 'getEscalations')->never();
+        foreach ([\App\Services\Huntress\HuntressIncidentReconcileService::class,
+            \App\Services\Huntress\HuntressEscalationReconcileService::class] as $class) {
+            $result = (new $class($client, app(\App\Services\TicketService::class), app(\App\Services\AlertService::class)))->reconcile();
+            $this->assertSame(0, $result->updated);
+            $this->assertSame(1, $result->skipped);
+        }
+        $this->assertSame(\App\Enums\TicketStatus::New, $pair[1]->fresh()->status);
+    }
+
+    public function test_upstream_mismatch_fetch_failure_and_live_remap_refuse(): void
+    {
+        $this->event();
+        $pair = $this->pair();
+        $pair[1]->update(['status' => \App\Enums\TicketStatus::New]);
+        $this->capture($pair);
+        foreach (['wrong_id', 'wrong_org', 'fetch_failed', 'live_remap'] as $case) {
+            $client = \Mockery::mock(\App\Services\Huntress\HuntressClient::class);
+            $call = $client->shouldReceive('getIncidentReport')->once()->with(9182);
+            if ($case === 'fetch_failed') {
+                $call->andThrow(new \RuntimeException('synthetic outage'));
+            } elseif ($case === 'live_remap') {
+                $call->andReturnUsing(function () use ($pair) {
+                    $pair[1]->client->update(['huntress_organization_id' => 43]);
+
+                    return ['id' => 9182, 'organization_id' => 42, 'status' => 'closed'];
+                });
+            } else {
+                $call->andReturn(['id' => $case === 'wrong_id' ? 9183 : 9182,
+                    'organization_id' => $case === 'wrong_org' ? 43 : 42, 'status' => 'closed']);
+            }
+            $result = (new \App\Services\Huntress\HuntressIncidentReconcileService($client,
+                app(\App\Services\TicketService::class), app(\App\Services\AlertService::class)))->reconcile();
+            $this->assertSame(0, $result->updated, $case);
+            $this->assertSame($case === 'fetch_failed' ? 1 : 0, $result->errors, $case);
+            $this->assertSame(\App\Enums\TicketStatus::New, $pair[1]->fresh()->status, $case);
+        }
+    }
+
     public function test_conflicting_candidates_are_never_promoted(): void
     {
         $this->event();
