@@ -12,6 +12,8 @@ enum TechnicianRunState: string
     case Gathering = 'gathering';
     case Drafting = 'drafting';
     case AwaitingApproval = 'awaiting_approval';
+    /** Separate from immediate execution and the reconnect queue. */
+    case Scheduled = 'scheduled';
     case Executing = 'executing';
     case Done = 'done';
     case Denied = 'denied';
