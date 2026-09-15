@@ -75,8 +75,11 @@ class BenjiPaysClient
             }, $response->status());
         }
 
+        $shape = json_decode($response->body());
         $body = $response->json();
-        if (! is_array($body) || ! array_key_exists('data', $body)) {
+        if (! is_object($shape) || ! property_exists($shape, 'data')
+            || ($path === '/v2/gateways' ? ! is_array($shape->data) : ! is_object($shape->data))
+            || ! is_array($body) || ! array_key_exists('data', $body)) {
             throw new BenjiPaysException('invalid_response');
         }
 

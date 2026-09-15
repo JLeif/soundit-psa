@@ -94,6 +94,29 @@ class BenjiPaysConnectionTest extends TestCase
         return [[null], ['wrong-csrf']];
     }
 
+    public function test_transport_failure_is_safe_in_flash_and_persisted_state(): void
+    {
+        Http::fake(fn () => throw new \Illuminate\Http\Client\ConnectionException(self::KEY));
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+        $this->withSession(['_token' => 'csrf'])->post(route('settings.integrations.benjipays.test'), ['_token' => 'csrf'])
+            ->assertRedirect(route('settings.integrations'))->assertSessionHas('error');
+        $this->assertSame('error', Setting::getValue('benjipays_last_verification_outcome'));
+        $this->assertStringNotContainsString(self::KEY, json_encode(session()->all()));
+        $this->get(route('settings.integrations'))->assertOk()->assertDontSee(self::KEY);
+    }
+
+    public function test_invalid_stored_key_records_error_without_transport(): void
+    {
+        Setting::setEncrypted('benjipays_api_key', self::KEY."\r\n");
+        Http::fake();
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+        $this->withSession(['_token' => 'csrf'])->post(route('settings.integrations.benjipays.test'), ['_token' => 'csrf'])
+            ->assertRedirect(route('settings.integrations'));
+        $this->assertSame('error', Setting::getValue('benjipays_last_verification_outcome'));
+        $this->assertStringNotContainsString(self::KEY, json_encode(session()->all()));
+        Http::assertNothingSent();
+    }
+
     public function test_get_cannot_trigger_connection_check(): void
     {
         Http::fake();

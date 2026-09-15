@@ -132,7 +132,7 @@ class BenjiPaysClientTest extends TestCase
 
     public static function badResponses(): array
     {
-        return [['not-json'], [[]], [['data' => null]], [['data' => 'secret']], [['data' => ['wrong' => true]]]];
+        return [['not-json'], ['{"data":{}}'], ['{"data":{"0":{}}}'], [[]], [['data' => null]], [['data' => 'secret']], [['data' => ['wrong' => true]]]];
     }
 
     #[DataProvider('balances')]
@@ -195,6 +195,29 @@ class BenjiPaysClientTest extends TestCase
     public static function invalidIds(): array
     {
         return [[''], [' '], ['.'], ['..'], ["id\n"], [str_repeat('a', 201)]];
+    }
+
+    public function test_missing_key_refuses_without_transport(): void
+    {
+        Setting::setEncrypted('benjipays_api_key', '');
+        Http::fake();
+        try {
+            app(BenjiPaysClient::class)->gateways();
+            $this->fail('Expected refusal');
+        } catch (BenjiPaysException $e) {
+            $this->assertSame('configuration', $e->reason);
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_malformed_invoice_response_becomes_safe_unavailable_reason(): void
+    {
+        Http::fake(['*' => Http::response(['data' => null])]);
+        $invoice = new Invoice;
+        $invoice->qbo_invoice_id = '1042';
+        $result = app(BenjiPaysInvoiceBalance::class)->read($invoice);
+        $this->assertNull($result->balanceCents);
+        $this->assertSame('invalid_response', $result->reason);
     }
 
     public static function invoiceFixture(): array
