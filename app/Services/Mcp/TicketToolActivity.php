@@ -41,12 +41,17 @@ final class TicketToolActivity
             $state = $row->result_status !== null ? match ($row->result_status) {
                 'awaiting_approval' => 'proposed',
                 'executed' => 'executed',
-                'error', 'failed', 'executed_with_fault', 'blocked' => 'failure',
+                // The write LANDED; the fault is follow-up, not a denial of execution.
+                // Never 'failure': a consumer keying on state must not re-run a
+                // committed side effect.
+                'executed_with_fault' => 'executed_with_fault',
+                'error', 'failed', 'blocked' => 'failure',
                 default => 'pending',
             } : ($row->call_status === 'error' ? 'failure' : (in_array($row->activity_kind, ['read', 'failure'], true) ? $row->activity_kind : 'pending'));
             $summary = match ($state) {
                 'proposed' => 'Awaiting approval; not executed.',
                 'executed' => 'Action execution recorded.',
+                'executed_with_fault' => 'Action executed with a fault; follow-up required. Diagnostic payload withheld.',
                 'failure' => 'Failure or refusal recorded; diagnostic payload withheld.',
                 'read' => 'Read returned successfully; content withheld.',
                 default => 'Pending or held; execution not confirmed.',
@@ -54,9 +59,6 @@ final class TicketToolActivity
 
             if ($state === 'read' && preg_match('/^Read returned [0-9]{1,8} items; content withheld\\.$/D', $row->result_summary ?? '')) {
                 $summary = $row->result_summary;
-            }
-            if ($row->result_status === 'executed_with_fault') {
-                $summary = 'Action executed with a fault; follow-up required. Diagnostic payload withheld.';
             }
 
             return ['id' => $row->source.':'.$row->id, 'tool' => mb_substr($row->tool ?? '', 0, 120),
@@ -69,6 +71,7 @@ final class TicketToolActivity
             'next_offset' => $more && $offset + $limit <= 10000 ? $offset + $limit : null,
             'truncated' => $more, 'order' => 'created_at DESC, id DESC, source ASC',
             'pagination' => 'Offset paging; concurrent inserts may shift pages. Maximum offset 10000. Timestamps are UTC.',
+            'states' => 'proposed = staged, not executed; executed = execution recorded; executed_with_fault = execution recorded WITH a fault (the write landed — follow up, do not re-run); failure = refusal or failure, no execution recorded; pending = outcome not confirmed; read = read returned.',
             'coverage' => 'Explicitly associated staff calls and ticket action records only; unassociated calls and legacy MCP calls are absent, not proof of no activity. Raw outputs withheld.'];
     }
 }

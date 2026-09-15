@@ -221,6 +221,11 @@ class TicketToolHistoryTest extends TestCase
         $this->assertContains('proposed', $states);
         $this->assertContains('failure', $states);
         $this->assertContains('pending', $states);
+        // A faulted execution is never projected as a denial of execution.
+        $this->assertContains('executed_with_fault', $states);
+        $this->assertCount(1, array_filter($states, fn (string $state): bool => $state === 'failure'));
+        $faulted = collect($all['items'])->firstWhere('state', 'executed_with_fault');
+        $this->assertStringContainsString('executed with a fault', $faulted['summary']);
         $ids = array_column($all['items'], 'id');
         $this->assertSame(array_slice($ids, 2, 2), array_column($service->page($ticket, 2, 2)['items'], 'id'));
         $this->assertSame('pending', collect($all['items'])->firstWhere('tool', 'bad-link')['state']);
