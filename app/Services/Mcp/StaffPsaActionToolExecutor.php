@@ -135,6 +135,9 @@ class StaffPsaActionToolExecutor
                 ? ['error' => 'Unlinked intake scope carries no client; call with an explicit positive integer client_id.']
                 : app(\App\Services\Email\EmailResolutionService::class)->stage($arguments, $clientId, $actorLabel),
             'dismiss_email_item' => $this->dismissEmailItem($arguments, $actorLabel),
+            'resolve_phone_call', 'stage_resolve_phone_call' => $clientId instanceof UnlinkedTicketScope
+                ? ['error' => 'An explicit positive integer client_id is required.']
+                : app(\App\Services\PhoneCallResolutionService::class)->execute($arguments, $clientId, $actorLabel, $name === 'stage_resolve_phone_call'),
             'link_call_to_ticket' => $this->linkCallToTicket($arguments, $actorLabel),
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),
             default => ['error' => "Unknown PSA action tool: {$name}"],

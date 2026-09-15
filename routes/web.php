@@ -750,6 +750,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/assistant/general', [AssistantController::class, 'general'])->name('assistant.general');
     });
 
+    Route::post('/cockpit/phone-call-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\PhoneCallResolutionController::class, 'approve'])->name('phone-call-resolutions.approve')->middleware('throttle:30,1');
+    Route::post('/cockpit/phone-call-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\PhoneCallResolutionController::class, 'deny'])->name('phone-call-resolutions.deny')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\EmailResolutionController::class, 'approve'])->name('email-resolutions.approve')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\EmailResolutionController::class, 'deny'])->name('email-resolutions.deny')->middleware('throttle:30,1');
 

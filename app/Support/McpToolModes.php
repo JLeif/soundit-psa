@@ -51,6 +51,7 @@ class McpToolModes
         'stage_public_note' => 'write_public_note',
         'stage_close_ticket' => 'close_ticket',
         'stage_resolve_email_item' => 'resolve_email_item',
+        'stage_resolve_phone_call' => 'resolve_phone_call',
         'propose_merge' => 'merge_ticket',
         'propose_asset_merge' => 'merge_asset',
     ];
@@ -84,6 +85,11 @@ class McpToolModes
         return array_flip(self::stagedToCanonical());
     }
 
+    /** Capabilities whose bare grant holds; explicit :immediate is still supported. */
+    private const BARE_GRANT_DEFAULTS_STAGED = [
+        'resolve_phone_call',
+    ];
+
     /**
      * Capabilities whose IMMEDIATE lane did not exist before the staged/immediate
      * unification: merge_ticket / merge_asset shipped only as cockpit-approved
@@ -102,6 +108,7 @@ class McpToolModes
      */
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
         'resolve_email_item',
+        'resolve_phone_call',
         'merge_ticket',
         'merge_asset',
         // tactical_remove_agent has no immediate implementation at all
@@ -225,6 +232,11 @@ class McpToolModes
 
         if (($canonical = self::canonicalForAlias($entry)) !== null) {
             return [$canonical, self::MODE_STAGED];
+        }
+
+        if (in_array($entry, self::BARE_GRANT_DEFAULTS_STAGED, true)) {
+            // These capabilities require an explicit :immediate grant.
+            return [$entry, self::MODE_STAGED];
         }
 
         if (self::isStageable($entry)) {
