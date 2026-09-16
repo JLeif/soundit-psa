@@ -25,10 +25,20 @@ final class MailboxDispatch
             $row = DB::table('scheduled_authorizations')->find($id);
             $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
             $plan = $sealed['binding']['payload'];
-            $outcome = MailboxResult::classify($plan, $this->client->submitScheduledMailboxOnce($plan));
+            $outcome = MailboxResult::classify($plan, $this->client->submitScheduledMailboxOnce(
+                $plan, fn () => $this->coordinator->beforeSend($id, $nonce),
+            ));
+        } catch (ScheduledNoSend) {
+            return;
         } catch (\Throwable) {
             $outcome = 'uncertain';
         }
-        $this->coordinator->settle($id, $nonce, $outcome);
+        if (! $this->coordinator->settle($id, $nonce, $outcome)) {
+            // Mailbox endpoints supply no stable operation ID; never invent one or
+            // retain arbitrary response bodies containing mailbox/customer material.
+            $this->coordinator->lateReceipt($id, $nonce, 'cipp', null, $outcome);
+
+            return;
+        }
     }
 }

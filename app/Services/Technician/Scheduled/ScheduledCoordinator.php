@@ -18,6 +18,12 @@ final class ScheduledCoordinator
         if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             return null;
         }
+        // Quiescing is not cancellation. A live sweep reads the marker HERE, before it
+        // can claim: otherwise it would claim, issue intent and then hit the send fence,
+        // burning a never-in-flight waiting approval to terminal abandoned_no_send.
+        if (app(ScheduledQuiescence::class)->at() !== null) {
+            return null;
+        }
 
         return DB::transaction(function () use ($id) {
             $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
@@ -33,6 +39,16 @@ final class ScheduledCoordinator
             if ($row->attempt >= 100) {
                 $this->transition($row, 'blocked', 'attempt_limit');
 
+                return null;
+            }
+            // Re-read the marker INSIDE this transaction, as late as possible. The check
+            // above it is read-then-act, so on its own it would still hand a waiting row to
+            // a worker whose only remaining exit is the send fence.
+            // This MUST be the locking read: the ordinary reads above have already opened
+            // this transaction's REPEATABLE READ view, so a plain at() would be answered
+            // from that older snapshot and miss a marker committed after it. The lock is
+            // held until commit, so no marker can land between this check and the UPDATE.
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
                 return null;
             }
             $nonce = (string) Str::uuid();
@@ -125,6 +141,19 @@ final class ScheduledCoordinator
 
                 return false;
             }
+            // The evidence revalidation above is live vendor I/O outside any transaction and
+            // can span seconds, so a drain may have persisted the marker while it ran. A claim
+            // taken before the marker is released back to waiting HERE: committing intent now
+            // would leave the send fence as its only exit, burning a never-dispatched,
+            // human-confirmed approval to terminal abandoned_no_send.
+            // This MUST be the locking read: the approver/ticket/lineage reads above are plain
+            // consistent reads, so they have already opened this transaction's read view and a
+            // plain at() here would be answered from that older snapshot.
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
+                $this->defer($id, $nonce, 'quiesced_no_send');
+
+                return false;
+            }
             $finalNow = $this->clock->now();
 
             // Re-read after all potentially slow preflight/clock work. Half-open window.
@@ -166,7 +195,9 @@ final class ScheduledCoordinator
     /** Only explicit pre-dispatch availability reasons may defer an attempt. */
     public function defer(int $id, string $nonce, string $reason, ?\Carbon\CarbonImmutable $cooldownUntil = null): bool
     {
-        if (! in_array($reason, ['offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true)) {
+        // quiesced_no_send is retryable HERE and only here: nothing was dispatched, so the
+        // claim returns to waiting for a later sweep instead of becoming terminal evidence.
+        if (! in_array($reason, ['offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy', 'quiesced_no_send'], true)) {
             throw new InvalidArgumentException('not_retryable');
         }
 
@@ -213,7 +244,7 @@ final class ScheduledCoordinator
                 return;
             }
             $now = $this->clock->now();
-            if ($row->state === 'dispatch_intent' && $row->intent_at && $now->gte(\Carbon\CarbonImmutable::parse($row->intent_at, 'UTC')->addMinutes(5))) {
+            if ($row->state === 'dispatch_intent' && $row->intent_at && $now->gte(\Carbon\CarbonImmutable::parse($row->intent_at, 'UTC')->addSeconds(ScheduledPolicy::MAX_TRANSPORT_SECONDS + ScheduledPolicy::RECEIPT_GRACE_SECONDS))) {
                 $this->transition($row, 'uncertain', 'intent_outcome_unknown');
             } elseif (in_array($row->state, ['waiting', 'claimed'], true) && $now->gte($row->expires_at)) {
                 $this->transition($row, 'expired', 'window_closed');
@@ -255,6 +286,41 @@ final class ScheduledCoordinator
             });
 
             return true;
+        }, 3);
+    }
+
+    /** Live last-moment fence. It cannot close the read-to-HTTP window. */
+    public function beforeSend(int $id, string $nonce): bool
+    {
+        return DB::transaction(function () use ($id, $nonce) {
+            $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
+            // A stale holder must never overwrite another nonce or terminal evidence.
+            if (! $row || $row->state !== 'dispatch_intent' || $row->nonce !== $nonce) {
+                return false;
+            }
+            if (app(ScheduledQuiescence::class)->at() !== null) {
+                $this->transition($row, 'abandoned_no_send', 'quiesced_no_send');
+
+                return false;
+            }
+
+            return true;
+        }, 3);
+    }
+
+    /** Append-only late evidence; never reverse terminal state or release its fences. */
+    public function lateReceipt(int $id, string $nonce, string $vendor, ?string $vendorId, string $outcome): void
+    {
+        DB::transaction(function () use ($id, $nonce, $vendor, $vendorId, $outcome) {
+            $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
+            if (! $row || $row->nonce !== $nonce) {
+                return;
+            }
+            DB::table('scheduled_late_receipts')->insert([
+                'authorization_id' => $id, 'nonce' => $nonce, 'vendor' => $vendor,
+                'vendor_id' => $vendorId, 'outcome' => $outcome,
+                'intent_at' => $row->intent_at, 'received_at' => $this->clock->now(),
+            ]);
         }, 3);
     }
 

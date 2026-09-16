@@ -15,6 +15,9 @@ final class ScheduledAdmission
     /** Transactional admission; per-action evidence binds independently captured confirmations. */
     public function admit(int $runId, int $approverId, string $expectedHash, ?int $tokenId, string $start, string $end, string $zone, array $humanInputs, ScheduledEvidence $evidence): int
     {
+        if (app(ScheduledQuiescence::class)->at() !== null) {
+            throw new InvalidArgumentException('scheduling_quiesced');
+        }
         if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             throw new InvalidArgumentException('scheduling_disabled_or_clock_unhealthy');
         }
@@ -39,6 +42,9 @@ final class ScheduledAdmission
         $meta = ApprovalEnvelope::canonical($run->proposed_meta ?? []);
 
         return DB::transaction(function () use ($run, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta, $humanInputs): int {
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
+                throw new InvalidArgumentException('scheduling_quiesced');
+            }
             $locked = TechnicianRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
             $this->policy->approver($approverId);
             $this->policy->ticket($locked);

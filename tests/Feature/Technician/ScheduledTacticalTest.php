@@ -60,6 +60,8 @@ class ScheduledTacticalTest extends TestCase
 
     protected int $reads = 0;
 
+    protected ?\Closure $atReceipt = null;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -88,6 +90,10 @@ class ScheduledTacticalTest extends TestCase
             $this->wire[] = ['method' => $request->getMethod(), 'path' => $request->getUri()->getPath(), 'body' => json_decode((string) $request->getBody(), true)];
             if ($this->fail) {
                 throw new \RuntimeException('synthetic transport timeout');
+            }
+
+            if ($this->atReceipt !== null) {
+                ($this->atReceipt)();
             }
 
             return Create::promiseFor(new Response($this->status, ['Location' => 'https://not-followed.example.test'], json_encode($this->response)));
@@ -302,6 +308,46 @@ class ScheduledTacticalTest extends TestCase
         $this->assertSame('no_vendor_request', DB::table('scheduled_authorizations')->value('reason'));
         $this->assertSame('no_vendor_request', DB::table('scheduled_note_outbox')->orderByDesc('id')->value('reason'));
         $this->assertDatabaseCount('scheduled_target_fences', 0);
+    }
+
+    public function test_quiesce_inside_bus_prevents_actual_tactical_io(): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        $id = $this->admit(['confirm_hostname' => 'fixture-device']);
+        $this->app->instance(\App\Services\Tactical\TacticalActionService::class, new class(app(TacticalClient::class)) extends \App\Services\Tactical\TacticalActionService
+        {
+            public function dispatch(\App\Services\Tactical\Actions\TacticalAction $action, Asset $target, ?User $actor, array $params,
+                ?string $confirmToken = null, ?string $actorLabel = null, ?int $ticketId = null): \App\Services\Tactical\Actions\TacticalActionResult
+            {
+                app(\App\Services\Technician\Scheduled\ScheduledQuiescence::class)->begin();
+
+                return parent::dispatch($action, $target, $actor, $params, $confirmToken, $actorLabel, $ticketId);
+            }
+        });
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(0, $this->wire);
+        $this->assertSame('abandoned_no_send', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseCount('scheduled_late_receipts', 0);
+    }
+
+    public function test_late_tactical_receipt_is_evidence_not_success_or_replay(): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        $id = $this->admit(['confirm_hostname' => 'fixture-device']);
+        $this->time = $this->time->setTime(1, 0);
+        $this->atReceipt = function () use ($id) {
+            $this->time = $this->time->addSeconds(640);
+            app(\App\Services\Technician\Scheduled\ScheduledCoordinator::class)->recover($id);
+        };
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(1, $this->wire);
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseHas('scheduled_late_receipts', ['authorization_id' => $id, 'vendor' => 'tactical', 'outcome' => 'completed']);
+        $this->assertDatabaseHas('tactical_action_logs', ['result_status' => 'error', 'message' => 'scheduled_late_receipt']);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(1, $this->wire);
+        $this->assertDatabaseCount('scheduled_late_receipts', 1);
     }
 
     public static function actions(): array

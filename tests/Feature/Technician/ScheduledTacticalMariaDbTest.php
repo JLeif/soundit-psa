@@ -67,7 +67,7 @@ class ScheduledTacticalMariaDbTest extends ScheduledTacticalTest
         touch($go);
         $this->assertNotSame(0, proc_close($p));
         $this->assertSame('dispatch_intent', DB::table('scheduled_authorizations')->value('state'));
-        $this->time = $this->time->setTime(1, 6);
+        $this->time = $this->time->setTime(1, 10, 40);
         app(\App\Services\Technician\Scheduled\ScheduledCoordinator::class)->recover($id);
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
         $p = $this->child($id, $go, $posts);

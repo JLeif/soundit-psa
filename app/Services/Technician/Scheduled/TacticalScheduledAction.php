@@ -9,7 +9,9 @@ use App\Services\Tactical\TacticalClient;
 /** Retains the audited Tactical bus, but never equates HTTP success with effect success. */
 final class TacticalScheduledAction implements TacticalAction
 {
-    public function __construct(private string $type) {}
+    public bool $receiptHandled = false;
+
+    public function __construct(private string $type, private ?int $authorizationId = null, private ?string $nonce = null) {}
 
     public function key(): string
     {
@@ -41,10 +43,26 @@ final class TacticalScheduledAction implements TacticalAction
     public function execute(TacticalClient $client, string $agentId, array $params): TacticalActionResult
     {
         try {
-            $body = $client->submitScheduledOnce($this->type, $agentId, $params);
+            $body = $client->submitScheduledOnce($this->type, $agentId, $params,
+                $this->authorizationId === null ? null : fn () => app(ScheduledCoordinator::class)->beforeSend($this->authorizationId, $this->nonce ?? ''),
+            );
             $outcome = TacticalPlan::outcome($this->type, $body);
+        } catch (ScheduledNoSend) {
+            return TacticalActionResult::blocked('scheduled_no_send');
         } catch (\Throwable) {
             $outcome = 'uncertain';
+        }
+
+        if ($this->authorizationId !== null) {
+            $coordinator = app(ScheduledCoordinator::class);
+            $settled = $coordinator->settle($this->authorizationId, $this->nonce ?? '', $outcome);
+            $this->receiptHandled = true;
+            if (! $settled) {
+                $coordinator->lateReceipt($this->authorizationId, $this->nonce ?? '', 'tactical', null, $outcome);
+
+                // The bus audits this result: do not report success after refusal.
+                return TacticalActionResult::error('scheduled_late_receipt');
+            }
         }
 
         // Keep an immutable audit even for an unknown receipt; never log raw vendor output.
