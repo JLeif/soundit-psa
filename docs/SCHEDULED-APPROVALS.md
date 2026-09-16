@@ -108,9 +108,15 @@ Under an explicitly approved operational procedure, run
 `php artisan technician:scheduled-drain`. This MUTATES a live persisted DB marker
 `scheduled_approvals.quiesced_at` and later delivers private notes; it is not the
 read-only preflight and requires production-setting authorization in production.
-Admission refuses while the marker exists, and a live sweep refuses to claim a
-waiting approval while it exists, so quiescence never drives never-dispatched
-waiting work to `abandoned_no_send`. Both vendor send paths re-read row
+Admission refuses while the marker exists. A live sweep re-reads the marker inside
+the claim transaction and again inside the intent transaction after its live evidence
+revalidation, releasing a claim it already holds back to `waiting` rather than
+carrying it to the send fence, so a row that is still waiting or claimed when the
+marker lands is not terminalized by quiescence. Only a dispatch intent that committed
+before the marker can still reach the fence and become `abandoned_no_send`. The marker
+lives in a different row from the approval, so those re-reads narrow but cannot erase
+the instant between reading it and committing: after a drain, inventory
+`abandoned_no_send` rows rather than assuming none can exist. Both vendor send paths re-read row
 state, nonce and marker after preparation (including CIPP token acquisition),
 immediately before transport. A matching unsent intent becomes `abandoned_no_send`;
 a stale holder never overwrites another nonce or terminal evidence. There remains

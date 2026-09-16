@@ -41,6 +41,12 @@ final class ScheduledCoordinator
 
                 return null;
             }
+            // Re-read the marker INSIDE this transaction, as late as possible. The check
+            // above it is read-then-act, so on its own it would still hand a waiting row to
+            // a worker whose only remaining exit is the send fence.
+            if (app(ScheduledQuiescence::class)->at() !== null) {
+                return null;
+            }
             $nonce = (string) Str::uuid();
             DB::table('scheduled_authorizations')->where('id', $id)->where('state', 'waiting')->update([
                 'state' => 'claimed', 'nonce' => $nonce, 'claimed_at' => $now, 'attempt' => $row->attempt + 1,
@@ -131,6 +137,16 @@ final class ScheduledCoordinator
 
                 return false;
             }
+            // The evidence revalidation above is live vendor I/O outside any transaction and
+            // can span seconds, so a drain may have persisted the marker while it ran. A claim
+            // taken before the marker is released back to waiting HERE: committing intent now
+            // would leave the send fence as its only exit, burning a never-dispatched,
+            // human-confirmed approval to terminal abandoned_no_send.
+            if (app(ScheduledQuiescence::class)->at() !== null) {
+                $this->defer($id, $nonce, 'quiesced_no_send');
+
+                return false;
+            }
             $finalNow = $this->clock->now();
 
             // Re-read after all potentially slow preflight/clock work. Half-open window.
@@ -172,7 +188,9 @@ final class ScheduledCoordinator
     /** Only explicit pre-dispatch availability reasons may defer an attempt. */
     public function defer(int $id, string $nonce, string $reason, ?\Carbon\CarbonImmutable $cooldownUntil = null): bool
     {
-        if (! in_array($reason, ['offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true)) {
+        // quiesced_no_send is retryable HERE and only here: nothing was dispatched, so the
+        // claim returns to waiting for a later sweep instead of becoming terminal evidence.
+        if (! in_array($reason, ['offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy', 'quiesced_no_send'], true)) {
             throw new InvalidArgumentException('not_retryable');
         }
 

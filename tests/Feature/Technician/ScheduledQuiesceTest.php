@@ -107,4 +107,26 @@ class ScheduledQuiesceTest extends ScheduledApprovalTest
         $this->assertNull(app(ScheduledCoordinator::class)->claim($id));
         $this->assertDatabaseMissing('scheduled_authorizations', ['id' => $id, 'state' => 'abandoned_no_send']);
     }
+
+    public function test_marker_written_during_evidence_revalidation_releases_the_claim_not_abandons_it(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $c = app(ScheduledCoordinator::class);
+        // Claim wins the race against the marker; the drain writes it while intent() is
+        // still revalidating evidence outside any transaction.
+        $nonce = $c->claim($id);
+        $this->assertNotNull($nonce);
+        app(\App\Services\Technician\Scheduled\ScheduledQuiescence::class)->begin();
+        $this->assertFalse($c->intent($id, $nonce, $this->evidence));
+        $row = DB::table('scheduled_authorizations')->find($id);
+        $this->assertSame('waiting', $row->state);
+        $this->assertNull($row->nonce);
+        $this->assertNull($row->intent_at);
+        $this->assertSame('quiesced_no_send', $row->reason);
+        // The old nonce can never reach the send fence, and nothing is terminalized.
+        $this->assertFalse($c->beforeSend($id, $nonce));
+        $this->assertDatabaseMissing('scheduled_authorizations', ['id' => $id, 'state' => 'abandoned_no_send']);
+        $this->assertNull($c->claim($id));
+    }
 }
