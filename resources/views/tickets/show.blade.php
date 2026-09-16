@@ -36,7 +36,7 @@
          at lg (≥992px), not md: at tablet width (768px) the dense right rail overflowed
          a 33% column, so it now stacks below the content — matching contracts/show
          (psa-ybif). --}}
-    <div class="col-lg-8 order-1 order-lg-1">
+    <div class="col-lg-8 order-1 order-lg-1 ticket-main">
         <h4 class="section-title mb-1">{{ $ticket->display_id }}</h4>
         <h5 class="mb-3">{{ $ticket->subject }}</h5>
         @if($ticket->client && $ticket->client->stage === \App\Enums\ClientStage::Prospect)
@@ -127,14 +127,14 @@
         @endif
 
         {{-- Notes --}}
-        <div class="card shadow-sm mt-4" id="notes">
+        <div class="card mt-4 ticket-notes" id="notes">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-chat-left-text me-2"></i>Notes</span>
+                <span id="ticketNotesHeading"><i class="bi bi-chat-left-text me-2"></i>Notes</span>
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="toggleSystemNotes" onclick="toggleSystemNotes()">
                     <i class="bi bi-gear me-1"></i>Show system notes
                 </button>
             </div>
-            <div class="card-body">
+            <div class="card-body ticket-notes-scroll" tabindex="0" role="region" aria-labelledby="ticketNotesHeading">
                 {{-- Action buttons --}}
                 @include('tickets._action-buttons')
 
@@ -758,6 +758,7 @@
                                 <button type="button" class="btn btn-link btn-sm p-0 ms-1" id="moveTicketBtn" title="Move to another client">
                                     <i class="bi bi-arrow-right-circle" style="font-size: 0.8rem;"></i>
                                 </button>
+                                @include('tickets._contact-details', ['entity' => $ticket->client, 'person' => false])
                                 {{-- Move panel --}}
                                 <div id="movePanel" class="d-none mt-2 p-2 border rounded bg-light" style="font-size: 0.85rem;">
                                     <div class="text-warning small mb-2">
@@ -806,6 +807,7 @@
                                 @else
                                     <x-person-badge :person="$ticket->contact" :size="24" fallback="-" />
                                 @endif
+                                @include('tickets._contact-details', ['entity' => $ticket->contact, 'person' => true])
                             </td>
                         </tr>
                         <tr>
@@ -1973,6 +1975,17 @@ window.runTicketScript = function() {
 @push('styles')
 <link rel="stylesheet" href="{{ asset('css/ticket-ai-chat.css') }}?v={{ filemtime(public_path('css/ticket-ai-chat.css')) }}">
 <style>
+/* The right rail (or the non-Notes content, if taller) establishes desktop height.
+   Size containment keeps a long timeline from expanding both columns. Stacked
+   layouts use normal document flow, without a nested mobile scrolling trap. */
+@media (min-width: 992px) {
+    .ticket-main { display: flex; flex-direction: column; }
+    .ticket-main > :not(.ticket-notes) { flex-shrink: 0; }
+    .ticket-notes { flex: 1 1 auto; min-height: 20rem; }
+    .ticket-notes-scroll { contain: size; flex: 1 1 0; min-height: 0; overflow-y: auto; }
+}
+.ticket-notes-scroll:focus-visible { outline: 2px solid #234179; outline-offset: -2px; }
+.ticket-contact-details { overflow-wrap: anywhere; }
 .note-body img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
 .note-body table { font-size: 0.85rem; }
 .note-body pre { font-size: 0.8rem; background: #f8f9fa; padding: 8px; border-radius: 4px; overflow-x: auto; }
