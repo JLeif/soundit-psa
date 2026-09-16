@@ -6,7 +6,13 @@ use App\Support\HuntressConfig;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
-/** Bounded, read-only settings lookup; never follows a credential-bearing redirect. */
+/**
+ * Shares GET /v1/account and its account.id contract with HuntressClient::account().
+ * This admin request path needs a single-attempt budget, not the sync client's
+ * retry sleeps; Laravel HTTP also permits hermetic Http::fake transport tests.
+ * Never follows a credential-bearing redirect. If another caller needs this
+ * bounded transport, add a seam to HuntressClient rather than another client.
+ */
 class HuntressAccountLookup
 {
     public function id(): string
