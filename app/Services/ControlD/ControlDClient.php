@@ -154,6 +154,42 @@ class ControlDClient
     }
 
     /**
+     * Parent-only B2 transport. Exact method/path pairs, never the legacy raw-error GET.
+     * Producer: docs.controld.com/reference/post_organizations-suborg (OpenAPI 3.0.1).
+     * Create accepts form encoding, not an assumed JSON contract.
+     */
+    public function requestParent(string $method, string $endpoint, #[\SensitiveParameter] ?array $body = null): array
+    {
+        if (! (($method === 'POST' && $endpoint === 'organizations/suborg' && $body !== null)
+            || ($method === 'GET' && $endpoint === 'organizations/sub_organizations' && $body === null))
+            || ! is_string($this->config['api_key'] ?? null) || trim($this->config['api_key']) === '') {
+            throw new ControlDClientException('Control D parent request is invalid or unconfigured.');
+        }
+        $options = ['allow_redirects' => false, 'http_errors' => false];
+        if ($body !== null) {
+            $options['form_params'] = $body;
+        }
+        try {
+            $response = $this->http->request($method, $endpoint, $options);
+        } catch (GuzzleException) {
+            throw new ControlDClientException('Control D parent request failed; outcome may be unknown.');
+        }
+        $status = $response->getStatusCode();
+        $decoded = json_decode((string) $response->getBody());
+        if ($method === 'POST' && $status >= 400 && $status < 500
+            && $decoded instanceof \stdClass && ($decoded->success ?? null) === false
+            && ($decoded->error ?? null) instanceof \stdClass && is_int($decoded->error->code ?? null)) {
+            throw new ControlDWriteRejectedException('Control D parent POST was explicitly rejected by the vendor envelope.');
+        }
+        if ($status < 200 || $status >= 300 || ! $decoded instanceof \stdClass
+            || ($decoded->success ?? null) !== true || ! ($decoded->body ?? null) instanceof \stdClass) {
+            throw new ControlDClientException('Control D parent response is unconfirmed; outcome may be unknown.');
+        }
+
+        return ['success' => true, 'body' => $decoded->body];
+    }
+
+    /**
      * Get all devices for a sub-organization.
      */
     public function getDevices(string $orgPk): array

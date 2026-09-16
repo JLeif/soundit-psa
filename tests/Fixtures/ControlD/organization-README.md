@@ -1,0 +1,27 @@
+# Organization fixtures (B2)
+
+Source: vendor-owned OpenAPI 3.0.1, info.version 1.0.1, embedded in
+https://docs.controld.com/reference/post_organizations-suborg and
+https://docs.controld.com/reference/get_organizations-sub-organizations,
+retrieved 2026-09-16. `organization-schema.json` preserves the two path definitions.
+`organization.json` is mechanically instantiated from the POST response schema,
+with synthetic values; it is NOT a captured live create response. No vendor
+request was made with an API credential. The GET fixture uses that schema's common
+PK/name fields. The service validates the consumed identity projection, not every
+unused quota/contact field. Any missing/malformed inventory or identity fails loud.
+
+POST consumes application/x-www-form-urlencoded with four required inputs: name,
+contact_email, twofa_req (0/1), stats_endpoint. B2 requires all four explicitly;
+it does not select a contact, MFA policy or region on the operator's behalf.
+The caller must supply a supported analytics-region PK; vendor validation failures
+remain failures, not automatic defaults. No optional fields are emitted.
+
+POST response: body.organization.PK. GET response: body.sub_organizations[] with
+PK and name. Only the exact PK returned by this attempt can be bound. The GET must
+contain exactly one matching PK with the byte-exact sent name; no name-based
+adoption. This is a positive-membership check, not an assertion that an empty or
+partial inventory proves global absence. Unknown/missing membership refuses.
+
+Name length 255 and non-control/edge-whitespace refusal, and identifier syntax
+limits, are local safety policies, not claimed vendor maxima. Parent transport
+uses fixed errors, no redirects, no retries, and no raw-error legacy GET path.
