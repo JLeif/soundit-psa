@@ -19,8 +19,10 @@ class ControlDProvisioning
      * PIN is a separate canonical LOCAL string; null means Prevent Deactivation OFF.
      * Result contains secrets: callers must not log/serialize it to a public surface.
      * A failure after POST is uncertain, not permission to retry or auto-delete.
+     * The PIN is a sensitive parameter: PHP redacts it from exception traces even where
+     * zend.exception_ignore_args is Off, so a refusal cannot write it to the log.
      */
-    public function create(string $orgPk, array $fields, ?string $pin = null): array
+    public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null): array
     {
         $this->available();
         $this->identifier($orgPk);
@@ -109,7 +111,7 @@ class ControlDProvisioning
         }
     }
 
-    private function validate(array $fields, ?string $pin): array
+    private function validate(array $fields, #[\SensitiveParameter] ?string $pin): array
     {
         $required = ['icon', 'profile_id', 'max', 'ts_exp', 'stats', 'intercept_mode'];
         if (array_diff($required, array_keys($fields))

@@ -35,7 +35,10 @@ class ControlDOnboardingTest extends TestCase
         parent::setUp();
         Http::fake();
         Http::preventStrayRequests();
-        $this->travelTo(now()->setDate(2026, 9, 17)->startOfDay());
+        // Frozen relative to the real clock, never to a calendar date: validate() compares
+        // ts_exp against time(), which travelTo does not affect, so a fixed past date would
+        // make every success path here start refusing on a wall-clock day.
+        $this->travelTo(now()->startOfSecond());
         Setting::setEncrypted('controld_api_key', 'synthetic-key');
         foreach (['enabled' => '1', 'tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7', 'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $value);

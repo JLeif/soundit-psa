@@ -15,8 +15,12 @@ class ControlDOnboarding
 {
     public function __construct(private readonly ControlDProvisioning $provisioning) {}
 
-    /** No secret-bearing return value. Icon is explicit, never inferred from a mixed fleet. */
-    public function create(int $clientId, string $icon, ?string $pin = null, ?string $namePrefix = null): void
+    /**
+     * No secret-bearing return value. Icon is explicit, never inferred from a mixed fleet.
+     * The PIN is a sensitive parameter: PHP redacts it from exception traces even where
+     * zend.exception_ignore_args is Off, so a refusal cannot write it to the log.
+     */
+    public function create(int $clientId, string $icon, #[\SensitiveParameter] ?string $pin = null, ?string $namePrefix = null): void
     {
         $orgPk = null;
         $created = null;
@@ -62,7 +66,10 @@ class ControlDOnboarding
                 }
                 $count = $client->assets()->count();
                 // Dashboard clamp adopted as a local safety ceiling, not an API maximum.
-                if ($count > 10000 || $headroom > 10000 - $count || $count + $headroom < 1) {
+                // Negative headroom is refused on its own: bounding only the sum would cut a
+                // code whose max is below the client's known asset count, and the stored-secret
+                // guard then makes that wrong limit permanent. This writer owns the bounds.
+                if ($headroom < 0 || $count > 10000 || $headroom > 10000 - $count || $count + $headroom < 1) {
                     throw new ControlDClientException('Asset count plus controld_code_device_limit_headroom must be 1..10000.');
                 }
                 $now = now()->getTimestamp();
