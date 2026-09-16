@@ -129,9 +129,14 @@ first: 100 rows each bounded at 610 transport seconds can far outlast an hour. S
 holders also stop starting new work 2320 elapsed seconds into the run and finish only
 the unit already in flight inside the reserved 1280 seconds. That work budget, not the
 size of the lease, is what keeps a live holder inside its own lock; do not force-release
-a live holder. A sweep that stops on the budget just resumes on the next minute; a drain
-scan cut short by it counts an error and exits 1 — re-run it, and never read that as a
-clean quiesce.
+a live holder. The sweep splits that budget rather than sharing it: it stops starting
+dispatch work at 2020 elapsed seconds, leaving the last 300 seconds for note delivery,
+which is local database work only, so a slow vendor backlog can never starve the very
+notes it generates. A sweep that stops on either budget just resumes on the next minute
+and reports the rows it left in `deferred`, so a truncated sweep is never read as an
+empty one; `deferred` is not an error and does not by itself fail the command. A drain
+scan cut short by its budget counts an error and exits 1 — re-run it, and never read that
+as a clean quiesce.
 Drain scans all recovery candidates and pending notes in chunks, never dispatches,
 and reports aggregate counts only. Recovery still requires intent age 610 + 30
 seconds, so `grace_pending_intents` may require another invocation after the extra

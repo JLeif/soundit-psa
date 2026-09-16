@@ -33,6 +33,17 @@ final class ScheduledPolicy
      */
     public const OVERLAP_WORK_SECONDS = self::OVERLAP_LOCK_SECONDS - 2 * (self::MAX_TRANSPORT_SECONDS + self::RECEIPT_GRACE_SECONDS);
 
+    /**
+     * Slice of that budget reserved for note delivery, which is local database work with
+     * no vendor transport. Dispatch may spend everything up to DISPATCH_WORK_SECONDS but
+     * never this remainder: a backlog slow enough to exhaust the dispatch share is exactly
+     * when the operator most needs the uncertain/blocked notes that backlog generates.
+     */
+    public const NOTE_WORK_SECONDS = 300;
+
+    /** Latest elapsed second at which a sweep may START dispatching another row. */
+    public const DISPATCH_WORK_SECONDS = self::OVERLAP_WORK_SECONDS - self::NOTE_WORK_SECONDS;
+
     public function approver(int $id): User
     {
         $user = User::find($id);

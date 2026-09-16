@@ -18,7 +18,7 @@ final class ScheduledSweep
         // so a live holder cannot be overlapped by the next sweep or an operator drain.
         $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK, ScheduledPolicy::OVERLAP_LOCK_SECONDS);
         if (! $lock->get()) {
-            return ['recovered' => 0, 'notes' => 0, 'errors' => 1];
+            return ['recovered' => 0, 'notes' => 0, 'deferred' => 0, 'errors' => 1];
         }
         try {
             return $this->runLocked();
@@ -29,15 +29,22 @@ final class ScheduledSweep
 
     private function runLocked(): array
     {
-        $counts = ['recovered' => 0, 'notes' => 0, 'errors' => 0];
+        $counts = ['recovered' => 0, 'notes' => 0, 'deferred' => 0, 'errors' => 0];
         // A single row may legitimately hold the transport open for MAX_TRANSPORT_SECONDS,
         // so 100 rows can far outlast any lease. Start no new unit once the budget is
         // spent; the unit already in flight is itself bounded, so the whole run finishes
         // inside the lock it holds. Unprocessed rows are simply the next sweep's work.
+        // The budget is SPLIT, never shared: dispatch stops at DISPATCH_WORK_SECONDS, so a
+        // phase that legitimately spends its whole share can never starve note delivery,
+        // which is the operator's only ticket-side view of the backlog that stalled it.
+        // Whatever either loop leaves is counted, so a truncated run is never reported as
+        // an empty one.
         $started = hrtime(true);
-        $spent = fn () => (hrtime(true) - $started) / 1e9 >= ScheduledPolicy::OVERLAP_WORK_SECONDS;
-        foreach (DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('expires_at')->limit(100)->pluck('id') as $id) {
-            if ($spent()) {
+        $spent = fn (float $budget) => (hrtime(true) - $started) / 1e9 >= $budget;
+        $ids = DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('expires_at')->limit(100)->pluck('id')->all();
+        foreach ($ids as $index => $id) {
+            if ($spent(ScheduledPolicy::DISPATCH_WORK_SECONDS)) {
+                $counts['deferred'] += count($ids) - $index;
                 break;
             }
             try {
@@ -51,8 +58,10 @@ final class ScheduledSweep
                 $counts['errors']++;
             }
         }
-        foreach (DB::table('scheduled_note_outbox')->whereNull('note_id')->orderBy('id')->limit(100)->pluck('id') as $id) {
-            if ($spent()) {
+        $pending = DB::table('scheduled_note_outbox')->whereNull('note_id')->orderBy('id')->limit(100)->pluck('id')->all();
+        foreach ($pending as $index => $id) {
+            if ($spent(ScheduledPolicy::OVERLAP_WORK_SECONDS)) {
+                $counts['deferred'] += count($pending) - $index;
                 break;
             }
             try {
