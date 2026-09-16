@@ -1,0 +1,80 @@
+# Scheduled Tactical policy — PR3 preparation
+
+Specification #1724; boundary issue #1783; implementation #1889.
+This is a pre-enrollment policy and producer assessment, **not a shipped Tactical adapter**.
+The scheduled feature remains default-off. The installed scheduled adapter still covers
+only the five mailbox actions. Immediate Tactical behavior is unchanged.
+
+## Exact type boundary
+
+The following registry names are approved, but registry membership is not adapter availability:
+
+| Action | Direct tool | Required argument boundary |
+|---|---|---|
+| tactical_stage_script | tactical_run_script | Script ID plus immutable executable revision, args and timeout; no silently changed interpreter, snippets or execution identity |
+| tactical_stage_command | tactical_run_command | Exact command, closed shell enum, bounded timeout; no custom interpreter, environment or run-as-user override |
+| tactical_stage_reboot | tactical_reboot_device | Exact device and existing hostname confirmation; no additional submode |
+| tactical_stage_shutdown | tactical_shutdown_device | Same, including shutdown consequence |
+| tactical_stage_recover_mesh | tactical_recover_mesh | Device recovery mode `mesh` only; not arbitrary recovery mode |
+| tactical_stage_maintenance | tactical_set_maintenance | Exact boolean intent, never truthy coercion |
+| tactical_stage_start_service | tactical_start_service | Exact service identity and start operation |
+| tactical_stage_stop_service | tactical_stop_service | Exact service identity/stop and existing confirmations |
+| tactical_stage_restart_service | tactical_restart_service | Exact service identity/restart and existing confirmations |
+| tactical_stage_install_approved_patches | tactical_install_approved_patches | Exact reviewed patch set, not the set dynamically approved later |
+
+The existing per-tool validators and confirmations remain required; this table does not
+replace them or authorize more permissive limits. Unknown arguments and submodes are not
+implicitly authorized by an approved action name. `tactical_stage_recover_mesh` is not
+`mesh_stage_*`; those independent mail-security rule actions remain excluded. Tactical
+admin/bulk and remote-control session actions remain excluded. The approved mailbox rows
+are not an allowlist contradiction either. No prefix matching or fallback to immediate
+approval is permissible for scheduling.
+
+## Pinning is a producer contract, not a preflight hash
+
+Source inspected: public `amidaware/tacticalrmm` revision
+`1e786d37cae29120b64117659e61df39c1a8d142`:
+
+- `api/tacticalrmm/agents/views.py::run_script` resolves a mutable Script PK from
+  `request.data["script"]` and calls `agent.run_script(scriptpk=...)`.
+- `api/tacticalrmm/agents/models.py::Agent.run_script` fetches that PK again,
+  parses current script arguments/environment, uses current `script.code` and
+  `script.shell`, and forces run-as-user if the current model requests it.
+- PSA `TacticalClient::runScript` submits the PK; it does not submit an expected
+  revision/content digest or immutable executable bytes. A GET/hash/POST sequence
+  cannot prevent replacement after the GET. A fixture pretending it can is not proof.
+- `api/tacticalrmm/winupdate/views.py::InstallWindowsUpdates.post` invokes
+  `approve_updates()` and derives current approved GUIDs on the server. PSA
+  `TacticalClient::installApprovedPatches` submits an empty body. Sending an
+  invented patch-set field would not constrain this producer.
+
+#1724 explicitly permits visible refusal of patch scheduling until exact snapshot
+support exists. Script execution needs an explicit disposition before enrollment:
+keep script scheduling unavailable pending a real conditional/immutable vendor primitive,
+or authorize a separately designed immutable execution path. Do not silently replace
+script execution with commands, create/mutate vendor scripts, weaken revision pinning,
+or claim a preflight comparison closes the race. This assessment is of the cited public
+producer, not certification of any live installation.
+
+## Shared human-input fence (#1885)
+
+`ScheduledCoordinator::intent` now requires both independently sealed top-level
+`human_inputs` and `binding.human_inputs` to be arrays and canonically equal **before**
+provider revalidation. The subsequent locked envelope equality remains in place.
+Object-key ordering does not matter; field presence, scalar types and list order do.
+Divergence blocks terminally without intent or vendor submission. Admission still seals
+raw human inputs independently; this does not relabel #1780's capture work as missing.
+
+`ScheduledCanonicalInputsTest` exercises actual mailbox admission, coordinator, adapter
+and fake HTTP transport. Equal copies submit once; mismatched same-domain addresses,
+dropped/extra/nested fields and malformed copies refuse. Controls prohibit live traffic.
+The original deliberately lossy admission fixture remains to prove independent capture
+and repeat-confirmation refusal, separately from the new fire-time equality check.
+
+## Remaining PR3 work
+
+No Tactical enrollment, routing/UI, script pinning, patch snapshot support, Tactical
+wire controls or Tactical MariaDB dispatch races are delivered by this preparation.
+Those require the producer disposition, full implementation, exact-tip gates/CI and a
+separately admitted held review. No activation or release is implied. Rollback before
+merge is branch discard/revert only; no production state has changed.
