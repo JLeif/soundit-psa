@@ -82,6 +82,15 @@ class ControlDOnboardingTest extends TestCase
         return new ControlDOnboarding($this->provisioning($responses));
     }
 
+    private function succeeds(callable $call): mixed
+    {
+        try {
+            return $call();
+        } catch (ControlDClientException $e) {
+            $this->fail('Expected successful verified storage, got '.get_class($e).': '.$e->getMessage());
+        }
+    }
+
     private function refusal(callable $call, string $needle): ControlDClientException
     {
         try {
@@ -104,7 +113,7 @@ class ControlDOnboardingTest extends TestCase
         $row = $this->row(['deactivation_pin' => 987654321, 'name_prefix' => 'TEST-']);
         $writer = $this->writer([...$this->preflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])]);
         Log::spy();
-        $this->assertNull($writer->create($client->id, 'desktop-windows', '987654321', 'TEST-'));
+        $this->assertNull($this->succeeds(fn () => $writer->create($client->id, 'desktop-windows', '987654321', 'TEST-')));
         $this->assertSame(['GET', 'GET', 'POST', 'GET'], array_map(fn ($h) => $h['request']->getMethod(), $this->history));
         $body = json_decode((string) $this->history[2]['request']->getBody(), true);
         $this->assertSame(5, $body['max']);
@@ -193,7 +202,7 @@ class ControlDOnboardingTest extends TestCase
             Setting::setValue('controld_code_analytics_level', (string) $stats);
             $row = $this->row(['stats' => $stats]);
             $before = count($this->history);
-            $this->writer([...$this->preflight(), $this->response(['organization' => ['PK' => 'testorg001', 'stats_endpoint' => 'synthetic-region']]), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])])->create($client->id, 'desktop-windows');
+            $this->succeeds(fn () => $this->writer([...$this->preflight(), $this->response(['organization' => ['PK' => 'testorg001', 'stats_endpoint' => 'synthetic-region']]), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])])->create($client->id, 'desktop-windows'));
             $body = json_decode((string) $this->history[$before + 3]['request']->getBody(), true);
             $this->assertSame($stats, $body['stats']);
             $this->assertSame($row['code'], $client->fresh()->controld_provisioning_code);
