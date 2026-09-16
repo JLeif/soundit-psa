@@ -35,7 +35,7 @@ final class ScheduledAdmission
         }
         $meta = ApprovalEnvelope::canonical($run->proposed_meta ?? []);
 
-        return DB::transaction(function () use ($run, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta): int {
+        return DB::transaction(function () use ($run, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta, $humanInputs): int {
             $locked = TechnicianRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
             $this->policy->approver($approverId);
             $this->policy->ticket($locked);
@@ -58,6 +58,8 @@ final class ScheduledAdmission
                     || $row->client_id != $locked->client_id || $row->ticket_id != $locked->ticket_id
                     || $row->originating_mcp_token_id != $tokenId
                     || ($sealed['provenance'] ?? null) !== $meta
+                    || ! array_key_exists('human_inputs', $sealed)
+                    || ApprovalEnvelope::canonical($sealed['human_inputs']) !== ApprovalEnvelope::canonical($humanInputs)
                     || ApprovalEnvelope::canonical($sealed['binding']) !== ApprovalEnvelope::canonical($binding)) {
                     throw new InvalidArgumentException('existing_authorization_conflict');
                 }
@@ -74,6 +76,9 @@ final class ScheduledAdmission
                 'client_id' => $run->client_id, 'ticket_id' => $run->ticket_id, 'action_type' => $run->action_type,
                 'direct_tool' => $direct, 'content_hash' => $expectedHash, 'approver_user_id' => $approverId,
                 'originating_mcp_token_id' => $tokenId, 'binding' => $binding, 'provenance' => $meta,
+                // Independently capture the exact confirmation, even if evidence drops fields.
+                // These values exist ONLY inside the authenticated encrypted envelope.
+                'human_inputs' => $humanInputs,
                 'not_before' => $window->start->format('Y-m-d H:i:s'), 'expires_at' => $window->end->format('Y-m-d H:i:s'),
                 'display_timezone' => $zone, 'local_start' => $start, 'local_end' => $end,
                 'start_offset' => $window->startOffset, 'end_offset' => $window->endOffset];
@@ -81,7 +86,7 @@ final class ScheduledAdmission
             // All operations on this pinned target serialize, including opposing effects.
             $targetKey = hash('sha256', ApprovalEnvelope::canonical([$run->client_id, $binding['target']['tenant_id'], $binding['target']['object_id']]));
             $id = DB::table('scheduled_authorizations')->insertGetId([
-                ...array_diff_key($values, array_flip(['binding', 'provenance'])), ...$sealed,
+                ...array_diff_key($values, array_flip(['binding', 'provenance', 'human_inputs'])), ...$sealed,
                 'target_key' => $targetKey, 'effect_key' => hash('sha256', ApprovalEnvelope::canonical([$direct, $binding])),
                 'approved_at' => $now, 'next_attempt_at' => $window->start, 'state' => 'waiting', 'transition_sequence' => 1,
             ]);

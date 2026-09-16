@@ -678,7 +678,7 @@ class StaffCippWriteToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
     {
         if (! CippConfig::isEnabled() || ! CippConfig::isConfigured()) {
             return ['error' => 'CIPP is not enabled or configured'];
@@ -742,10 +742,45 @@ class StaffCippWriteToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel);
+            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId);
         }
 
         return $this->executeDirect($name, $arguments, $clientId, $actorLabel);
+    }
+
+    /** Read-only scheduled mailbox preparation. Never claims, dispatches, or releases a run. */
+    public function scheduledMailboxPlan(TechnicianRun $run, array $humanInputs): array
+    {
+        if (! \App\Services\Technician\Scheduled\MailboxPlan::supports($run->action_type)) {
+            throw new CippWriteScopeException('Unsupported scheduled action');
+        }
+        $payload = $this->decryptRunPayload($run);
+        $tool = self::STAGED_TO_DIRECT[$run->action_type];
+        if (! $payload || ($payload['direct_tool'] ?? null) !== $tool
+            || ($payload['client_id'] ?? null) !== $run->client_id
+            || ($payload['ticket_id'] ?? null) !== $run->ticket_id) {
+            throw new CippWriteScopeException('Scheduled proposal binding changed');
+        }
+        $client = Client::findOrFail($run->client_id);
+        $this->resolver->resolveTicketForHeldAction($client->id, $run->ticket_id);
+        $person = $this->resolver->resolveCippPerson($client->id, $payload['person_id'] ?? null);
+        $params = $this->mailboxParamsForTool($tool, $client->id, $payload['params'] ?? [], $humanInputs, heldApproval: true, person: $person);
+        if ($this->cooldownActive($tool, $client->id, $person, null, self::COOLDOWNS[$tool] ?? 300)) {
+            throw new \App\Services\Technician\Scheduled\ScheduledUnavailable('cooldown');
+        }
+        $people = ['owner' => ['person_id' => $person->person->id, 'id' => $person->userId, 'upn' => $person->userPrincipalName]];
+        foreach (['target_person', 'delegate_person'] as $key) {
+            if (isset($params[$key])) {
+                $other = $params[$key];
+                if ($key === 'delegate_person' && strcasecmp($other->userId, $person->userId) === 0) {
+                    throw new CippWriteScopeException('Self-delegation refused');
+                }
+                $people[$key] = ['person_id' => $other->person->id, 'id' => $other->userId, 'upn' => $other->userPrincipalName];
+                unset($params[$key]);
+            }
+        }
+
+        return ['action' => $run->action_type, 'tenant' => $this->resolver->resolveCippTenant($client), 'people' => $people, 'params' => $params];
     }
 
     public function approveStagedRun(TechnicianRun $run, int $approverId, array $approvalInputs = []): TechnicianApprovalResult
@@ -1273,7 +1308,7 @@ class StaffCippWriteToolExecutor
         ];
     }
 
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
     {
         $context = $this->context($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -1372,6 +1407,9 @@ class StaffCippWriteToolExecutor
                 'params' => $params,
             ], JSON_THROW_ON_ERROR)),
         ];
+        if ($scheduledTokenId !== null && \App\Services\Technician\Scheduled\MailboxPlan::supports($tool)) {
+            $meta['scheduled_provenance'] = ['version' => 1, 'kind' => 'mcp', 'token_id' => $scheduledTokenId];
+        }
         $proposedContent = $this->stagedDisplay($directTool, $person, $license, $state, $mailbox)."\nReason: ".$reason;
 
         // Keyed on the DB's own idempotency invariant (technician_runs_idempotency:
@@ -1400,6 +1438,9 @@ class StaffCippWriteToolExecutor
             ],
         );
 
+        if (! $run->wasRecentlyCreated && $run->state === TechnicianRunState::Scheduled) {
+            return ['error' => 'This proposal has a scheduled authorization. It cannot be revived; inspect its result in the cockpit.'];
+        }
         if (! $run->wasRecentlyCreated && $run->state !== TechnicianRunState::AwaitingApproval) {
             // Race winner: another request staged this exact content between the
             // liveAwaitingRun() check and this firstOrCreate() call. Never a false

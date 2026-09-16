@@ -758,6 +758,10 @@ Route::middleware('auth')->group(function () {
     Route::post('/cockpit/email-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\EmailResolutionController::class, 'approve'])->name('email-resolutions.approve')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\EmailResolutionController::class, 'deny'])->name('email-resolutions.deny')->middleware('throttle:30,1');
 
+    Route::get('/cockpit/runs/{run}/schedule', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'create'])->name('cockpit.schedule');
+    Route::post('/cockpit/runs/{run}/schedule', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'store'])->name('cockpit.schedule.store')->middleware('throttle:30,1');
+    Route::post('/cockpit/runs/{run}/schedule/cancel', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'cancel'])->name('cockpit.schedule.cancel')->middleware('throttle:30,1');
+
     // AI Technician cockpit (Plan 1B)
     Route::get('/cockpit', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'index'])->name('cockpit.index');
     Route::post('/cockpit/undo', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'undo'])->name('cockpit.undo')->middleware('throttle:60,1');

@@ -118,8 +118,9 @@ class ScheduledApprovalTest extends TestCase
         $this->assertSame('cancelled', DB::table('scheduled_authorizations')->value('state'));
     }
 
-    public function test_no_adapter_can_fire_even_when_flag_and_clock_are_healthy(): void
+    public function test_uninstalled_adapter_cannot_fire_even_when_flag_and_clock_are_healthy(): void
     {
+        $this->run->update(['action_type' => 'tactical_stage_reboot']);
         $id = $this->admit();
         $this->time = $this->time->setTime(1, 0);
         $c = app(ScheduledCoordinator::class);

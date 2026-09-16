@@ -1101,11 +1101,13 @@ class McpStaffController extends Controller
                     $arguments['client_id'] = $explicitClientArgument;
                     $arguments['staged'] = true;
                 }
+                $staffToken = $request->attributes->get('mcp_staff_token');
                 $result = app(StaffCippWriteToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $staffToken instanceof McpStaffToken ? $staffToken->id : null,
                 );
             } elseif ($this->isCippAdminTool((string) $name)) {
                 $result = app(StaffCippAdminToolExecutor::class)->execute(
