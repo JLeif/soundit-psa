@@ -80,7 +80,15 @@ class ScheduledMailboxController extends Controller
 
     public function cancel(TechnicianRun $run, ScheduledCoordinator $coordinator)
     {
-        $this->authorizeRun($run);
+        // Cancel is stop-only: it issues no dispatch intent and mutates no mailbox, so it stays
+        // available to the approver even when the ticket binding has changed. Dispatch of such a
+        // row is refused at intent; withholding the stop control would leave the approver with no
+        // way to prevent a mutation they are authorised to prevent.
+        try {
+            app(ScheduledPolicy::class)->approver((int) auth()->id());
+        } catch (\Throwable) {
+            abort(403);
+        }
         $row = DB::table('scheduled_authorizations')->where('run_id', $run->id)->orderByDesc('revision')->first();
         abort_unless($row && (int) $row->approver_user_id === (int) auth()->id(), 403);
         $ok = $coordinator->cancel($row->id, (int) auth()->id());
