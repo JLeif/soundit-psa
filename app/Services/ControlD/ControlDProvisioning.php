@@ -26,38 +26,53 @@ class ControlDProvisioning
         $this->identifier($orgPk);
         $body = $this->validate($fields, $pin);
         $this->preflight($orgPk, $body);
-        $created = $this->body($this->client->postForOrg('provision', $orgPk, $body));
-        if (! ($created->provision ?? null) instanceof stdClass) {
-            $this->refuse('Create response has no provisioning row; reconcile before retrying.');
-        }
-        $pk = $created->provision->PK ?? null;
-        $this->identifier($pk);
-        $row = $this->readBack($orgPk, $pk);
-        foreach (['profile_id', 'max', 'ts_exp', 'stats', 'intercept_mode', 'icon'] as $key) {
-            if (! property_exists($row, $key) || $body[$key] !== $row->$key) {
-                $this->refuse('Provisioning read-back differs from requested fields.');
+        $pk = null;
+        $phase = 'post';
+        try {
+            $response = $this->client->postForOrg('provision', $orgPk, $body);
+            $phase = 'create-response';
+            $created = $this->body($response);
+            if (! ($created->provision ?? null) instanceof stdClass) {
+                $this->refuse('Create response has no provisioning row; reconcile before retrying.');
             }
-        }
-        if (isset($body['name_prefix'])) {
-            if (($row->name_prefix ?? null) !== $body['name_prefix']) {
-                $this->refuse('Provisioning prefix read-back differs.');
+            $candidate = $created->provision->PK ?? null;
+            $this->identifier($candidate);
+            $pk = $candidate;
+            $phase = 'read-back';
+            $row = $this->readBack($orgPk, $pk);
+            foreach (['profile_id', 'max', 'ts_exp', 'stats', 'intercept_mode', 'icon'] as $key) {
+                if (! property_exists($row, $key) || $body[$key] !== $row->$key) {
+                    $this->refuse('Provisioning read-back differs from requested fields.');
+                }
             }
-        } elseif (property_exists($row, 'name_prefix') && $row->name_prefix !== '') {
-            $this->refuse('Provisioning read-back has an unexpected prefix.');
-        }
-        if ($pin !== null) {
-            if (! is_int($row->deactivation_pin ?? null) || (string) $row->deactivation_pin !== $pin) {
-                $this->refuse('Provisioning PIN read-back is missing or differs.');
+            if (isset($body['name_prefix'])) {
+                if (($row->name_prefix ?? null) !== $body['name_prefix']) {
+                    $this->refuse('Provisioning prefix read-back differs.');
+                }
+            } elseif (property_exists($row, 'name_prefix') && $row->name_prefix !== '') {
+                $this->refuse('Provisioning read-back has an unexpected prefix.');
             }
-        } elseif (property_exists($row, 'deactivation_pin')) {
-            $this->refuse('Provisioning read-back has an unexpected PIN.');
-        }
-        if (! is_string($row->code ?? null) || strlen($row->code) !== 32
-            || ($row->status ?? null) !== 1 || ($row->expired ?? null) !== 0) {
-            $this->refuse('Provisioning read-back is not an active usable code.');
-        }
+            if ($pin !== null) {
+                if (! is_int($row->deactivation_pin ?? null) || (string) $row->deactivation_pin !== $pin) {
+                    $this->refuse('Provisioning PIN read-back is missing or differs.');
+                }
+            } elseif (property_exists($row, 'deactivation_pin')) {
+                $this->refuse('Provisioning read-back has an unexpected PIN.');
+            }
+            if (! is_string($row->code ?? null) || strlen($row->code) !== 32
+                || ($row->status ?? null) !== 1 || ($row->expired ?? null) !== 0) {
+                $this->refuse('Provisioning read-back is not an active usable code.');
+            }
 
-        return ['PK' => $pk, 'code' => $row->code, 'deactivation_pin' => $pin];
+            return ['PK' => $pk, 'code' => $row->code, 'deactivation_pin' => $pin];
+        } catch (ControlDWriteRejectedException $e) {
+            if ($phase === 'post') {
+                throw $e;
+            }
+            throw new ControlDWriteUncertainException($orgPk, $pk, $phase);
+        } catch (\Throwable) {
+            throw new ControlDWriteUncertainException($orgPk, $pk, $phase);
+        }
     }
 
     public function invalidate(string $orgPk, string $pk): void

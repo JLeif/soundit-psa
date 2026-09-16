@@ -101,13 +101,13 @@ class ControlDClient
     public function requestForOrg(string $method, string $endpoint, string $orgPk, ?array $body = null): array
     {
         if (! in_array($method, ['GET', 'POST', 'PUT', 'DELETE'], true)
-            || ! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
-                && ! in_array($endpoint, ['devices/types', 'profiles', 'organizations/organization'], true)
+            || (! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
+                && ! in_array($endpoint, ['devices/types', 'profiles', 'organizations/organization'], true))
             || ! preg_match('/\A[A-Za-z0-9_-]+\z/', $orgPk)
             || ! is_string($this->config['api_key'] ?? null) || trim($this->config['api_key']) === '') {
             throw new ControlDClientException('Control D scoped request is invalid or unconfigured.');
         }
-        $options = ['headers' => ['X-Force-Org-Id' => $orgPk], 'allow_redirects' => false];
+        $options = ['headers' => ['X-Force-Org-Id' => $orgPk], 'allow_redirects' => false, 'http_errors' => false];
         if ($body !== null) {
             $options['json'] = $body;
         }
@@ -116,6 +116,9 @@ class ControlDClient
         } catch (GuzzleException) {
             // Guzzle messages/previous exceptions may contain codes, PINs or credentials.
             throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
+        }
+        if ($response->getStatusCode() >= 400 && $response->getStatusCode() < 500) {
+            throw new ControlDWriteRejectedException('Control D scoped request was rejected (HTTP 4xx).');
         }
         if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
             throw new ControlDClientException('Control D scoped request did not succeed.');

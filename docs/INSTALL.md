@@ -1145,12 +1145,31 @@ mass assignment. This storage layer does not create a code, populate a client,
 expose a new UI/tool, or enable onboarding. No additional settings or grants are
 required for storage alone.
 
-For an application rollback, leave these additive columns in place. Rolling back
-`2026_09_16_100000_add_controld_onboarding_secrets_to_clients` **drops both columns
-and any stored secrets**; do not run its `down()` on populated production data as an
-application rollback. Neither dropping a column nor clearing a local secret revokes
-an upstream provisioning code. Vendor invalidation and onboarding remain separate
-operations.
+For an application rollback, revert callers only: leave these additive columns AND
+Client's encrypted casts/hidden attributes in place while the columns exist. The
+migration `down()` now refuses any populated row (including soft-deleted clients);
+an empty-table rollback drops both columns. Never use it as an application rollback.
+Neither dropping a column nor clearing a local secret revokes an upstream code.
+Soft deletion retains the encrypted secrets for reconciliation; it does not revoke
+a code or permit onboarding a deleted client.
+
+The caller-less B1 `ControlDOnboarding` writer handles already mapped clients only;
+no route, command, button, sub-org creation or Tactical fan-out is enabled. All SIX
+panel defaults must be present: Tactical client field id, enforced profile, expiry
+days, device headroom, analytics level and intercept mode. Blank analytics/intercept
+refuses before any vendor request; dashboard defaults are never adopted. The badge
+means local defaults present, not vendor validation or authorization. Analytics is
+explicitly `0`, `1` or `2`; provisioning owns the vendor allowlists. Asset count plus
+headroom is bounded to 1..10000 (a local dashboard-derived safety ceiling, not a
+verified API maximum); expiry arithmetic refuses overflow and dates beyond year
+9999. Icon is an explicit writer argument; PIN/prefix are optional explicit inputs.
+A stored code or PIN refuses re-cut. The writer returns no secret-bearing result.
+
+A typed `ControlDWriteUncertainException` carries only org, provision PK when known,
+and phase after a possibly successful POST, failed read-back or failed local commit.
+Do not automatically retry or delete: reconcile upstream and local state first. A
+request explicitly rejected with HTTP 4xx is distinguished from unknown transport
+outcomes. No production pilot or live vendor write is authorized by installation.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 

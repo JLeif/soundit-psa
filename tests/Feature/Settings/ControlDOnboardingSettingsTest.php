@@ -58,8 +58,8 @@ class ControlDOnboardingSettingsTest extends TestCase
             'default_profile_id' => '5840sea5y7',
             'code_expiry_days' => '14',
             'code_device_limit_headroom' => '5',
-            'code_analytics_level' => '',
-            'code_intercept_mode' => '',
+            'code_analytics_level' => '0',
+            'code_intercept_mode' => 'standard',
         ], $overrides);
     }
 
@@ -396,7 +396,7 @@ class ControlDOnboardingSettingsTest extends TestCase
             ->assertDontSee('is not a value onboarding can use');
     }
 
-    public function test_the_readiness_badge_follows_the_four_required_values(): void
+    public function test_the_readiness_badge_follows_the_six_required_values(): void
     {
         $this->actingAs($this->user)
             ->get(route('settings.integrations'))
@@ -409,7 +409,7 @@ class ControlDOnboardingSettingsTest extends TestCase
             ->get(route('settings.integrations'))
             ->assertOk()
             // "Defaults complete", deliberately not "Ready". The predicate behind this
-            // badge checks four local values; it says nothing about the integration
+            // badge checks six local values; it says nothing about the integration
             // being enabled, credentialed, vendor-validated or granted, and a badge
             // reading "Ready" would be read as all four.
             ->assertSee('Defaults complete')
@@ -565,19 +565,20 @@ class ControlDOnboardingSettingsTest extends TestCase
 
     // --- readiness ---
 
-    public function test_readiness_requires_all_four_and_ignores_the_optional_pair(): void
+    public function test_readiness_requires_all_six_without_vendor_defaults(): void
     {
         $this->save(['code_analytics_level' => '', 'code_intercept_mode' => '']);
-        $this->assertTrue(
-            ControlDConfig::isOnboardingConfigured(),
-            'Analytics level and intercept mode are optional here.'
-        );
+        $this->assertFalse(ControlDConfig::isOnboardingConfigured());
+        $this->save();
+        $this->assertTrue(ControlDConfig::isOnboardingConfigured());
 
         foreach ([
             'tactical_client_field_id',
             'default_profile_id',
             'code_expiry_days',
             'code_device_limit_headroom',
+            'code_analytics_level',
+            'code_intercept_mode',
         ] as $required) {
             $this->save([$required => '']);
             $this->assertFalse(
@@ -768,9 +769,9 @@ class ControlDOnboardingSettingsTest extends TestCase
         $this->assertSame(PHP_INT_MAX, ControlDConfig::codeExpiryDays());
     }
 
-    // --- the optional pair: trimmed, not otherwise touched (finding 3) ---
+    // --- the vendor pair: trimmed, not otherwise touched ---
 
-    public function test_a_whitespace_only_optional_value_is_blank(): void
+    public function test_a_whitespace_only_vendor_value_is_blank(): void
     {
         // Blank an operator cannot see. It must clear like any other blank rather than
         // become a vendor value made of spaces.
@@ -784,8 +785,8 @@ class ControlDOnboardingSettingsTest extends TestCase
         $this->assertNull(ControlDConfig::codeAnalyticsLevel());
         $this->assertNull(ControlDConfig::codeInterceptMode());
 
-        // And they are optional: readiness does not depend on them.
-        $this->assertTrue(ControlDConfig::isOnboardingConfigured());
+        // Blank refuses onboarding without silently adopting vendor defaults.
+        $this->assertFalse(ControlDConfig::isOnboardingConfigured());
     }
 
     public function test_the_interior_of_a_vendor_value_is_preserved_exactly(): void
