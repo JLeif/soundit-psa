@@ -27,7 +27,9 @@ class ScheduledApprovalDrainCommand extends Command
 
             return self::FAILURE;
         }
-        $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK);
+        // Same named lock AND same explicit bounded lease as the sweep: a dead holder
+        // cannot make the drain unreachable while admission is already blocked.
+        $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK, ScheduledPolicy::OVERLAP_LOCK_SECONDS);
         if (! $lock->get()) {
             $this->line('{"status":"overlap_busy"}');
 

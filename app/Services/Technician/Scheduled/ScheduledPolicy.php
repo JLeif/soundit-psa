@@ -16,6 +16,12 @@ final class ScheduledPolicy
 
     public const OVERLAP_LOCK = 'scheduled-approvals:sweep-drain';
 
+    // Explicit bounded lease: only the database store substitutes a default expiry, so
+    // on file/redis/memcached a SIGKILLed holder would otherwise block recovery, note
+    // delivery and the drain forever. Far longer than any healthy sweep, and release()
+    // remains owner-checked, so an expired lease is never force-released by a peer.
+    public const OVERLAP_LOCK_SECONDS = 3600;
+
     public function approver(int $id): User
     {
         $user = User::find($id);

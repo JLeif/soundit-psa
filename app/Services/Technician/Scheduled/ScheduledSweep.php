@@ -12,9 +12,10 @@ final class ScheduledSweep
 
     public function run(): array
     {
-        // Use the shared store's default lock lifetime (no explicit short lease).
-        // A killed holder requires explicit operator lock recovery, never force-release here.
-        $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK);
+        // Explicit bounded lease on every store class: a killed holder self-expires
+        // instead of stalling recovery and the drain indefinitely. Never force-release
+        // here; a live holder keeps the lock for the whole of its run.
+        $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK, ScheduledPolicy::OVERLAP_LOCK_SECONDS);
         if (! $lock->get()) {
             return ['recovered' => 0, 'notes' => 0, 'errors' => 1];
         }

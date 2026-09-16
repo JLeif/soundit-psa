@@ -25,6 +25,7 @@ final class TacticalDispatch
         // Only the intent winner sends. Neither transport uncertainty nor process death retries.
         // Uncertainty starts at the send: a failure before it provably left nothing behind.
         $outcome = 'failed';
+        $action = null;
         try {
             $row = DB::table('scheduled_authorizations')->find($id);
             $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
@@ -54,6 +55,12 @@ final class TacticalDispatch
             }
         } catch (\Throwable) {
             // No raw vendor/command bytes to logs, flash or scheduled notes.
+        }
+        // execute() may already have settled this row and recorded its own receipt before
+        // a later bus step (the audit write) threw. That throw says nothing about the
+        // vendor outcome, so never contradict the settled evidence with a second receipt.
+        if ($action?->receiptHandled) {
+            return;
         }
         // Every 'failed' above is decided before the send, so this dispatcher — and only
         // this dispatcher — may state that no request reached the provider.

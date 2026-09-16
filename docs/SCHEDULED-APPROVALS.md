@@ -120,9 +120,12 @@ Drain waits the shared maximum transport bound (610 seconds) from the ORIGINAL
 marker, then acquires the same `scheduled-approvals:sweep-drain` cache lock as the
 sweep. `overlap_busy` exits 1; preserve the live holder and retry. All processes
 must share a functioning cross-process cache lock store; process-local array cache
-is only a test fixture, never deployment certification. A dead holder may need
-explicit operator lock recovery after proving it dead; do not force-release a
-live holder. Store lease semantics apply (the database store defaults to 24h).
+is only a test fixture, never deployment certification. Both holders take that lock
+with an explicit 3600-second lease, so a killed holder self-expires within an hour
+on every store class (file, redis, memcached, database) instead of stalling recovery
+and the drain forever; the database store's own 24h default never applies while this
+explicit lease is passed. Prefer waiting out the lease over intervening: do not
+force-release a live holder, and do not shorten the lease below a healthy sweep run.
 Drain scans all recovery candidates and pending notes in chunks, never dispatches,
 and reports aggregate counts only. Recovery still requires intent age 610 + 30
 seconds, so `grace_pending_intents` may require another invocation after the extra
