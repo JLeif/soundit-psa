@@ -253,8 +253,9 @@ final class ScheduledCoordinator
             'state' => $state, 'reason' => $reason, 'finished_at' => $now, 'transition_sequence' => $sequence,
         ]);
         DB::table('scheduled_note_outbox')->insert(['authorization_id' => $row->id, 'transition_sequence' => $sequence, 'event' => $state, 'reason' => $reason, 'created_at' => $now]);
-        // Uncertain/submitted reservations remain for explicit read-only reconciliation.
-        if (! in_array($state, ['uncertain', 'submitted'], true)) {
+        // Only uncertain reservations remain, for explicit read-only reconciliation: a
+        // submitted receipt is an observed send, so it must not fence the target forever.
+        if ($state !== 'uncertain') {
             DB::table('scheduled_target_fences')->where('authorization_id', $row->id)->delete();
             DB::table('scheduled_run_fences')->where('authorization_id', $row->id)->delete();
         }

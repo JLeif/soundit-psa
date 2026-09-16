@@ -50,8 +50,9 @@ queries remain unchanged. Scheduled runs cannot pass the existing immediate CAS.
   before intent can be reclaimed only after invalidating the old nonce.
 - A persisted intent is never automatically reissued. Abandoned intent becomes
   terminal `uncertain`, including death before an unobservable send. Submitted is
-  not completed. Uncertain/submitted target fences remain for later read-only
-  reconciliation; this PR deliberately has no fence-clear/reconcile endpoint.
+  not completed, but its send was observed, so only uncertain target fences remain
+  for later read-only reconciliation; this PR deliberately has no fence-clear or
+  reconcile endpoint. A failure proven to precede the send settles `failed`.
   Cancel/expiry cannot report prevention after intent. Terminal rows never become
   awaiting approval or legacy offline queue rows. Replacement requires a new
   proposal/fresh confirmation, not mutation or revival of the old row.

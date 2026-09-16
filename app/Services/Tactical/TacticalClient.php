@@ -1492,6 +1492,27 @@ class TacticalClient
     }
 
     /**
+     * Resolve a stored "ClientName|SiteName" mapping to TRMM's numeric site FK,
+     * off the same read-only clients/ listing installs use. Agent payloads carry
+     * that FK, never the names, so evidence has to resolve it before comparing.
+     * Null means the mapping names no live client/site; throws propagate.
+     */
+    public function resolveSiteId(string $siteId): ?int
+    {
+        if (! str_contains($siteId, '|')) {
+            return null;
+        }
+
+        [$clientName, $siteName] = array_map('trim', explode('|', $siteId, 2));
+
+        if ($clientName === '' || $siteName === '') {
+            return null;
+        }
+
+        return $this->lookupSiteIds($clientName, $siteName)['site'] ?? null;
+    }
+
+    /**
      * Validate the "ClientName|SiteName" mapping and map our platform slug to
      * TRMM's. Pure parsing — no network.
      *

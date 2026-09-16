@@ -31,7 +31,12 @@ $app->instance(App\Services\Technician\Scheduled\ScheduledClock::class, new clas
 });
 $http = new GuzzleHttp\Client(['base_uri' => 'https://tactical.example.test/', 'handler' => GuzzleHttp\HandlerStack::create(function ($request) use ($job) {
     if ($request->getMethod() === 'GET') {
-        $body = str_starts_with($request->getUri()->getPath(), '/services/') ? $job['services'] : $job['agent'];
+        $path = $request->getUri()->getPath();
+        $body = match (true) {
+            str_starts_with($path, '/services/') => $job['services'],
+            str_starts_with($path, '/clients/') => $job['clients'],
+            default => $job['agent'],
+        };
 
         return GuzzleHttp\Promise\Create::promiseFor(new GuzzleHttp\Psr7\Response(200, [], json_encode($body)));
     }

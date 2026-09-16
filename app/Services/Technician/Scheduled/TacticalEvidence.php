@@ -51,12 +51,18 @@ final class TacticalEvidence implements ScheduledEvidence
         try {
             $live = $this->client->getAgent($agent);
             $services = isset($params['service_name']) ? $this->client->getServices($agent) : null;
+            $siteFk = $this->client->resolveSiteId($site);
         } catch (\Throwable) {
             throw new ScheduledUnavailable('read_unavailable');
         }
+        // clients.tactical_site_id is the "ClientName|SiteName" pair every writer stores,
+        // so the configured site must be resolved to its FK before any comparison.
+        if ($siteFk === null) {
+            throw new InvalidArgumentException('site_mapping_unresolved');
+        }
         // AgentSerializer (tacticalrmm@1e786d37) excludes only id: agent_id/hostname/site
         // are model fields; site is the FK, NOT site_name or client display-name aliases.
-        if (($live['agent_id'] ?? null) !== $agent || ! is_int($live['site'] ?? null) || (string) $live['site'] !== (string) $site
+        if (($live['agent_id'] ?? null) !== $agent || ! is_int($live['site'] ?? null) || $live['site'] !== $siteFk
             || ! is_string($live['hostname'] ?? null) || $live['hostname'] !== ($asset->hostname ?: $asset->name)) {
             throw new InvalidArgumentException('live_device_identity_changed');
         }
@@ -79,7 +85,7 @@ final class TacticalEvidence implements ScheduledEvidence
         $namespace = hash('sha256', TacticalConfig::apiUrl());
 
         return ['payload' => ['type' => $run->action_type, 'asset_id' => $asset->id, 'agent_id' => $agent, 'params' => $params],
-            'target' => ['tenant_id' => 'tactical:'.$namespace.':'.$site, 'object_id' => $agent],
+            'target' => ['tenant_id' => 'tactical:'.$namespace.':'.$siteFk, 'object_id' => $agent],
             'hostname' => $live['hostname'], 'integration' => $namespace, 'human_inputs' => $humanInputs];
     }
 

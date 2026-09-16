@@ -23,7 +23,8 @@ final class TacticalDispatch
             return;
         }
         // Only the intent winner sends. Neither transport uncertainty nor process death retries.
-        $outcome = 'uncertain';
+        // Uncertainty starts at the send: a failure before it provably left nothing behind.
+        $outcome = 'failed';
         try {
             $row = DB::table('scheduled_authorizations')->find($id);
             $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
@@ -37,9 +38,13 @@ final class TacticalDispatch
             $confirm = $action->isDestructive() ? TacticalActionConfirmToken::issue(
                 $action->key(), $plan['agent_id'], $user->id, $action->payloadHash($plan['params']),
             ) : null;
+            $outcome = 'uncertain';
             $result = $this->bus->dispatch($action, $asset, $user, $plan['params'], $confirm, 'scheduled:'.$id, $row->ticket_id);
             if ($result->isOk() && in_array($result->stdout, ['completed', 'submitted', 'uncertain'], true)) {
                 $outcome = $result->stdout;
+            } elseif (in_array($result->status, ['denied', 'rejected', 'blocked'], true)) {
+                // The bus classifies these before execute(): no request reached the provider.
+                $outcome = 'failed';
             }
         } catch (\Throwable) {
             // No raw vendor/command bytes to logs, flash or scheduled notes.

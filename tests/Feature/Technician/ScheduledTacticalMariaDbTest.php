@@ -13,7 +13,7 @@ class ScheduledTacticalMariaDbTest extends ScheduledTacticalTest
         $prefix = dirname(getenv('SCHEDULED_TEST_SOCKET')).'/tactical-child-'.bin2hex(random_bytes(6));
         file_put_contents($prefix.'.json', json_encode(['id' => $id, 'user' => $this->user->id, 'go' => $go,
             'posts' => $posts, 'ready' => $prefix.'.ready', 'operation' => $operation, 'crash' => $crash,
-            'agent' => $this->agent, 'services' => $this->services]));
+            'agent' => $this->agent, 'services' => $this->services, 'clients' => $this->clients]));
         $ext = getenv('SCHEDULED_TEST_EXTENSION_DIR');
         $p = proc_open([PHP_BINARY, '-d', 'extension='.$ext.'/mysqlnd.so', '-d', 'extension='.$ext.'/pdo_mysql.so',
             base_path('tests/Fixtures/scheduled-tactical-child.php'), $prefix.'.json'],

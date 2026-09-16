@@ -92,7 +92,10 @@ The shared coordinator owns claim, intent, nonce, target fence, cancellation and
 Only the intent winner enters the existing audited Tactical action bus. Scheduled transport
 uses one request, no redirect/retry/fallback. Producer-specific exact receipts classify
 reboot/shutdown/recovery/maintenance/service results; a raw command receipt is merely
-`submitted` because it has no reliable exit-status contract. Unexpected bodies, transport
+`submitted` because it has no reliable exit-status contract, and it releases its
+reservations because the send itself was observed. Bus refusals decided before execution
+(`denied`/`rejected`/`blocked`) and any binding failure before the send settle `failed`,
+which claims no execution and releases the reservations too. Unexpected bodies, transport
 exceptions and post-intent crash recovery become `uncertain`, retain the target fence and
 never automatically replay. No raw command result is included in the scheduled audit note.
 

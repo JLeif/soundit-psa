@@ -48,6 +48,8 @@ class ScheduledTacticalTest extends TestCase
 
     protected array $agent = ['agent_id' => 'fixture-agent', 'site' => 17, 'hostname' => 'fixture-device', 'status' => 'online'];
 
+    protected array $clients = [['id' => 4, 'name' => 'Fixture Client', 'sites' => [['id' => 17, 'name' => 'Main Site', 'client' => 4]]]];
+
     protected array $services = [['name' => 'Spooler', 'display_name' => 'Print Spooler']];
 
     protected mixed $response = 'ok';
@@ -74,7 +76,12 @@ class ScheduledTacticalTest extends TestCase
         $http = new HttpClient(['base_uri' => 'https://tactical.example.test/', 'handler' => HandlerStack::create(function ($request, $options) {
             if ($request->getMethod() === 'GET') {
                 $this->reads++;
-                $body = str_starts_with($request->getUri()->getPath(), '/services/') ? $this->services : $this->agent;
+                $path = $request->getUri()->getPath();
+                $body = match (true) {
+                    str_starts_with($path, '/services/') => $this->services,
+                    str_starts_with($path, '/clients/') => $this->clients,
+                    default => $this->agent,
+                };
 
                 return Create::promiseFor(new Response(200, [], json_encode($body)));
             }
@@ -87,7 +94,7 @@ class ScheduledTacticalTest extends TestCase
         })]);
         $this->app->instance(TacticalClient::class, new TacticalClient($http));
         $this->user = User::factory()->create(['role' => 'tech', 'is_active' => true]);
-        $this->client = Client::factory()->create(['tactical_site_id' => '17']);
+        $this->client = Client::factory()->create(['tactical_site_id' => 'Fixture Client|Main Site']);
         $this->asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'fixture-device']);
         TacticalAsset::create(['asset_id' => $this->asset->id, 'agent_id' => 'fixture-agent', 'hostname' => 'fixture-device', 'status' => 'online']);
         $this->ticket = Ticket::factory()->create(['client_id' => $this->client->id]);
@@ -274,6 +281,26 @@ class ScheduledTacticalTest extends TestCase
         $this->actingAs($this->user)->get(route('cockpit.schedule', $this->run))->assertStatus(409);
     }
 
+    public function test_provably_unsent_bus_refusal_settles_failed_not_uncertain(): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        $id = $this->admit(['confirm_hostname' => 'fixture-device']);
+        // The bus decides denied/rejected/blocked before execute(): nothing was sent.
+        $this->app->instance(\App\Services\Tactical\TacticalActionService::class, new class(app(TacticalClient::class)) extends \App\Services\Tactical\TacticalActionService
+        {
+            public function dispatch(\App\Services\Tactical\Actions\TacticalAction $action, Asset $target, ?User $actor, array $params,
+                ?string $confirmToken = null, ?string $actorLabel = null, ?int $ticketId = null): \App\Services\Tactical\Actions\TacticalActionResult
+            {
+                return \App\Services\Tactical\Actions\TacticalActionResult::denied('Synthetic pre-send refusal');
+            }
+        });
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(0, $this->wire);
+        $this->assertSame('failed', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseCount('scheduled_target_fences', 0);
+    }
+
     public static function actions(): array
     {
         $host = ['confirm_hostname' => 'fixture-device'];
@@ -306,6 +333,8 @@ class ScheduledTacticalTest extends TestCase
         app(TacticalDispatch::class)->run($id);
         $this->assertSame([compact('method', 'path', 'body')], $this->wire);
         $this->assertSame($outcome, DB::table('scheduled_authorizations')->value('state'));
+        // An observed send releases the target: only uncertain outcomes keep the fence.
+        $this->assertDatabaseCount('scheduled_target_fences', 0);
         $this->assertDatabaseCount('tactical_action_logs', 1);
     }
 }
