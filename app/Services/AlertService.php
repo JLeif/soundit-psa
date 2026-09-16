@@ -81,7 +81,14 @@ class AlertService
             // guards this with its own 422 before calling upsert, so it never
             // reaches this exception; every other source gets the exception
             // instead of the silent move.
-            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && $resolved->client_id !== $data['client_id']) {
+            // Compared as integers: the `integer` validation rule a caller's
+            // controller applies (e.g. RmmAlertController) accepts a numeric
+            // string without casting it, so $data['client_id'] may arrive as
+            // "5" while $resolved->client_id is the model's native int - a
+            // caller's own legitimate re-fire must not be refused as a
+            // cross-client conflict just because of that representation
+            // difference.
+            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && (int) $resolved->client_id !== (int) $data['client_id']) {
                 throw new \RuntimeException("Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.");
             }
 
@@ -93,14 +100,22 @@ class AlertService
                 $metadata['previous_resolved_at'] = $resolved->resolved_at->toIso8601String();
             }
 
+            // title and severity are required by the caller's own validation,
+            // so those two are deliberately overwritten unconditionally - a
+            // revival always has a current title and severity. Everything
+            // else that isn't part of "this occurrence is new" falls back to
+            // the resolved row's existing value when the payload omits it,
+            // the same way the re-fire branch above does - a revival payload
+            // that omits message or hostname must not silently blank a value
+            // that was already there.
             $resolved->update([
                 'asset_id' => $data['asset_id'] ?? $resolved->asset_id,
                 'client_id' => $data['client_id'] ?? $resolved->client_id,
                 'severity' => $data['severity'],
                 'status' => AlertStatus::Active,
                 'title' => $data['title'],
-                'message' => $data['message'] ?? null,
-                'hostname' => $data['hostname'] ?? null,
+                'message' => $data['message'] ?? $resolved->message,
+                'hostname' => $data['hostname'] ?? $resolved->hostname,
                 'ticket_id' => null,
                 'acknowledged_by' => null,
                 'acknowledged_at' => null,
