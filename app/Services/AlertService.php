@@ -49,6 +49,90 @@ class AlertService
             return $existing;
         }
 
+        // The `alerts` table has unique(source, source_alert_id)
+        // (database/migrations/2026_03_25_000001_create_alerts_table.php:32),
+        // so a given key is owned by exactly one row for the table's entire
+        // lifetime, even after that row resolves. Without this branch, any
+        // source whose alert resolves and later recurs under the same
+        // source_alert_id would hit a duplicate-key error on the INSERT below
+        // instead of getting an alert: the estate drifts again, and the write
+        // meant to report it fails. So a resolved row under this key is
+        // revived in place, reset to Active for the new occurrence, rather
+        // than a second row being created (which the index forbids) or the
+        // occurrence being silently dropped.
+        $resolved = Alert::where('source', $source)
+            ->where('source_alert_id', $sourceAlertId)
+            ->where('status', AlertStatus::Resolved)
+            ->first();
+
+        if ($resolved) {
+            // Reviving in place means updating client_id to whatever the
+            // incoming payload claims - which is exactly how an alert could
+            // move between clients silently. Before this branch existed, a
+            // cross-client collision on a resolved row hit the unique index
+            // and threw a QueryException: loud, and nothing was written.
+            // Tactical's fallback key (md5("{hostname}:{checkLabel}"), see
+            // TacticalAlertService.php:173) is NOT client-scoped, so two
+            // different clients can each have a "SERVER01" with a "Disk
+            // Space" check and collide on the same source_alert_id. Refusing
+            // here - rather than letting the update proceed - preserves that
+            // loud failure instead of quietly reassigning the alert (and its
+            // history) to the wrong client. The Leif RMM controller already
+            // guards this with its own 422 before calling upsert, so it never
+            // reaches this exception; every other source gets the exception
+            // instead of the silent move.
+            // Compared as integers: the `integer` validation rule a caller's
+            // controller applies (e.g. RmmAlertController) accepts a numeric
+            // string without casting it, so $data['client_id'] may arrive as
+            // "5" while $resolved->client_id is the model's native int - a
+            // caller's own legitimate re-fire must not be refused as a
+            // cross-client conflict just because of that representation
+            // difference.
+            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && (int) $resolved->client_id !== (int) $data['client_id']) {
+                throw new \RuntimeException("Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.");
+            }
+
+            $metadata = array_merge($resolved->metadata ?? [], $data['metadata'] ?? []);
+            if ($resolved->ticket_id !== null) {
+                $metadata['previous_ticket_id'] = $resolved->ticket_id;
+            }
+            if ($resolved->resolved_at !== null) {
+                $metadata['previous_resolved_at'] = $resolved->resolved_at->toIso8601String();
+            }
+
+            // title and severity are required by the caller's own validation,
+            // so those two are deliberately overwritten unconditionally - a
+            // revival always has a current title and severity. Everything
+            // else that isn't part of "this occurrence is new" falls back to
+            // the resolved row's existing value when the payload omits it,
+            // the same way the re-fire branch above does - a revival payload
+            // that omits message or hostname must not silently blank a value
+            // that was already there.
+            $resolved->update([
+                'asset_id' => $data['asset_id'] ?? $resolved->asset_id,
+                'client_id' => $data['client_id'] ?? $resolved->client_id,
+                'severity' => $data['severity'],
+                'status' => AlertStatus::Active,
+                'title' => $data['title'],
+                'message' => $data['message'] ?? $resolved->message,
+                'hostname' => $data['hostname'] ?? $resolved->hostname,
+                'ticket_id' => null,
+                'acknowledged_by' => null,
+                'acknowledged_at' => null,
+                'resolved_at' => null,
+                'refired_count' => $resolved->refired_count + 1,
+                'metadata' => $metadata,
+                'fired_at' => $data['fired_at'] ?? now(),
+            ]);
+
+            Log::info("[Alert] Revived {$source->value} alert {$sourceAlertId}", [
+                'alert_id' => $resolved->id,
+                'refired_count' => $resolved->refired_count,
+            ]);
+
+            return $resolved;
+        }
+
         $alert = Alert::create([
             'asset_id' => $data['asset_id'] ?? null,
             'client_id' => $data['client_id'] ?? null,

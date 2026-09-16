@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\LevelWebhookController;
 use App\Http\Controllers\Api\NinjaWebhookController;
 use App\Http\Controllers\Api\PlivoWebhookController;
 use App\Http\Controllers\Api\QboWebhookController;
+use App\Http\Controllers\Api\RmmAlertController;
 use App\Http\Controllers\Api\RmmController;
 use App\Http\Controllers\Api\ScreenConnectWebhookController;
 use App\Http\Controllers\Api\T2TController;
@@ -25,21 +26,25 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'index']);
 
-// Leif RMM integration — bearer token, read-only.
+// Leif RMM integration — bearer token.
 //
 // Its own surface rather than a reuse of the UI's client routes, which carry
 // web+auth (session cookies plus CSRF) and are therefore unusable by a service.
 // A UI endpoint borrowed as a contract changes whenever the UI does and the
 // consumer finds out in production.
 //
-// The PSA owns client identity; the RMM mirrors it and writes nothing back, so
-// nothing here mutates. Throttled because a shared bearer token deserves a
+// The GET routes mirror identity: the PSA owns clients and assets, the RMM
+// mirrors them and writes nothing back. The POST routes raise alerts — that is
+// not identity, it is the same kind of traffic the Tactical, Comet and Ninja
+// webhooks already carry. Throttled because a shared bearer token deserves a
 // ceiling on guessing.
 Route::middleware([VerifyRmmApiKey::class, 'throttle:60,1'])
     ->prefix('rmm')
     ->group(function () {
         Route::get('clients', [RmmController::class, 'clients']);
         Route::get('assets', [RmmController::class, 'assets']);
+        Route::post('alerts', [RmmAlertController::class, 'store']);
+        Route::post('alerts/resolve', [RmmAlertController::class, 'resolve']);
     });
 
 // NinjaRMM webhooks — no auth available from Ninja's side
