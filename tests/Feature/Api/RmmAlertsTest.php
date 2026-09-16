@@ -212,7 +212,7 @@ class RmmAlertsTest extends TestCase
             'source_alert_id' => $clientA->id.':huntress',
         ]), $this->authed())
             ->assertStatus(422)
-            ->assertJson(['message' => 'An open alert already exists under this source_alert_id for a different client.']);
+            ->assertJson(['message' => 'An alert already exists under this source_alert_id for a different client.']);
 
         $this->assertSame(1, Alert::count());
         $alert = Alert::findOrFail($raised->json('alert_id'));
@@ -232,7 +232,7 @@ class RmmAlertsTest extends TestCase
             'source_alert_id' => $clientA->id.':huntress',
         ]), $this->authed())
             ->assertStatus(422)
-            ->assertJson(['message' => 'An open alert already exists under this source_alert_id for a different client.']);
+            ->assertJson(['message' => 'An alert already exists under this source_alert_id for a different client.']);
 
         $this->assertSame(1, Alert::count());
         $alert = Alert::findOrFail($raised->json('alert_id'));
