@@ -42,7 +42,7 @@ final class ScheduledAdmission
         $meta = ApprovalEnvelope::canonical($run->proposed_meta ?? []);
 
         return DB::transaction(function () use ($run, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta, $humanInputs): int {
-            if (app(ScheduledQuiescence::class)->at() !== null) {
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
                 throw new InvalidArgumentException('scheduling_quiesced');
             }
             $locked = TechnicianRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
