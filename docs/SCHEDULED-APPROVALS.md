@@ -1,4 +1,103 @@
-# Scheduled approval substrate (PR1, issue #1724)
+# Scheduled approvals (issue #1724)
+
+## Activation runbook
+
+**Readiness is not activation authorization.** The feature defaults off through
+`SCHEDULED_APPROVALS_ENABLED=false`. Charlie alone authorizes activation in this
+deployment; a reviewed change or dark deployment is not permission to flip it.
+The existing technician kill switch is unchanged.
+
+### What enabling exposes
+
+In the cockpit, active Admin/Tech staff see **Schedule approval instead** on
+awaiting proposals with recorded version-1 scheduling provenance and a registered
+action. The form collects a future window, explicit time zone and human
+confirmation; admission and fire-time checks still enforce identity, permissions,
+lineage, clock health and the kill switch. Old proposals without lineage are not
+grandfathered. Scheduling is not immediate approval or a generic delayed task.
+
+Installed action types (only these thirteen can dispatch):
+
+- Mailbox: `cipp_stage_set_mailbox_forwarding`,
+  `cipp_stage_set_mailbox_out_of_office`, `cipp_stage_set_mailbox_delegate`,
+  `cipp_stage_set_mailbox_gal_visibility`, `cipp_stage_convert_mailbox`.
+- Tactical: `tactical_stage_command`, `tactical_stage_reboot`,
+  `tactical_stage_shutdown`, `tactical_stage_recover_mesh`,
+  `tactical_stage_maintenance`, `tactical_stage_start_service`,
+  `tactical_stage_stop_service`, `tactical_stage_restart_service`.
+
+`tactical_stage_script` and `tactical_stage_install_approved_patches` remain
+registered but visibly refuse at admission with their named
+`unsupported_scheduling_type:<type>` reason. Neither silently executes immediately.
+They await an immutable/conditional vendor execution primitive (#1911); see
+[SCHEDULED-TACTICAL-POLICY](SCHEDULED-TACTICAL-POLICY.md). Other registry entries
+without adapters are not enabled by this flag. Immediate approval paths are unchanged.
+
+The cockpit's **Scheduled approvals — latest 100** result table and the recorded
+approver's **Cancel schedule** control for waiting/claimed rows remain available
+when the flag is off; they are not new permissions granted by activation. Cancellation
+can lose the intent race. Inspect the recorded result rather than assuming prevention.
+Submitted means an observed send, not completed execution; uncertain means the effect
+is unknown. Reconcile with the relevant vendor (CIPP or Tactical), never auto-retry.
+
+### Before an authorized flip
+
+1. Confirm the reviewed readiness release, migrations and retained evidence schema
+   are present. Inspect existing waiting/claimed/intent rows and unresolved results;
+   enabling also allows still-valid pending work to resume. The cockpit is bounded
+   to the latest 100, not an exhaustive reconciliation inventory.
+2. Verify production MariaDB UTC and system clock health using `ScheduledClock`:
+   absolute skew at both read edges must be <=2 seconds, and the application runtime
+   must be able to run `timedatectl show --property=NTPSynchronized --value` with a
+   positive `yes` within its one-second timeout. SQLite is not clock certification.
+3. Check the technician kill switch deliberately and verify existing integration
+   availability, approver roles, staging lineage and explicit token grants. Do not
+   change those settings or grants as an incidental part of this flag operation.
+4. Verify the scheduler is running and `php artisan schedule:list` includes
+   `technician:scheduled-sweep` every minute; verify the configured queue workers
+   and their normal health checks too. The scheduled sweep itself runs as a console
+   command, not a queued dispatch job. An entry in the list alone is not proof of
+   execution: inspect recent scheduler completion/errors and private-note delivery.
+
+Only after explicit activation approval, set `SCHEDULED_APPROVALS_ENABLED=true`
+in the deployment environment and run `php artisan config:cache` using the normal
+application deployment context. Verify `php artisan config:show scheduled_approvals`
+reports `enabled true`. Refresh/restart long-lived application/queue/scheduler
+processes through the normal operational procedure so they do not retain old config;
+new web and console processes must agree. Merely editing `.env` does not refresh
+cached config or a process that already loaded it. Verify cockpit availability and
+sweep execution without staging an unapproved live vendor action.
+
+### Disable and drain safely
+
+Set `SCHEDULED_APPROVALS_ENABLED=false`, rebuild with `php artisan config:cache`,
+refresh long-lived consumers as above, and verify effective `enabled false`.
+This stops new admissions and pre-intent dispatch checks once those consumers see
+it. It does **not** undo a persisted dispatch intent or an already sent operation:
+in-flight work may finish, and a dead intent can become uncertain. Do not promise
+that disabling or the kill switch retracts work past the intent boundary.
+
+The automatic schedule is flag-gated, including recovery and note delivery. With
+effective config verified off, run `php artisan technician:scheduled-sweep` manually
+under the approved rollback procedure to recover/expire rows and drain private notes
+without dispatching adapters. Each invocation is bounded to 100 recovery rows and
+100 pending notes; inspect its `errors`/`notes` output and remaining outbox rows,
+repeat as needed, and investigate orphan notes rather than calling zero deliveries
+a clean drain. This command also applies the existing ciphertext-retention policy.
+Cancel waiting/claimed approvals through the recorded approver's stop-only control
+where appropriate; disabling does not itself cancel them, so account for them before
+any re-enable. Keep intent/submitted/uncertain evidence for reconciliation, preserve
+uncertain fences, and never revive a Scheduled proposal, drop populated tables or
+replay an unknown effect. An inverse vendor operation needs separate approval.
+
+Sources: `ScheduledMailboxController`, cockpit views, `ActionRegistry`,
+`MailboxPlan`, `TacticalPlan`, `ScheduledAdmission`, `ScheduledCoordinator`,
+`ScheduledClock`, `ScheduledSweep` and `routes/console.php` at this repository tip.
+
+## Historical PR1 substrate notes
+
+The following describes the original PR1 increment, **not current adapter/UI
+availability**. The activation runbook above describes the shipped PR2/PR3 surface.
 
 This increment is **not an executable scheduled-action feature**. It adds a dormant
 server-side authorization ledger, not an adapter or a new bearer credential. There

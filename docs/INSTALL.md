@@ -202,6 +202,11 @@ MICROSOFT_REDIRECT_URI=https://psa.yourmsp.com/auth/microsoft/callback
 
 #### Other integrations
 
+Scheduled approvals use `SCHEDULED_APPROVALS_ENABLED` (default `false`, off).
+Any change requires `php artisan config:cache` refresh; follow the
+[activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for authorization,
+long-lived process refresh, pre-flip checks and safe disable/drain steps.
+
 All other integrations (NinjaRMM, Level RMM, QuickBooks Online, Plivo) are configured via **Settings > Integrations** in the web UI after your first login. No `.env` variables are needed for these.
 
 ### Run migrations and cache
