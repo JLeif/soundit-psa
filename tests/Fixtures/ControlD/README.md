@@ -1,4 +1,13 @@
-# Provisioning A fixtures and boundaries
+# Control D fixtures and boundaries
+
+B3 `read-only-rejection.json` copies the sanitized HTTP403 envelope observed at the
+September 16 13:47 Pacific pilot and ruled at 16:17: integer code40301 and vendor
+read-only-token message. Only code/status are consumed; the message is never persisted.
+The shape is not proof of any pre-write key capability. B3 organization fixtures reuse
+B2's producer OpenAPI fixtures; case-only/duplicate rows are deliberate negative controls.
+`stage-contender.php` is a test-only independent-process contender using an isolated
+SQLite snapshot and an empty Guzzle MockHandler: no live transport or production DB.
+
 
 Provenance: producer contract measured September 16, 2026; development rulings on card
 6a9b3613b036fdbdc152e6ea at 05:05 and 06:03 Pacific. No live write was used to make these fixtures.

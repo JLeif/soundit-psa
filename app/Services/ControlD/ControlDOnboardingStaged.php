@@ -190,7 +190,14 @@ class ControlDOnboardingStaged
         $fields = $this->codeFields($client, $payload);
         $intent->org_pk = $client->controld_org_id;
         $intent->saveOrFail();
-        $created = $this->provisioning->create($intent->org_pk, $fields, $payload['pin']);
+        $intentId = $intent->id;
+        $created = $this->provisioning->create($intent->org_pk, $fields, $payload['pin'], static function (string $pk) use ($intentId): void {
+            if (ControlDOnboardingIntent::whereKey($intentId)->where('state', 'posted')->update([
+                'vendor_pk' => $pk, 'phase' => 'read-back', 'updated_at' => now(),
+            ]) !== 1) {
+                throw new ControlDClientException('Control D intent checkpoint failed.');
+            }
+        });
         $intent->forceFill(['vendor_pk' => $created['PK'], 'phase' => 'local-persistence'])->saveOrFail();
         $this->bind($intent, $actor, $intent->org_pk, $created);
     }

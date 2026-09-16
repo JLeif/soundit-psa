@@ -25,7 +25,7 @@ class ControlDProvisioning
      * frames' trace arguments even where zend.exception_ignore_args is Off. That is a
      * statement about this path only, not about a caller that copies the body elsewhere.
      */
-    public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null): array
+    public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null, ?\Closure $recordPostedPk = null): array
     {
         $this->available();
         $this->identifier($orgPk);
@@ -43,6 +43,11 @@ class ControlDProvisioning
             $candidate = $created->provision->PK ?? null;
             $this->identifier($candidate);
             $pk = $candidate;
+            // B3 may durably retain the own-POST handle before read-back. No code/PIN
+            // crosses this callback. A failed checkpoint is uncertain, never retried.
+            if ($recordPostedPk !== null) {
+                $recordPostedPk($pk);
+            }
             $phase = 'read-back';
             $row = $this->readBack($orgPk, $pk);
             foreach (['profile_id', 'max', 'ts_exp', 'stats', 'intercept_mode', 'icon'] as $key) {
