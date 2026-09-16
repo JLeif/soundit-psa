@@ -1475,7 +1475,17 @@ class IntegrationsController extends Controller
 
     // --- Huntress ---
 
-    public function updateHuntressWebhooks(Request $request)
+    public function detectHuntressAccount(\App\Services\Huntress\HuntressAccountLookup $lookup)
+    {
+        try {
+            return response()->json(['account_id' => $lookup->id()]);
+        } catch (\Throwable) {
+            // Upstream errors may contain credentials or private response bodies.
+            return response()->json(['message' => 'Unable to detect the account ID. Check saved Huntress API credentials and try again.'], 422);
+        }
+    }
+
+    public function updateHuntressWebhooks(Request $request, \App\Services\Huntress\HuntressAccountLookup $lookup)
     {
         $validator = \Illuminate\Support\Facades\Validator::make($request->only([
             'signing_secret', 'account_id', 'webhooks_enabled',
@@ -1512,6 +1522,25 @@ class IntegrationsController extends Controller
                 'signing_secret' => 'Enter a valid Svix signing secret before enabling webhook linking.',
             ]);
         }
+        // An unchanged account while disabling must remain an offline escape hatch.
+        // Every new/changed account and every enable is verified when API access exists.
+        try {
+            $needsVerification = $enabled || $accountId === '' || $accountId !== (string) HuntressConfig::get('webhook_account_id');
+            if ($needsVerification && HuntressConfig::isConfigured()) {
+                $detected = $lookup->id();
+                if ($accountId !== '' && $accountId !== $detected) {
+                    return redirect()->route('settings.integrations')->withErrors([
+                        'account_id' => 'The entered account ID does not match the configured Huntress API account ('.$detected.'). No settings were saved.',
+                    ]);
+                }
+                $accountId = $detected;
+            }
+        } catch (\Throwable) {
+            return redirect()->route('settings.integrations')->withErrors([
+                'account_id' => 'Unable to verify the Huntress account ID. No settings were saved. Check saved API credentials and try again.',
+            ]);
+        }
+
         if ($enabled && $accountId === '') {
             return redirect()->route('settings.integrations')->withErrors([
                 'account_id' => 'An expected Huntress account ID is required to enable webhook linking.',
