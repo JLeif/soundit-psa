@@ -1130,6 +1130,21 @@ Syncs backup account counts (M365 mailboxes, DR servers, etc.) from Servosity fo
 
 ### Control D (DNS Security)
 
+The standard migration adds two nullable encrypted client attributes for future
+onboarding: `controld_provisioning_code` and `controld_deactivation_pin`. They use
+Laravel encryption with the application's `APP_KEY`; retain that key with encrypted
+backups. They are excluded from normal Client array/JSON serialization and generic
+mass assignment. This storage layer does not create a code, populate a client,
+expose a new UI/tool, or enable onboarding. No additional settings or grants are
+required for storage alone.
+
+For an application rollback, leave these additive columns in place. Rolling back
+`2026_09_16_100000_add_controld_onboarding_secrets_to_clients` **drops both columns
+and any stored secrets**; do not run its `down()` on populated production data as an
+application rollback. Neither dropping a column nor clearing a local secret revokes
+an upstream provisioning code. Vendor invalidation and onboarding remain separate
+operations.
+
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
 1. Settings > Integrations > Control D DNS Security (Licensing tab)
