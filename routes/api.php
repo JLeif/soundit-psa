@@ -44,6 +44,7 @@ Route::middleware([VerifyRmmApiKey::class, 'throttle:60,1'])
         Route::get('clients', [RmmController::class, 'clients']);
         Route::get('assets', [RmmController::class, 'assets']);
         Route::post('alerts', [RmmAlertController::class, 'store']);
+        Route::post('alerts/resolve', [RmmAlertController::class, 'resolve']);
     });
 
 // NinjaRMM webhooks — no auth available from Ninja's side

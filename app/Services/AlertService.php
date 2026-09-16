@@ -49,6 +49,56 @@ class AlertService
             return $existing;
         }
 
+        // The `alerts` table has unique(source, source_alert_id)
+        // (database/migrations/2026_03_25_000001_create_alerts_table.php:32),
+        // so a given key is owned by exactly one row for the table's entire
+        // lifetime, even after that row resolves. Without this branch, any
+        // source whose alert resolves and later recurs under the same
+        // source_alert_id would hit a duplicate-key error on the INSERT below
+        // instead of getting an alert: the estate drifts again, and the write
+        // meant to report it fails. So a resolved row under this key is
+        // revived in place, reset to Active for the new occurrence, rather
+        // than a second row being created (which the index forbids) or the
+        // occurrence being silently dropped.
+        $resolved = Alert::where('source', $source)
+            ->where('source_alert_id', $sourceAlertId)
+            ->where('status', AlertStatus::Resolved)
+            ->first();
+
+        if ($resolved) {
+            $metadata = array_merge($resolved->metadata ?? [], $data['metadata'] ?? []);
+            if ($resolved->ticket_id !== null) {
+                $metadata['previous_ticket_id'] = $resolved->ticket_id;
+            }
+            if ($resolved->resolved_at !== null) {
+                $metadata['previous_resolved_at'] = $resolved->resolved_at->toIso8601String();
+            }
+
+            $resolved->update([
+                'asset_id' => $data['asset_id'] ?? $resolved->asset_id,
+                'client_id' => $data['client_id'] ?? $resolved->client_id,
+                'severity' => $data['severity'],
+                'status' => AlertStatus::Active,
+                'title' => $data['title'],
+                'message' => $data['message'] ?? null,
+                'hostname' => $data['hostname'] ?? null,
+                'ticket_id' => null,
+                'acknowledged_by' => null,
+                'acknowledged_at' => null,
+                'resolved_at' => null,
+                'refired_count' => $resolved->refired_count + 1,
+                'metadata' => $metadata,
+                'fired_at' => $data['fired_at'] ?? now(),
+            ]);
+
+            Log::info("[Alert] Revived {$source->value} alert {$sourceAlertId}", [
+                'alert_id' => $resolved->id,
+                'refired_count' => $resolved->refired_count,
+            ]);
+
+            return $resolved;
+        }
+
         $alert = Alert::create([
             'asset_id' => $data['asset_id'] ?? null,
             'client_id' => $data['client_id'] ?? null,
