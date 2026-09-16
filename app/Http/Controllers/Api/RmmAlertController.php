@@ -55,16 +55,21 @@ class RmmAlertController extends Controller
             'fired_at' => ['nullable', 'date'],
         ]);
 
-        // AlertService::upsert only looks for an alert in Active, Acknowledged or
-        // Ticketed status when deciding whether to re-fire. This check is
-        // deliberately broader — any alert under this key, resolved ones
-        // included — so that `created` below is false only when nothing at all
-        // existed under the key. If a resolved alert exists and upsert creates a
-        // new one, `created` reports false even though a new row appears; the
-        // caller can still tell from `status` and `refired_count`.
-        $existing = Alert::where('source', AlertSource::LeifRmm)
+        // The `integer` rule accepts a numeric string ("5") without casting
+        // it; the model attribute below comes back as a native int. Normalise
+        // here once so every comparison and write below is a real int, not a
+        // string that happens to look like one.
+        $data['client_id'] = (int) $data['client_id'];
+
+        // One query answers two questions: whether anything already exists
+        // under this key at all (for `created` below - deliberately broader
+        // than AlertService::upsert's own Active/Acknowledged/Ticketed lookup,
+        // so `created` is false only when nothing at all existed under the
+        // key) and, if something does, whether it belongs to a different
+        // client (for the guard below).
+        $anyUnderKey = Alert::where('source', AlertSource::LeifRmm)
             ->where('source_alert_id', $data['source_alert_id'])
-            ->exists();
+            ->first();
 
         // AlertService::upsert matches purely on source + source_alert_id, with
         // no client scoping. Its re-fire branch never updates client_id, but
@@ -81,12 +86,11 @@ class RmmAlertController extends Controller
         // server-side invariant, so it is guarded here too. Checked against
         // ANY status, not just open ones: now that a resolved alert can be
         // revived by upsert, a resolved row under someone else's client is
-        // just as much a hazard as an open one.
-        $anyUnderKey = Alert::where('source', AlertSource::LeifRmm)
-            ->where('source_alert_id', $data['source_alert_id'])
-            ->first();
-
-        if ($anyUnderKey !== null && $anyUnderKey->client_id !== $data['client_id']) {
+        // just as much a hazard as an open one. Compared as integers - the
+        // model attribute is a native int, and $data['client_id'] was
+        // normalised above, but the cast stays here too as the guard's own
+        // guarantee against a future caller of this branch skipping that step.
+        if ($anyUnderKey !== null && (int) $anyUnderKey->client_id !== (int) $data['client_id']) {
             return response()->json([
                 'message' => 'An alert already exists under this source_alert_id for a different client.',
             ], 422);
@@ -111,7 +115,7 @@ class RmmAlertController extends Controller
             // `created` is reported so the RMM can log "raised" vs "re-fired"
             // without inferring it from refired_count, which is 0 for both a new
             // alert and one whose first re-fire has not happened yet.
-            'created' => ! $existing,
+            'created' => $anyUnderKey === null,
             'status' => $alert->status->value,
             'refired_count' => (int) $alert->refired_count,
         ]);

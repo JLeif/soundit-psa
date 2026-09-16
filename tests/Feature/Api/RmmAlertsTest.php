@@ -136,6 +136,28 @@ class RmmAlertsTest extends TestCase
         $this->assertSame('2 devices lost Huntress coverage.', $alert->message);
     }
 
+    public function test_a_string_client_id_still_refires_its_own_alert(): void
+    {
+        // Laravel's `integer` rule accepts a numeric string without casting
+        // it, so a client_id of "5" survives validation as the string "5".
+        // The model attribute comes back as a native int. If the cross-client
+        // guard compared those with !== it would treat a caller's own
+        // legitimate re-fire as a conflict with a different client, forever.
+        $this->configure();
+        $client = Client::factory()->create();
+
+        $first = $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+
+        $second = $this->postJson('/api/rmm/alerts', $this->payload($client->id, [
+            'client_id' => (string) $client->id,
+        ]), $this->authed())
+            ->assertOk()
+            ->assertJson(['alert_id' => $first->json('alert_id'), 'refired_count' => 1]);
+
+        $this->assertFalse($second->json('created'));
+        $this->assertSame(1, Alert::count());
+    }
+
     public function test_a_different_requirement_gets_its_own_alert(): void
     {
         $this->configure();
