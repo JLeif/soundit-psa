@@ -322,7 +322,7 @@ class ScheduledMailboxTest extends TestCase
         // Advance beyond cooldown without violating the append-only audit table.
         $this->travel(11)->minutes();
         $again = $executor->execute('cipp_stage_convert_mailbox', $args, $this->client->id, 'synthetic');
-        $this->assertStringContainsString('scheduled authorization', $again['error']);
+        $this->assertStringContainsString('scheduled authorization', $again['error'] ?? '');
         $this->assertSame(TechnicianRunState::Scheduled, $run->fresh()->state);
         $this->assertCount(0, $this->wire);
     }
