@@ -2,7 +2,7 @@
 
 namespace App\Services\Technician\Scheduled;
 
-/** Exact future adapter contract. PR1 deliberately wires no adapters. */
+/** Exact approved catalog; installed adapters are a strict subset. */
 final class ActionRegistry
 {
     public const ACTIONS = [
@@ -45,6 +45,6 @@ final class ActionRegistry
 
     public static function adapterAvailable(string $action): bool
     {
-        return false;
+        return MailboxPlan::supports($action);
     }
 }

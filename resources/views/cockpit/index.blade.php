@@ -100,6 +100,7 @@
 @section('content')
 @include('cockpit.partials.email-resolutions')
 @include('cockpit.partials.phone-call-resolutions')
+@include('cockpit.partials.scheduled-results')
 <div
     class="cockpit-shell"
     x-data="cockpitQueue({ counts: @js($counts), csrf: @js(csrf_token()) })"
@@ -475,6 +476,9 @@
 
                         <p class="small text-danger-emphasis fw-semibold mb-2"><i class="bi bi-exclamation-triangle me-1"></i>Executes on the endpoint or account when approved</p>
                         <pre class="cockpit-readout mb-2">{{ $run->proposed_content }}</pre>
+                        @if(config('scheduled_approvals.enabled') && \App\Services\Technician\Scheduled\MailboxPlan::supports($run->action_type) && auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech()))
+                            <a class="btn btn-sm btn-outline-primary mb-2" href="{{ route('cockpit.schedule', $run) }}">Schedule approval instead</a>
+                        @endif
                         @if(!empty($run->proposed_meta['drafted_by']))
                             <p class="text-muted small mb-2">Drafted by: {{ $run->proposed_meta['drafted_by'] }}</p>
                         @endif

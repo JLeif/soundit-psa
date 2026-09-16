@@ -35,6 +35,14 @@ class TechnicianCockpitController extends Controller
 
         return view('cockpit.index', [
             'drafts' => $drafts,
+            // Results remain visible while the feature is off; never hide uncertainty behind a flag.
+            'scheduledResults' => auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech())
+                ? DB::table('scheduled_authorizations')->join('tickets', 'tickets.id', '=', 'scheduled_authorizations.ticket_id')
+                    ->whereColumn('tickets.client_id', 'scheduled_authorizations.client_id')
+                    ->orderByDesc('scheduled_authorizations.id')->limit(100)->get([
+                        'scheduled_authorizations.id', 'run_id', 'scheduled_authorizations.ticket_id', 'action_type',
+                        'scheduled_authorizations.state', 'not_before', 'expires_at', 'display_timezone', 'approver_user_id',
+                    ]) : collect(),
             'emailResolutions' => \App\Models\EmailResolutionProposal::where('state', 'pending')->with('client')->orderBy('id')->get(),
             'canApproveEmailResolution' => app(\App\Services\Email\EmailResolutionService::class)->canApprove(auth()->user()),
             'phoneCallResolutions' => \App\Models\PhoneCallResolutionProposal::where('state', 'pending')->orderBy('id')->get(),
@@ -60,6 +68,8 @@ class TechnicianCockpitController extends Controller
 
     public function approve(Request $request, TechnicianRun $run, TechnicianApprovalService $service)
     {
+        // A crafted deferral must never silently fall through to immediate execution.
+        abort_if($request->hasAny(['execute_not_before', 'schedule', 'start', 'end', 'timezone']), 422, 'Use the explicit scheduled-approval form; immediate approval does not accept deferral.');
         // Dispatch on action_type so future tools (reply, escalate) plug in without rework.
         // Fail-closed: an unrecognized action type must NOT fall through to a send.
         $result = match ($run->action_type) {

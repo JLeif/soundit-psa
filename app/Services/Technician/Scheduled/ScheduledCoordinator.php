@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
-/** Durable substrate: no vendor client, executor, action bus or adapter dispatch. */
+/** Durable claim/intent/settlement fence. Vendor I/O stays outside transactions. */
 final class ScheduledCoordinator
 {
     public function __construct(private ScheduledClock $clock, private ScheduledPolicy $policy) {}
@@ -51,6 +51,11 @@ final class ScheduledCoordinator
         if (! $row || $row->state !== 'claimed' || $row->nonce !== $nonce) {
             return false;
         }
+        if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged()) {
+            $this->defer($id, $nonce, 'kill_switch');
+
+            return false;
+        }
         try {
             $approved = ApprovalEnvelope::open($row->ciphertext ?? '', $row->digest);
             if (! is_array($approved['human_inputs'] ?? null)) {
@@ -62,6 +67,10 @@ final class ScheduledCoordinator
             if (ApprovalEnvelope::canonical($live) !== ApprovalEnvelope::canonical($approved['binding'])) {
                 throw new InvalidArgumentException('identity_changed');
             }
+        } catch (ScheduledUnavailable $e) {
+            $this->defer($id, $nonce, $e->getMessage());
+
+            return false;
         } catch (\Throwable) {
             return $this->block($id, $nonce, 'preflight_refused');
         }
@@ -108,7 +117,7 @@ final class ScheduledCoordinator
             if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy() || $now->lt($row->not_before)) {
                 return false;
             }
-            // PR1 cannot create a dispatchable intent: allowlist != an installed adapter.
+            // Only the explicitly installed mailbox slice may create dispatch intent.
             if (! ActionRegistry::adapterAvailable($row->action_type)) {
                 $this->transition($row, 'blocked', 'adapter_unavailable');
 
@@ -219,7 +228,7 @@ final class ScheduledCoordinator
     /** Terminal settlement never changes an uncertain row or releases it to ordinary approval. */
     public function settle(int $id, string $nonce, string $outcome): bool
     {
-        if (! in_array($outcome, ['completed', 'submitted', 'uncertain'], true)) {
+        if (! in_array($outcome, ['completed', 'failed', 'submitted', 'uncertain'], true)) {
             throw new InvalidArgumentException('invalid_outcome');
         }
 

@@ -11,12 +11,12 @@ use Tests\TestCase;
 
 class ScheduledApprovalPrimitivesTest extends TestCase
 {
-    public function test_exact_allowlist_has_no_wired_adapters(): void
+    public function test_exact_allowlist_has_only_five_mailbox_adapters(): void
     {
         $this->assertCount(30, ActionRegistry::ACTIONS);
         foreach (ActionRegistry::ACTIONS as $action => $tool) {
             $this->assertSame($tool, ActionRegistry::directTool($action));
-            $this->assertFalse(ActionRegistry::adapterAvailable($action));
+            $this->assertSame(in_array($action, ['cipp_stage_convert_mailbox', 'cipp_stage_set_mailbox_forwarding', 'cipp_stage_set_mailbox_gal_visibility', 'cipp_stage_set_mailbox_out_of_office', 'cipp_stage_set_mailbox_delegate'], true), ActionRegistry::adapterAvailable($action));
         }
         foreach (['cipp_stage_reset_user_password', 'cipp_stage_create_user', 'cipp_stage_wipe_device', 'cipp_stage_offboard_user', 'tactical_stage_open_remote_control', 'cipp_stage_future'] as $action) {
             $this->assertNull(ActionRegistry::directTool($action));

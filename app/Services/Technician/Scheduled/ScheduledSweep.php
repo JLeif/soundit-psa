@@ -4,7 +4,7 @@ namespace App\Services\Technician\Scheduled;
 
 use Illuminate\Support\Facades\DB;
 
-/** Bounded polling; no adapter execution exists in this increment. */
+/** Bounded polling with an exact mailbox-only dispatch lane. */
 final class ScheduledSweep
 {
     public function __construct(private ScheduledCoordinator $coordinator, private ScheduledOutbox $outbox) {}
@@ -15,8 +15,10 @@ final class ScheduledSweep
         foreach (DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('expires_at')->limit(100)->pluck('id') as $id) {
             try {
                 $this->coordinator->recover($id);
-                // No evidence provider or mutation adapter wired in PR1, so do not claim work.
                 $counts['recovered']++;
+                if (config('scheduled_approvals.enabled')) {
+                    app(MailboxDispatch::class)->run($id);
+                }
             } catch (\Throwable) {
                 $counts['errors']++;
             }

@@ -23,7 +23,7 @@ final class ScheduledOutbox
                 return false;
             }
             // No raw payload, identity, human text, exception or vendor response is rendered.
-            $event = in_array($item->event, ['scheduled', 'waiting', 'cancelled', 'expired', 'blocked', 'submitted', 'completed', 'uncertain'], true) ? $item->event : 'unknown';
+            $event = in_array($item->event, ['scheduled', 'waiting', 'cancelled', 'expired', 'blocked', 'submitted', 'completed', 'failed', 'uncertain'], true) ? $item->event : 'unknown';
             $body = "Scheduled approval #{$row->id}, run #{$row->run_id}: {$event}. Approver #{$row->approver_user_id}.";
             $reason = in_array($item->reason, ['window_closed', 'attempt_limit', 'operator_cancelled', 'adapter_unavailable', 'preflight_refused', 'authorization_changed', 'intent_outcome_unknown', 'vendor_receipt', 'offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true) ? $item->reason : null;
             if ($reason !== null) {
@@ -54,7 +54,7 @@ final class ScheduledOutbox
     {
         $now = app(ScheduledClock::class)->now();
 
-        return DB::table('scheduled_authorizations')->whereIn('state', ['cancelled', 'expired', 'blocked', 'completed', 'uncertain'])
+        return DB::table('scheduled_authorizations')->whereIn('state', ['cancelled', 'expired', 'blocked', 'completed', 'failed', 'uncertain'])
             ->whereNotNull('finished_at')->where('finished_at', '<=', $now->subDays(30))->whereNotNull('ciphertext')
             ->update(['ciphertext' => null, 'purged_at' => $now]);
     }
