@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Enums\AlertSeverity;
 use App\Enums\AlertSource;
+use App\Enums\AlertStatus;
 use App\Http\Controllers\Controller;
 use App\Models\Alert;
 use App\Services\AlertService;
@@ -65,6 +66,28 @@ class RmmAlertController extends Controller
             ->where('source_alert_id', $data['source_alert_id'])
             ->exists();
 
+        // AlertService::upsert matches purely on source + source_alert_id, with
+        // no client scoping, and neither its re-fire branch nor its revive
+        // branch (a resolved row recurring under the same key) ever updates
+        // client_id. If two different clients ever posted the same
+        // source_alert_id, upsert would silently re-fire or revive the FIRST
+        // client's alert onto the second client's payload - a write against the
+        // wrong client on a live billing system. The RMM's key convention
+        // (<clientId>:<requirement>) prevents this in practice, but that is a
+        // caller convention, not a server-side invariant, so it is guarded here
+        // before upsert runs. Checked against ANY status, not just open ones:
+        // now that a resolved alert can be revived by upsert, a resolved row
+        // under someone else's client is just as much a hazard as an open one.
+        $anyUnderKey = Alert::where('source', AlertSource::LeifRmm)
+            ->where('source_alert_id', $data['source_alert_id'])
+            ->first();
+
+        if ($anyUnderKey !== null && $anyUnderKey->client_id !== $data['client_id']) {
+            return response()->json([
+                'message' => 'An open alert already exists under this source_alert_id for a different client.',
+            ], 422);
+        }
+
         $alert = $this->alerts->upsert(
             AlertSource::LeifRmm,
             $data['source_alert_id'],
@@ -88,5 +111,37 @@ class RmmAlertController extends Controller
             'status' => $alert->status->value,
             'refired_count' => (int) $alert->refired_count,
         ]);
+    }
+
+    /**
+     * POST /api/rmm/alerts/resolve
+     *
+     * The estate healing itself closes its own alert: when every device behind
+     * an alert is `ok` again, the RMM calls this and AlertService settles the
+     * alert, including any ticket already attached to it.
+     *
+     * An unknown or already-resolved key is a SUCCESS, not an error. The RMM
+     * retries, and "nothing is open under this key" is exactly the state it was
+     * asking for - a 404 would make it special-case its own success.
+     */
+    public function resolve(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'source_alert_id' => ['required', 'string', 'max:191'],
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $alert = Alert::where('source', AlertSource::LeifRmm)
+            ->where('source_alert_id', $data['source_alert_id'])
+            ->whereIn('status', [AlertStatus::Active, AlertStatus::Acknowledged, AlertStatus::Ticketed])
+            ->first();
+
+        if ($alert === null) {
+            return response()->json(['resolved' => false, 'alert_id' => null]);
+        }
+
+        $this->alerts->resolve($alert, $data['reason'] ?? null);
+
+        return response()->json(['resolved' => true, 'alert_id' => $alert->id]);
     }
 }

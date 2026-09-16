@@ -190,4 +190,154 @@ class RmmAlertsTest extends TestCase
 
         $this->assertSame(0, Alert::count());
     }
+
+    public function test_refuses_to_refire_or_revive_an_alert_under_another_client(): void
+    {
+        // AlertService::upsert matches on source + source_alert_id with no
+        // client scoping, and neither its re-fire branch nor its revive branch
+        // (a resolved row recurring under the same key) ever updates client_id.
+        // If two different clients ever posted the same source_alert_id, the
+        // second post would silently re-fire or revive the FIRST client's
+        // alert. The RMM's key convention (<clientId>:<requirement>) prevents
+        // this in practice, but that is a caller convention, not a
+        // server-side invariant - so the controller guards it directly, against
+        // ANY status under the key, not just open ones.
+        $this->configure();
+        $clientA = Client::factory()->create();
+        $clientB = Client::factory()->create();
+
+        $raised = $this->postJson('/api/rmm/alerts', $this->payload($clientA->id), $this->authed())->assertOk();
+
+        $this->postJson('/api/rmm/alerts', $this->payload($clientB->id, [
+            'source_alert_id' => $clientA->id.':huntress',
+        ]), $this->authed())
+            ->assertStatus(422)
+            ->assertJson(['message' => 'An open alert already exists under this source_alert_id for a different client.']);
+
+        $this->assertSame(1, Alert::count());
+        $alert = Alert::findOrFail($raised->json('alert_id'));
+        $this->assertSame($clientA->id, $alert->client_id);
+    }
+
+    public function test_refuses_to_revive_a_resolved_alert_under_another_client(): void
+    {
+        $this->configure();
+        $clientA = Client::factory()->create();
+        $clientB = Client::factory()->create();
+
+        $raised = $this->postJson('/api/rmm/alerts', $this->payload($clientA->id), $this->authed())->assertOk();
+        $this->postJson('/api/rmm/alerts/resolve', ['source_alert_id' => $clientA->id.':huntress'], $this->authed())->assertOk();
+
+        $this->postJson('/api/rmm/alerts', $this->payload($clientB->id, [
+            'source_alert_id' => $clientA->id.':huntress',
+        ]), $this->authed())
+            ->assertStatus(422)
+            ->assertJson(['message' => 'An open alert already exists under this source_alert_id for a different client.']);
+
+        $this->assertSame(1, Alert::count());
+        $alert = Alert::findOrFail($raised->json('alert_id'));
+        $this->assertSame($clientA->id, $alert->client_id);
+        $this->assertSame(AlertStatus::Resolved, $alert->status);
+    }
+
+    // -- resolving ------------------------------------------------------------
+
+    public function test_resolves_the_alert_raised_under_that_key(): void
+    {
+        $this->configure();
+        $client = Client::factory()->create();
+        $raised = $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+
+        $this->postJson('/api/rmm/alerts/resolve', [
+            'source_alert_id' => $client->id.':huntress',
+            'reason' => 'All devices returned to ok',
+        ], $this->authed())
+            ->assertOk()
+            ->assertJson(['resolved' => true, 'alert_id' => $raised->json('alert_id')]);
+
+        $this->assertSame(AlertStatus::Resolved, Alert::findOrFail($raised->json('alert_id'))->status);
+    }
+
+    public function test_resolving_an_unknown_key_succeeds_quietly(): void
+    {
+        // The RMM retries. A 404 here would make it special-case a situation
+        // that is not a problem: nothing is open, which is what it wanted.
+        $this->configure();
+
+        $this->postJson('/api/rmm/alerts/resolve', ['source_alert_id' => 'nobody:nothing'], $this->authed())
+            ->assertOk()
+            ->assertJson(['resolved' => false, 'alert_id' => null]);
+    }
+
+    public function test_resolving_twice_is_not_an_error(): void
+    {
+        $this->configure();
+        $client = Client::factory()->create();
+        $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+
+        $body = ['source_alert_id' => $client->id.':huntress'];
+        $this->postJson('/api/rmm/alerts/resolve', $body, $this->authed())->assertOk()->assertJson(['resolved' => true]);
+        $this->postJson('/api/rmm/alerts/resolve', $body, $this->authed())->assertOk()->assertJson(['resolved' => false]);
+    }
+
+    public function test_a_new_alert_after_a_resolve_revives_the_same_row(): void
+    {
+        // alerts has unique(source, source_alert_id), so a resolved row still
+        // owns its key forever - drift that comes back has to revive that same
+        // row, not create a second one under the same key (which the unique
+        // index forbids).
+        $this->configure();
+        $client = Client::factory()->create();
+
+        $first = $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+        $this->postJson('/api/rmm/alerts/resolve', ['source_alert_id' => $client->id.':huntress'], $this->authed())->assertOk();
+        $second = $this->postJson('/api/rmm/alerts', $this->payload($client->id, [
+            'message' => '1 device lost Huntress coverage again.',
+        ]), $this->authed())->assertOk();
+
+        $this->assertSame($first->json('alert_id'), $second->json('alert_id'));
+        $this->assertSame(1, Alert::count());
+
+        $alert = Alert::findOrFail($first->json('alert_id'));
+        $this->assertSame(AlertStatus::Active, $alert->status);
+        $this->assertSame(1, $alert->refired_count);
+        $this->assertNull($alert->resolved_at);
+        $this->assertNull($alert->acknowledged_at);
+        $this->assertSame('1 device lost Huntress coverage again.', $alert->message);
+    }
+
+    public function test_reviving_a_resolved_alert_that_had_a_ticket_preserves_it_in_metadata(): void
+    {
+        $this->configure();
+        $client = Client::factory()->create();
+
+        $raised = $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+        $alert = Alert::findOrFail($raised->json('alert_id'));
+
+        // Attach a ticket directly - no need to exercise the ticket-creation
+        // flow to prove revival preserves the link.
+        $ticket = \App\Models\Ticket::factory()->create(['client_id' => $client->id]);
+        $alert->update(['ticket_id' => $ticket->id]);
+        $this->postJson('/api/rmm/alerts/resolve', ['source_alert_id' => $client->id.':huntress'], $this->authed())->assertOk();
+        $this->assertNotNull($alert->refresh()->resolved_at);
+
+        $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+
+        $revived = $alert->refresh();
+        $this->assertNull($revived->ticket_id);
+        $this->assertSame($ticket->id, $revived->metadata['previous_ticket_id']);
+        $this->assertArrayHasKey('previous_resolved_at', $revived->metadata);
+    }
+
+    public function test_resolve_refuses_without_a_key(): void
+    {
+        $this->configure();
+        $client = Client::factory()->create();
+        $this->postJson('/api/rmm/alerts', $this->payload($client->id), $this->authed())->assertOk();
+
+        $this->postJson('/api/rmm/alerts/resolve', ['source_alert_id' => $client->id.':huntress'])
+            ->assertStatus(401);
+
+        $this->assertSame(AlertStatus::Active, Alert::first()->status);
+    }
 }
