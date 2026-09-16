@@ -476,7 +476,7 @@
 
                         <p class="small text-danger-emphasis fw-semibold mb-2"><i class="bi bi-exclamation-triangle me-1"></i>Executes on the endpoint or account when approved</p>
                         <pre class="cockpit-readout mb-2">{{ $run->proposed_content }}</pre>
-                        @if(config('scheduled_approvals.enabled') && \App\Services\Technician\Scheduled\MailboxPlan::supports($run->action_type) && data_get($run->proposed_meta, 'scheduled_provenance.version') === 1 && auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech()))
+                        @if(config('scheduled_approvals.enabled') && \App\Services\Technician\Scheduled\ActionRegistry::directTool($run->action_type) !== null && data_get($run->proposed_meta, 'scheduled_provenance.version') === 1 && auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech()))
                             <a class="btn btn-sm btn-outline-primary mb-2" href="{{ route('cockpit.schedule', $run) }}">Schedule approval instead</a>
                         @endif
                         @if(!empty($run->proposed_meta['drafted_by']))

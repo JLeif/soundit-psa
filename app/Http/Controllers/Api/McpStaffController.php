@@ -1129,6 +1129,7 @@ class McpStaffController extends Controller
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $staffToken instanceof McpStaffToken ? $staffToken->id : null,
                 );
             } elseif ($this->isHuntressActionTool((string) $name)) {
                 $result = app(StaffHuntressActionToolExecutor::class)->execute(

@@ -1,0 +1,269 @@
+<?php
+
+namespace Tests\Feature\Technician;
+
+use App\Enums\TechnicianRunState;
+use App\Models\Asset;
+use App\Models\Client;
+use App\Models\Setting;
+use App\Models\TacticalAsset;
+use App\Models\TechnicianRun;
+use App\Models\Ticket;
+use App\Models\User;
+use App\Services\Tactical\TacticalClient;
+use App\Services\Technician\Scheduled\ActionRegistry;
+use App\Services\Technician\Scheduled\ScheduledAdmission;
+use App\Services\Technician\Scheduled\ScheduledClock;
+use App\Services\Technician\Scheduled\TacticalDispatch;
+use App\Services\Technician\Scheduled\TacticalEvidence;
+use Carbon\CarbonImmutable;
+use GuzzleHttp\Client as HttpClient;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Psr7\Response;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\TestCase;
+
+class ScheduledTacticalTest extends TestCase
+{
+    use RefreshDatabase;
+
+    protected CarbonImmutable $time;
+
+    protected User $user;
+
+    protected Client $client;
+
+    protected Asset $asset;
+
+    protected Ticket $ticket;
+
+    protected TechnicianRun $run;
+
+    protected array $wire = [];
+
+    protected array $agent = ['agent_id' => 'fixture-agent', 'site' => 17, 'hostname' => 'fixture-device', 'status' => 'online'];
+
+    protected array $services = [['name' => 'Spooler', 'display_name' => 'Print Spooler']];
+
+    protected mixed $response = 'ok';
+
+    protected int $status = 200;
+
+    protected bool $fail = false;
+
+    protected int $reads = 0;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['scheduled_approvals.enabled' => true]);
+        $this->time = CarbonImmutable::parse('2026-09-16 00:00:00', 'UTC');
+        $clock = Mockery::mock(ScheduledClock::class);
+        $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
+        $clock->shouldReceive('healthy')->andReturn(true);
+        $this->app->instance(ScheduledClock::class, $clock);
+        Setting::setValue('tactical_enabled', '1');
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic-key');
+        // All Guzzle requests terminate in this handler: no live socket or vendor.
+        $http = new HttpClient(['base_uri' => 'https://tactical.example.test/', 'handler' => HandlerStack::create(function ($request, $options) {
+            if ($request->getMethod() === 'GET') {
+                $this->reads++;
+                $body = str_starts_with($request->getUri()->getPath(), '/services/') ? $this->services : $this->agent;
+
+                return Create::promiseFor(new Response(200, [], json_encode($body)));
+            }
+            $this->wire[] = ['method' => $request->getMethod(), 'path' => $request->getUri()->getPath(), 'body' => json_decode((string) $request->getBody(), true)];
+            if ($this->fail) {
+                throw new \RuntimeException('synthetic transport timeout');
+            }
+
+            return Create::promiseFor(new Response($this->status, ['Location' => 'https://not-followed.example.test'], json_encode($this->response)));
+        })]);
+        $this->app->instance(TacticalClient::class, new TacticalClient($http));
+        $this->user = User::factory()->create(['role' => 'tech', 'is_active' => true]);
+        $this->client = Client::factory()->create(['tactical_site_id' => '17']);
+        $this->asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'fixture-device']);
+        TacticalAsset::create(['asset_id' => $this->asset->id, 'agent_id' => 'fixture-agent', 'hostname' => 'fixture-device', 'status' => 'online']);
+        $this->ticket = Ticket::factory()->create(['client_id' => $this->client->id]);
+        $this->ticket->assets()->attach($this->asset);
+    }
+
+    protected function proposal(string $type, array $params): void
+    {
+        $this->run = TechnicianRun::create(['ticket_id' => $this->ticket->id, 'client_id' => $this->client->id,
+            'action_type' => $type, 'content_hash' => hash('sha256', json_encode([$type, $params])), 'state' => TechnicianRunState::AwaitingApproval,
+            'proposed_content' => 'Synthetic device proposal', 'proposed_meta' => [
+                'scheduled_provenance' => ['version' => 1, 'kind' => 'native_human', 'user_id' => $this->user->id],
+                'encrypted_payload' => Crypt::encryptString(json_encode(['direct_tool' => ActionRegistry::directTool($type),
+                    'asset_id' => $this->asset->id, 'client_id' => $this->client->id, 'ticket_id' => $this->ticket->id, 'params' => $params])),
+            ]]);
+    }
+
+    protected function admit(array $human = []): int
+    {
+        return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+            '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(TacticalEvidence::class));
+    }
+
+    public static function refusals(): array
+    {
+        return [
+            ['tactical_stage_script', 'unsupported_scheduling_type:tactical_stage_script', true],
+            ['tactical_stage_install_approved_patches', 'unsupported_scheduling_type:tactical_stage_install_approved_patches', true],
+            ['tactical_stage_unknown', 'scheduling_type_not_registered', false],
+        ];
+    }
+
+    #[DataProvider('refusals')]
+    public function test_distinct_visible_admission_refusals(string $type, string $reason, bool $present): void
+    {
+        $this->proposal($type, []);
+        $this->assertSame($present, ActionRegistry::directTool($type) !== null);
+        $this->assertFalse(ActionRegistry::adapterAvailable($type));
+        try {
+            $this->admit();
+            $this->fail('Unsupported admission succeeded');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame($reason, $e->getMessage());
+        }
+        $this->assertSame(0, $this->reads);
+        $this->assertCount(0, $this->wire);
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->actingAs($this->user)->get(route('cockpit.schedule', $this->run))->assertStatus(422)->assertSee($reason);
+        $this->actingAs($this->user)->post(route('cockpit.schedule.store', $this->run), [])->assertStatus(422)->assertSee($reason);
+    }
+
+    public static function invalidArguments(): array
+    {
+        return [
+            ['command', ['cmd' => 'whoami', 'shell' => 'custom', 'timeout' => 30]],
+            ['command', ['cmd' => 'whoami', 'shell' => 'shell', 'timeout' => 30, 'run_as_user' => true]],
+            ['command', ['cmd' => 'whoami', 'shell' => 'shell', 'timeout' => '30']],
+            ['maintenance', ['enabled' => 'false']],
+            ['maintenance', ['enabled' => 1]],
+            ['recover_mesh', ['mode' => 'tacagent']],
+            ['reboot', ['delay' => 600]],
+            ['start_service', ['service_name' => 'Print Spooler']],
+            ['stop_service', ['service_name' => 'spooler']],
+        ];
+    }
+
+    #[DataProvider('invalidArguments')]
+    public function test_argument_policy_refuses_without_write(string $type, array $params): void
+    {
+        $this->proposal('tactical_stage_'.$type, $params);
+        $refused = false;
+        try {
+            $this->admit(in_array($type, ['command', 'reboot'], true) ? ['confirm_hostname' => 'fixture-device'] : ($type === 'stop_service' ? ['confirm_hostname' => 'fixture-device', 'confirm_service_name' => 'spooler'] : []));
+        } catch (\InvalidArgumentException|\App\Services\Tactical\Actions\InvalidActionParams $e) {
+            $refused = true;
+        }
+        $this->assertTrue($refused, 'Bad argument reached scheduling');
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertCount(0, $this->wire);
+    }
+
+    public static function changes(): array
+    {
+        return [['agent'], ['site'], ['hostname'], ['service'], ['boolean'], ['token'], ['link'], ['kill']];
+    }
+
+    #[DataProvider('changes')]
+    public function test_fire_time_mutations_refuse(string $change): void
+    {
+        $this->proposal('tactical_stage_start_service', ['service_name' => 'Spooler']);
+        $id = $this->admit();
+        match ($change) {
+            'agent' => $this->agent['agent_id'] = 'replacement',
+            'site' => $this->agent['site'] = 18,
+            'hostname' => $this->agent['hostname'] = 'replacement',
+            'service' => $this->services = [['name' => 'replacement', 'display_name' => 'Spooler']],
+            'boolean' => $this->agent['site'] = '17',
+            'token' => $this->user->update(['is_active' => false]),
+            'link' => $this->ticket->assets()->detach(),
+            'kill' => config(['scheduled_approvals.enabled' => false]),
+        };
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(0, $this->wire);
+        $this->assertSame($change === 'kill' ? 'waiting' : 'blocked', DB::table('scheduled_authorizations')->value('state'));
+    }
+
+    public static function uncertainReplies(): array
+    {
+        return [[200, ['unexpected' => true], false], [302, 'ok', false], [500, 'ok', false], [200, 'ok', true]];
+    }
+
+    #[DataProvider('uncertainReplies')]
+    public function test_uncertain_transport_never_retries(int $status, mixed $reply, bool $fail): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        $id = $this->admit(['confirm_hostname' => 'fixture-device']);
+        $this->status = $status;
+        $this->response = $reply;
+        $this->fail = $fail;
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(1, $this->wire);
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseCount('scheduled_target_fences', 1);
+    }
+
+    public function test_reconnect_cannot_execute_scheduled_row_and_confirmations_remain_required(): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        try {
+            $this->admit(['confirm_hostname' => 'wrong']);
+            $this->fail('Wrong confirmation accepted');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame('confirmation_mismatch', $e->getMessage());
+        }
+        $id = $this->admit(['confirm_hostname' => 'fixture-device']);
+        app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class)->runQueuedOnReconnect($this->run->fresh());
+        $this->assertCount(0, $this->wire);
+        $this->assertSame('waiting', DB::table('scheduled_authorizations')->find($id)->state);
+        $this->actingAs($this->user)->get(route('cockpit.schedule', $this->run))->assertStatus(409);
+    }
+
+    public static function actions(): array
+    {
+        $host = ['confirm_hostname' => 'fixture-device'];
+        $service = [...$host, 'confirm_service_name' => 'Spooler'];
+
+        return [
+            ['command', ['cmd' => 'whoami', 'shell' => 'powershell', 'timeout' => 30], $host, 'POST', '/agents/fixture-agent/cmd/', ['cmd' => 'whoami', 'shell' => 'powershell', 'timeout' => 30, 'custom_shell' => null, 'run_as_user' => false, 'env_vars' => []], 'fixture output', 'submitted'],
+            ['reboot', [], $host, 'POST', '/agents/fixture-agent/reboot/', [], 'ok', 'completed'],
+            ['shutdown', [], $host, 'POST', '/agents/fixture-agent/shutdown/', [], 'ok', 'completed'],
+            ['recover_mesh', ['mode' => 'mesh'], [], 'POST', '/agents/fixture-agent/recover/', ['mode' => 'mesh'], 'Successfully completed recovery', 'completed'],
+            ['maintenance', ['enabled' => false], [], 'PUT', '/agents/fixture-agent/', ['maintenance_mode' => false], 'The agent was updated successfully', 'completed'],
+            ['start_service', ['service_name' => 'Spooler'], [], 'POST', '/services/fixture-agent/Spooler/', ['sv_action' => 'start'], 'The service was started successfully', 'completed'],
+            ['stop_service', ['service_name' => 'Spooler'], $service, 'POST', '/services/fixture-agent/Spooler/', ['sv_action' => 'stop'], 'The service was stopped successfully', 'completed'],
+            ['restart_service', ['service_name' => 'Spooler'], $service, 'POST', '/services/fixture-agent/Spooler/', ['sv_action' => 'restart'], 'The service was restarted successfully', 'completed'],
+        ];
+    }
+
+    #[DataProvider('actions')]
+    public function test_exact_eight_wire_effects_no_early_or_repeat_send(string $type, array $params, array $human, string $method, string $path, array $body, string $reply, string $outcome): void
+    {
+        $this->proposal('tactical_stage_'.$type, $params);
+        $id = $this->admit($human);
+        $this->assertGreaterThan(0, $this->reads);
+        $this->assertSame(TechnicianRunState::Scheduled, $this->run->fresh()->state);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertCount(0, $this->wire);
+        $this->response = $reply;
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertSame([compact('method', 'path', 'body')], $this->wire);
+        $this->assertSame($outcome, DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseCount('tactical_action_logs', 1);
+    }
+}

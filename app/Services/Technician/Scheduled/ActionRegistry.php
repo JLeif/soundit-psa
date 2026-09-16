@@ -43,8 +43,22 @@ final class ActionRegistry
         return self::ACTIONS[$action] ?? null;
     }
 
+    /** Fixed, distinct admission reason codes. Never echo an arbitrary caller type. */
+    public static function admissionRefusal(string $action): ?string
+    {
+        if (self::directTool($action) === null) {
+            return 'scheduling_type_not_registered';
+        }
+
+        return match ($action) {
+            'tactical_stage_script' => 'unsupported_scheduling_type:tactical_stage_script',
+            'tactical_stage_install_approved_patches' => 'unsupported_scheduling_type:tactical_stage_install_approved_patches',
+            default => null,
+        };
+    }
+
     public static function adapterAvailable(string $action): bool
     {
-        return MailboxPlan::supports($action);
+        return MailboxPlan::supports($action) || TacticalPlan::supports($action);
     }
 }

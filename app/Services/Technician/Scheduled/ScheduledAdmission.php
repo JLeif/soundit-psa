@@ -12,7 +12,7 @@ final class ScheduledAdmission
 {
     public function __construct(private ScheduledClock $clock, private ScheduledPolicy $policy) {}
 
-    /** Internal substrate only. There is no route or evidence implementation in PR1. */
+    /** Transactional admission; per-action evidence binds independently captured confirmations. */
     public function admit(int $runId, int $approverId, string $expectedHash, ?int $tokenId, string $start, string $end, string $zone, array $humanInputs, ScheduledEvidence $evidence): int
     {
         if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
@@ -20,6 +20,9 @@ final class ScheduledAdmission
         }
         $user = $this->policy->approver($approverId);
         $run = TechnicianRun::findOrFail($runId);
+        if ($refusal = ActionRegistry::admissionRefusal($run->action_type)) {
+            throw new InvalidArgumentException($refusal);
+        }
         $this->policy->ticket($run);
         $this->policy->lineage($run, $tokenId);
         $direct = ActionRegistry::directTool($run->action_type);

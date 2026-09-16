@@ -190,14 +190,14 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
     {
         if (! TacticalConfig::isConfigured()) {
             return ['error' => 'Tactical RMM is not configured'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel);
+            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId);
         }
 
         return match ($name) {
@@ -533,7 +533,7 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
     {
         $context = $this->context($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -608,6 +608,9 @@ class StaffTacticalActionToolExecutor
                 'params' => $params,
             ], JSON_THROW_ON_ERROR)),
         ];
+        if ($scheduledTokenId !== null && \App\Services\Technician\Scheduled\ActionRegistry::directTool($tool) !== null) {
+            $meta['scheduled_provenance'] = ['version' => 1, 'kind' => 'mcp', 'token_id' => $scheduledTokenId];
+        }
         $proposedContent = $display."\nReason: ".$reason;
 
         // Keyed on the DB's own idempotency invariant (technician_runs_idempotency:
@@ -636,6 +639,10 @@ class StaffTacticalActionToolExecutor
             ],
         );
 
+        // Scheduled is a permanent tombstone even after settlement: never revive/replay it.
+        if (! $run->wasRecentlyCreated && $run->state === TechnicianRunState::Scheduled) {
+            return ['error' => 'This proposal already has a scheduled authorization; inspect its result.'];
+        }
         if (! $run->wasRecentlyCreated && $run->state !== TechnicianRunState::AwaitingApproval) {
             // Race winner: another request staged this exact content between the
             // liveAwaitingRun() check and this firstOrCreate() call. Never a false
@@ -1076,6 +1083,33 @@ class StaffTacticalActionToolExecutor
             $actorId,
             $payloadHash,
         );
+    }
+
+    /** Scheduled admission/fire-time reuse existing confirmations and cooldown, no mutation. */
+    public function assertScheduledTacticalConfirmation(TechnicianRun $run, Asset $asset, array $params, array $human): void
+    {
+        $tool = \App\Services\Technician\Scheduled\ActionRegistry::directTool($run->action_type);
+        $keys = [];
+        if (in_array($tool, ['tactical_run_command', 'tactical_reboot_device', 'tactical_shutdown_device', 'tactical_stop_service', 'tactical_restart_service'], true)) {
+            $keys[] = 'confirm_hostname';
+        }
+        if (in_array($tool, ['tactical_stop_service', 'tactical_restart_service'], true)) {
+            $keys[] = 'confirm_service_name';
+        }
+        if (array_diff(array_keys($human), $keys) || array_diff($keys, array_keys($human))) {
+            throw new \InvalidArgumentException('confirmation_fields_invalid');
+        }
+        foreach ($human as $value) {
+            if (! is_string($value)) {
+                throw new \InvalidArgumentException('confirmation_fields_invalid');
+            }
+        }
+        if ($this->confirmHostnameError($tool, $human, $asset) || $this->confirmServiceNameError($tool, $human, $params)) {
+            throw new \InvalidArgumentException('confirmation_mismatch');
+        }
+        if ($this->cooldownActive($tool, $asset, Ticket::find($run->ticket_id), self::COOLDOWNS[$tool] ?? 60)) {
+            throw new \App\Services\Technician\Scheduled\ScheduledUnavailable('cooldown');
+        }
     }
 
     private function confirmHostnameError(string $tool, array $arguments, Asset $asset): ?string
