@@ -58,8 +58,10 @@ final class ScheduledCoordinator
         }
         try {
             $approved = ApprovalEnvelope::open($row->ciphertext ?? '', $row->digest);
-            if (! is_array($approved['human_inputs'] ?? null)) {
-                throw new InvalidArgumentException('human_confirmation_missing');
+            if (! is_array($approved['human_inputs'] ?? null)
+                || ! is_array($approved['binding']['human_inputs'] ?? null)
+                || ApprovalEnvelope::canonical($approved['human_inputs']) !== ApprovalEnvelope::canonical($approved['binding']['human_inputs'])) {
+                throw new InvalidArgumentException('human_confirmation_mismatch');
             }
             $run = TechnicianRun::findOrFail($row->run_id);
             $user = $this->policy->approver($row->approver_user_id);

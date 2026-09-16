@@ -54,7 +54,7 @@ class ScheduledApprovalTest extends TestCase
         {
             public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
             {
-                return ['payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
+                return ['human_inputs' => $humanInputs, 'payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
             }
 
             public function revalidate(TechnicianRun $run, User $approver, array $approved): array
