@@ -82,12 +82,13 @@ class ControlDClient
         return json_decode($body, true) ?? [];
     }
 
-    public function postForOrg(string $endpoint, string $orgPk, array $body): array
+    /** $body may carry a deactivation PIN; keep it out of this frame's trace arguments. */
+    public function postForOrg(string $endpoint, string $orgPk, #[\SensitiveParameter] array $body): array
     {
         return $this->requestForOrg('POST', $endpoint, $orgPk, $body);
     }
 
-    public function putForOrg(string $endpoint, string $orgPk, ?array $body = null): array
+    public function putForOrg(string $endpoint, string $orgPk, #[\SensitiveParameter] ?array $body = null): array
     {
         return $this->requestForOrg('PUT', $endpoint, $orgPk, $body);
     }
@@ -97,17 +98,23 @@ class ControlDClient
         return $this->requestForOrg('DELETE', $endpoint, $orgPk);
     }
 
-    /** Strict provisioning transport: no retries, redirects, or secret-bearing errors. */
-    public function requestForOrg(string $method, string $endpoint, string $orgPk, ?array $body = null): array
+    /**
+     * Strict provisioning transport: no retries, redirects, or secret-bearing errors.
+     * $body may carry a deactivation PIN. #[\SensitiveParameter] redacts only the parameter
+     * it decorates, never a copy held by another frame, so every frame that takes the body
+     * annotates it: otherwise the rejection/transport throws below would leave the PIN in
+     * live trace arguments wherever zend.exception_ignore_args is Off.
+     */
+    public function requestForOrg(string $method, string $endpoint, string $orgPk, #[\SensitiveParameter] ?array $body = null): array
     {
         if (! in_array($method, ['GET', 'POST', 'PUT', 'DELETE'], true)
-            || ! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
-                && ! in_array($endpoint, ['devices/types', 'profiles', 'organizations/organization'], true)
+            || (! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
+                && ! in_array($endpoint, ['devices/types', 'profiles', 'organizations/organization'], true))
             || ! preg_match('/\A[A-Za-z0-9_-]+\z/', $orgPk)
             || ! is_string($this->config['api_key'] ?? null) || trim($this->config['api_key']) === '') {
             throw new ControlDClientException('Control D scoped request is invalid or unconfigured.');
         }
-        $options = ['headers' => ['X-Force-Org-Id' => $orgPk], 'allow_redirects' => false];
+        $options = ['headers' => ['X-Force-Org-Id' => $orgPk], 'allow_redirects' => false, 'http_errors' => false];
         if ($body !== null) {
             $options['json'] = $body;
         }
@@ -115,6 +122,19 @@ class ControlDClient
             $response = $this->http->request($method, $endpoint, $options);
         } catch (GuzzleException) {
             // Guzzle messages/previous exceptions may contain codes, PINs or credentials.
+            throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
+        }
+        if ($response->getStatusCode() >= 400 && $response->getStatusCode() < 500) {
+            // Vendor error envelope: https://docs.controld.com/reference/response-conventions
+            // A proxy/WAF status alone does not prove that a POST was not processed.
+            $error = json_decode((string) $response->getBody());
+            if ($error instanceof \stdClass && ($error->success ?? null) === false
+                && ($error->error ?? null) instanceof \stdClass && is_int($error->error->code ?? null)) {
+                if ($method === 'POST') {
+                    throw new ControlDWriteRejectedException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
+                }
+                throw new ControlDClientException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
+            }
             throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
         }
         if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {

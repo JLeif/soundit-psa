@@ -157,7 +157,7 @@ class ControlDProvisioningTest extends TestCase
         $row = $this->row();
         $read = $pin === null ? $row : [...$row, 'deactivation_pin' => $pin];
         $service = $this->service([...$this->preflight(), $this->response(['provision' => [...$row, 'deactivation_pin' => 123]]), $this->response(['provisions' => [$read]])]);
-        $this->refuses(fn () => $service->create('testorg001', $this->fields(), '123'), 'PIN read-back');
+        $this->refuses(fn () => $service->create('testorg001', $this->fields(), '123'), 'uncertain');
         $this->assertCount(4, $this->history);
     }
 
@@ -248,7 +248,7 @@ class ControlDProvisioningTest extends TestCase
         $row = $this->row();
         foreach ([$row, [...$row, 'name_prefix' => 'other']] as $read) {
             $service = $this->service([...$this->preflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [$read]])]);
-            $this->refuses(fn () => $service->create('testorg001', [...$this->fields(), 'name_prefix' => 'TEST-']), 'prefix');
+            $this->refuses(fn () => $service->create('testorg001', [...$this->fields(), 'name_prefix' => 'TEST-']), 'uncertain');
         }
         $this->history = [];
         $service = $this->service([...$this->preflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [[...$row, 'name_prefix' => '']]])]);

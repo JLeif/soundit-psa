@@ -36,11 +36,9 @@ class ControlDConfig
      *
      * Analytics level and intercept mode are the VENDOR'S value space, and this file
      * deliberately does not enumerate it. Cutting a code under a sub-organisation uses
-     * POST /provision, which is not in Control D's public reference, so an allow-list
-     * written here would be a guess that either rejects a legal value or blesses an
-     * illegal one. They are validated where the code is actually cut, against the
-     * vendor's own response — the read-back that every Control D write owes anyway,
-     * since the API answers 200 to a write that changed nothing.
+     * POST /provision. ControlDProvisioning owns the producer-grounded allowlists
+     * and validates before requests, then verifies the effective values by read-back.
+     * Both settings must be explicitly configured; blank never adopts vendor defaults.
      *
      * NORMALISATION, stated exactly rather than as "verbatim": surrounding whitespace
      * is stripped, on write by the controller and again on read here, and nothing else
@@ -192,14 +190,12 @@ class ControlDConfig
     /**
      * Whether the panel carries everything onboarding needs before it may run.
      *
-     * The four required values are the ones whose absence has a wrong answer rather
-     * than no answer: the Tactical field id (step 5 writes to it), the enforced profile
-     * (step 2), and the code's expiry and headroom (step 4). Analytics level and
-     * intercept mode are optional HERE — when blank, onboarding sends nothing for them
-     * rather than inventing a value.
+     * All six values are required: Tactical field id, enforced profile, expiry,
+     * headroom, analytics level and intercept mode. Blank vendor fields mean nobody
+     * has decided yet, not permission to use dashboard defaults.
      *
      * 🔑 WHAT THIS DOES NOT MEAN, because the name is short and the answer is narrow.
-     * True says only that these four local values are present and readable. It does
+     * True says only that these six local values are present and readable. It does
      * NOT mean the integration is enabled, that an API key is stored, that Control D
      * has ever agreed any of these values exist, or that the onboarding verb is
      * granted. Every one of those is a separate check owned somewhere else, and an
@@ -211,7 +207,9 @@ class ControlDConfig
         return self::tacticalClientOrgFieldId() !== null
             && self::defaultProfileId() !== null
             && self::codeExpiryDays() !== null
-            && self::codeDeviceLimitHeadroom() !== null;
+            && self::codeDeviceLimitHeadroom() !== null
+            && self::codeAnalyticsLevel() !== null
+            && self::codeInterceptMode() !== null;
     }
 
     public static function isEnabled(): bool

@@ -2083,8 +2083,9 @@
                         <p class="text-muted small mb-3">
                             Used when a client is onboarded to Control D: the sub-organization is created
                             with the enforced profile below, and its provisioning code is cut with these
-                            defaults. Onboarding refuses to run while any of the first four is blank.
-                            {{-- "Defaults complete", not "Ready": this badge reports only that the four
+                            defaults. All six values are required to onboard; blank analytics or intercept
+                            mode refuses rather than adopting vendor defaults.
+                            {{-- "Defaults complete", not "Ready": this badge reports only that the six
                                  required values on THIS card are filled in. It says nothing about the
                                  integration being enabled, an API key being stored, Control D having
                                  agreed any of these values exist, or the onboarding verb being granted.
@@ -2248,7 +2249,7 @@
                                 @error('code_analytics_level')
                                     <div class="invalid-feedback">{{ $message }}</div>
                                 @enderror
-                                <div class="form-text">Optional. Blank sends nothing.</div>
+                                <div class="form-text">Required to onboard. Blank refuses; no vendor default is applied.</div>
                             </div>
                             <div class="col-md-3 mb-3">
                                 <label for="controld_code_intercept_mode" class="form-label">Intercept mode</label>
@@ -2260,7 +2261,7 @@
                                 @error('code_intercept_mode')
                                     <div class="invalid-feedback">{{ $message }}</div>
                                 @enderror
-                                <div class="form-text">Optional. Blank sends nothing.</div>
+                                <div class="form-text">Required to onboard. Blank refuses; no vendor default is applied.</div>
                             </div>
                         </div>
                     </div>
