@@ -13,7 +13,12 @@ class ScheduledApprovalConfigTest extends TestCase
         return [
             'absent defaults off' => [null, false],
             'explicit false stays off' => ['false', false],
+            'off spelling stays off' => ['off', false],
+            'no spelling stays off' => ['no', false],
+            'disabled spelling stays off' => ['disabled', false],
+            'unparseable value stays off' => ['fasle', false],
             'explicit true enables' => ['true', true],
+            'numeric one enables' => ['1', true],
         ];
     }
 

@@ -3,7 +3,10 @@
 ## Activation runbook
 
 **Readiness is not activation authorization.** The feature defaults off through
-`SCHEDULED_APPROVALS_ENABLED=false`. Charlie alone authorizes activation in this
+`SCHEDULED_APPROVALS_ENABLED=false`. Only `true`, `1`, `on` or `yes` enable it; any
+other value — including off-looking spellings such as `off`, `no` or `disabled`, and
+typos — resolves to `false` rather than failing open. Still verify the effective
+config rather than trusting the written value. Charlie alone authorizes activation in this
 deployment; a reviewed change or dark deployment is not permission to flip it.
 The existing technician kill switch is unchanged.
 
