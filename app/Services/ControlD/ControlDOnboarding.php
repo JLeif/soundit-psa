@@ -23,6 +23,9 @@ class ControlDOnboarding
      */
     public function create(int $clientId, string $icon, #[\SensitiveParameter] ?string $pin = null, ?string $namePrefix = null): void
     {
+        if (DB::transactionLevel() > 0) {
+            throw new ControlDClientException('Onboarding requires an independent transaction; do not call it inside an open one.');
+        }
         $orgPk = null;
         $created = null;
         try {

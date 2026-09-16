@@ -18,6 +18,7 @@ use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\RefreshDatabaseState;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -26,7 +27,18 @@ use Tests\TestCase;
 
 class ControlDOnboardingTest extends TestCase
 {
+    // The writer must own its outer transaction; RefreshDatabase wraps each test
+    // in an ambient transaction and would exercise only the refusal path.
     use RefreshDatabase;
+
+    public function beginDatabaseTransaction(): void
+    {
+        // Fresh isolated test schema per case, without a wrapper transaction or down().
+        // down() intentionally refuses populated secrets; it is not test cleanup.
+        $this->beforeApplicationDestroyed(function (): void {
+            RefreshDatabaseState::$migrated = false;
+        });
+    }
 
     private array $history = [];
 
@@ -108,6 +120,25 @@ class ControlDOnboardingTest extends TestCase
 
             return $e;
         }
+    }
+
+    public function test_ambient_transaction_refuses_before_vendor_or_storage(): void
+    {
+        $client = $this->client();
+        $row = $this->row();
+        $writer = $this->writer([...$this->preflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])]);
+        $this->assertSame(0, DB::transactionLevel());
+        DB::beginTransaction();
+        try {
+            $this->refusal(fn () => $writer->create($client->id, 'desktop-windows'), 'Onboarding requires an independent transaction; do not call it inside an open one.');
+            $this->assertSame(1, DB::transactionLevel());
+            $this->assertCount(0, $this->history);
+            $this->assertNull($client->fresh()->controld_provisioning_code);
+            $this->assertNull($client->fresh()->controld_deactivation_pin);
+        } finally {
+            DB::rollBack();
+        }
+        $this->assertSame(0, DB::transactionLevel());
     }
 
     public function test_wire_readback_encrypted_storage_and_secret_free_audit_without_result(): void
@@ -231,7 +262,7 @@ class ControlDOnboardingTest extends TestCase
     {
         $row = $this->row();
         $fields = array_intersect_key($row, array_flip(['icon', 'profile_id', 'max', 'ts_exp', 'stats', 'intercept_mode']));
-        foreach ([new Response(400, [], 'synthetic-key'), new Response(500, [], 'synthetic-key'), new ConnectException('synthetic-key', new Request('POST', 'https://example.test')), new Response(200, [], '{broken'), $this->response(['provision' => []])] as $index => $response) {
+        foreach ([new Response(400, [], '{"body":[],"success":false,"error":{"message":"synthetic-key","code":40000}}'), new Response(500, [], 'synthetic-key'), new ConnectException('synthetic-key', new Request('POST', 'https://example.test')), new Response(200, [], '{broken'), $this->response(['provision' => []])] as $index => $response) {
             $service = $this->provisioning([...$this->preflight(), $response]);
             $e = $this->refusal(fn () => $service->create('testorg001', $fields), $index === 0 ? 'rejected' : 'uncertain');
             $this->assertInstanceOf($index === 0 ? ControlDWriteRejectedException::class : ControlDWriteUncertainException::class, $e);
@@ -241,6 +272,50 @@ class ControlDOnboardingTest extends TestCase
             }
         }
         $this->assertCount(15, $this->history);
+    }
+
+    public static function ambiguous4xx(): array
+    {
+        // Error envelope contract: docs.controld.com/reference/response-conventions.
+        // These deliberately do NOT meet its explicit false + object + integer code shape.
+        return [
+            'empty 429' => [429, ''],
+            'HTML 403' => [403, '<html>synthetic-key</html>'],
+            'non-envelope JSON' => [400, '{"message":"synthetic-key"}'],
+            'success true' => [400, '{"success":true,"error":{"code":40000}}'],
+            'false string' => [400, '{"success":"false","error":{"code":40000}}'],
+            'error list' => [400, '{"success":false,"error":[40000]}'],
+            'string code' => [400, '{"success":false,"error":{"code":"40000"}}'],
+            'float code' => [400, '{"success":false,"error":{"code":40000.5}}'],
+            'missing code' => [400, '{"success":false,"error":{}}'],
+        ];
+    }
+
+    #[DataProvider('ambiguous4xx')]
+    public function test_envelopeless_post_4xx_is_uncertain(int $status, string $body): void
+    {
+        $client = $this->client();
+        $writer = $this->writer([...$this->preflight(), new Response($status, [], $body)]);
+        $e = $this->refusal(fn () => $writer->create($client->id, 'desktop-windows'), 'uncertain');
+        $this->assertInstanceOf(ControlDWriteUncertainException::class, $e);
+        $this->assertSame('testorg001', $e->orgPk);
+        $this->assertNull($e->provisionPk);
+        $this->assertSame('post', $e->phase);
+        $this->assertCount(3, $this->history);
+        $this->assertNull($client->fresh()->controld_provisioning_code);
+        $this->assertNull($client->fresh()->controld_deactivation_pin);
+    }
+
+    public function test_vendor_rejection_type_is_reserved_for_post(): void
+    {
+        foreach (['GET', 'PUT', 'DELETE'] as $method) {
+            $stack = HandlerStack::create(new MockHandler([new Response(400, [], '{"body":[],"success":false,"error":{"code":40000,"message":"synthetic-key"}}')]));
+            $stack->push(Middleware::history($this->history));
+            $client = new ControlDClient(['api_key' => 'synthetic-key', 'handler' => $stack]);
+            $e = $this->refusal(fn () => $client->requestForOrg($method, 'provision', 'testorg001'), 'explicitly rejected by the vendor envelope');
+            $this->assertSame(ControlDClientException::class, get_class($e));
+        }
+        $this->assertCount(3, $this->history);
     }
 
     public function test_readback_http_4xx_is_uncertain_not_a_definite_nonwrite(): void

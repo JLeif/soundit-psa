@@ -1168,7 +1168,8 @@ A stored code or PIN refuses re-cut. The writer returns no secret-bearing result
 A typed `ControlDWriteUncertainException` carries only org, provision PK when known,
 and phase after a possibly successful POST, failed read-back or failed local commit.
 Do not automatically retry or delete: reconcile upstream and local state first. A
-request explicitly rejected with HTTP 4xx is distinguished from unknown transport
+POST explicitly rejected by the vendor envelope (HTTP 4xx, JSON `success === false`
+with an error object containing an integer code) is distinguished from unknown transport
 outcomes. No production pilot or live vendor write is authorized by installation.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.

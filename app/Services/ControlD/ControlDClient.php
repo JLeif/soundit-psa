@@ -88,7 +88,7 @@ class ControlDClient
         return $this->requestForOrg('POST', $endpoint, $orgPk, $body);
     }
 
-    public function putForOrg(string $endpoint, string $orgPk, ?array $body = null): array
+    public function putForOrg(string $endpoint, string $orgPk, #[\SensitiveParameter] ?array $body = null): array
     {
         return $this->requestForOrg('PUT', $endpoint, $orgPk, $body);
     }
@@ -125,7 +125,17 @@ class ControlDClient
             throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
         }
         if ($response->getStatusCode() >= 400 && $response->getStatusCode() < 500) {
-            throw new ControlDWriteRejectedException('Control D scoped request was rejected (HTTP 4xx).');
+            // Vendor error envelope: https://docs.controld.com/reference/response-conventions
+            // A proxy/WAF status alone does not prove that a POST was not processed.
+            $error = json_decode((string) $response->getBody());
+            if ($error instanceof \stdClass && ($error->success ?? null) === false
+                && ($error->error ?? null) instanceof \stdClass && is_int($error->error->code ?? null)) {
+                if ($method === 'POST') {
+                    throw new ControlDWriteRejectedException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
+                }
+                throw new ControlDClientException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
+            }
+            throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
         }
         if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
             throw new ControlDClientException('Control D scoped request did not succeed.');
