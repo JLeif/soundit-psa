@@ -95,7 +95,8 @@ reboot/shutdown/recovery/maintenance/service results; a raw command receipt is m
 `submitted` because it has no reliable exit-status contract, and it releases its
 reservations because the send itself was observed. Bus refusals decided before execution
 (`denied`/`rejected`/`blocked`) and any binding failure before the send settle `failed`,
-which claims no execution and releases the reservations too. Unexpected bodies, transport
+which claims no execution, records the operator-visible reason `no_vendor_request`
+rather than a vendor receipt, and releases the reservations too. Unexpected bodies, transport
 exceptions and post-intent crash recovery become `uncertain`, retain the target fence and
 never automatically replay. No raw command result is included in the scheduled audit note.
 

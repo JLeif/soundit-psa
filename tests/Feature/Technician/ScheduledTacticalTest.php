@@ -298,6 +298,9 @@ class ScheduledTacticalTest extends TestCase
         app(TacticalDispatch::class)->run($id);
         $this->assertCount(0, $this->wire);
         $this->assertSame('failed', DB::table('scheduled_authorizations')->value('state'));
+        // Nothing was sent, so neither the row nor the operator note may claim a receipt.
+        $this->assertSame('no_vendor_request', DB::table('scheduled_authorizations')->value('reason'));
+        $this->assertSame('no_vendor_request', DB::table('scheduled_note_outbox')->orderByDesc('id')->value('reason'));
         $this->assertDatabaseCount('scheduled_target_fences', 0);
     }
 

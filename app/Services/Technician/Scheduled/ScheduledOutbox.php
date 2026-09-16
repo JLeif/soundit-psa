@@ -25,7 +25,7 @@ final class ScheduledOutbox
             // No raw payload, identity, human text, exception or vendor response is rendered.
             $event = in_array($item->event, ['scheduled', 'waiting', 'cancelled', 'expired', 'blocked', 'submitted', 'completed', 'failed', 'uncertain'], true) ? $item->event : 'unknown';
             $body = "Scheduled approval #{$row->id}, run #{$row->run_id}: {$event}. Approver #{$row->approver_user_id}.";
-            $reason = in_array($item->reason, ['window_closed', 'attempt_limit', 'operator_cancelled', 'adapter_unavailable', 'preflight_refused', 'authorization_changed', 'intent_outcome_unknown', 'vendor_receipt', 'offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true) ? $item->reason : null;
+            $reason = in_array($item->reason, ['window_closed', 'attempt_limit', 'operator_cancelled', 'adapter_unavailable', 'preflight_refused', 'authorization_changed', 'intent_outcome_unknown', 'vendor_receipt', 'no_vendor_request', 'offline', 'read_unavailable', 'cooldown', 'kill_switch', 'clock_unhealthy'], true) ? $item->reason : null;
             if ($reason !== null) {
                 $body .= " Reason: {$reason}.";
             }

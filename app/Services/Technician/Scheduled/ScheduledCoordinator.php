@@ -239,7 +239,14 @@ final class ScheduledCoordinator
             if (! $row || $row->state !== 'dispatch_intent' || $row->nonce !== $nonce) {
                 return false;
             }
-            $this->transition($row, $outcome, $outcome === 'uncertain' ? 'intent_outcome_unknown' : 'vendor_receipt');
+            // 'failed' is only reachable before the send (pre-send bus refusal, changed
+            // dispatch target, envelope/lookup failure): no request reached the provider,
+            // so the persisted and operator-visible reason must not claim a vendor receipt.
+            $this->transition($row, $outcome, match ($outcome) {
+                'uncertain' => 'intent_outcome_unknown',
+                'failed' => 'no_vendor_request',
+                default => 'vendor_receipt',
+            });
 
             return true;
         }, 3);
