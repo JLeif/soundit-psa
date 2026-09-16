@@ -1174,6 +1174,22 @@ POST explicitly rejected by the vendor envelope (HTTP 4xx, JSON `success === fal
 with an error object containing an integer code) is distinguished from unknown transport
 outcomes. No production pilot or live vendor write is authorized by installation.
 
+The separate caller-less B2 `ControlDOnboardingOrganization` service creates NEW
+sub-organizations only. It requires a server-resolved active Admin User and explicit
+name, contact email, MFA choice and analytics-region PK (no inferred defaults).
+It refuses ambient database transactions and every existing client mapping. Vendor
+POST and parent-enumeration read-back occur outside the database transaction; only
+the exact POST PK, listed once with the sent name, may be persisted. Under a client
+row lock it re-reads authorization and mapping state and checks PK conflicts across
+soft-deleted clients too. A `ControlDOrganizationUncertainException` carries optional
+org PK and phase (`post`, `readback`, `local-persistence`) for manual reconciliation;
+never automatically retry or delete an orphan. The audit contains only actor/client
+IDs and org PK. No route, command, MCP grant, activation or pilot is installed.
+B3 still owns staged intent/crash recovery; this is not crash-safe orchestration.
+Rollback before any authorized caller: leave the branch unmerged; after a separately
+authorized release, revert callers/service through normal review, never delete vendor
+organizations or overwrite mappings as an automatic rollback.
+
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
 1. Settings > Integrations > Control D DNS Security (Licensing tab)

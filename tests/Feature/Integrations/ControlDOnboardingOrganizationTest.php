@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Integrations;
 
+use App\Enums\UserRole;
 use App\Models\Client;
 use App\Models\Setting;
 use App\Models\User;
@@ -287,6 +288,37 @@ class ControlDOnboardingOrganizationTest extends TestCase
         foreach ([['GET', 'organizations/suborg', null], ['POST', 'organizations/sub_organizations', []], ['DELETE', 'organizations/suborg', null], ['GET', 'https://example.invalid', null], ['GET', 'organizations/sub_organizations', []]] as [$method, $path, $body]) {
             $this->refusal(fn () => $transport->requestParent($method, $path, $body), ControlDClientException::class);
         }
+        $this->assertCount(0, $this->history);
+    }
+
+    public function test_connection_failure_is_sanitized_uncertain_without_retry(): void
+    {
+        $actor = User::factory()->create(['is_active' => true]);
+        $client = Client::factory()->create();
+        $error = new \GuzzleHttp\Exception\ConnectException('synthetic-key synthetic@example.invalid', new \GuzzleHttp\Psr7\Request('POST', 'https://example.invalid'));
+        $e = $this->refusal(fn () => $this->runCreate($this->writer([$error]), $actor, $client), ControlDOrganizationUncertainException::class);
+        $this->assertNull($e->orgPk);
+        $this->assertCount(1, $this->history);
+    }
+
+    public function test_disabled_and_invalid_explicit_choices_refuse_before_vendor(): void
+    {
+        $actor = User::factory()->create(['is_active' => true]);
+        $client = Client::factory()->create();
+        $writer = $this->writer();
+        foreach ([['', 'x@example.invalid', 1, 'region'], ['Name', 'bad-email', 1, 'region'], ['Name', 'x@example.invalid', 2, 'region'], ['Name', 'x@example.invalid', 1, '']] as [$name, $email, $mfa, $region]) {
+            $this->refusal(fn () => $writer->create($actor, $client->id, $name, $email, $mfa, $region), ControlDClientException::class);
+        }
+        Setting::setValue('controld_enabled', '0');
+        $this->refusal(fn () => $this->runCreate($writer, $actor, $client), ControlDClientException::class);
+        $this->assertCount(0, $this->history);
+    }
+
+    public function test_unconfigured_transport_refuses_and_unsaved_actor_cannot_authorize(): void
+    {
+        $this->refusal(fn () => (new ControlDClient([]))->requestParent('GET', 'organizations/sub_organizations'), ControlDClientException::class);
+        $actor = new User(['role' => UserRole::Admin, 'is_active' => true]);
+        $this->refusal(fn () => $this->runCreate($this->writer(), $actor, Client::factory()->create()), ControlDClientException::class);
         $this->assertCount(0, $this->history);
     }
 
