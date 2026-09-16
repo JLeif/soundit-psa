@@ -319,8 +319,8 @@ class ScheduledMailboxTest extends TestCase
         $this->assertTrue($result['success'] ?? false, json_encode($result));
         $run = TechnicianRun::findOrFail($result['run_id']);
         $run->update(['state' => TechnicianRunState::Scheduled]);
-        // Remove only the synthetic proposal cooldown so the tombstone guard itself is reached.
-        DB::table('technician_action_logs')->delete();
+        // Advance beyond cooldown without violating the append-only audit table.
+        $this->travel(11)->minutes();
         $again = $executor->execute('cipp_stage_convert_mailbox', $args, $this->client->id, 'synthetic');
         $this->assertStringContainsString('scheduled authorization', $again['error']);
         $this->assertSame(TechnicianRunState::Scheduled, $run->fresh()->state);
