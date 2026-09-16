@@ -17,7 +17,8 @@ class ScheduledApprovalPreflightCommand extends Command
         try {
             // No IDs, nonces, payloads, targets, ticket/client data or exception text.
             // Aggregate the entire table in one query, not the cockpit latest-100 view.
-            $known = ['waiting', 'claimed', 'dispatch_intent', 'submitted', 'uncertain', 'failed', 'blocked', 'expired', 'cancelled', 'abandoned_no_send'];
+            // `completed` is the normal terminal success state written by ScheduledCoordinator::settle().
+            $known = ['waiting', 'claimed', 'dispatch_intent', 'submitted', 'uncertain', 'completed', 'failed', 'blocked', 'expired', 'cancelled', 'abandoned_no_send'];
             $counts = array_fill_keys($known, 0);
             $counts['unknown'] = 0;
             foreach (DB::table('scheduled_authorizations')->selectRaw('state, COUNT(*) AS total')->groupBy('state')->get() as $row) {
