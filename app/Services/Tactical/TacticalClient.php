@@ -995,12 +995,15 @@ class TacticalClient
      * classifies (transport => offline, HTTP error => error).
      */
     /** Scheduled-only single send: no redirect, retry, fallback or forgiving JSON decode. */
-    public function submitScheduledOnce(string $type, string $agentId, array $params): mixed
+    public function submitScheduledOnce(string $type, string $agentId, array $params, ?callable $beforeSend = null): mixed
     {
         [$method, $path, $body] = \App\Services\Technician\Scheduled\TacticalPlan::wire($type, $agentId, $params);
+        if ($beforeSend !== null && ! $beforeSend()) {
+            throw new \App\Services\Technician\Scheduled\ScheduledNoSend;
+        }
         $response = $this->http->request($method, $path, [
             'json' => $body, 'allow_redirects' => false, 'http_errors' => false,
-            'connect_timeout' => 10, 'timeout' => min(610, ($params['timeout'] ?? 60) + 10),
+            'connect_timeout' => 10, 'timeout' => min(\App\Services\Technician\Scheduled\ScheduledPolicy::MAX_TRANSPORT_SECONDS, ($params['timeout'] ?? 60) + 10),
         ]);
         if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
             throw new \RuntimeException('scheduled_vendor_receipt_unknown');

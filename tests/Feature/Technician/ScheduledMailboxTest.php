@@ -60,6 +60,8 @@ class ScheduledMailboxTest extends TestCase
 
     protected bool $healthy = true;
 
+    protected ?\Closure $atReceipt = null;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -92,6 +94,10 @@ class ScheduledMailboxTest extends TestCase
             $this->wire[] = ['url' => $r->url(), 'body' => $r->data()];
             if ($this->transportFail) {
                 throw new \Illuminate\Http\Client\ConnectionException('synthetic timeout');
+            }
+
+            if ($this->atReceipt !== null) {
+                ($this->atReceipt)();
             }
 
             return Http::response($this->result, $this->status);
@@ -152,6 +158,48 @@ class ScheduledMailboxTest extends TestCase
             $this->assertTrue((bool) $note->is_private);
             $this->assertStringNotContainsString('approved@example.test', $note->body);
         }
+    }
+
+    public function test_quiesce_after_token_acquisition_prevents_mailbox_send(): void
+    {
+        $this->proposal('cipp_stage_set_mailbox_forwarding', ['mode' => 'external', 'keep_copy' => true, 'external_domain' => 'example.test']);
+        $id = $this->admit(['external_smtp' => 'approved@example.test']);
+        $this->time = $this->time->setTime(1, 0);
+        $client = new class(['api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1', 'client_id' => 'write-client', 'client_secret' => 'synthetic-secret'], Cache::store(), fn () => ['93.184.216.34']) extends CippRestWriteClient
+        {
+            public function submitScheduledMailboxOnce(array $plan, ?callable $beforeSend = null): array
+            {
+                return parent::submitScheduledMailboxOnce($plan, function () use ($beforeSend) {
+                    app(\App\Services\Technician\Scheduled\ScheduledQuiescence::class)->begin();
+
+                    return $beforeSend();
+                });
+            }
+        };
+        $this->app->instance(CippRestWriteClient::class, $client);
+        app(MailboxDispatch::class)->run($id);
+        $this->assertCount(0, $this->wire);
+        $this->assertSame('abandoned_no_send', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseCount('scheduled_late_receipts', 0);
+    }
+
+    public function test_late_mailbox_receipt_is_appended_without_state_reversal(): void
+    {
+        $this->proposal('cipp_stage_set_mailbox_forwarding', ['mode' => 'external', 'keep_copy' => true, 'external_domain' => 'example.test']);
+        $id = $this->admit(['external_smtp' => 'approved@example.test']);
+        $this->time = $this->time->setTime(1, 0);
+        $this->result = ['Results' => ['Successfully set forwarding for owner@synthetic.test to External Address approved@example.test with keeping a copy set to True']];
+        $this->atReceipt = function () use ($id) {
+            $this->time = $this->time->addSeconds(640);
+            app(\App\Services\Technician\Scheduled\ScheduledCoordinator::class)->recover($id);
+        };
+        app(MailboxDispatch::class)->run($id);
+        $this->assertCount(1, $this->wire);
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertDatabaseHas('scheduled_late_receipts', ['authorization_id' => $id, 'vendor' => 'cipp', 'outcome' => 'completed']);
+        app(MailboxDispatch::class)->run($id);
+        $this->assertCount(1, $this->wire);
+        $this->assertDatabaseCount('scheduled_late_receipts', 1);
     }
 
     public static function effects(): array

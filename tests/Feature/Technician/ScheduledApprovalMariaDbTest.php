@@ -143,7 +143,7 @@ class ScheduledApprovalMariaDbTest extends ScheduledApprovalTest
         touch($go);
         $this->assertNotSame(0, proc_close($p));
         $nonce = json_decode(file_get_contents($job['result']));
-        $this->time = $this->time->setTime(1, 5);
+        $this->time = $this->time->setTime(1, 10, 40);
         $c = app(ScheduledCoordinator::class);
         $c->recover($id);
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
@@ -172,7 +172,7 @@ class ScheduledApprovalMariaDbTest extends ScheduledApprovalTest
         } finally {
             DB::unprepared('DROP TRIGGER fail_scheduled_settle');
         }
-        $this->time = $this->time->addMinutes(5);
+        $this->time = $this->time->addSeconds(640);
         $c->recover($id);
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
     }

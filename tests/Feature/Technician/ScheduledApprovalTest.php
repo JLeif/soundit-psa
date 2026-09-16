@@ -148,7 +148,7 @@ class ScheduledApprovalTest extends TestCase
         DB::table('scheduled_authorizations')->where('id', $id)->update(['state' => 'dispatch_intent', 'intent_at' => $this->time]);
         $this->assertFalse($c->cancel($id, $this->user->id));
         $this->assertFalse($c->settle($id, $old, 'completed'));
-        $this->time = $this->time->addMinutes(5);
+        $this->time = $this->time->addSeconds(640);
         $c->recover($id);
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
         $this->assertFalse($c->settle($id, $new, 'completed'));

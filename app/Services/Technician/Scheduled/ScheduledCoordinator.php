@@ -213,7 +213,7 @@ final class ScheduledCoordinator
                 return;
             }
             $now = $this->clock->now();
-            if ($row->state === 'dispatch_intent' && $row->intent_at && $now->gte(\Carbon\CarbonImmutable::parse($row->intent_at, 'UTC')->addMinutes(5))) {
+            if ($row->state === 'dispatch_intent' && $row->intent_at && $now->gte(\Carbon\CarbonImmutable::parse($row->intent_at, 'UTC')->addSeconds(ScheduledPolicy::MAX_TRANSPORT_SECONDS + ScheduledPolicy::RECEIPT_GRACE_SECONDS))) {
                 $this->transition($row, 'uncertain', 'intent_outcome_unknown');
             } elseif (in_array($row->state, ['waiting', 'claimed'], true) && $now->gte($row->expires_at)) {
                 $this->transition($row, 'expired', 'window_closed');
@@ -255,6 +255,41 @@ final class ScheduledCoordinator
             });
 
             return true;
+        }, 3);
+    }
+
+    /** Live last-moment fence. It cannot close the read-to-HTTP window. */
+    public function beforeSend(int $id, string $nonce): bool
+    {
+        return DB::transaction(function () use ($id, $nonce) {
+            $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
+            // A stale holder must never overwrite another nonce or terminal evidence.
+            if (! $row || $row->state !== 'dispatch_intent' || $row->nonce !== $nonce) {
+                return false;
+            }
+            if (app(ScheduledQuiescence::class)->at() !== null) {
+                $this->transition($row, 'abandoned_no_send', 'quiesced_no_send');
+
+                return false;
+            }
+
+            return true;
+        }, 3);
+    }
+
+    /** Append-only late evidence; never reverse terminal state or release its fences. */
+    public function lateReceipt(int $id, string $nonce, string $vendor, ?string $vendorId, string $outcome): void
+    {
+        DB::transaction(function () use ($id, $nonce, $vendor, $vendorId, $outcome) {
+            $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
+            if (! $row || $row->nonce !== $nonce) {
+                return;
+            }
+            DB::table('scheduled_late_receipts')->insert([
+                'authorization_id' => $id, 'nonce' => $nonce, 'vendor' => $vendor,
+                'vendor_id' => $vendorId, 'outcome' => $outcome,
+                'intent_at' => $row->intent_at, 'received_at' => $this->clock->now(),
+            ]);
         }, 3);
     }
 

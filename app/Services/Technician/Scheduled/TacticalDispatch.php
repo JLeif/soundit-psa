@@ -33,13 +33,19 @@ final class TacticalDispatch
             if ($asset->tacticalAsset?->agent_id !== $plan['agent_id'] || (int) $asset->client_id !== (int) $row->client_id) {
                 throw new \RuntimeException('dispatch_target_changed');
             }
-            $action = new TacticalScheduledAction($plan['type']);
+            $action = new TacticalScheduledAction($plan['type'], $id, $nonce);
             $user = User::findOrFail($row->approver_user_id);
             $confirm = $action->isDestructive() ? TacticalActionConfirmToken::issue(
                 $action->key(), $plan['agent_id'], $user->id, $action->payloadHash($plan['params']),
             ) : null;
+            if (! $this->coordinator->beforeSend($id, $nonce)) {
+                return;
+            }
             $outcome = 'uncertain';
             $result = $this->bus->dispatch($action, $asset, $user, $plan['params'], $confirm, 'scheduled:'.$id, $row->ticket_id);
+            if ($action->receiptHandled || $result->message === 'scheduled_no_send') {
+                return;
+            }
             if ($result->isOk() && in_array($result->stdout, ['completed', 'submitted', 'uncertain'], true)) {
                 $outcome = $result->stdout;
             } elseif (in_array($result->status, ['denied', 'rejected', 'blocked'], true)) {
@@ -51,6 +57,11 @@ final class TacticalDispatch
         }
         // Every 'failed' above is decided before the send, so this dispatcher — and only
         // this dispatcher — may state that no request reached the provider.
-        $this->coordinator->settle($id, $nonce, $outcome, $outcome === 'failed' ? 'no_vendor_request' : null);
+        if (! $this->coordinator->settle($id, $nonce, $outcome, $outcome === 'failed' ? 'no_vendor_request' : null)) {
+            // These synchronous endpoints have no stable vendor operation ID.
+            $this->coordinator->lateReceipt($id, $nonce, 'tactical', null, $outcome);
+
+            return;
+        }
     }
 }

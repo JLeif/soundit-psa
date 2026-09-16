@@ -10,6 +10,12 @@ use InvalidArgumentException;
 
 final class ScheduledPolicy
 {
+    public const MAX_TRANSPORT_SECONDS = 610;
+
+    public const RECEIPT_GRACE_SECONDS = 30;
+
+    public const OVERLAP_LOCK = 'scheduled-approvals:sweep-drain';
+
     public function approver(int $id): User
     {
         $user = User::find($id);

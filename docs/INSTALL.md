@@ -374,6 +374,8 @@ These commands execute automatically based on their schedule:
 
 **Ad-hoc maintenance commands** (not scheduled — run manually when needed):
 
+- `php artisan technician:scheduled-drain` — authorized persisted quiesce/wait/recovery; see [scheduled disable/drain](SCHEDULED-APPROVALS.md#disable-and-drain-safely).
+
 | Command | Purpose |
 |---------|---------|
 | `prepay:reconcile` | Recalculate prepay balances from the transaction ledger. Use `--contract=ID` for a specific contract. |

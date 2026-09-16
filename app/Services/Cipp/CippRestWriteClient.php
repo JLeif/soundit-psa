@@ -1031,14 +1031,19 @@ class CippRestWriteClient
     }
 
     /** Scheduled mailbox-only capture: one attempt, no redirect/retry, bounded decoding (#499). */
-    public function submitScheduledMailboxOnce(array $plan): array
+    public function submitScheduledMailboxOnce(array $plan, ?callable $beforeSend = null): array
     {
         [$endpoint, $body] = \App\Services\Technician\Scheduled\MailboxPlan::wire($plan);
         $url = $this->endpointUrl($endpoint);
         $options = $this->safeRequestOptions($url);
         $options['allow_redirects'] = false;
-        $response = Http::timeout(60)->connectTimeout(10)->acceptJson()->asJson()
-            ->withOptions($options)->withToken($this->getToken())->post($url, $body);
+        $request = Http::timeout(60)->connectTimeout(10)->acceptJson()->asJson()
+            ->withOptions($options)->withToken($this->getToken());
+        // Token acquisition and DNS work may block. Re-read AFTER those, at the send.
+        if ($beforeSend !== null && ! $beforeSend()) {
+            throw new \App\Services\Technician\Scheduled\ScheduledNoSend;
+        }
+        $response = $request->post($url, $body);
 
         return ['status' => $response->status(), 'body' => strlen($response->body()) <= 16384 ? $response->json() : null];
     }
