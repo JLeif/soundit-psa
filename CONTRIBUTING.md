@@ -70,7 +70,7 @@ One command decides whether a change is acceptable, and CI runs the same one:
 bash scripts/gc-verify.sh
 ```
 
-It runs, in order: `php artisan test` · `vendor/bin/pint --test` scoped to the PHP files your branch changed against `main` · a real-data and secret guard. That script is the single source of truth — CI runs it, maintainers run it, and so should you before opening a pull request.
+It runs, in order: `php artisan test --fail-on-warning` · `vendor/bin/pint --test` scoped to the PHP files your branch changed against `main` · a real-data and secret guard. PHPUnit warnings fail the gate with a non-zero exit and explicit FAIL (commit `695ea813`, PR #1561); this does not newly fail risky tests or deprecations, whose PHPUnit/config defaults remain unchanged. That script is the single source of truth — CI runs it, maintainers run it, and so should you before opening a pull request.
 
 CI runs on pull requests and on pushes to `main`. Pushing a branch with no open pull request runs nothing, so open the PR if you want the gate's verdict.
 
@@ -78,12 +78,12 @@ One caveat worth knowing, because it makes the gate quietly weaker rather than l
 
 ## Before you write code
 
-The repo documents its own intent; read rather than infer. [`DESIGN.md`](DESIGN.md) for architectural decisions, [`PRODUCT.md`](PRODUCT.md) for what the product is trying to be, [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) for the working conventions — those last two apply to human contributors as much as to agents.
+The repo documents its own intent; read rather than infer. Read [`STANDARDS.md`](STANDARDS.md) for the sourced operative obligations, [`DESIGN.md`](DESIGN.md) for the visual design system (especially §§5–6 before a Blade change), [`PRODUCT.md`](PRODUCT.md) for product intent, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for architecture and integration detail. Full bundled obligations remain at the same tip as the index. These conventions apply to humans as much as to agents; [`AGENTS.md`](AGENTS.md) adds non-interactive shell guidance.
 
 ## Pull requests
 
 - Branch from `main`; keep a pull request to one coherent change.
-- **Say what you tested.** A change to money, permissions, or a customer-visible surface needs a test that would have failed before the change.
+- **Say what you tested.** A change to money, permissions, or a customer-visible surface needs a test that would have failed before the change. Handback includes mutation/red-control evidence: enumerate meaningful mutants and show each assertion-killed; show the new guard failing against unfixed code for the intended behavior, not a missing import or setup error. Restore the source and show the guard and full suite green at the exact handback commit. Pair negative checks with positive controls that reach the behavior on both sides; report failures, skipped checks, denominator and load-path binding, not just a pass count. See [retained evidence contract](docs/DECISIONS.md#evidence).
 - Explain *why*, not just *what*. The history is the durable record of the reasoning.
 - Reviews may come from automated review seats as well as maintainers. Treat a machine-authored review as you would a human one: argue with it if it is wrong.
 
