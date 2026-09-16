@@ -1,0 +1,17 @@
+{
+  "PK": "fixture001",
+  "org": "testorg001",
+  "code": "0123456789abcdef0123456789abcdef",
+  "icon": "desktop-windows",
+  "profile_id": "testprofile01",
+  "profile": {"PK": "testprofile01", "name": "Synthetic profile", "updated": 1700000000},
+  "max": 12,
+  "count": 0,
+  "ts": 1700000000,
+  "ts_exp": 0,
+  "expired": 0,
+  "status": 1,
+  "stats": 0,
+  "intercept_mode": "standard",
+  "ctrld": {"cmd": "synthetic", "script": "synthetic", "filename": "synthetic"}
+}
