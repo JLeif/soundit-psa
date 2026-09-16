@@ -17,6 +17,22 @@ final class ScheduledQuiescence
         return $value === null ? null : CarbonImmutable::parse($value, 'UTC');
     }
 
+    /**
+     * In-transaction marker read. at() is a plain consistent read, so under the server
+     * default REPEATABLE READ it is served from the snapshot the transaction's FIRST
+     * ordinary read opened — a marker committed after that read, but before this check,
+     * would be invisible for the rest of the transaction. A locking read always sees the
+     * latest committed row and holds the key until commit, so a marker cannot land
+     * between the check and the state change it guards. Only call this inside a
+     * transaction; outside one it would lock and release immediately.
+     */
+    public function atForUpdate(): ?CarbonImmutable
+    {
+        $value = DB::table('settings')->where('key', self::KEY)->lockForUpdate()->value('value');
+
+        return $value === null ? null : CarbonImmutable::parse($value, 'UTC');
+    }
+
     public function begin(): CarbonImmutable
     {
         $now = app(ScheduledClock::class)->now();

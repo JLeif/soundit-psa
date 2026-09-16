@@ -114,9 +114,12 @@ revalidation, releasing a claim it already holds back to `waiting` rather than
 carrying it to the send fence, so a row that is still waiting or claimed when the
 marker lands is not terminalized by quiescence. Only a dispatch intent that committed
 before the marker can still reach the fence and become `abandoned_no_send`. The marker
-lives in a different row from the approval, so those re-reads narrow but cannot erase
-the instant between reading it and committing: after a drain, inventory
-`abandoned_no_send` rows rather than assuming none can exist. Both vendor send paths re-read row
+lives in a different row from the approval, so those in-transaction re-reads take it as
+a LOCKING read: a plain consistent read would be answered from the snapshot the
+transaction's first ordinary read opened under the default REPEATABLE READ and could
+miss a marker committed after that point, and the lock is held until the transaction
+commits. After a drain, still inventory `abandoned_no_send` rows rather than assuming
+none can exist. Both vendor send paths re-read row
 state, nonce and marker after preparation (including CIPP token acquisition),
 immediately before transport. A matching unsent intent becomes `abandoned_no_send`;
 a stale holder never overwrites another nonce or terminal evidence. There remains

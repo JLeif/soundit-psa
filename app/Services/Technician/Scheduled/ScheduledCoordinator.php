@@ -142,7 +142,10 @@ final class ScheduledCoordinator
             // taken before the marker is released back to waiting HERE: committing intent now
             // would leave the send fence as its only exit, burning a never-dispatched,
             // human-confirmed approval to terminal abandoned_no_send.
-            if (app(ScheduledQuiescence::class)->at() !== null) {
+            // This MUST be the locking read: the approver/ticket/lineage reads above are plain
+            // consistent reads, so they have already opened this transaction's read view and a
+            // plain at() here would be answered from that older snapshot.
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
                 $this->defer($id, $nonce, 'quiesced_no_send');
 
                 return false;
