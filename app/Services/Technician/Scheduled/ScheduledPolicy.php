@@ -39,7 +39,7 @@ final class ScheduledPolicy
      * never this remainder: a backlog slow enough to exhaust the dispatch share is exactly
      * when the operator most needs the uncertain/blocked notes that backlog generates.
      */
-    public const NOTE_WORK_SECONDS = 300;
+    public const NOTE_WORK_SECONDS = self::MAX_TRANSPORT_SECONDS + self::RECEIPT_GRACE_SECONDS + 300;
 
     /** Latest elapsed second at which a sweep may START dispatching another row. */
     public const DISPATCH_WORK_SECONDS = self::OVERLAP_WORK_SECONDS - self::NOTE_WORK_SECONDS;

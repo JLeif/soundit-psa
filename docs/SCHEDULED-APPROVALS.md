@@ -130,7 +130,8 @@ holders also stop starting new work 2320 elapsed seconds into the run and finish
 the unit already in flight inside the reserved 1280 seconds. That work budget, not the
 size of the lease, is what keeps a live holder inside its own lock; do not force-release
 a live holder. The sweep splits that budget rather than sharing it: it stops starting
-dispatch work at 2020 elapsed seconds, leaving the last 300 seconds for note delivery,
+dispatch work at 1380 elapsed seconds, reserving 940 seconds: one bounded in-flight
+unit plus 300 seconds of note delivery,
 which is local database work only, so a slow vendor backlog can never starve the very
 notes it generates. A sweep that stops on either budget just resumes on the next minute
 and reports the rows it left in `deferred`, so a truncated sweep is never read as an
