@@ -84,7 +84,7 @@ class RmmAlertController extends Controller
 
         if ($anyUnderKey !== null && $anyUnderKey->client_id !== $data['client_id']) {
             return response()->json([
-                'message' => 'An open alert already exists under this source_alert_id for a different client.',
+                'message' => 'An alert already exists under this source_alert_id for a different client.',
             ], 422);
         }
 
