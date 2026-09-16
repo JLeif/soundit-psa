@@ -37,7 +37,7 @@ class ScheduledMailboxController extends Controller
     {
         $this->authorizeRun($run);
         abort_unless(MailboxPlan::supports($run->action_type), 422, 'This action does not support scheduling.');
-        $input = $request->validate([
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
             'content_hash' => ['required', 'string', 'size:64'],
             'start' => ['required', 'date_format:Y-m-d\\TH:i'], 'end' => ['required', 'date_format:Y-m-d\\TH:i'],
             'timezone' => ['required', 'string', 'max:100'], 'confirm' => ['accepted'],
@@ -45,6 +45,11 @@ class ScheduledMailboxController extends Controller
             'internal_message' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'external_message' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ]);
+        if ($validator->fails()) {
+            // Laravel's validate() redirect flashes all input, including mailbox bodies.
+            return redirect()->route('cockpit.index')->with('error', 'Scheduling was refused: invalid confirmation or window. No scheduled submission was made.');
+        }
+        $input = $validator->validated();
         $human = array_intersect_key($input, array_flip(['external_smtp', 'internal_message', 'external_message']));
         $provenance = $run->proposed_meta['scheduled_provenance'] ?? [];
         $tokenId = ($provenance['kind'] ?? null) === 'mcp' ? ($provenance['token_id'] ?? null) : null;

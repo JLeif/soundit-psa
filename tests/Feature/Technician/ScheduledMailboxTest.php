@@ -5,12 +5,14 @@ namespace Tests\Feature\Technician;
 use App\Enums\PersonType;
 use App\Enums\TechnicianRunState;
 use App\Models\Client;
+use App\Models\McpToken;
 use App\Models\Person;
 use App\Models\Setting;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Cipp\CippRestWriteClient;
+use App\Services\Mcp\StaffCippWriteToolExecutor;
 use App\Services\Technician\Scheduled\ApprovalEnvelope;
 use App\Services\Technician\Scheduled\MailboxDispatch;
 use App\Services\Technician\Scheduled\MailboxEvidence;
@@ -277,5 +279,85 @@ class ScheduledMailboxTest extends TestCase
         $this->assertDatabaseCount('scheduled_authorizations', 0);
     }
 
-    // MORE_CONTROLS
+    public function test_invalid_form_never_flashes_sensitive_mailbox_inputs(): void
+    {
+        $this->proposal('cipp_stage_set_mailbox_out_of_office', ['state' => 'Enabled']);
+        $this->actingAs($this->user)->post(route('cockpit.schedule.store', $this->run), [
+            'content_hash' => 'invalid', 'internal_message' => 'private synthetic body', 'external_smtp' => 'private@example.test',
+        ])->assertRedirect()->assertSessionHas('error')->assertSessionMissing('_old_input');
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertCount(0, $this->wire);
+    }
+
+    public function test_mcp_boundary_records_real_token_lineage_and_revocation_blocks_dispatch(): void
+    {
+        $bearer = \App\Support\McpConfig::rotateStaffToken(allowedTools: ['cipp_convert_mailbox:staged'], label: 'synthetic-scheduler');
+        $reply = $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->postJson('/api/mcp/staff', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'cipp_convert_mailbox',
+                'arguments' => ['client_id' => $this->client->id, 'person_id' => $this->owner->id, 'ticket_id' => $this->ticket->id,
+                    'mailbox_type' => 'Shared', 'confirm_upn' => $this->owner->cipp_upn, 'reason' => 'Synthetic control', 'staged' => true]],
+        ])->assertOk();
+        $result = json_decode($reply->json('result.content.0.text'), true);
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $this->run = TechnicianRun::findOrFail($result['run_id']);
+        $token = McpToken::where('label', 'synthetic-scheduler')->sole();
+        $this->assertSame($token->id, $this->run->proposed_meta['scheduled_provenance']['token_id']);
+        $id = app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, $token->id,
+            '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', [], app(MailboxEvidence::class));
+        $token->update(['tools' => []]);
+        $this->time = $this->time->setTime(1, 0);
+        app(MailboxDispatch::class)->run($id);
+        $this->assertSame('blocked', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertCount(0, $this->wire);
+    }
+
+    public function test_scheduled_tombstone_cannot_be_revived_by_restaging(): void
+    {
+        $args = ['person_id' => $this->owner->id, 'ticket_id' => $this->ticket->id, 'mailbox_type' => 'Shared', 'confirm_upn' => $this->owner->cipp_upn, 'reason' => 'Synthetic control'];
+        $executor = app(StaffCippWriteToolExecutor::class);
+        $result = $executor->execute('cipp_stage_convert_mailbox', $args, $this->client->id, 'synthetic');
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $run = TechnicianRun::findOrFail($result['run_id']);
+        $run->update(['state' => TechnicianRunState::Scheduled]);
+        // Remove only the synthetic proposal cooldown so the tombstone guard itself is reached.
+        DB::table('technician_action_logs')->delete();
+        $again = $executor->execute('cipp_stage_convert_mailbox', $args, $this->client->id, 'synthetic');
+        $this->assertStringContainsString('scheduled authorization', $again['error']);
+        $this->assertSame(TechnicianRunState::Scheduled, $run->fresh()->state);
+        $this->assertCount(0, $this->wire);
+    }
+
+    public function test_gal_and_conversion_exact_wires(): void
+    {
+        foreach ([['cipp_stage_set_mailbox_gal_visibility', ['hidden' => true], 'ExecHideFromGAL', 'HideFromGAL', true,
+            'Successfully hidden owner@synthetic.test from GAL.'],
+            ['cipp_stage_convert_mailbox', ['mailbox_type' => 'Shared'], 'ExecConvertMailbox', 'MailboxType', 'Shared',
+                'Successfully converted owner@synthetic.test to a Shared mailbox']] as [$action, $params, $endpoint, $field, $value, $result]) {
+            $this->time = $this->time->setTime(0, 0);
+            $this->proposal($action, $params);
+            $id = $this->admit();
+            $this->time = $this->time->setTime(1, 0);
+            $this->result = ['Results' => $result];
+            app(MailboxDispatch::class)->run($id);
+            $wire = end($this->wire);
+            $this->assertStringEndsWith('/api/'.$endpoint, $wire['url']);
+            $this->assertSame($value, $wire['body'][$field]);
+            $this->assertSame('owner@synthetic.test', $wire['body']['ID']);
+            $this->assertSame('completed', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
+        }
+        $this->assertCount(2, $this->wire);
+    }
+
+    public function test_uncertain_result_is_rendered_even_when_disabled_and_cannot_cancel(): void
+    {
+        $this->proposal('cipp_stage_convert_mailbox', ['mailbox_type' => 'Shared']);
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        app(MailboxDispatch::class)->run($id);
+        config(['scheduled_approvals.enabled' => false]);
+        $this->actingAs($this->user)->get(route('cockpit.index'))->assertOk()->assertSee('Effect unknown. Never retry automatically.')->assertDontSee('Cancel schedule');
+        $this->post(route('cockpit.schedule.cancel', $this->run))->assertSessionHas('error');
+        $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertCount(1, $this->wire);
+    }
 }
