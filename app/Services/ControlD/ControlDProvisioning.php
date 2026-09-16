@@ -19,8 +19,11 @@ class ControlDProvisioning
      * PIN is a separate canonical LOCAL string; null means Prevent Deactivation OFF.
      * Result contains secrets: callers must not log/serialize it to a public surface.
      * A failure after POST is uncertain, not permission to retry or auto-delete.
-     * The PIN is a sensitive parameter: PHP redacts it from exception traces even where
-     * zend.exception_ignore_args is Off, so a refusal cannot write it to the log.
+     * The PIN is a sensitive parameter, and validate() copies it into the request body, so
+     * every frame that then carries that body — preflight(), postForOrg(), requestForOrg() —
+     * annotates its own array parameter as well. PHP therefore redacts the PIN from THESE
+     * frames' trace arguments even where zend.exception_ignore_args is Off. That is a
+     * statement about this path only, not about a caller that copies the body elsewhere.
      */
     public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null): array
     {
@@ -144,7 +147,7 @@ class ControlDProvisioning
         return $fields;
     }
 
-    private function preflight(string $orgPk, array $body): void
+    private function preflight(string $orgPk, #[\SensitiveParameter] array $body): void
     {
         // Live GET /devices/types shape recorded by the producer-contract probe.
         $types = $this->body($this->client->requestForOrg('GET', 'devices/types', $orgPk));

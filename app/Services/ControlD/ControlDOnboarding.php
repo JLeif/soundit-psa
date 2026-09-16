@@ -17,8 +17,9 @@ class ControlDOnboarding
 
     /**
      * No secret-bearing return value. Icon is explicit, never inferred from a mixed fleet.
-     * The PIN is a sensitive parameter: PHP redacts it from exception traces even where
-     * zend.exception_ignore_args is Off, so a refusal cannot write it to the log.
+     * The PIN is a sensitive parameter on every frame of this path that takes it or the
+     * request body built from it, so PHP redacts it from those frames' trace arguments even
+     * where zend.exception_ignore_args is Off. Nothing here logs it.
      */
     public function create(int $clientId, string $icon, #[\SensitiveParameter] ?string $pin = null, ?string $namePrefix = null): void
     {

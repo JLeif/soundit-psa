@@ -82,7 +82,8 @@ class ControlDClient
         return json_decode($body, true) ?? [];
     }
 
-    public function postForOrg(string $endpoint, string $orgPk, array $body): array
+    /** $body may carry a deactivation PIN; keep it out of this frame's trace arguments. */
+    public function postForOrg(string $endpoint, string $orgPk, #[\SensitiveParameter] array $body): array
     {
         return $this->requestForOrg('POST', $endpoint, $orgPk, $body);
     }
@@ -97,8 +98,14 @@ class ControlDClient
         return $this->requestForOrg('DELETE', $endpoint, $orgPk);
     }
 
-    /** Strict provisioning transport: no retries, redirects, or secret-bearing errors. */
-    public function requestForOrg(string $method, string $endpoint, string $orgPk, ?array $body = null): array
+    /**
+     * Strict provisioning transport: no retries, redirects, or secret-bearing errors.
+     * $body may carry a deactivation PIN. #[\SensitiveParameter] redacts only the parameter
+     * it decorates, never a copy held by another frame, so every frame that takes the body
+     * annotates it: otherwise the rejection/transport throws below would leave the PIN in
+     * live trace arguments wherever zend.exception_ignore_args is Off.
+     */
+    public function requestForOrg(string $method, string $endpoint, string $orgPk, #[\SensitiveParameter] ?array $body = null): array
     {
         if (! in_array($method, ['GET', 'POST', 'PUT', 'DELETE'], true)
             || (! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
