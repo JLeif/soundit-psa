@@ -92,4 +92,19 @@ class ScheduledQuiesceTest extends ScheduledApprovalTest
         $this->assertTrue($c->settle($id, $nonce, 'submitted'));
         $this->assertSame('submitted', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
     }
+
+    public function test_live_sweep_during_quiescence_leaves_waiting_approvals_waiting(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        app(\App\Services\Technician\Scheduled\ScheduledQuiescence::class)->begin();
+        app(\App\Services\Technician\Scheduled\ScheduledSweep::class)->run();
+        $row = DB::table('scheduled_authorizations')->find($id);
+        $this->assertSame('waiting', $row->state);
+        $this->assertNull($row->nonce);
+        $this->assertNull($row->intent_at);
+        $this->assertSame(0, (int) $row->attempt);
+        $this->assertNull(app(ScheduledCoordinator::class)->claim($id));
+        $this->assertDatabaseMissing('scheduled_authorizations', ['id' => $id, 'state' => 'abandoned_no_send']);
+    }
 }

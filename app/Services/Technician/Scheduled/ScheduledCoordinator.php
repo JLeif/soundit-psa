@@ -18,6 +18,12 @@ final class ScheduledCoordinator
         if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             return null;
         }
+        // Quiescing is not cancellation. A live sweep reads the marker HERE, before it
+        // can claim: otherwise it would claim, issue intent and then hit the send fence,
+        // burning a never-in-flight waiting approval to terminal abandoned_no_send.
+        if (app(ScheduledQuiescence::class)->at() !== null) {
+            return null;
+        }
 
         return DB::transaction(function () use ($id) {
             $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();

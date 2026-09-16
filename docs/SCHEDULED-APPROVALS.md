@@ -108,7 +108,9 @@ Under an explicitly approved operational procedure, run
 `php artisan technician:scheduled-drain`. This MUTATES a live persisted DB marker
 `scheduled_approvals.quiesced_at` and later delivers private notes; it is not the
 read-only preflight and requires production-setting authorization in production.
-Admission refuses while the marker exists. Both vendor send paths re-read row
+Admission refuses while the marker exists, and a live sweep refuses to claim a
+waiting approval while it exists, so quiescence never drives never-dispatched
+waiting work to `abandoned_no_send`. Both vendor send paths re-read row
 state, nonce and marker after preparation (including CIPP token acquisition),
 immediately before transport. A matching unsent intent becomes `abandoned_no_send`;
 a stale holder never overwrites another nonce or terminal evidence. There remains
