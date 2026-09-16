@@ -12,7 +12,7 @@ class ScheduledClock
 
     public function now(): CarbonImmutable
     {
-        if (DB::connection()->getDriverName() !== 'mysql') {
+        if (! in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
             // SQLite is for unit controls, not operational clock certification.
             return CarbonImmutable::now('UTC');
         }

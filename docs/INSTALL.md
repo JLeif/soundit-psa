@@ -207,6 +207,7 @@ Scheduled approvals use `SCHEDULED_APPROVALS_ENABLED` (default `false`, off; onl
 Any change requires `php artisan config:cache` refresh; follow the
 [activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for authorization,
 long-lived process refresh, pre-flip checks and safe disable/drain steps.
+Run `php artisan technician:scheduled-preflight` for read-only clock certification and exhaustive privacy-safe inventory; see the [runbook](SCHEDULED-APPROVALS.md#before-an-authorized-flip).
 
 All other integrations (NinjaRMM, Level RMM, QuickBooks Online, Plivo) are configured via **Settings > Integrations** in the web UI after your first login. No `.env` variables are needed for these.
 
