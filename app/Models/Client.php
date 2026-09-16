@@ -17,7 +17,7 @@ class Client extends Model
 {
     use HasFactory, SoftDeletes;
 
-    protected $hidden = ['credentials'];
+    protected $hidden = ['credentials', 'controld_provisioning_code', 'controld_deactivation_pin'];
 
     protected $fillable = [
         'halo_id',
@@ -85,6 +85,9 @@ class Client extends Model
             'site_notes_updated_at' => 'datetime',
             'portal_install_token_expires_at' => 'datetime',
             'credentials' => 'encrypted',
+            // Internal onboarding storage only: deliberately not mass assignable or serialized.
+            'controld_provisioning_code' => 'encrypted',
+            'controld_deactivation_pin' => 'encrypted',
             'credentials_updated_at' => 'datetime',
             'comet_backup_password' => 'encrypted',
             'cipp_transport_rules' => 'array',

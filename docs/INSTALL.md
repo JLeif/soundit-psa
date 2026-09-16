@@ -207,6 +207,7 @@ Scheduled approvals use `SCHEDULED_APPROVALS_ENABLED` (default `false`, off; onl
 Any change requires `php artisan config:cache` refresh; follow the
 [activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for authorization,
 long-lived process refresh, pre-flip checks and safe disable/drain steps.
+Run `php artisan technician:scheduled-preflight` for read-only clock certification and exhaustive privacy-safe inventory; see the [runbook](SCHEDULED-APPROVALS.md#before-an-authorized-flip).
 
 All other integrations (NinjaRMM, Level RMM, QuickBooks Online, Plivo) are configured via **Settings > Integrations** in the web UI after your first login. No `.env` variables are needed for these.
 
@@ -1137,6 +1138,21 @@ Syncs backup account counts (M365 mailboxes, DR servers, etc.) from Servosity fo
 5. Click **Sync Licenses Now** or wait for the daily 05:45 cron
 
 ### Control D (DNS Security)
+
+The standard migration adds two nullable encrypted client attributes for future
+onboarding: `controld_provisioning_code` and `controld_deactivation_pin`. They use
+Laravel encryption with the application's `APP_KEY`; retain that key with encrypted
+backups. They are excluded from normal Client array/JSON serialization and generic
+mass assignment. This storage layer does not create a code, populate a client,
+expose a new UI/tool, or enable onboarding. No additional settings or grants are
+required for storage alone.
+
+For an application rollback, leave these additive columns in place. Rolling back
+`2026_09_16_100000_add_controld_onboarding_secrets_to_clients` **drops both columns
+and any stored secrets**; do not run its `down()` on populated production data as an
+application rollback. Neither dropping a column nor clearing a local secret revokes
+an upstream provisioning code. Vendor invalidation and onboarding remain separate
+operations.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 

@@ -46,7 +46,15 @@ is unknown. Reconcile with the relevant vendor (CIPP or Tactical), never auto-re
 ### Before an authorized flip
 
 1. Confirm the reviewed readiness release, migrations and retained evidence schema
-   are present. Inspect existing waiting/claimed/intent rows and unresolved results;
+   are present. Run `php artisan technician:scheduled-preflight` in the application
+   runtime. This read-only command checks DB UTC through `ScheduledClock` (MySQL
+   and MariaDB) and emits exhaustive state counts, including unknown states, with
+   no row IDs, nonces, payloads or client/ticket data. It has no 100-row limit.
+   Exit 0 means clock certified and no pending/unresolved inventory; exit 1 means
+   clock unverified, reconciliation required or unavailable inventory. Neither
+   exit code authorizes activation. Counts are a point-in-time observation, not
+   a quiescence guarantee; repeat after controlled reconciliation and before any
+   separately authorized flip. Inspect existing waiting/claimed/intent rows and unresolved results;
    enabling also allows still-valid pending work to resume. The cockpit is bounded
    to the latest 100, not an exhaustive reconciliation inventory.
 2. Verify production MariaDB UTC and system clock health using `ScheduledClock`:
@@ -70,6 +78,22 @@ processes through the normal operational procedure so they do not retain old con
 new web and console processes must agree. Merely editing `.env` does not refresh
 cached config or a process that already loaded it. Verify cockpit availability and
 sweep execution without staging an unapproved live vendor action.
+
+### Container clock diagnostics (not certification)
+
+The stock Docker runtime is **unsupported for operational clock certification**:
+`healthy()` requires an in-runtime positive `timedatectl` result as well as the
+DB UTC comparison. Do not enable scheduled approvals in that runtime merely
+because the host is synchronized. On the host, `timedatectl show
+--property=NTPSynchronized --value` and `date -u` are diagnostics. Inside the
+application container, run `date -u` and
+`php artisan technician:scheduled-preflight` (using your normal container exec
+command). The preflight queries DB `UTC_TIMESTAMP(6)` via `ScheduledClock` on
+MySQL/MariaDB; missing timedatectl/systemd or unknown NTP remains unverified,
+exit 1. A host `yes` alone cannot make `healthy()` pass. SQLite/fallback drivers
+are explicitly unverified. No privileged container, host socket mount, fake
+binary or alternative trust primitive is prescribed here. Supporting that runtime
+requires a separately reviewed clock-certification design.
 
 ### Disable and drain safely
 
