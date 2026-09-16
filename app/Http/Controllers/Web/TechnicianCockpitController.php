@@ -37,11 +37,14 @@ class TechnicianCockpitController extends Controller
             'drafts' => $drafts,
             // Results remain visible while the feature is off; never hide uncertainty behind a flag.
             'scheduledResults' => auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech())
-                ? DB::table('scheduled_authorizations')->join('tickets', 'tickets.id', '=', 'scheduled_authorizations.ticket_id')
-                    ->whereColumn('tickets.client_id', 'scheduled_authorizations.client_id')
+                ? DB::table('scheduled_authorizations')->leftJoin('tickets', 'tickets.id', '=', 'scheduled_authorizations.ticket_id')
+                    // The ticket/client agreement is DISPLAY-ONLY: a ticket reassigned to another
+                    // client is flagged in its row, never filtered out of the only surface that
+                    // shows an uncertain outcome.
                     ->orderByDesc('scheduled_authorizations.id')->limit(100)->get([
                         'scheduled_authorizations.id', 'run_id', 'scheduled_authorizations.ticket_id', 'action_type',
                         'scheduled_authorizations.state', 'not_before', 'expires_at', 'display_timezone', 'approver_user_id',
+                        'scheduled_authorizations.client_id', 'tickets.client_id as ticket_client_id',
                     ]) : collect(),
             'emailResolutions' => \App\Models\EmailResolutionProposal::where('state', 'pending')->with('client')->orderBy('id')->get(),
             'canApproveEmailResolution' => app(\App\Services\Email\EmailResolutionService::class)->canApprove(auth()->user()),

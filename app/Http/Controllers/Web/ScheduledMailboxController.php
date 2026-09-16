@@ -24,10 +24,19 @@ class ScheduledMailboxController extends Controller
         }
     }
 
+    /** Admission demands recorded staging lineage; without it every admission attempt refuses. */
+    private function hasSchedulingLineage(TechnicianRun $run): bool
+    {
+        $provenance = is_array($run->proposed_meta) ? ($run->proposed_meta['scheduled_provenance'] ?? null) : null;
+
+        return is_array($provenance) && ($provenance['version'] ?? null) === 1;
+    }
+
     public function create(TechnicianRun $run)
     {
         $this->authorizeRun($run);
         abort_unless(config('scheduled_approvals.enabled') && MailboxPlan::supports($run->action_type), 422, 'Scheduling is disabled or unsupported for this action.');
+        abort_unless($this->hasSchedulingLineage($run), 422, 'This proposal carries no recorded staging lineage, so it can never be scheduled. Approve it directly instead.');
         abort_unless($run->state === \App\Enums\TechnicianRunState::AwaitingApproval, 409, 'This proposal is no longer awaiting approval.');
 
         return view('cockpit.schedule', ['run' => $run]);
@@ -37,6 +46,10 @@ class ScheduledMailboxController extends Controller
     {
         $this->authorizeRun($run);
         abort_unless(MailboxPlan::supports($run->action_type), 422, 'This action does not support scheduling.');
+        if (! $this->hasSchedulingLineage($run)) {
+            // Named refusal: lineage is a property of the proposal, not of the window or identity.
+            return redirect()->route('cockpit.index')->with('error', 'This proposal carries no recorded staging lineage, so it cannot be scheduled. Approve it directly instead; no scheduled submission was made.');
+        }
         $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
             'content_hash' => ['required', 'string', 'size:64'],
             'start' => ['required', 'date_format:Y-m-d\\TH:i'], 'end' => ['required', 'date_format:Y-m-d\\TH:i'],
