@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Models\TechnicianRun;
+use App\Services\Technician\Scheduled\ActionRegistry;
 use App\Services\Technician\Scheduled\MailboxEvidence;
-use App\Services\Technician\Scheduled\MailboxPlan;
 use App\Services\Technician\Scheduled\ScheduledAdmission;
 use App\Services\Technician\Scheduled\ScheduledCoordinator;
 use App\Services\Technician\Scheduled\ScheduledPolicy;
+use App\Services\Technician\Scheduled\TacticalEvidence;
+use App\Services\Technician\Scheduled\TacticalPlan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -35,7 +37,8 @@ class ScheduledMailboxController extends Controller
     public function create(TechnicianRun $run)
     {
         $this->authorizeRun($run);
-        abort_unless(config('scheduled_approvals.enabled') && MailboxPlan::supports($run->action_type), 422, 'Scheduling is disabled or unsupported for this action.');
+        abort_if(ActionRegistry::admissionRefusal($run->action_type) !== null, 422, ActionRegistry::admissionRefusal($run->action_type) ?? '');
+        abort_unless(config('scheduled_approvals.enabled') && ActionRegistry::adapterAvailable($run->action_type), 422, 'Scheduling is disabled or unsupported for this action.');
         abort_unless($this->hasSchedulingLineage($run), 422, 'This proposal carries no recorded staging lineage, so it can never be scheduled. Approve it directly instead.');
         abort_unless($run->state === \App\Enums\TechnicianRunState::AwaitingApproval, 409, 'This proposal is no longer awaiting approval.');
 
@@ -45,7 +48,8 @@ class ScheduledMailboxController extends Controller
     public function store(Request $request, TechnicianRun $run, ScheduledAdmission $admission, MailboxEvidence $evidence)
     {
         $this->authorizeRun($run);
-        abort_unless(MailboxPlan::supports($run->action_type), 422, 'This action does not support scheduling.');
+        abort_if(ActionRegistry::admissionRefusal($run->action_type) !== null, 422, ActionRegistry::admissionRefusal($run->action_type) ?? '');
+        abort_unless(ActionRegistry::adapterAvailable($run->action_type), 422, 'This action does not support scheduling.');
         if (! $this->hasSchedulingLineage($run)) {
             // Named refusal: lineage is a property of the proposal, not of the window or identity.
             return redirect()->route('cockpit.index')->with('error', 'This proposal carries no recorded staging lineage, so it cannot be scheduled. Approve it directly instead; no scheduled submission was made.');
@@ -57,13 +61,18 @@ class ScheduledMailboxController extends Controller
             'external_smtp' => ['sometimes', 'nullable', 'email:rfc', 'max:254'],
             'internal_message' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'external_message' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'confirm_hostname' => ['sometimes', 'string', 'max:255'],
+            'confirm_service_name' => ['sometimes', 'string', 'max:255'],
         ]);
         if ($validator->fails()) {
             // Laravel's validate() redirect flashes all input, including mailbox bodies.
             return redirect()->route('cockpit.index')->with('error', 'Scheduling was refused: invalid confirmation or window. No scheduled submission was made.');
         }
         $input = $validator->validated();
-        $human = array_intersect_key($input, array_flip(['external_smtp', 'internal_message', 'external_message']));
+        $human = array_intersect_key($input, array_flip(['external_smtp', 'internal_message', 'external_message', 'confirm_hostname', 'confirm_service_name']));
+        if (TacticalPlan::supports($run->action_type)) {
+            $evidence = app(TacticalEvidence::class);
+        }
         $provenance = $run->proposed_meta['scheduled_provenance'] ?? [];
         $tokenId = ($provenance['kind'] ?? null) === 'mcp' ? ($provenance['token_id'] ?? null) : null;
         try {

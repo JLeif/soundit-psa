@@ -58,8 +58,10 @@ final class ScheduledCoordinator
         }
         try {
             $approved = ApprovalEnvelope::open($row->ciphertext ?? '', $row->digest);
-            if (! is_array($approved['human_inputs'] ?? null)) {
-                throw new InvalidArgumentException('human_confirmation_missing');
+            if (! is_array($approved['human_inputs'] ?? null)
+                || ! is_array($approved['binding']['human_inputs'] ?? null)
+                || ApprovalEnvelope::canonical($approved['human_inputs']) !== ApprovalEnvelope::canonical($approved['binding']['human_inputs'])) {
+                throw new InvalidArgumentException('human_confirmation_mismatch');
             }
             $run = TechnicianRun::findOrFail($row->run_id);
             $user = $this->policy->approver($row->approver_user_id);
@@ -226,18 +228,31 @@ final class ScheduledCoordinator
     }
 
     /** Terminal settlement never changes an uncertain row or releases it to ordinary approval. */
-    public function settle(int $id, string $nonce, string $outcome): bool
+    public function settle(int $id, string $nonce, string $outcome, ?string $failureReason = null): bool
     {
         if (! in_array($outcome, ['completed', 'failed', 'submitted', 'uncertain'], true)) {
             throw new InvalidArgumentException('invalid_outcome');
         }
+        // Only the calling adapter knows whether a request left the PSA, so the
+        // pre-send reason is opt-in and cannot be attached to any other outcome.
+        if ($failureReason !== null && ($outcome !== 'failed' || $failureReason !== 'no_vendor_request')) {
+            throw new InvalidArgumentException('invalid_reason');
+        }
 
-        return DB::transaction(function () use ($id, $nonce, $outcome) {
+        return DB::transaction(function () use ($id, $nonce, $outcome, $failureReason) {
             $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
             if (! $row || $row->state !== 'dispatch_intent' || $row->nonce !== $nonce) {
                 return false;
             }
-            $this->transition($row, $outcome, $outcome === 'uncertain' ? 'intent_outcome_unknown' : 'vendor_receipt');
+            // settle() is shared: an adapter that derives 'failed' from a vendor response
+            // body (mailbox) reports a genuine vendor receipt, while an adapter whose
+            // 'failed' is provably pre-send (tactical) passes 'no_vendor_request' itself.
+            // Never infer "no request reached the provider" from the outcome alone.
+            $this->transition($row, $outcome, match ($outcome) {
+                'uncertain' => 'intent_outcome_unknown',
+                'failed' => $failureReason ?? 'vendor_receipt',
+                default => 'vendor_receipt',
+            });
 
             return true;
         }, 3);
@@ -251,8 +266,9 @@ final class ScheduledCoordinator
             'state' => $state, 'reason' => $reason, 'finished_at' => $now, 'transition_sequence' => $sequence,
         ]);
         DB::table('scheduled_note_outbox')->insert(['authorization_id' => $row->id, 'transition_sequence' => $sequence, 'event' => $state, 'reason' => $reason, 'created_at' => $now]);
-        // Uncertain/submitted reservations remain for explicit read-only reconciliation.
-        if (! in_array($state, ['uncertain', 'submitted'], true)) {
+        // Only uncertain reservations remain, for explicit read-only reconciliation: a
+        // submitted receipt is an observed send, so it must not fence the target forever.
+        if ($state !== 'uncertain') {
             DB::table('scheduled_target_fences')->where('authorization_id', $row->id)->delete();
             DB::table('scheduled_run_fences')->where('authorization_id', $row->id)->delete();
         }

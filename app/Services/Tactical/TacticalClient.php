@@ -994,6 +994,21 @@ class TacticalClient
      * failure raises TacticalClientException, which the action bus catches and
      * classifies (transport => offline, HTTP error => error).
      */
+    /** Scheduled-only single send: no redirect, retry, fallback or forgiving JSON decode. */
+    public function submitScheduledOnce(string $type, string $agentId, array $params): mixed
+    {
+        [$method, $path, $body] = \App\Services\Technician\Scheduled\TacticalPlan::wire($type, $agentId, $params);
+        $response = $this->http->request($method, $path, [
+            'json' => $body, 'allow_redirects' => false, 'http_errors' => false,
+            'connect_timeout' => 10, 'timeout' => min(610, ($params['timeout'] ?? 60) + 10),
+        ]);
+        if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
+            throw new \RuntimeException('scheduled_vendor_receipt_unknown');
+        }
+
+        return json_decode((string) $response->getBody(), true, 32, JSON_THROW_ON_ERROR);
+    }
+
     public function reboot(string $agentId): mixed
     {
         // The reboot endpoint returns the JSON scalar "ok" (not an object), so the
@@ -1474,6 +1489,27 @@ class TacticalClient
 
             return false;
         }
+    }
+
+    /**
+     * Resolve a stored "ClientName|SiteName" mapping to TRMM's numeric site FK,
+     * off the same read-only clients/ listing installs use. Agent payloads carry
+     * that FK, never the names, so evidence has to resolve it before comparing.
+     * Null means the mapping names no live client/site; throws propagate.
+     */
+    public function resolveSiteId(string $siteId): ?int
+    {
+        if (! str_contains($siteId, '|')) {
+            return null;
+        }
+
+        [$clientName, $siteName] = array_map('trim', explode('|', $siteId, 2));
+
+        if ($clientName === '' || $siteName === '') {
+            return null;
+        }
+
+        return $this->lookupSiteIds($clientName, $siteName)['site'] ?? null;
     }
 
     /**

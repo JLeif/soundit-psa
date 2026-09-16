@@ -12,8 +12,25 @@ class ScheduledHumanInputsTest extends ScheduledApprovalTest
 {
     private function admitInputs(array $inputs): int
     {
+        $lossy = new class($this->evidence) implements \App\Services\Technician\Scheduled\ScheduledEvidence
+        {
+            public function __construct(private \App\Services\Technician\Scheduled\ScheduledEvidence $base) {}
+
+            public function approve(\App\Models\TechnicianRun $run, \App\Models\User $user, array $inputs): array
+            {
+                // Preserve the original #1780 deliberately lossy-provider control:
+                // different confirmations produce exactly the same binding.
+                return $this->base->approve($run, $user, []);
+            }
+
+            public function revalidate(\App\Models\TechnicianRun $run, \App\Models\User $user, array $approved): array
+            {
+                return $approved;
+            }
+        };
+
         return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
-            '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', $inputs, $this->evidence);
+            '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', $inputs, $lossy);
     }
 
     public function test_exact_human_inputs_are_encrypted_independently_of_lossy_provider(): void
@@ -68,6 +85,12 @@ class ScheduledHumanInputsTest extends ScheduledApprovalTest
     public function test_preflight_cannot_swap_the_sealed_confirmation_behind_the_final_lock(): void
     {
         $id = $this->admitInputs(['internal_message' => 'Alpha']);
+        // This control targets the later locked comparison, so first make the
+        // copies agree; the separate #1885 tests cover refusal before preflight.
+        $row = DB::table('scheduled_authorizations')->find($id);
+        $values = ApprovalEnvelope::open($row->ciphertext, $row->digest);
+        $values['binding']['human_inputs'] = $values['human_inputs'];
+        DB::table('scheduled_authorizations')->where('id', $id)->update(ApprovalEnvelope::seal($values));
         $this->time = $this->time->setTime(1, 0);
         $coordinator = app(\App\Services\Technician\Scheduled\ScheduledCoordinator::class);
         $nonce = $coordinator->claim($id);

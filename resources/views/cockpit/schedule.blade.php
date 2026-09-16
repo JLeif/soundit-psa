@@ -26,6 +26,20 @@
                 @endif
             @endif
         @endforeach
+        @if(in_array($run->action_type, ['tactical_stage_command', 'tactical_stage_reboot', 'tactical_stage_shutdown', 'tactical_stage_stop_service', 'tactical_stage_restart_service'], true))
+            <label class="form-label" for="schedule-hostname">Type the device hostname to confirm</label>
+            <input class="form-control mb-3" id="schedule-hostname" name="confirm_hostname" required maxlength="255" autocomplete="off">
+        @endif
+        @if(in_array($run->action_type, ['tactical_stage_stop_service', 'tactical_stage_restart_service'], true))
+            <label class="form-label" for="schedule-service">Type the exact service name to confirm</label>
+            <input class="form-control mb-3" id="schedule-service" name="confirm_service_name" required maxlength="255" autocomplete="off">
+        @endif
+        @if($run->action_type === 'tactical_stage_shutdown')
+            <p class="text-danger">Shutdown leaves this device powered off. Remote power-on may not be available.</p>
+        @endif
+        @if($run->action_type === 'tactical_stage_command')
+            <p>A command receipt is marked submitted, not proof of a successful exit. It is never automatically replayed.</p>
+        @endif
         <p class="small">Confirmation inputs are encrypted, retained until 30 days after the terminal result, then purged. Cancellation is possible only before dispatch intent wins. Unknown outcomes are marked uncertain and never automatically retried.</p>
         <div class="form-check mb-3"><input class="form-check-input" type="checkbox" name="confirm" id="schedule-confirm" value="1" required><label class="form-check-label" for="schedule-confirm">I approve this proposal and window for one scheduled submission.</label></div>
         <button class="btn btn-primary" type="submit">Approve schedule</button>

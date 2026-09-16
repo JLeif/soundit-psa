@@ -1124,11 +1124,13 @@ class McpStaffController extends Controller
                     $clientId,
                 );
             } elseif ($this->isTacticalActionTool((string) $name)) {
+                $staffToken = $request->attributes->get('mcp_staff_token');
                 $result = app(StaffTacticalActionToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $staffToken instanceof McpStaffToken ? $staffToken->id : null,
                 );
             } elseif ($this->isHuntressActionTool((string) $name)) {
                 $result = app(StaffHuntressActionToolExecutor::class)->execute(

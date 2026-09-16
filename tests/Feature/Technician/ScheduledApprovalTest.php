@@ -54,7 +54,7 @@ class ScheduledApprovalTest extends TestCase
         {
             public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
             {
-                return ['payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
+                return ['human_inputs' => $humanInputs, 'payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
             }
 
             public function revalidate(TechnicianRun $run, User $approver, array $approved): array
@@ -120,7 +120,8 @@ class ScheduledApprovalTest extends TestCase
 
     public function test_uninstalled_adapter_cannot_fire_even_when_flag_and_clock_are_healthy(): void
     {
-        $this->run->update(['action_type' => 'tactical_stage_reboot']);
+        // PR3 now installs reboot; the not-yet-enrolled CIPP sign-in adapter stays absent.
+        $this->run->update(['action_type' => 'cipp_stage_disable_user_sign_in']);
         $id = $this->admit();
         $this->time = $this->time->setTime(1, 0);
         $c = app(ScheduledCoordinator::class);

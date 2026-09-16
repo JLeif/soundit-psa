@@ -4,7 +4,7 @@ namespace App\Services\Technician\Scheduled;
 
 use Illuminate\Support\Facades\DB;
 
-/** Bounded polling with an exact mailbox-only dispatch lane. */
+/** Bounded polling; each installed dispatcher accepts only its exact action subset. */
 final class ScheduledSweep
 {
     public function __construct(private ScheduledCoordinator $coordinator, private ScheduledOutbox $outbox) {}
@@ -18,6 +18,7 @@ final class ScheduledSweep
                 $counts['recovered']++;
                 if (config('scheduled_approvals.enabled')) {
                     app(MailboxDispatch::class)->run($id);
+                    app(TacticalDispatch::class)->run($id);
                 }
             } catch (\Throwable) {
                 $counts['errors']++;
