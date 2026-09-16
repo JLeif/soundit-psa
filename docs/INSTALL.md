@@ -1177,7 +1177,9 @@ outcomes. No production pilot or live vendor write is authorized by installation
 The separate caller-less B2 `ControlDOnboardingOrganization` service creates NEW
 sub-organizations only. It requires a server-resolved active Admin User and explicit
 name, contact email, MFA choice and analytics-region PK (no inferred defaults).
-It refuses ambient database transactions and every existing client mapping. Vendor
+It refuses ambient database transactions and every existing client mapping. A disabled
+master switch or a missing API key refuses definitely before any request is sent and is
+never reported as an uncertain vendor outcome. Vendor
 POST and parent-enumeration read-back occur outside the database transaction; only
 the exact POST PK, listed once with the sent name, may be persisted. Under a client
 row lock it re-reads authorization and mapping state and checks PK conflicts across

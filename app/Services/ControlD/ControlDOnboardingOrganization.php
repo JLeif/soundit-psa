@@ -30,6 +30,11 @@ class ControlDOnboardingOrganization
         if (! ControlDConfig::isEnabled()) {
             throw new ControlDClientException('Control D is disabled.');
         }
+        // Pre-flight the transport credential: a missing key sends nothing, so it is a
+        // definite local refusal, never an uncertain outcome that needs reconciliation.
+        if (! $this->vendor->isConfigured()) {
+            throw new ControlDClientException('Control D parent transport is unconfigured.');
+        }
         if (trim($name) === '' || trim($name) !== $name || mb_strlen($name) > 255
             || preg_match('/[\x00-\x1f\x7f]/', $name)
             || ! filter_var($contactEmail, FILTER_VALIDATE_EMAIL)

@@ -154,6 +154,16 @@ class ControlDClient
     }
 
     /**
+     * Parent transport credential pre-flight. A caller can refuse definitely before
+     * any request is sent, instead of mislabelling a purely local refusal as an
+     * unknown vendor outcome. requestParent applies exactly this check itself.
+     */
+    public function isConfigured(): bool
+    {
+        return is_string($this->config['api_key'] ?? null) && trim($this->config['api_key']) !== '';
+    }
+
+    /**
      * Parent-only B2 transport. Exact method/path pairs, never the legacy raw-error GET.
      * Producer: docs.controld.com/reference/post_organizations-suborg (OpenAPI 3.0.1).
      * Create accepts form encoding, not an assumed JSON contract.
@@ -162,7 +172,7 @@ class ControlDClient
     {
         if (! (($method === 'POST' && $endpoint === 'organizations/suborg' && $body !== null)
             || ($method === 'GET' && $endpoint === 'organizations/sub_organizations' && $body === null))
-            || ! is_string($this->config['api_key'] ?? null) || trim($this->config['api_key']) === '') {
+            || ! $this->isConfigured()) {
             throw new ControlDClientException('Control D parent request is invalid or unconfigured.');
         }
         $options = ['allow_redirects' => false, 'http_errors' => false];

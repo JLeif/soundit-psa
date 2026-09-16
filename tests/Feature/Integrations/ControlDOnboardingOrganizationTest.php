@@ -314,6 +314,19 @@ class ControlDOnboardingOrganizationTest extends TestCase
         $this->assertCount(0, $this->history);
     }
 
+    public function test_unconfigured_key_refuses_definitely_before_any_request(): void
+    {
+        $actor = User::factory()->create(['is_active' => true]);
+        $client = Client::factory()->create();
+        $stack = HandlerStack::create(new MockHandler(array_fill(0, 4, new Response(503))));
+        $stack->push(Middleware::history($this->history));
+        $writer = new ControlDOnboardingOrganization(new ControlDClient(['api_key' => ' ', 'handler' => $stack]));
+        $e = $this->refusal(fn () => $this->runCreate($writer, $actor, $client), ControlDClientException::class);
+        $this->assertNotInstanceOf(ControlDOrganizationUncertainException::class, $e);
+        $this->assertCount(0, $this->history);
+        $this->assertNull($client->fresh()->controld_org_id);
+    }
+
     public function test_unconfigured_transport_refuses_and_unsaved_actor_cannot_authorize(): void
     {
         $this->refusal(fn () => (new ControlDClient([]))->requestParent('GET', 'organizations/sub_organizations'), ControlDClientException::class);
