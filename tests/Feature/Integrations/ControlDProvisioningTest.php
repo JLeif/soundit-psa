@@ -55,7 +55,9 @@ class ControlDProvisioningTest extends TestCase
 
     private function client(array $responses): ControlDClient
     {
-        $stack = HandlerStack::create(new MockHandler($responses));
+        // Extra calls get a controlled vendor refusal, never a live request or a
+        // missing-mock error masquerading as a behavioral mutation kill.
+        $stack = HandlerStack::create(new MockHandler([...$responses, ...array_fill(0, 10, $this->response((object) [], false))]));
         $stack->push(Middleware::history($this->history));
 
         return new ControlDClient(['api_key' => 'synthetic-key', 'handler' => $stack]);
