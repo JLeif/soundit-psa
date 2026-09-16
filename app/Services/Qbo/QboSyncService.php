@@ -614,12 +614,20 @@ class QboSyncService
             }
 
             $detail = $qboLine['SalesItemLineDetail'] ?? [];
-            $psaLine->update([
-                'description' => $qboLine['Description'] ?? $psaLine->description,
-                'quantity' => (float) ($detail['Qty'] ?? $psaLine->quantity),
-                'unit_price' => (float) ($detail['UnitPrice'] ?? $psaLine->unit_price),
-                'amount' => (float) ($qboLine['Amount'] ?? $psaLine->amount),
-            ]);
+            try {
+                $psaLine->update([
+                    // VARCHAR(255) is a character limit, not a byte/display-width
+                    // limit. Keep the existing schema; full text remains in QBO.
+                    'description' => mb_substr($qboLine['Description'] ?? $psaLine->description, 0, 255, 'UTF-8'),
+                    'quantity' => (float) ($detail['Qty'] ?? $psaLine->quantity),
+                    'unit_price' => (float) ($detail['UnitPrice'] ?? $psaLine->unit_price),
+                    'amount' => (float) ($qboLine['Amount'] ?? $psaLine->amount),
+                ]);
+            } catch (\Throwable $e) {
+                // Other callers may log/report the thrown exception. Do not
+                // propagate a QueryException's SQL, bindings or previous chain.
+                throw new QboLineSyncException($i, $e::class);
+            }
         }
     }
 
@@ -797,9 +805,10 @@ class QboSyncService
                     $results['reverted']++;
                 }
             } catch (\Throwable $e) {
-                Log::error("[QboSync] Failed to re-check paid invoice {$invoice->invoice_number}", [
+                Log::error('[QboSync] Failed to re-check paid invoice', [
                     'invoice_id' => $invoice->id,
-                    'error' => $e->getMessage(),
+                    'line_index' => $e instanceof QboLineSyncException ? $e->lineIndex : null,
+                    'exception_class' => $e instanceof QboLineSyncException ? $e->exceptionClass : $e::class,
                 ]);
                 $results['errors']++;
             }
