@@ -14,6 +14,8 @@ class ControlDClient
         private readonly array $config,
     ) {
         $this->http = new Client([
+            // Handler injection keeps wire-level tests off the live vendor.
+            'handler' => $this->config['handler'] ?? null,
             'base_uri' => 'https://api.controld.com/',
             'timeout' => 30,
             'headers' => [
@@ -78,6 +80,57 @@ class ControlDClient
         $body = (string) $response->getBody();
 
         return json_decode($body, true) ?? [];
+    }
+
+    public function postForOrg(string $endpoint, string $orgPk, array $body): array
+    {
+        return $this->requestForOrg('POST', $endpoint, $orgPk, $body);
+    }
+
+    public function putForOrg(string $endpoint, string $orgPk, ?array $body = null): array
+    {
+        return $this->requestForOrg('PUT', $endpoint, $orgPk, $body);
+    }
+
+    public function deleteForOrg(string $endpoint, string $orgPk): array
+    {
+        return $this->requestForOrg('DELETE', $endpoint, $orgPk);
+    }
+
+    /** Strict provisioning transport: no retries, redirects, or secret-bearing errors. */
+    public function requestForOrg(string $method, string $endpoint, string $orgPk, ?array $body = null): array
+    {
+        if (! in_array($method, ['GET', 'POST', 'PUT', 'DELETE'], true)
+            || ! preg_match('/\Aprovision(?:\/[A-Za-z0-9_-]+(?:\/invalidate)?)?\z/', $endpoint)
+                && ! in_array($endpoint, ['devices/types', 'profiles', 'organizations/organization'], true)
+            || ! preg_match('/\A[A-Za-z0-9_-]+\z/', $orgPk)
+            || ! is_string($this->config['api_key'] ?? null) || trim($this->config['api_key']) === '') {
+            throw new ControlDClientException('Control D scoped request is invalid or unconfigured.');
+        }
+        $options = ['headers' => ['X-Force-Org-Id' => $orgPk], 'allow_redirects' => false];
+        if ($body !== null) {
+            $options['json'] = $body;
+        }
+        try {
+            $response = $this->http->request($method, $endpoint, $options);
+        } catch (GuzzleException) {
+            // Guzzle messages/previous exceptions may contain codes, PINs or credentials.
+            throw new ControlDClientException('Control D scoped request failed; outcome may be unknown.');
+        }
+        if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
+            throw new ControlDClientException('Control D scoped request did not succeed.');
+        }
+        try {
+            $decoded = json_decode((string) $response->getBody(), false, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw new ControlDClientException('Control D response is not valid JSON.');
+        }
+        if (! $decoded instanceof \stdClass || ($decoded->success ?? null) !== true) {
+            throw new ControlDClientException('Control D response did not confirm success.');
+        }
+
+        // Keep container identity for strict response-shape checks at the consumer.
+        return ['success' => true, 'body' => $decoded->body ?? null];
     }
 
     /**
