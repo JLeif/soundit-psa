@@ -67,17 +67,21 @@ class RmmAlertController extends Controller
             ->exists();
 
         // AlertService::upsert matches purely on source + source_alert_id, with
-        // no client scoping, and neither its re-fire branch nor its revive
-        // branch (a resolved row recurring under the same key) ever updates
-        // client_id. If two different clients ever posted the same
-        // source_alert_id, upsert would silently re-fire or revive the FIRST
-        // client's alert onto the second client's payload - a write against the
-        // wrong client on a live billing system. The RMM's key convention
-        // (<clientId>:<requirement>) prevents this in practice, but that is a
-        // caller convention, not a server-side invariant, so it is guarded here
-        // before upsert runs. Checked against ANY status, not just open ones:
-        // now that a resolved alert can be revived by upsert, a resolved row
-        // under someone else's client is just as much a hazard as an open one.
+        // no client scoping. Its re-fire branch never updates client_id, but
+        // its revive branch (a resolved row recurring under the same key)
+        // does - that's exactly the hazard: if two different clients ever
+        // posted the same source_alert_id, upsert could silently move the
+        // FIRST client's resolved alert onto the second client's payload - a
+        // write against the wrong client on a live billing system.
+        // AlertService itself now refuses that specific move with an
+        // exception (see its revive branch), but that's a loud 500 for a
+        // situation this guard can turn into a clean 422 before upsert ever
+        // runs. The RMM's key convention (<clientId>:<requirement>) prevents
+        // the collision in practice, but that is a caller convention, not a
+        // server-side invariant, so it is guarded here too. Checked against
+        // ANY status, not just open ones: now that a resolved alert can be
+        // revived by upsert, a resolved row under someone else's client is
+        // just as much a hazard as an open one.
         $anyUnderKey = Alert::where('source', AlertSource::LeifRmm)
             ->where('source_alert_id', $data['source_alert_id'])
             ->first();
