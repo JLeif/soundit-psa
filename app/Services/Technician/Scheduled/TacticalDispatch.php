@@ -49,6 +49,8 @@ final class TacticalDispatch
         } catch (\Throwable) {
             // No raw vendor/command bytes to logs, flash or scheduled notes.
         }
-        $this->coordinator->settle($id, $nonce, $outcome);
+        // Every 'failed' above is decided before the send, so this dispatcher — and only
+        // this dispatcher — may state that no request reached the provider.
+        $this->coordinator->settle($id, $nonce, $outcome, $outcome === 'failed' ? 'no_vendor_request' : null);
     }
 }

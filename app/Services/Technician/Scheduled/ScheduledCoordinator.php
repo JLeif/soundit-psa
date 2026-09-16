@@ -228,23 +228,29 @@ final class ScheduledCoordinator
     }
 
     /** Terminal settlement never changes an uncertain row or releases it to ordinary approval. */
-    public function settle(int $id, string $nonce, string $outcome): bool
+    public function settle(int $id, string $nonce, string $outcome, ?string $failureReason = null): bool
     {
         if (! in_array($outcome, ['completed', 'failed', 'submitted', 'uncertain'], true)) {
             throw new InvalidArgumentException('invalid_outcome');
         }
+        // Only the calling adapter knows whether a request left the PSA, so the
+        // pre-send reason is opt-in and cannot be attached to any other outcome.
+        if ($failureReason !== null && ($outcome !== 'failed' || $failureReason !== 'no_vendor_request')) {
+            throw new InvalidArgumentException('invalid_reason');
+        }
 
-        return DB::transaction(function () use ($id, $nonce, $outcome) {
+        return DB::transaction(function () use ($id, $nonce, $outcome, $failureReason) {
             $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
             if (! $row || $row->state !== 'dispatch_intent' || $row->nonce !== $nonce) {
                 return false;
             }
-            // 'failed' is only reachable before the send (pre-send bus refusal, changed
-            // dispatch target, envelope/lookup failure): no request reached the provider,
-            // so the persisted and operator-visible reason must not claim a vendor receipt.
+            // settle() is shared: an adapter that derives 'failed' from a vendor response
+            // body (mailbox) reports a genuine vendor receipt, while an adapter whose
+            // 'failed' is provably pre-send (tactical) passes 'no_vendor_request' itself.
+            // Never infer "no request reached the provider" from the outcome alone.
             $this->transition($row, $outcome, match ($outcome) {
                 'uncertain' => 'intent_outcome_unknown',
-                'failed' => 'no_vendor_request',
+                'failed' => $failureReason ?? 'vendor_receipt',
                 default => 'vendor_receipt',
             });
 

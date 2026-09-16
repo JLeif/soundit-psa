@@ -96,7 +96,10 @@ reboot/shutdown/recovery/maintenance/service results; a raw command receipt is m
 reservations because the send itself was observed. Bus refusals decided before execution
 (`denied`/`rejected`/`blocked`) and any binding failure before the send settle `failed`,
 which claims no execution, records the operator-visible reason `no_vendor_request`
-rather than a vendor receipt, and releases the reservations too. Unexpected bodies, transport
+rather than a vendor receipt, and releases the reservations too. That reason is supplied
+by the Tactical dispatcher, which reaches `failed` only before the send; the shared
+coordinator never infers it from the outcome, so an adapter whose `failed` is derived
+from a vendor response body still records `vendor_receipt`. Unexpected bodies, transport
 exceptions and post-intent crash recovery become `uncertain`, retain the target fence and
 never automatically replay. No raw command result is included in the scheduled audit note.
 
