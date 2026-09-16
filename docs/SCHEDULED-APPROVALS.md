@@ -124,8 +124,14 @@ is only a test fixture, never deployment certification. Both holders take that l
 with an explicit 3600-second lease, so a killed holder self-expires within an hour
 on every store class (file, redis, memcached, database) instead of stalling recovery
 and the drain forever; the database store's own 24h default never applies while this
-explicit lease is passed. Prefer waiting out the lease over intervening: do not
-force-release a live holder, and do not shorten the lease below a healthy sweep run.
+explicit lease is passed. The lease alone is NOT a claim that a run always finishes
+first: 100 rows each bounded at 610 transport seconds can far outlast an hour. So both
+holders also stop starting new work 2320 elapsed seconds into the run and finish only
+the unit already in flight inside the reserved 1280 seconds. That work budget, not the
+size of the lease, is what keeps a live holder inside its own lock; do not force-release
+a live holder. A sweep that stops on the budget just resumes on the next minute; a drain
+scan cut short by it counts an error and exits 1 — re-run it, and never read that as a
+clean quiesce.
 Drain scans all recovery candidates and pending notes in chunks, never dispatches,
 and reports aggregate counts only. Recovery still requires intent age 610 + 30
 seconds, so `grace_pending_intents` may require another invocation after the extra

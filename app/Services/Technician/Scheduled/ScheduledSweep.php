@@ -14,7 +14,8 @@ final class ScheduledSweep
     {
         // Explicit bounded lease on every store class: a killed holder self-expires
         // instead of stalling recovery and the drain indefinitely. Never force-release
-        // here; a live holder keeps the lock for the whole of its run.
+        // here; runLocked() keeps its own work inside the lease (OVERLAP_WORK_SECONDS)
+        // so a live holder cannot be overlapped by the next sweep or an operator drain.
         $lock = Cache::lock(ScheduledPolicy::OVERLAP_LOCK, ScheduledPolicy::OVERLAP_LOCK_SECONDS);
         if (! $lock->get()) {
             return ['recovered' => 0, 'notes' => 0, 'errors' => 1];
@@ -29,7 +30,16 @@ final class ScheduledSweep
     private function runLocked(): array
     {
         $counts = ['recovered' => 0, 'notes' => 0, 'errors' => 0];
+        // A single row may legitimately hold the transport open for MAX_TRANSPORT_SECONDS,
+        // so 100 rows can far outlast any lease. Start no new unit once the budget is
+        // spent; the unit already in flight is itself bounded, so the whole run finishes
+        // inside the lock it holds. Unprocessed rows are simply the next sweep's work.
+        $started = hrtime(true);
+        $spent = fn () => (hrtime(true) - $started) / 1e9 >= ScheduledPolicy::OVERLAP_WORK_SECONDS;
         foreach (DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('expires_at')->limit(100)->pluck('id') as $id) {
+            if ($spent()) {
+                break;
+            }
             try {
                 $this->coordinator->recover($id);
                 $counts['recovered']++;
@@ -42,6 +52,9 @@ final class ScheduledSweep
             }
         }
         foreach (DB::table('scheduled_note_outbox')->whereNull('note_id')->orderBy('id')->limit(100)->pluck('id') as $id) {
+            if ($spent()) {
+                break;
+            }
             try {
                 $counts['notes'] += (int) $this->outbox->deliver($id);
             } catch (\Throwable) {

@@ -38,8 +38,20 @@ class ScheduledApprovalDrainCommand extends Command
         try {
             $errors = 0;
             $notes = 0;
-            DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('id')->chunkById(100, function ($rows) use ($coordinator, &$errors) {
+            // The scan is unbounded in row count, so it must be bounded in time: stop
+            // STARTING work at OVERLAP_WORK_SECONDS, leaving the reserve for whatever unit
+            // is in flight. A drain must never outlive its own lease and let a sweep run
+            // against its in-flight rows. A scan cut short this way counts an error, so it
+            // exits 1 and is re-run: it is never reported as a clean quiesce.
+            $started = hrtime(true);
+            $spent = fn () => (hrtime(true) - $started) / 1e9 >= ScheduledPolicy::OVERLAP_WORK_SECONDS;
+            DB::table('scheduled_authorizations')->whereIn('state', ['waiting', 'claimed', 'dispatch_intent'])->orderBy('id')->chunkById(100, function ($rows) use ($coordinator, &$errors, $spent) {
                 foreach ($rows as $row) {
+                    if ($spent()) {
+                        $errors++;
+
+                        return false;
+                    }
                     try {
                         $coordinator->recover($row->id);
                     } catch (\Throwable) {
@@ -47,8 +59,13 @@ class ScheduledApprovalDrainCommand extends Command
                     }
                 }
             });
-            DB::table('scheduled_note_outbox')->whereNull('note_id')->orderBy('id')->chunkById(100, function ($rows) use ($outbox, &$notes, &$errors) {
+            DB::table('scheduled_note_outbox')->whereNull('note_id')->orderBy('id')->chunkById(100, function ($rows) use ($outbox, &$notes, &$errors, $spent) {
                 foreach ($rows as $row) {
+                    if ($spent()) {
+                        $errors++;
+
+                        return false;
+                    }
                     try {
                         $notes += (int) $outbox->deliver($row->id);
                     } catch (\Throwable) {

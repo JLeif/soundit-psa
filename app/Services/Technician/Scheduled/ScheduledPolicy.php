@@ -18,9 +18,20 @@ final class ScheduledPolicy
 
     // Explicit bounded lease: only the database store substitutes a default expiry, so
     // on file/redis/memcached a SIGKILLed holder would otherwise block recovery, note
-    // delivery and the drain forever. Far longer than any healthy sweep, and release()
-    // remains owner-checked, so an expired lease is never force-released by a peer.
+    // delivery and the drain forever. release() remains owner-checked, so an expired
+    // lease is never force-released by a peer. Size alone can NEVER make the lease
+    // "longer than any run": 100 rows each bounded at MAX_TRANSPORT_SECONDS outlast any
+    // sane expiry, so holders bound their own lock-held work below instead.
     public const OVERLAP_LOCK_SECONDS = 3600;
+
+    /**
+     * Latest elapsed second at which a lock holder may START another unit of work. The
+     * reserve is twice the per-unit worst case (one bounded transport plus its receipt
+     * grace), covering the in-flight unit and the local recovery/evidence reads around
+     * it, so a live holder finishes inside OVERLAP_LOCK_SECONDS however long its queue
+     * is and no second sweep or drain can run against its in-flight rows.
+     */
+    public const OVERLAP_WORK_SECONDS = self::OVERLAP_LOCK_SECONDS - 2 * (self::MAX_TRANSPORT_SECONDS + self::RECEIPT_GRACE_SECONDS);
 
     public function approver(int $id): User
     {
