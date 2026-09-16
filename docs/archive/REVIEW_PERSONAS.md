@@ -1,3 +1,6 @@
+> ARCHIVED: persona selection and reviewer-calls-reviewer contradict independent review slices; this is not operative guidance (see [review contract](../DECISIONS.md#review)).
+> Security → RUBRIC and Critic → escalate-irreversible survive in [STANDARDS](../../STANDARDS.md); obsolete Halo persona removed.
+
 # Sound PSA Review Personas
 
 When reviewing plans, consider these perspectives to catch blind spots and ensure changes are technically sound, operationally practical, and aligned with how an MSP actually works.
@@ -13,7 +16,6 @@ The `/review-plan` command uses smart selection to include only relevant persona
 **Conditionally Included (Based on Plan Content):**
 - Documentation Manager — For changes that affect install steps, `.env` variables, cron schedules, integrations, dependencies, or deployment procedures
 - MSP Operations Manager — For features involving tickets, contracts, billing, SLAs, prepaid hours, or client workflows
-- Halo API Specialist — For any changes touching HaloClient, API calls, data sync, or Halo data model
 - Security & Compliance — For auth changes, credential handling, API tokens, data access, or VPS configuration
 - ITIL Expert — For features involving incident management, change management, SLA tracking, or service catalogue
 - AI Expert — For features involving LLM/AI integration, prompt engineering, tool use, agentic loops, or AI-driven automation
@@ -52,44 +54,9 @@ The `/review-plan` command uses smart selection to include only relevant persona
 
 **Project-Specific Checks:**
 - Services go in `app/Services/`, not controllers
-- HaloClient is a singleton — inject via constructor, never instantiate directly
 - No Vite/npm — Bootstrap 5.3 + Icons via CDN only
 - File drivers for cache and sessions (no Redis)
 - MariaDB on both local dev (`soundit_psa_dev`) and production (`soundit_psa`) — confirm migrations use MariaDB-compatible syntax
-
----
-
-### Halo API Specialist
-
-**Focus Areas:**
-- Halo PSA API data model and quirks
-- API endpoint selection and parameter usage
-- Data sync strategies (read-through, cache, polling)
-- Error handling for Halo API failures
-- OAuth2 token lifecycle and caching
-
-**Typical Concerns:**
-- Are we using the correct Halo endpoint for this operation?
-- Does this handle Halo's data format quirks correctly?
-- What happens when Halo is down or slow?
-- Are we caching appropriately (not over-fetching, not stale)?
-- Does this match how Halo actually returns data?
-
-**Key Questions:**
-- Have we checked the Halo API index (`docs/Halo/halo-api-index.md`) for this endpoint?
-- Does this handle pagination correctly?
-- Are we passing `includelines=true` where needed for line items?
-- Does `POST` to this endpoint replace or append? (Halo varies by endpoint)
-- Are we handling the OAuth2 token refresh (auto-retry on 401)?
-- Is `_itemid` vs `item_id` handled correctly for invoice lines?
-
-**Known Halo Gotchas:**
-- `POST /ClientContract` with `contract_prepayhistory` **replaces the entire array** — must read first, append, POST all back
-- Invoice line item product field is `_itemid` (underscore prefix), not `item_id`
-- `GET /RecurringInvoice` requires `includelines=true` to get line items
-- `POST /ClientPrepay` creates at client level only, even if you pass `contract_id`
-- Halo Portal custom pages use `$CLIENT_ID` (no braces) for variable substitution
-- Prepay items: 56 (managed, $300), 57 (break-fix, $600), 58 (generic)
 
 ---
 
@@ -97,7 +64,6 @@ The `/review-plan` command uses smart selection to include only relevant persona
 
 **Focus Areas:**
 - Authentication and authorization (Entra ID SSO)
-- API credential management (Halo, Microsoft, other vendors)
 - Client data access controls
 - VPS security and secrets management
 - OWASP top 10 vulnerability prevention
@@ -112,15 +78,12 @@ The `/review-plan` command uses smart selection to include only relevant persona
 **Key Questions:**
 - Are secrets in `.env` only, never committed to git?
 - Does this maintain proper session security?
-- Are we validating all user input before passing to Halo API?
 - Could this create an injection vulnerability (SQL, command, XSS)?
 - Is the Entra ID tenant restriction enforced?
-- Are Halo API tokens cached securely (file cache, not exposed)?
 
 **Project-Specific Checks:**
 - Entra ID SSO: single-tenant restriction, proper callback validation
-- Halo OAuth2: tokens cached via Laravel Cache, auto-retry on 401
-- VPS: SSH key auth only, secrets in `/var/www/psa/.env`
+- VPS: SSH key auth only, secrets in the deployment `.env`
 - No client-facing auth — all users are MSP staff authenticated via SSO (each MSP deployment has its own staff team)
 
 ---
@@ -141,19 +104,14 @@ The `/review-plan` command uses smart selection to include only relevant persona
 - Does this match how we actually work, or how we wish we worked?
 - Will this save time or create more admin overhead?
 - Does this handle the edge cases we hit every week?
-- Is this a genuine improvement over what Halo offered?
-- Will this break our existing workflows during the Halo transition?
 
 **Key Questions:**
-- Is this better and faster than the old Halo workflow it replaces?
 - Does this handle the full lifecycle (create, update, close)?
 - What happens when a client has unusual billing arrangements?
 - Does this account for our actual contract types (managed, break-fix, hybrid)?
-- Are Halo-synced records handled correctly as read-only during transition?
 - Are we building for the common case or getting bogged down in edge cases?
 
 **Red Flags to Watch:**
-- Features that are no better than what Halo offered — we should be improving, not just porting
 - Workflows that don't match the actual order of operations in the field
 - Assumptions about billing that don't account for real-world messiness
 - Forgetting that technicians are often on-site with limited time/attention
@@ -186,8 +144,6 @@ The `/review-plan` command uses smart selection to include only relevant persona
 - Does this support root cause analysis, not just symptom resolution?
 
 **Project-Specific Checks:**
-- Sound PSA should improve on Halo's ITIL implementations — are we building something better, or just porting?
-- Are ticket statuses and categories well-defined in our own schema (not just mirroring Halo's)?
 - Do reports reflect SLA-relevant metrics (response time, resolution time)?
 - Is change management supported for contract/billing modifications?
 
@@ -209,7 +165,6 @@ The `/review-plan` command uses smart selection to include only relevant persona
 - Is this the highest priority right now?
 - Can we ship a simpler version first?
 - What's the opportunity cost of building this?
-- Is this a meaningful improvement over what Halo offered?
 
 **Key Questions:**
 - What's the simplest version that delivers value?
@@ -217,12 +172,9 @@ The `/review-plan` command uses smart selection to include only relevant persona
 - What's the effort vs impact ratio?
 - Does this reduce manual work for the team?
 - Is this something we'll actually use daily, or is it a nice idea?
-- Does this move us closer to full Halo retirement?
 
 **Project-Specific Checks:**
 - Does this serve the MSP technicians and staff who use this daily?
-- Does this improve on the equivalent Halo workflow, or just replicate it?
-- Is transition sync (read-only Halo data) handled correctly during the migration period?
 - Is the deploy path simple (git push, SSH pull, artisan commands)?
 
 ---
@@ -281,20 +233,17 @@ When flagging documentation impact, be specific:
 **Context:**
 - Internal MSP technician handling tickets, client calls, and on-site work
 - Busy, often multitasking between several clients
-- Transitioning from Halo PSA — familiar with its workflows but frustrated by its limitations
 - Wants tools that save time, not add process
 - Accesses the PSA app between appointments or during admin time
 - Not a developer, but tech-savvy
 
 **Typical Concerns:**
-- Is this actually better and faster than the old Halo workflow?
 - Can I find what I need in under 3 clicks?
 - Will this work on my phone/tablet when I'm on-site?
 - Does this show me what I need without information overload?
 - Will I remember how to use this if I only use it once a week?
 
 **Key Questions:**
-- Is this a genuine improvement on the equivalent Halo workflow?
 - Can I see the most important info at a glance?
 - Does this work well on mobile for on-site use?
 - Are the workflows intuitive, or do I need to remember a specific process?
@@ -317,7 +266,6 @@ When flagging documentation impact, be specific:
 - Has 20–80 endpoints under management, 5–25 clients, no employees
 - Wears every hat: field tech, help desk, bookkeeper, project manager, procurement
 - Often working from a truck, a client site, or a home office with constant context-switching
-- Budget-conscious — this PSA replaces expensive per-tech-seat tools (Halo, ConnectWise, etc.)
 - Needs the tool to run itself as much as possible — automation isn't a luxury, it's survival
 
 **Typical Concerns:**
@@ -413,7 +361,6 @@ When flagging documentation impact, be specific:
 - AiClient should abstract provider differences (Anthropic vs OpenAI) cleanly
 - Tool definitions should match Claude's tool_use schema exactly
 - JSON parsing must handle markdown code fences (Claude often wraps JSON in ```json blocks)
-- Prompts ported from HaloClaude Python should be reviewed for Laravel/PSA context accuracy
 - Token usage should be logged for cost monitoring
 - AI confirmation prompts (junk filter) should err on the side of caution (false negatives safer than false positives)
 - The agentic tool loop needs clear exit conditions and max-rounds cap
@@ -452,13 +399,11 @@ When flagging documentation impact, be specific:
 - How would a SaaS company with 10,000 MSP customers solve this?
 - What if we automated this entirely instead of building a UI for it?
 - Could we eliminate this problem instead of managing it?
-- Is there a way to turn a Halo limitation into a feature?
 - What would make a tech say "I can't believe we didn't have this before"?
 
 **Project-Specific Prompts:**
 - "What if the dashboard updated itself based on what the tech is doing right now?"
 - "What if clients could see their own data without us building a portal?"
-- "What if we used Halo's webhooks to push data instead of polling?"
 - "What's the version of this that takes 10 minutes to build but solves 80% of the problem?"
 
 ---
@@ -474,13 +419,9 @@ When flagging documentation impact, be specific:
 
 **Typical Concerns:**
 - What happens when this feature interacts with existing features unexpectedly?
-- Are we making assumptions about Halo's API that could change?
-- What's the worst-case scenario if the Halo API is down?
-- Are we creating data in our DB that could get out of sync with Halo?
 
 **Key Questions:**
 - What are we assuming that might not be true?
-- What happens when Halo's API changes or breaks?
 - How does this fail gracefully?
 - What's the migration path if we need to change this later?
 - Are we painting ourselves into a corner?
@@ -488,15 +429,10 @@ When flagging documentation impact, be specific:
 - What does the person maintaining this in 2 years need to know?
 
 **Devil's Advocate Prompts:**
-- "What if Halo changes this endpoint's behavior?"
 - "What if we need to support a second PSA tool someday?"
 - "Fast forward 6 months — what do we regret?"
-- "What happens when the cached Halo data is stale?"
 
 **Project-Specific Checks:**
-- **Halo dependency**: Are we too tightly coupled to Halo's data model?
-- **Data sync**: Could our local DB get out of sync with Halo as system of record?
-- **Single point of failure**: What happens when the VPS, Halo, or Entra ID is down?
 - **Schema changes**: Is this migration reversible?
 - **Credential rotation**: What breaks when API keys or secrets expire?
 
@@ -504,7 +440,6 @@ When flagging documentation impact, be specific:
 - The plan acknowledges risks and has mitigation strategies
 - Reversibility has been considered
 - Edge cases have been thought through, not hand-waved
-- There's a clear fallback if the Halo API misbehaves
 - Dependencies are explicit
 
 ---
@@ -518,7 +453,6 @@ Personas can **call for additional reviewers** when they uncover concerns outsid
 | If you notice... | Call for... |
 |------------------|-------------|
 | Security implications (auth, tokens, credentials) | Security & Compliance |
-| Halo API integration concerns | Halo API Specialist |
 | Schema changes that may be hard to reverse | The Critic |
 | Workflow that doesn't match MSP operations | MSP Operations Manager |
 | ITIL process alignment questions | ITIL Expert |
@@ -530,7 +464,6 @@ Personas can **call for additional reviewers** when they uncover concerns outsid
 ### Common Collaboration Chains
 
 **Technical deep-dive:**
-Senior Developer → Halo API Specialist → Security & Compliance → The Critic
 
 **Operational review:**
 MSP Operations Manager → ITIL Expert → Staff User → Project Manager
@@ -539,7 +472,6 @@ MSP Operations Manager → ITIL Expert → Staff User → Project Manager
 Staff User → Client Persona → MSP Operations Manager → The Critic
 
 **Risk assessment:**
-The Critic → Security & Compliance → Halo API Specialist
 
 ---
 
@@ -556,9 +488,6 @@ When reviewing a plan, ask each selected persona:
 ### Red Flags to Watch For
 
 **Technical Red Flags:**
-- Direct Halo API calls from controllers (should go through HaloClient service)
-- Missing error handling for Halo API failures
-- Hardcoded Halo IDs or values that should be configurable
 - No input validation or sanitization
 - Secrets or credentials outside `.env`
 
@@ -569,10 +498,7 @@ When reviewing a plan, ask each selected persona:
 - Assumptions about billing that don't match real contracts
 
 **Integration Red Flags:**
-- Storing data locally that should live in Halo (system of record)
-- Not handling Halo API pagination
 - Ignoring OAuth2 token expiry and refresh
-- Tight coupling to Halo's data model without abstraction
 
 ---
 
@@ -582,7 +508,6 @@ When reviewing a plan, ask each selected persona:
 - Adding new persona types (e.g., "Vendor Integration Specialist" when adding CIPP/Mesh)
 - Refining existing personas based on real usage
 - Adding project-specific checks as patterns emerge
-- Updating Halo gotchas as new API quirks are discovered
 
 **How to Update:**
 - Edit this file directly (single source of truth)
