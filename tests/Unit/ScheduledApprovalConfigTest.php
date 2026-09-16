@@ -19,6 +19,8 @@ class ScheduledApprovalConfigTest extends TestCase
             'unparseable value stays off' => ['fasle', false],
             'explicit true enables' => ['true', true],
             'numeric one enables' => ['1', true],
+            'on enables' => ['on', true],
+            'yes enables' => ['yes', true],
         ];
     }
 
