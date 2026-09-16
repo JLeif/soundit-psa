@@ -44,7 +44,11 @@ final class ScheduledCoordinator
             // Re-read the marker INSIDE this transaction, as late as possible. The check
             // above it is read-then-act, so on its own it would still hand a waiting row to
             // a worker whose only remaining exit is the send fence.
-            if (app(ScheduledQuiescence::class)->at() !== null) {
+            // This MUST be the locking read: the ordinary reads above have already opened
+            // this transaction's REPEATABLE READ view, so a plain at() would be answered
+            // from that older snapshot and miss a marker committed after it. The lock is
+            // held until commit, so no marker can land between this check and the UPDATE.
+            if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
                 return null;
             }
             $nonce = (string) Str::uuid();
