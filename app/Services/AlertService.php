@@ -66,6 +66,25 @@ class AlertService
             ->first();
 
         if ($resolved) {
+            // Reviving in place means updating client_id to whatever the
+            // incoming payload claims - which is exactly how an alert could
+            // move between clients silently. Before this branch existed, a
+            // cross-client collision on a resolved row hit the unique index
+            // and threw a QueryException: loud, and nothing was written.
+            // Tactical's fallback key (md5("{hostname}:{checkLabel}"), see
+            // TacticalAlertService.php:173) is NOT client-scoped, so two
+            // different clients can each have a "SERVER01" with a "Disk
+            // Space" check and collide on the same source_alert_id. Refusing
+            // here - rather than letting the update proceed - preserves that
+            // loud failure instead of quietly reassigning the alert (and its
+            // history) to the wrong client. The Leif RMM controller already
+            // guards this with its own 422 before calling upsert, so it never
+            // reaches this exception; every other source gets the exception
+            // instead of the silent move.
+            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && $resolved->client_id !== $data['client_id']) {
+                throw new \RuntimeException("Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.");
+            }
+
             $metadata = array_merge($resolved->metadata ?? [], $data['metadata'] ?? []);
             if ($resolved->ticket_id !== null) {
                 $metadata['previous_ticket_id'] = $resolved->ticket_id;
