@@ -26,6 +26,9 @@ final class TacticalEvidence implements ScheduledEvidence
         if (! TacticalConfig::isEnabled() || ! TacticalConfig::isConfigured() || ! TacticalPlan::supports($run->action_type)) {
             throw new InvalidArgumentException('integration_or_adapter_unavailable');
         }
+        if ($run->proposed_meta['scheduled_argument_refusal'] ?? false) {
+            throw new InvalidArgumentException('unsupported_scheduling_arguments');
+        }
         $payload = json_decode(Crypt::decryptString($run->proposed_meta['encrypted_payload']), true, 32, JSON_THROW_ON_ERROR);
         if (! is_array($payload) || array_diff(array_keys($payload), ['direct_tool', 'asset_id', 'ticket_id', 'client_id', 'params'])
             || ($payload['direct_tool'] ?? null) !== ActionRegistry::directTool($run->action_type)

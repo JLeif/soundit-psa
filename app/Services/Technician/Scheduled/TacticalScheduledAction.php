@@ -40,9 +40,14 @@ final class TacticalScheduledAction implements TacticalAction
 
     public function execute(TacticalClient $client, string $agentId, array $params): TacticalActionResult
     {
-        $body = $client->submitScheduledOnce($this->type, $agentId, $params);
+        try {
+            $body = $client->submitScheduledOnce($this->type, $agentId, $params);
+            $outcome = TacticalPlan::outcome($this->type, $body);
+        } catch (\Throwable) {
+            $outcome = 'uncertain';
+        }
 
-        // No raw vendor output is needed for scheduled effect classification or its audit.
-        return TacticalActionResult::ok(TacticalPlan::outcome($this->type, $body));
+        // Keep an immutable audit even for an unknown receipt; never log raw vendor output.
+        return TacticalActionResult::ok($outcome);
     }
 }

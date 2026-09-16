@@ -1,9 +1,9 @@
-# Scheduled Tactical policy — PR3 preparation
+# Scheduled Tactical policy — PR3
 
 Specification #1724; boundary issue #1783; implementation #1889.
-This is a pre-enrollment policy and producer assessment, **not a shipped Tactical adapter**.
-The scheduled feature remains default-off. The installed scheduled adapter still covers
-only the five mailbox actions. Immediate Tactical behavior is unchanged.
+This candidate enrolls eight Tactical adapters alongside five mailbox adapters. The
+scheduled feature remains default-off; implementation is not deployment or activation.
+Immediate Tactical script and approved-patch behavior is unchanged.
 
 ## Exact type boundary
 
@@ -48,10 +48,13 @@ Source inspected: public `amidaware/tacticalrmm` revision
   `TacticalClient::installApprovedPatches` submits an empty body. Sending an
   invented patch-set field would not constrain this producer.
 
-#1724 explicitly permits visible refusal of patch scheduling until exact snapshot
-support exists. Script execution needs an explicit disposition before enrollment:
-keep script scheduling unavailable pending a real conditional/immutable vendor primitive,
-or authorize a separately designed immutable execution path. Do not silently replace
+Both script and patch scheduling remain unavailable: registry entries are preserved,
+`adapterAvailable` is false, and admission refuses before provider reads or authorization
+creation with `unsupported_scheduling_type:tactical_stage_script` or
+`unsupported_scheduling_type:tactical_stage_install_approved_patches`. An absent registry
+name instead refuses with `scheduling_type_not_registered`. The cockpit scheduling
+boundary exposes the same fixed reasons. Design-only follow-up #1911 owns the missing
+conditional/immutable vendor primitives; this PR does not implement an alternative path. Do not silently replace
 script execution with commands, create/mutate vendor scripts, weaken revision pinning,
 or claim a preflight comparison closes the race. This assessment is of the cited public
 producer, not certification of any live installation.
@@ -71,10 +74,31 @@ dropped/extra/nested fields and malformed copies refuse. Controls prohibit live 
 The original deliberately lossy admission fixture remains to prove independent capture
 and repeat-confirmation refusal, separately from the new fire-time equality check.
 
-## Remaining PR3 work
+## Eight-adapter execution contract
 
-No Tactical enrollment, routing/UI, script pinning, patch snapshot support, Tactical
-wire controls or Tactical MariaDB dispatch races are delivered by this preparation.
-Those require the producer disposition, full implementation, exact-tip gates/CI and a
-separately admitted held review. No activation or release is implied. Rollback before
-merge is branch discard/revert only; no production state has changed.
+`TacticalPlan` accepts only exact parameter sets. Commands use `cmd|powershell|shell`
+and integer timeout 10–600; custom shells, environment and run-as overrides are absent.
+Maintenance requires an actual boolean; recovery is mesh-only. Services bind exact SCM
+names, not display aliases. Staging records MCP-token provenance and flags legacy argument
+coercion as scheduling-ineligible rather than changing immediate behavior. Existing
+hostname/service confirmations and cooldown checks run at admission and revalidation.
+
+Fresh evidence binds PSA ticket/asset/client association, unique configured Tactical site
+FK, agent ID, exact hostname, integration URL namespace and service identity. Offline or
+unavailable reads may defer only before intent and within the window. Reconnect processing
+cannot execute a Scheduled run. Scheduled tombstones cannot be revived by restaging.
+
+The shared coordinator owns claim, intent, nonce, target fence, cancellation and recovery.
+Only the intent winner enters the existing audited Tactical action bus. Scheduled transport
+uses one request, no redirect/retry/fallback. Producer-specific exact receipts classify
+reboot/shutdown/recovery/maintenance/service results; a raw command receipt is merely
+`submitted` because it has no reliable exit-status contract. Unexpected bodies, transport
+exceptions and post-intent crash recovery become `uncertain`, retain the target fence and
+never automatically replay. No raw command result is included in the scheduled audit note.
+
+Tests: `ScheduledTacticalTest` drives real admission, evidence, action bus and Guzzle client
+with a hermetic handler; `ScheduledTacticalMariaDbTest` adds separate-process
+send/send, send/cancel and process-death boundaries against isolated socket-only MariaDB.
+The shared #1780/#1885 controls remain independent. Exact-tip warning-strict gates and CI,
+then separately admitted held review, are required; tests alone grant no release authority.
+Rollback before merge is branch discard/revert only; no production state has changed.

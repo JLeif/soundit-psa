@@ -111,6 +111,47 @@ class ScheduledTacticalTest extends TestCase
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(TacticalEvidence::class));
     }
 
+    public function test_real_mcp_lineage_web_admission_and_revocation(): void
+    {
+        $bearer = \App\Support\McpConfig::rotateStaffToken(allowedTools: ['tactical_set_maintenance:staged'], label: 'synthetic-tactical');
+        $reply = $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->postJson('/api/mcp/staff', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'tactical_set_maintenance',
+                'arguments' => ['client_id' => $this->client->id, 'asset_id' => $this->asset->id, 'ticket_id' => $this->ticket->id,
+                    'enabled' => true, 'reason' => 'Synthetic control', 'staged' => true]],
+        ])->assertOk();
+        $result = json_decode($reply->json('result.content.0.text'), true);
+        $this->assertTrue($result['success'] ?? false, $reply->getContent());
+        $this->run = TechnicianRun::findOrFail($result['run_id']);
+        $token = \App\Models\McpToken::where('label', 'synthetic-tactical')->sole();
+        $this->assertSame($token->id, $this->run->proposed_meta['scheduled_provenance']['token_id']);
+        $this->assertFalse($this->run->proposed_meta['scheduled_argument_refusal'] ?? false);
+        $this->actingAs($this->user)->post(route('cockpit.schedule.store', $this->run), [
+            'content_hash' => $this->run->content_hash, 'start' => '2026-09-16T01:00', 'end' => '2026-09-16T02:00', 'timezone' => 'UTC', 'confirm' => '1',
+        ])->assertRedirect()->assertSessionHasNoErrors()->assertSessionMissing('error');
+        $id = DB::table('scheduled_authorizations')->sole()->id;
+        $token->update(['tools' => []]);
+        $this->time = $this->time->setTime(1, 0);
+        app(TacticalDispatch::class)->run($id);
+        $this->assertSame('blocked', DB::table('scheduled_authorizations')->value('state'));
+        $this->assertCount(0, $this->wire);
+    }
+
+    public function test_immediate_boolean_coercion_does_not_grant_scheduled_authority(): void
+    {
+        $args = ['asset_id' => $this->asset->id, 'ticket_id' => $this->ticket->id, 'enabled' => 'false', 'reason' => 'Synthetic control'];
+        $result = app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class)->execute('tactical_stage_maintenance', $args, $this->client->id, 'synthetic', 17);
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $this->run = TechnicianRun::findOrFail($result['run_id']);
+        $this->assertTrue($this->run->proposed_meta['scheduled_argument_refusal']);
+        try {
+            app(TacticalEvidence::class)->approve($this->run, $this->user, []);
+            $this->fail('Coerced boolean authorized');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame('unsupported_scheduling_arguments', $e->getMessage());
+        }
+        $this->assertCount(0, $this->wire);
+    }
+
     public static function refusals(): array
     {
         return [
@@ -214,6 +255,7 @@ class ScheduledTacticalTest extends TestCase
         $this->assertCount(1, $this->wire);
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
         $this->assertDatabaseCount('scheduled_target_fences', 1);
+        $this->assertDatabaseCount('tactical_action_logs', 1);
     }
 
     public function test_reconnect_cannot_execute_scheduled_row_and_confirmations_remain_required(): void

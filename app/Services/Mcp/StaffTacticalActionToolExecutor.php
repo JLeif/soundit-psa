@@ -610,6 +610,20 @@ class StaffTacticalActionToolExecutor
         ];
         if ($scheduledTokenId !== null && \App\Services\Technician\Scheduled\ActionRegistry::directTool($tool) !== null) {
             $meta['scheduled_provenance'] = ['version' => 1, 'kind' => 'mcp', 'token_id' => $scheduledTokenId];
+            // Immediate staging historically normalizes bool-like values/service aliases.
+            // Do not silently carry that coercion into a future authorization.
+            if (\App\Services\Technician\Scheduled\TacticalPlan::supports($tool)) {
+                try {
+                    $raw = $this->rawParamsForTool($directTool, $arguments);
+                    if (array_intersect(['custom_shell', 'env_vars', 'run_as_user'], array_keys($arguments))
+                        || (isset($arguments['mode']) && $arguments['mode'] !== 'mesh')
+                        || \App\Services\Technician\Scheduled\ApprovalEnvelope::canonical(\App\Services\Technician\Scheduled\TacticalPlan::params($tool, $raw)) !== \App\Services\Technician\Scheduled\ApprovalEnvelope::canonical($params)) {
+                        $meta['scheduled_argument_refusal'] = true;
+                    }
+                } catch (\Throwable) {
+                    $meta['scheduled_argument_refusal'] = true;
+                }
+            }
         }
         $proposedContent = $display."\nReason: ".$reason;
 
