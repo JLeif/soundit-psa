@@ -165,19 +165,25 @@ class HdbPressIdCaptureTest extends TestCase
         Ticket::whereKey($pressTicket->id)->toBase()->update(['updated_at' => now()->subDays(30)]);
         Ticket::whereKey($plainTicket->id)->toBase()->update(['updated_at' => now()->subDays(30)]);
 
-        $service->addNoteFromCw($pressTicket->fresh(), $this->noteBody(self::UUID), true, $user->id);
-        $service->addNoteFromCw($plainTicket->fresh(), 'Customer called back, all good.', true, $user->id);
+        // Both independent note writes must observe one instant, even across a
+        // wall-clock second boundary (GitHub #1487).
+        $writtenAt = now()->startOfSecond();
+        $this->travelTo($writtenAt);
+        try {
+            $service->addNoteFromCw($pressTicket->fresh(), $this->noteBody(self::UUID), true, $user->id);
+            $service->addNoteFromCw($plainTicket->fresh(), 'Customer called back, all good.', true, $user->id);
 
-        // An inbound note DOES touch its ticket — TicketService::addNote() calls
-        // $ticket->touch() by design, so latest activity is visible. What must not
-        // happen is capture adding churn of its own on top: a press note and a
-        // plain note leave the ticket in the same timestamp state (GitHub #1317
-        // is about mass churn on history, not about a live note arriving).
-        $this->assertSame(self::UUID, $pressTicket->fresh()->hdb_press_id);
-        $this->assertEquals(
-            $plainTicket->fresh()->updated_at->startOfSecond(),
-            $pressTicket->fresh()->updated_at->startOfSecond(),
-        );
+            // An inbound note DOES touch its ticket — TicketService::addNote() calls
+            // $ticket->touch() by design, so latest activity is visible. What must not
+            // happen is capture adding churn of its own on top: a press note and a
+            // plain note leave the ticket in the same timestamp state (GitHub #1317
+            // is about mass churn on history, not about a live note arriving).
+            $this->assertSame(self::UUID, $pressTicket->fresh()->hdb_press_id);
+            $this->assertEquals($writtenAt, $plainTicket->fresh()->updated_at);
+            $this->assertEquals($writtenAt, $pressTicket->fresh()->updated_at);
+        } finally {
+            $this->travelBack();
+        }
     }
 
     public function test_press_id_is_not_mass_assignable_on_either_table(): void
