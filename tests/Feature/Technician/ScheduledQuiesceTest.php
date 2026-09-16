@@ -53,7 +53,8 @@ class ScheduledQuiesceTest extends ScheduledApprovalTest
         $c = app(ScheduledCoordinator::class);
         $nonce = $c->claim($id);
         $this->assertTrue($c->intent($id, $nonce, $this->evidence));
-        $this->artisan('technician:scheduled-drain')->assertExitCode(1);
+        $this->artisan('technician:scheduled-drain')->expectsOutput('{"status":"quiesced_wait","wait_seconds":610}')->assertExitCode(1);
+        $this->assertDatabaseHas('scheduled_note_outbox', ['note_id' => null]);
         $at = app(\App\Services\Technician\Scheduled\ScheduledQuiescence::class)->at();
         $this->time = $this->time->addSeconds(610);
         $this->artisan('technician:scheduled-drain')->assertExitCode(1);

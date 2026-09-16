@@ -8,6 +8,9 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (Schema::hasTable('scheduled_late_receipts')) {
+            return;
+        }
         Schema::create('scheduled_late_receipts', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('authorization_id')->index();
@@ -23,6 +26,6 @@ return new class extends Migration
 
     public function down(): void
     {
-        throw new RuntimeException('Retain scheduled late-receipt evidence; destructive rollback is unsupported.');
+        // Intentionally retain this additive evidence table on code rollback.
     }
 };
