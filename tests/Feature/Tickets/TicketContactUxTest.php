@@ -40,6 +40,8 @@ class TicketContactUxTest extends TestCase
         foreach (['client' => [$client->phone, $client->email], 'person' => [$person->phone_display, $person->mobile_display, $person->email]] as $kind => $values) {
             $nodes = $xpath->query('//*[@data-ticket-contact="'.$kind.'"]');
             $this->assertCount(1, $nodes);
+            $this->assertStringNotContainsString('d-none', $nodes->item(0)->getAttribute('class'));
+            $this->assertFalse($nodes->item(0)->hasAttribute('hidden'));
             foreach ($values as $value) {
                 $this->assertStringContainsString($value, $nodes->item(0)->textContent);
             }
