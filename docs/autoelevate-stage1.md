@@ -40,3 +40,14 @@ Focused tests: `php artisan test --filter AutoElevate --fail-on-warning`.
 Full release gate: unmodified `bash scripts/gc-verify.sh` plus exact-tip CI and held
 review. Removing/unmerging the feature before deployment has no live effect;
 there are no migrations, scheduled jobs or backfills in this stage.
+
+## Stage 2 (company mapping + client computers panel)
+
+See [ARCHITECTURE / AutoElevate integration](ARCHITECTURE.md#autoelevate-integration).
+Adds `clients.autoelevate_company_id` (uuid, nullable, indexed; additive migration, no
+backfill), the admin-only **Map companies** screen with auto-match by normalized name, and
+a read-only AutoElevate panel on the client page whose empty states say why they are
+empty. Still read-only at the vendor: no elevation approvals, no `requestEdit`, no polling.
+
+Focused tests: `php artisan test tests/Feature/AutoElevate tests/Feature/Settings --filter AutoElevate --fail-on-warning`.
+Rollback: unmerge; the column is dropped by the migration's `down()` (index first, then column).

@@ -162,6 +162,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/clients/{client}/integrations/{vendor}/unlink', [ClientIntegrationController::class, 'unlink'])->name('clients.integrations.unlink')
         ->whereIn('vendor', \App\Services\ClientIntegrationService::VENDORS);
     Route::post('/clients/{client}/comet/provision', [ClientIntegrationController::class, 'provisionComet'])->name('clients.comet.provision');
+    // AutoElevate stage 2: read-only computers panel, fetched when the Integrations tab opens.
+    Route::get('/clients/{client}/autoelevate/computers', [\App\Http\Controllers\Web\ClientAutoElevateController::class, 'computers'])->name('clients.autoelevate.computers');
     // Control D onboarding button (B4): Admin-only; stages the same cockpit proposal as
     // the controld_onboard_client verb. 404 unless the onboarding switch + six defaults.
     Route::post('/clients/{client}/controld/onboard', [\App\Http\Controllers\Web\ClientControlDOnboardingController::class, 'stage'])->middleware(['admin', 'throttle:10,1'])->name('clients.controld.onboard');
@@ -506,6 +508,12 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/stripe/test', [IntegrationsController::class, 'testStripe'])->name('settings.integrations.stripe.test');
     Route::post('/settings/integrations/autoelevate', [IntegrationsController::class, 'updateAutoElevate'])->middleware('admin')->name('settings.integrations.autoelevate.update');
     Route::post('/settings/integrations/autoelevate/test', [IntegrationsController::class, 'testAutoElevate'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.autoelevate.test');
+    // Settings — AutoElevate Company Mapping (stage 2; admin-only like the stage 1 routes)
+    Route::get('/settings/integrations/autoelevate/companies', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'index'])->middleware('admin')->name('settings.autoelevate-companies.index');
+    Route::post('/settings/integrations/autoelevate/companies', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'update'])->middleware('admin')->name('settings.autoelevate-companies.update');
+    // POST, not GET: autoMatch() writes client rows and spends a vendor read, so it must carry
+    // the CSRF token and must not be reachable by an <img> tag or a link prefetcher.
+    Route::post('/settings/integrations/autoelevate/companies/auto-match', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'autoMatch'])->middleware('admin')->name('settings.autoelevate-companies.auto-match');
     Route::post('/settings/integrations/benjipays', [IntegrationsController::class, 'updateBenjiPays'])->middleware('admin')->name('settings.integrations.benjipays.update');
     Route::post('/settings/integrations/benjipays/test', [IntegrationsController::class, 'testBenjiPays'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.benjipays.test');
     Route::get('/settings/integrations/stripe/customers', [\App\Http\Controllers\Web\StripeCustomerController::class, 'index'])->name('settings.stripe-customers.index');

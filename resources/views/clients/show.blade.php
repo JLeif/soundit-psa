@@ -190,7 +190,8 @@
                     </a>
                 @endif
             </li>
-            @if(count($integrations) > 0)
+            @php $autoelevatePanel = \App\Support\AutoElevateConfig::isConfigured(); @endphp
+            @if(count($integrations) > 0 || $autoelevatePanel)
             <li class="nav-item" role="presentation">
                 @if($isTabOverride)
                     <a class="nav-link" href="{{ route('clients.show', $client) }}#integrations">Integrations</a>
@@ -925,8 +926,27 @@
             @endif
 
             {{-- Integrations Tab (conditional) --}}
-            @if(count($integrations) > 0)
+            @if(count($integrations) > 0 || $autoelevatePanel)
             <div class="tab-pane fade" id="integrations" role="tabpanel">
+                {{-- AutoElevate computers (stage 2, read-only). Loaded when this tab opens so a
+                     page view never spends the vendor's hourly request bucket; the partial
+                     names its own state (not mapped / read failed / none returned / rows). --}}
+                @if($autoelevatePanel)
+                <div class="card shadow-sm card-static mb-3" id="autoelevate-card" data-autoelevate-url="{{ route('clients.autoelevate.computers', $client) }}">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <div><i class="bi bi-shield-lock me-2"></i>AutoElevate</div>
+                        @if($client->autoelevate_company_id)
+                            <span class="badge bg-success">Mapped</span>
+                        @else
+                            <span class="badge bg-secondary">Not mapped</span>
+                        @endif
+                    </div>
+                    <div class="card-body" id="autoelevate-panel-body">
+                        <span class="text-muted small"><i class="bi bi-hourglass-split me-1"></i>Loading AutoElevate computers…</span>
+                    </div>
+                </div>
+                @endif
+
                 @php
                     $mapped = collect($integrations)->where('mapped', true);
                     $unmapped = collect($integrations)->where('mapped', false);
@@ -1889,6 +1909,34 @@ function confirmClientSeatChange(form, id, oldQty, product, scheduledQty) {
             linkBtn.classList.remove('d-none');
         });
     });
+})();
+</script>
+@endif
+@if($autoelevatePanel ?? false)
+<script>
+(function() {
+    // AutoElevate panel: one fetch when the Integrations tab first opens (or is restored).
+    var card = document.getElementById('autoelevate-card');
+    if (!card) return;
+    var loaded = false;
+    function loadAutoElevate() {
+        if (loaded) return;
+        loaded = true;
+        fetch(card.dataset.autoelevateUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(function(html) { document.getElementById('autoelevate-panel-body').innerHTML = html; })
+            .catch(function() {
+                loaded = false;
+                document.getElementById('autoelevate-panel-body').innerHTML =
+                    '<div class="alert alert-danger small mb-0" role="alert"><i class="bi bi-exclamation-triangle me-1"></i><strong>AutoElevate panel could not be loaded.</strong> The computer list was not verified.</div>';
+            });
+    }
+    var tab = document.getElementById('integrations-tab');
+    if (tab) tab.addEventListener('shown.bs.tab', loadAutoElevate);
+    setTimeout(function() {
+        var active = document.querySelector('#clientTabs .nav-link.active');
+        if (active && active.id === 'integrations-tab') loadAutoElevate();
+    }, 100);
 })();
 </script>
 @endif
