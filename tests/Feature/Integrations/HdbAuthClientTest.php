@@ -38,7 +38,12 @@ use Tests\TestCase;
  *    that errors, because it stops an operator investigating.
  *
  * The shapes fed in are honest about what was measured: the LOGIN page is the
- * real one, byte-observed 2026-09-11. The two-factor challenge is NOT — it is
+ * real one, byte-observed 2026-09-11. The two REFUSAL notices (`notify--bad`
+ * block: "Invalid email or password" / "Invalid Captcha") and the BLANK
+ * re-serve (login page again, no notice, byte-identical to the GET) were
+ * measured 2026-09-17 with made-up accounts, and the fixtures below are written
+ * from that described structure — not pasted from a captured page, which would
+ * carry session tokens. The two-factor challenge is NOT measured — it is
  * unreachable without credentials, so those cases assert the client's stated
  * behaviour on plausible shapes, and the unrecognised-prompt case exists because
  * the real one may well be none of them.
@@ -82,6 +87,27 @@ class HdbAuthClientTest extends TestCase
                 <input type="password" name="password" id="password">
                 <input type="hidden" name="g" value="g">
                 <input type="submit" name="submit" id="submitButton" disabled hidden>
+            </form></body></html>
+            HTML;
+    }
+
+    /**
+     * The login form re-served WITH the portal's refusal notice, as measured
+     * 2026-09-17: the page is the login page plus a block whose class carries
+     * `notify--bad` and whose text is the portal's sentence. The beacon rides
+     * inside the notice too, so a client that copied notice text out would fail
+     * the leak assertions.
+     */
+    private function refusedLoginPage(string $notice): string
+    {
+        return <<<HTML
+            <html><body><!-- VENDOR-TEXT-<script>alert(1)</script>-BEACON -->
+            <div class="notify notify--bad" role="alert"><span class="notify__text">{$notice}</span><!-- VENDOR-TEXT-<script>alert(1)</script>-BEACON --></div>
+            <form action="" method="post" id="theOnlyForm">
+                <input type="email" name="email" id="email">
+                <input type="password" name="password" id="password">
+                <input type="hidden" name="g" value="g">
+                <input type="submit" name="submit" id="submitButton" value="Submit" disabled hidden>
             </form></body></html>
             HTML;
     }
@@ -159,8 +185,12 @@ class HdbAuthClientTest extends TestCase
         });
     }
 
-    public function test_it_posts_the_stored_credentials_and_a_submit_field(): void
+    public function test_it_posts_the_stored_credentials_and_the_browsers_non_empty_submit_value(): void
     {
+        // The portal only evaluates a login whose `submit` field is non-empty
+        // (measured 2026-09-17: `submit=` gets the blank form back, byte-
+        // identical to a GET, for every credential pair). A browser posts
+        // `submit=Submit`. Pinning the exact value, not just the key.
         Http::fake([
             self::LOGIN_URL => Http::sequence()
                 ->push($this->loginPage())
@@ -175,12 +205,16 @@ class HdbAuthClientTest extends TestCase
             return $request->method() === 'POST'
                 && ($data['email'] ?? null) === 'reports@example.test'
                 && ($data['password'] ?? null) === 'service-account-password'
-                && array_key_exists('submit', $data);
+                && ($data['submit'] ?? null) === 'Submit';
         });
     }
 
-    public function test_a_re_served_login_form_is_a_credential_rejection(): void
+    public function test_a_blank_re_served_login_form_means_the_post_was_not_evaluated(): void
     {
+        // Measured 2026-09-17: the portal answers an un-evaluated post with the
+        // login page and NO notice — the exact bytes a GET returns. For a week
+        // that read as `credentials_rejected`, and it never can again: without
+        // the portal's own refusal notice there is no credential verdict.
         Http::fake([
             self::LOGIN_URL => Http::sequence()
                 ->push($this->loginPage())
@@ -191,7 +225,113 @@ class HdbAuthClientTest extends TestCase
 
         $this->assertFalse($result->ok());
         $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_NOT_EVALUATED, $result->reason);
+        $this->assertNotSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+        $this->assertNothingLeaked($result);
+    }
+
+    public function test_the_portals_invalid_credentials_notice_is_a_credential_rejection(): void
+    {
+        // The positive marker, measured 2026-09-17 with a made-up account:
+        // a `notify--bad` block reading "Invalid email or password".
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->refusedLoginPage('Invalid email or password. Try again.')),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertFalse($result->ok());
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
         $this->assertSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+        $this->assertNothingLeaked($result);
+        $this->assertStringNotContainsStringIgnoringCase('Invalid email', $result->reason);
+    }
+
+    public function test_the_portals_captcha_notice_is_a_guard_refusal_not_a_credential_verdict(): void
+    {
+        // Measured 2026-09-17: posting the HTML's ASCII `g` instead of the
+        // JS-written U+0261 gets "Invalid Captcha" in the same block. The
+        // credentials were never judged, so the symbol must not say they were.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->refusedLoginPage('Invalid Captcha')),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertFalse($result->ok());
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_FORM_GUARD_REFUSED, $result->reason);
+        $this->assertNotSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+        $this->assertNothingLeaked($result);
+    }
+
+    public function test_an_unfamiliar_refusal_notice_is_reported_as_unrecognised_not_as_credentials(): void
+    {
+        // A notice this client has not seen is still the portal saying no — but
+        // WHAT it said is unknown, so it is neither a credential verdict nor a
+        // guard refusal, and its text stays inside the client.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->refusedLoginPage('Account locked: '.self::BEACON)),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertFalse($result->ok());
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED, $result->reason);
+        $this->assertNothingLeaked($result);
+        $this->assertStringNotContainsString('locked', $result->message());
+    }
+
+    public function test_notice_words_outside_a_notice_block_are_not_a_refusal(): void
+    {
+        // The marker is structural. The same sentence in a script, a comment
+        // or an empty placeholder block is not the portal refusing anything,
+        // so the page is still a blank re-serve.
+        $page = str_replace(
+            '<form ',
+            '<div class="notify notify--bad"></div>'
+            .'<script>var msg = "Invalid email or password";</script>'
+            .'<!-- Invalid Captcha --><form ',
+            $this->loginPage(),
+        );
+
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($page),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_NOT_EVALUATED, $result->reason);
+    }
+
+    public function test_a_refusal_notice_after_a_submitted_code_is_a_rejected_code(): void
+    {
+        // The second-factor leg has never been observed live, so a notice there
+        // is not read into finer symbols: whatever it says, the code did not
+        // get the operator in, and nothing is retried.
+        Setting::setEncrypted('hdb_totp_secret', self::SEED);
+
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->challengePage())
+                ->push($this->refusedLoginPage('Invalid email or password. Try again.')),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_TOTP_REJECTED, $result->reason);
+        $this->assertSame(3, $result->requests);
         $this->assertNothingLeaked($result);
     }
 
@@ -442,7 +582,8 @@ class HdbAuthClientTest extends TestCase
     public function test_the_logged_out_landing_redirect_is_not_read_as_a_successful_login(): void
     {
         // The portal's `/` is a 182-byte JS redirect to login.php. Landing back
-        // on it means the session did not take.
+        // on it means the session did not take — and, with no refusal notice,
+        // that the post was not evaluated. It is not a credential verdict.
         Http::fake([
             self::LOGIN_URL => Http::sequence()
                 ->push($this->loginPage())
@@ -452,7 +593,8 @@ class HdbAuthClientTest extends TestCase
         $result = (new HdbAuthClient)->authenticate();
 
         $this->assertFalse($result->ok());
-        $this->assertSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_NOT_EVALUATED, $result->reason);
     }
 
     public function test_it_uses_the_default_portal_host_when_none_is_stored(): void

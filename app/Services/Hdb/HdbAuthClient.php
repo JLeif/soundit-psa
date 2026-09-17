@@ -23,6 +23,21 @@ use Illuminate\Support\Facades\Http;
  * - `/` serves a 182-byte JS redirect to `login.php`; `login.php` 307s to `/login`.
  * - `/login` posts to ITSELF (`<form action="" method="post" id="theOnlyForm">`)
  *   with `email`, `password`, a submit named `submit`, and a hidden field `g`.
+ * - **`submit` must be NON-EMPTY or the portal never evaluates the login.**
+ *   Measured 2026-09-17 (made-up accounts, never the service credentials): a
+ *   browser posts `submit=Submit`; posting `submit=` gets the blank login form
+ *   back, byte-identical to a plain GET, for every credential pair — no error,
+ *   no flash, no cookie change. Until this was measured, that silent re-serve
+ *   was read as `credentials_rejected`. {@see FORM_SUBMIT_VALUE} posts the
+ *   browser's value, and {@see classify} now refuses to call a re-serve a
+ *   rejection (REASON_LOGIN_NOT_EVALUATED).
+ * - **A refusal is a `notify--bad` block.** With a non-empty submit the portal
+ *   answers a wrong pair with the login page plus a notice whose class carries
+ *   `notify--bad` and whose text is `Invalid email or password`; a post whose
+ *   `g` is the HTML's ASCII value gets `Invalid Captcha` in the same block.
+ *   Those two sentences and the second-factor markers are the only portal
+ *   prose this client reads, and it reads them only to pick a closed-vocabulary
+ *   symbol — the text never leaves here.
  * - **`g` is a bot trap.** The HTML ships `value='g'` (ASCII) and a DOMContentLoaded
  *   handler overwrites it with `ɡ` — U+0261 LATIN SMALL LETTER SCRIPT G. A client
  *   that posts the value it found in the HTML identifies itself as not having run
@@ -43,8 +58,11 @@ use Illuminate\Support\Facades\Http;
  * 2. **Success is a NEGATIVE test.** With no observed authenticated page there
  *    is no positive marker to assert, so "authenticated" means the portal
  *    answered 2xx with a non-empty body carrying neither an unauthenticated
- *    marker nor a second-factor prompt. That is the weakest link in this class
- *    and the first thing to tighten once someone has seen a real signed-in page.
+ *    marker, a refusal notice, nor a second-factor prompt. That is the weakest
+ *    link in this class and the first thing to tighten once someone has seen a
+ *    real signed-in page. REJECTION, by contrast, is now a positive test: the
+ *    `notify--bad` notice above. An unauthenticated page without it is reported
+ *    as REASON_LOGIN_NOT_EVALUATED, never as a credential verdict.
  */
 final class HdbAuthClient
 {
@@ -53,6 +71,14 @@ final class HdbAuthClient
      * field, replacing the ASCII `g` that ships in the HTML.
      */
     public const FORM_GUARD_VALUE = "\u{0261}";
+
+    /**
+     * The value a browser posts for the form's submit control. The portal
+     * treats an EMPTY `submit` as "no submission" and re-serves the form without
+     * evaluating the credentials (measured 2026-09-17), so this is not
+     * decorative: it is the field that makes the post a login attempt at all.
+     */
+    public const FORM_SUBMIT_VALUE = 'Submit';
 
     /**
      * Top-level requests one attempt may issue: GET the login page, POST the
@@ -95,6 +121,25 @@ final class HdbAuthClient
      * consulted after the second-factor tests have had their say.
      */
     private const LOGGED_OUT_REDIRECT_MARKER = 'login.php';
+
+    /**
+     * The class token the portal puts on its refusal notice. Structural: the
+     * element is found by this token, and only its own text is then compared
+     * against the two known notices below. An element carrying the token but
+     * no text is a placeholder, not a notice.
+     */
+    private const REFUSAL_NOTICE_CLASS = 'notify--bad';
+
+    /**
+     * The two refusal notices measured 2026-09-17, each mapped to the
+     * closed-vocabulary symbol it means. Matched case-insensitively as a
+     * substring of the notice's text only. Any other notice text reports
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, and the text stays here.
+     */
+    private const REFUSAL_NOTICES = [
+        'invalid email or password' => HdbAuthResult::REASON_CREDENTIALS_REJECTED,
+        'invalid captcha' => HdbAuthResult::REASON_FORM_GUARD_REFUSED,
+    ];
 
     /**
      * Field names a second-factor prompt might use. Matched case-insensitively
@@ -192,12 +237,14 @@ final class HdbAuthClient
                 return $page;
             }
 
-            // Leg 2 — the credentials, with the JS-set guard value.
+            // Leg 2 — the credentials, with the JS-set guard value and the
+            // browser's submit value. Both are load-bearing: see the class
+            // docblock for what the portal does when either is wrong.
             $posted = $this->request('post', $loginUrl, [
                 'email' => HdbPortalConfig::email(),
                 'password' => (string) HdbPortalConfig::password(),
                 'g' => self::FORM_GUARD_VALUE,
-                'submit' => '',
+                'submit' => self::FORM_SUBMIT_VALUE,
             ]);
             if ($posted instanceof HdbAuthResult) {
                 return $posted;
@@ -210,9 +257,13 @@ final class HdbAuthClient
                 return $this->answerChallenge($challenge);
             }
 
+            // On the credential leg the refusal notice's own kind decides the
+            // symbol (null), and an unauthenticated page WITHOUT a notice is
+            // the portal not having evaluated the post — not a credential verdict.
             return $this->classify(
                 $body,
-                HdbAuthResult::REASON_CREDENTIALS_REJECTED,
+                null,
+                HdbAuthResult::REASON_LOGIN_NOT_EVALUATED,
                 HdbAuthResult::REASON_TOTP_CHALLENGE_UNRECOGNISED,
             );
         } catch (HdbRedirectRefusedException) {
@@ -311,9 +362,12 @@ final class HdbAuthClient
         $body = (string) $answered;
 
         // Every remaining unhappy shape after a submitted code means the same
-        // thing to the operator: the code did not get them in.
+        // thing to the operator: the code did not get them in. That includes a
+        // refusal notice — this leg has never been observed live, so its notice
+        // texts are not read into finer symbols.
         return $this->classify(
             $body,
+            HdbAuthResult::REASON_TOTP_REJECTED,
             HdbAuthResult::REASON_TOTP_REJECTED,
             HdbAuthResult::REASON_TOTP_REJECTED,
         );
@@ -322,16 +376,29 @@ final class HdbAuthClient
     /**
      * Decide what a returned page means, fail-closed.
      *
-     * Ordered strongest evidence first: a password field is structural proof of
-     * the login page, second-factor prose is proof the password leg SUCCEEDED,
-     * and only a page carrying neither is read as signed in — the negative
-     * success test declared on the class docblock.
+     * Ordered strongest evidence first: a refusal notice is the portal's own
+     * POSITIVE word that it evaluated the post and said no; a password field is
+     * structural proof of the login page — which, without a notice, means the
+     * post was NOT evaluated; second-factor prose is proof the password leg
+     * SUCCEEDED; and only a page carrying none of these is read as signed in —
+     * the negative success test declared on the class docblock.
+     *
+     * @param  ?string  $noticeReason  the symbol a refusal notice reports on this
+     *                                 leg, or null to let the notice's own kind
+     *                                 decide ({@see REFUSAL_NOTICES})
+     * @param  string  $reServedReason  the symbol an unauthenticated page WITHOUT
+     *                                  a notice reports
      */
-    private function classify(string $body, string $rejectedReason, string $secondFactorReason): HdbAuthResult
+    private function classify(string $body, ?string $noticeReason, string $reServedReason, string $secondFactorReason): HdbAuthResult
     {
+        $noticed = $this->refusalNoticeReason($body);
+        if ($noticed !== null) {
+            return $this->result(HdbAuthStatus::Rejected, $noticeReason ?? $noticed);
+        }
+
         foreach (self::LOGIN_FORM_MARKERS as $marker) {
             if (stripos($body, $marker) !== false) {
-                return $this->result(HdbAuthStatus::Rejected, $rejectedReason);
+                return $this->result(HdbAuthStatus::Rejected, $reServedReason);
             }
         }
 
@@ -342,7 +409,7 @@ final class HdbAuthClient
         }
 
         if (stripos($body, self::LOGGED_OUT_REDIRECT_MARKER) !== false) {
-            return $this->result(HdbAuthStatus::Rejected, $rejectedReason);
+            return $this->result(HdbAuthStatus::Rejected, $reServedReason);
         }
 
         if (trim($body) === '') {
@@ -350,6 +417,59 @@ final class HdbAuthClient
         }
 
         return $this->result(HdbAuthStatus::Authenticated, HdbAuthResult::REASON_OK);
+    }
+
+    /**
+     * The closed-vocabulary symbol for the portal's refusal notice on a page,
+     * or null when the page carries no notice.
+     *
+     * Structural first, textual second, and the text is read ONLY inside the
+     * notice element: an element whose `class` attribute carries the
+     * {@see REFUSAL_NOTICE_CLASS} token is the notice, and its own text — tags
+     * stripped, entities decoded, whitespace collapsed — is compared against
+     * the two measured notices. Anything else on the page, including the same
+     * words in a script or a comment, is not a notice. A notice this client
+     * has not seen reports REASON_LOGIN_REFUSED_UNRECOGNISED; an empty one is a
+     * placeholder and reports nothing.
+     *
+     * Nothing off the page reaches the returned symbol: the match selects a
+     * constant, and the notice text is discarded here.
+     */
+    private function refusalNoticeReason(string $body): ?string
+    {
+        // The opening tag of every element whose class attribute carries the
+        // token as a whole class name, then that element's inner text up to
+        // the next closing tag. The notice is a leaf-ish block; nested inline
+        // tags inside it are stripped, a nested block would end the read early
+        // and, at worst, produce the unrecognised symbol — fail-closed.
+        $pattern = '~<([a-z][a-z0-9]*)\b[^>]*\bclass\s*=\s*(?:"[^"]*(?<![\w-])'
+            .preg_quote(self::REFUSAL_NOTICE_CLASS, '~')
+            .'(?![\w-])[^"]*"|\'[^\']*(?<![\w-])'
+            .preg_quote(self::REFUSAL_NOTICE_CLASS, '~')
+            .'(?![\w-])[^\']*\')[^>]*>(.*?)</\1\s*>~is';
+
+        if (! preg_match_all($pattern, $body, $notices, PREG_SET_ORDER)) {
+            return null;
+        }
+
+        foreach ($notices as $notice) {
+            $text = html_entity_decode(strip_tags($notice[2]), ENT_QUOTES | ENT_HTML5);
+            $text = trim((string) preg_replace('~\s+~u', ' ', $text));
+
+            if ($text === '') {
+                continue;
+            }
+
+            foreach (self::REFUSAL_NOTICES as $needle => $reason) {
+                if (stripos($text, $needle) !== false) {
+                    return $reason;
+                }
+            }
+
+            return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
+        }
+
+        return null;
     }
 
     /**

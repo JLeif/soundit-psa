@@ -66,12 +66,21 @@ class HdbConnectionTestActionTest extends TestCase
         ]);
     }
 
+    /**
+     * The portal refusing the credentials, in the shape measured 2026-09-17: the
+     * login page again PLUS its `notify--bad` notice. The bare login page with
+     * no notice is a different outcome (`login_not_evaluated`), covered in
+     * HdbAuthClientTest.
+     */
     private function fakeRefusedLogin(): void
     {
         Http::fake([
             self::LOGIN_URL => Http::sequence()
                 ->push($this->loginPage())
-                ->push($this->loginPage()),
+                ->push('<html><body><!-- '.self::BEACON.' --><div class="notify notify--bad">Invalid email or password. Try again.</div>'
+                    .'<form action="" method="post" id="theOnlyForm">'
+                    .'<input type="email" name="email"><input type="password" name="password">'
+                    .'<input type="hidden" name="g" value="g"><input type="submit" name="submit" value="Submit"></form></body></html>'),
         ]);
     }
 
