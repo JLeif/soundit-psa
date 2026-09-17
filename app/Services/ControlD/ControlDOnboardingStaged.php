@@ -104,14 +104,11 @@ class ControlDOnboardingStaged
         if ($intent === null || $intent->actor_id != $actor->getKey()) {
             throw new ControlDClientException('Control D intent does not belong to this actor.');
         }
-        // Atomic one-shot admission; posted means MAY have been sent, not success.
-        // A crash immediately after this commit requires manual reconciliation too.
-        $admitted = ControlDOnboardingIntent::whereKey($intentId)->where('state', 'staged')
-            ->where('active_client_id', $intent->client_id)->update(['state' => 'posted', 'phase' => 'post', 'updated_at' => now()]);
-        if ($admitted !== 1) {
+        // Cheap definite refusal before any local work or read-only vendor GET; the
+        // authoritative atomic one-shot admission is admit(), immediately before the write.
+        if ($intent->state !== 'staged') {
             throw new ControlDClientException('Control D intent is not executable; do not retry.');
         }
-        $intent->refresh();
         try {
             $this->eligible(Client::find($intent->client_id), $intent->operation);
             if ($intent->operation === 'organization') {
@@ -126,13 +123,41 @@ class ControlDOnboardingStaged
         } catch (ControlDWriteRejectedException $e) {
             $this->finish($intent, 'rejected', 'post', null, null, $e->reasonCode,
                 $e->isReadOnlyKey() ? 'vendor key is read-only' : 'vendor rejected the write');
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            // Refused before admission: no POST can have been issued, so this stays a
+            // definite local refusal. The intent remains staged and executable once the
+            // cause is fixed, instead of an uncertain row holding the lock indefinitely.
+            if ($intent->state !== 'posted') {
+                if ($e instanceof ControlDClientException) {
+                    throw $e;
+                }
+                throw new ControlDClientException('Control D intent was refused before admission; no vendor write was made.');
+            }
             // Never leak SQL bindings, request PII, secrets or raw vendor text. A
             // durable posted row/lock is retained if even this update fails.
             $this->finish($intent, 'uncertain', $intent->phase, $intent->org_pk, $intent->vendor_pk);
         }
 
         return $intentId;
+    }
+
+    /**
+     * Atomic one-shot admission, taken at the last moment before the intended vendor
+     * write. posted means MAY have been sent, not success; a crash immediately after
+     * this commit requires manual reconciliation too. Everything before it is local
+     * validation or a read-only GET, so a refusal there provably precedes any POST.
+     */
+    private function admit(ControlDOnboardingIntent $intent): void
+    {
+        $admitted = ControlDOnboardingIntent::whereKey($intent->id)->where('state', 'staged')
+            ->where('active_client_id', $intent->client_id)->update(['state' => 'posted', 'phase' => 'post', 'updated_at' => now()]);
+        if ($admitted !== 1) {
+            throw new ControlDClientException('Control D intent is not executable; do not retry.');
+        }
+        // In-memory state matches the durable row before anything is sent, so a later
+        // failure is classified as post-admission even if this read-back itself fails.
+        $intent->forceFill(['state' => 'posted', 'phase' => 'post']);
+        $intent->refresh();
     }
 
     private function finish(ControlDOnboardingIntent $intent, string $state, string $phase, ?string $orgPk, ?string $pk, ?int $reasonCode = null, ?string $reason = null): void
@@ -149,6 +174,7 @@ class ControlDOnboardingStaged
     private function organization(ControlDOnboardingIntent $intent, #[\SensitiveParameter] User $actor): void
     {
         $payload = $intent->payload;
+        $this->admit($intent);
         $response = $this->vendor->requestParent('POST', 'organizations/suborg', $payload);
         $row = $response['body']->organization ?? null;
         if (! $row instanceof \stdClass || ! is_string($row->PK ?? null)
@@ -197,7 +223,7 @@ class ControlDOnboardingStaged
             ]) !== 1) {
                 throw new ControlDClientException('Control D intent checkpoint failed.');
             }
-        });
+        }, fn () => $this->admit($intent));
         $intent->forceFill(['vendor_pk' => $created['PK'], 'phase' => 'local-persistence'])->saveOrFail();
         $this->bind($intent, $actor, $intent->org_pk, $created);
     }

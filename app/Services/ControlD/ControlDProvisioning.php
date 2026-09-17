@@ -24,13 +24,21 @@ class ControlDProvisioning
      * annotates its own array parameter as well. PHP therefore redacts the PIN from THESE
      * frames' trace arguments even where zend.exception_ignore_args is Off. That is a
      * statement about this path only, not about a caller that copies the body elsewhere.
+     * $admitBeforePost lets a caller commit its own durable one-shot admission at the
+     * last moment before the write, so its pre-write refusals stay definite refusals.
      */
-    public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null, ?\Closure $recordPostedPk = null): array
+    public function create(string $orgPk, array $fields, #[\SensitiveParameter] ?string $pin = null, ?\Closure $recordPostedPk = null, ?\Closure $admitBeforePost = null): array
     {
         $this->available();
         $this->identifier($orgPk);
         $body = $this->validate($fields, $pin);
         $this->preflight($orgPk, $body);
+        // Everything above is local validation or a read-only GET. A caller admission
+        // runs here, outside the try below, so its refusal propagates definitely and is
+        // never converted into an uncertain write.
+        if ($admitBeforePost !== null) {
+            $admitBeforePost();
+        }
         $pk = null;
         $phase = 'post';
         try {

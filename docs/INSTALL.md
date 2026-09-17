@@ -1198,8 +1198,12 @@ Admin identity. Nothing publishes a route, command, MCP grant or UI. Staging com
 an encrypted, serialization-hidden payload to the additive `controld_onboarding_intents`
 table. Its unique `active_client_id` is a durable per-client lock acquired BEFORE any
 vendor request; a second intent is refused, not queued. Vendor requests hold no SQL
-transaction. Execution atomically admits only `staged` to `posted`; `posted` means the
-POST may have happened, NOT that it succeeded. Own-POST PK checkpoints precede read-back;
+transaction. Execution atomically admits only `staged` to `posted`, at the last moment
+before the intended write: local eligibility/settings refusals and read-only preflight
+failures happen while the intent is still `staged`, stay definite refusals that record no
+possible POST, and leave it executable once the cause is fixed. Once admitted, `posted`
+means the POST may have happened, NOT that it succeeded. Own-POST PK checkpoints precede
+read-back;
 verified client binding and `bound` commit together. Rejected/bound intents release the
 lock. Uncertain and crash-left posted/staged records retain it indefinitely; no automatic
 retry, timeout release, cleanup, resume or reconciliation endpoint is installed. Manual

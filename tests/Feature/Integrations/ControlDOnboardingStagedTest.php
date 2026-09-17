@@ -394,4 +394,46 @@ class ControlDOnboardingStagedTest extends TestCase
         $this->assertCount(1, $this->history);
         $this->assertNull($client->fresh()->controld_org_id);
     }
+
+    public function test_local_settings_refusal_leaves_the_intent_staged_and_still_executable(): void
+    {
+        $row = $this->codeSetup();
+        $actor = User::factory()->create(['is_active' => true]);
+        $client = Client::factory()->create(['controld_org_id' => $row['org']]);
+        $id = $this->writer([])->stageCode($actor, $client->id, 'desktop-windows');
+        Setting::setValue('controld_default_profile_id', '');
+        // A zero-I/O local refusal is not evidence that a POST may have happened.
+        $this->refusal(fn () => $this->writer([])->execute($actor, $id));
+        $intent = ControlDOnboardingIntent::findOrFail($id);
+        $this->assertSame('staged', $intent->state);
+        $this->assertSame('preflight', $intent->phase);
+        $this->assertNull($intent->reason);
+        $this->assertNull($intent->reason_code);
+        $this->assertNull($intent->vendor_pk);
+        $this->assertSame($client->id, $intent->active_client_id);
+        $this->assertCount(0, $this->history);
+        Setting::setValue('controld_default_profile_id', 'testprofile01');
+        $writer = $this->writer([...$this->codePreflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])]);
+        $writer->execute($actor, $id);
+        $this->assertSame('bound', ControlDOnboardingIntent::findOrFail($id)->state);
+        $this->assertSame($row['code'], $client->fresh()->controld_provisioning_code);
+        $this->assertCount(4, $this->history);
+    }
+
+    public function test_client_state_change_between_stage_and_execute_refuses_without_posting(): void
+    {
+        $actor = User::factory()->create(['is_active' => true]);
+        $client = Client::factory()->create();
+        $writer = $this->writer();
+        $id = $this->stage($writer, $actor, $client);
+        Client::whereKey($client->id)->update(['controld_org_id' => 'racedOrg01']);
+        $this->refusal(fn () => $writer->execute($actor, $id));
+        $intent = ControlDOnboardingIntent::findOrFail($id);
+        $this->assertSame('staged', $intent->state);
+        $this->assertSame('preflight', $intent->phase);
+        $this->assertNull($intent->org_pk);
+        $this->assertNull($intent->reason);
+        $this->assertSame($client->id, $intent->active_client_id);
+        $this->assertCount(0, $this->history);
+    }
 }
