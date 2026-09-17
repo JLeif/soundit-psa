@@ -36,7 +36,7 @@ class ScheduledApprovalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['scheduled_approvals.enabled' => true]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-15 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -68,6 +68,40 @@ class ScheduledApprovalTest extends TestCase
     {
         return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $this->evidence);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledSettingsTest::class, 'values')]
+    public function test_admission_setting_gate_independent_of_evidence(?string $value, bool $expected): void
+    {
+        \App\Models\Setting::where('key', 'scheduled_approvals_enabled')->delete();
+        if ($value !== null) {
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', $value);
+        }
+        config(['scheduled_approvals.enabled' => ! $expected]);
+        if (! $expected) {
+            $this->expectException(\InvalidArgumentException::class);
+            $this->expectExceptionMessage('scheduling_disabled_or_clock_unhealthy');
+        }
+        $this->assertGreaterThan(0, $this->admit());
+        $this->assertDatabaseCount('scheduled_authorizations', 1);
+    }
+
+    public function test_setting_is_rechecked_after_live_evidence_before_intent(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $coordinator = app(ScheduledCoordinator::class);
+        $nonce = $coordinator->claim($id);
+        $this->assertNotNull($nonce);
+        $evidence = Mockery::mock(ScheduledEvidence::class);
+        $evidence->shouldReceive('revalidate')->once()->andReturnUsing(function ($run, $user, $binding) {
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
+            config(['scheduled_approvals.enabled' => true]);
+
+            return $binding;
+        });
+        $this->assertFalse($coordinator->intent($id, $nonce, $evidence));
+        $this->assertSame('claimed', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
     }
 
     public function test_admission_double_submit_and_note_delivery_are_idempotent(): void
@@ -208,7 +242,7 @@ class ScheduledApprovalTest extends TestCase
         foreach (['billing', 'contractor', 'inactive', 'missing_provenance', 'disabled', 'clock'] as $case) {
             $this->user->update(['role' => in_array($case, ['billing', 'contractor']) ? $case : 'tech', 'is_active' => $case !== 'inactive']);
             $this->run->update(['proposed_meta' => $case === 'missing_provenance' ? [] : ['scheduled_provenance' => ['version' => 1, 'kind' => 'native_human', 'user_id' => $this->user->id]]]);
-            config(['scheduled_approvals.enabled' => $case !== 'disabled']);
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', $case !== 'disabled' ? '1' : '0');
             $this->healthy = $case !== 'clock';
             try {
                 $this->admit();

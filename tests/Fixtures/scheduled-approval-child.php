@@ -12,10 +12,18 @@ if (! $socket || ! str_ends_with($socket, '/test.sock') || ! is_file(dirname($so
 config(['database.default' => 'scheduled_synthetic', 'database.connections.scheduled_synthetic' => [
     'driver' => 'mysql', 'unix_socket' => $socket, 'database' => 'scheduled_synthetic_test',
     'username' => 'root', 'password' => '', 'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci', 'prefix' => '', 'strict' => true,
-], 'app.key' => getenv('SCHEDULED_CHILD_KEY'), 'scheduled_approvals.enabled' => true]);
+], 'app.key' => getenv('SCHEDULED_CHILD_KEY')]);
 $db = Illuminate\Support\Facades\DB::connection();
 if ($db->selectOne('SELECT DATABASE() AS d, @@skip_networking AS n')->d !== 'scheduled_synthetic_test' || (int) $db->selectOne('SELECT @@skip_networking AS n')->n !== 1) {
     exit(91);
+}
+// The retired config flag was set here; the persisted setting replaces it. Write it on
+// THIS verified synthetic connection rather than inheriting whatever the parent left:
+// a child running with scheduling off refuses admission/claim and reports a trivially
+// clean result, so the concurrency control would prove nothing. Refuse loudly instead.
+App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
+if (! App\Support\TechnicianConfig::scheduledApprovalsEnabled()) {
+    exit(94);
 }
 $app->instance(App\Services\Technician\Scheduled\ScheduledClock::class, new class extends App\Services\Technician\Scheduled\ScheduledClock
 {

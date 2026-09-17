@@ -50,7 +50,7 @@ final class ScheduledSweep
             try {
                 $this->coordinator->recover($id);
                 $counts['recovered']++;
-                if (config('scheduled_approvals.enabled')) {
+                if (\App\Support\TechnicianConfig::scheduledApprovalsEnabled()) {
                     app(MailboxDispatch::class)->run($id);
                     app(TacticalDispatch::class)->run($id);
                 }

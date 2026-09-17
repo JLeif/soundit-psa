@@ -202,11 +202,12 @@ MICROSOFT_REDIRECT_URI=https://psa.yourmsp.com/auth/microsoft/callback
 
 #### Other integrations
 
-Scheduled approvals use `SCHEDULED_APPROVALS_ENABLED` (default `false`, off; only
-`true`/`1`/`on`/`yes` enable it, and every other value resolves off).
-Any change requires `php artisan config:cache` refresh; follow the
-[activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for authorization,
-long-lived process refresh, pre-flip checks and safe disable/drain steps.
+Scheduled approvals use the **Enable scheduled (deferred) execution of approved actions**
+checkbox in **Settings > Integrations > AI Technician**, off by default. The stored
+`scheduled_approvals_enabled` setting enables execution only when exactly `'1'`.
+Only an Admin-role staff user can save that form.
+Follow the [activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for
+authorization, pre-flip checks and safe disable/drain steps.
 Run `php artisan technician:scheduled-preflight` for read-only clock certification and exhaustive privacy-safe inventory; see the [runbook](SCHEDULED-APPROVALS.md#before-an-authorized-flip).
 
 All other integrations (NinjaRMM, Level RMM, QuickBooks Online, Plivo) are configured via **Settings > Integrations** in the web UI after your first login. No `.env` variables are needed for these.

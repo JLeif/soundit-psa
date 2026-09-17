@@ -65,7 +65,7 @@ class ScheduledMailboxTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['scheduled_approvals.enabled' => true]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-16 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -134,6 +134,59 @@ class ScheduledMailboxTest extends TestCase
     {
         return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(MailboxEvidence::class));
+    }
+
+    public static function disabledSettings(): array
+    {
+        return [[null], ['0'], ['yes'], ['true']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('disabledSettings')]
+    public function test_setting_gates_mailbox_evidence_admission_ui_claim_intent_and_sweep(?string $value): void
+    {
+        $this->proposal('cipp_stage_convert_mailbox', ['mailbox_type' => 'Shared']);
+        $this->actingAs($this->user);
+        $this->get(route('cockpit.schedule', $this->run))->assertOk();
+        $this->get(route('cockpit.index'))->assertOk()->assertSee('Schedule approval instead');
+        $evidence = app(MailboxEvidence::class);
+        $binding = $evidence->approve($this->run, $this->user, []);
+        $this->assertNotEmpty($binding['target']);
+        $off = function () use ($value) {
+            Setting::where('key', 'scheduled_approvals_enabled')->delete();
+            if ($value !== null) {
+                Setting::setValue('scheduled_approvals_enabled', $value);
+            }
+            config(['scheduled_approvals.enabled' => true]);
+        };
+        $off();
+        $this->get(route('cockpit.schedule', $this->run))->assertStatus(422);
+        $this->get(route('cockpit.index'))->assertOk()->assertDontSee('Schedule approval instead');
+        foreach ([fn () => $evidence->approve($this->run, $this->user, []), fn () => $this->admit()] as $attempt) {
+            try {
+                $attempt();
+                $this->fail('Disabled scheduling must refuse');
+            } catch (\InvalidArgumentException|\App\Services\Technician\Scheduled\ScheduledUnavailable $e) {
+                $this->assertContains($e->getMessage(), ['kill_switch', 'scheduling_disabled_or_clock_unhealthy']);
+            }
+        }
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        Setting::setValue('scheduled_approvals_enabled', '1');
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $coordinator = app(\App\Services\Technician\Scheduled\ScheduledCoordinator::class);
+        $off();
+        $this->assertNull($coordinator->claim($id));
+        $sweep = app(\App\Services\Technician\Scheduled\ScheduledSweep::class)->run();
+        $this->assertSame(1, $sweep['recovered']);
+        $this->assertSame(0, $sweep['errors']);
+        $this->assertSame('waiting', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
+        Setting::setValue('scheduled_approvals_enabled', '1');
+        $nonce = $coordinator->claim($id);
+        $this->assertNotNull($nonce);
+        $off();
+        $this->assertFalse($coordinator->intent($id, $nonce, $evidence));
+        $this->assertSame('waiting', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
+        $this->assertCount(0, $this->wire);
     }
 
     public function test_real_evidence_to_single_forwarding_transport_and_private_result_note(): void
@@ -270,15 +323,17 @@ class ScheduledMailboxTest extends TestCase
     public function test_out_of_office_uses_exact_encrypted_bodies_not_lengths(): void
     {
         $this->proposal('cipp_stage_set_mailbox_out_of_office', ['state' => 'Enabled', 'internal_message_length' => 5, 'external_message_length' => 5]);
-        $id = $this->admit(['internal_message' => 'hello', 'external_message' => 'world']);
+        // A punctuation-bearing sentinel cannot occur accidentally in random base64 ciphertext.
+        $internal = 'synthetic private message: hello <fixture@example.test>';
+        $id = $this->admit(['internal_message' => $internal, 'external_message' => 'world']);
         $row = DB::table('scheduled_authorizations')->find($id);
         $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
-        $this->assertSame('hello', $sealed['human_inputs']['internal_message']);
-        $this->assertStringNotContainsString('hello', json_encode($row));
+        $this->assertSame($internal, $sealed['human_inputs']['internal_message']);
+        $this->assertStringNotContainsString($internal, json_encode($row));
         $this->time = $this->time->setTime(1, 0);
         $this->result = ['Results' => 'Set Out-of-office for owner@synthetic.test to Enabled.'];
         app(MailboxDispatch::class)->run($id);
-        $this->assertSame('hello', $this->wire[0]['body']['InternalMessage']);
+        $this->assertSame($internal, $this->wire[0]['body']['InternalMessage']);
         $this->assertSame('world', $this->wire[0]['body']['ExternalMessage']);
         $this->assertSame('completed', DB::table('scheduled_authorizations')->value('state'));
     }
@@ -288,9 +343,9 @@ class ScheduledMailboxTest extends TestCase
         $this->proposal('cipp_stage_convert_mailbox', ['mailbox_type' => 'Shared']);
         $id = $this->admit();
         $this->time = $this->time->setTime(1, 0);
-        config(['scheduled_approvals.enabled' => false]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
         app(MailboxDispatch::class)->run($id);
-        config(['scheduled_approvals.enabled' => true]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->healthy = false;
         app(MailboxDispatch::class)->run($id);
         $this->healthy = true;
@@ -309,7 +364,7 @@ class ScheduledMailboxTest extends TestCase
             ->assertRedirect(route('cockpit.index'))->assertSessionHas('success');
         $this->assertDatabaseCount('scheduled_authorizations', 1);
         $this->get(route('cockpit.index'))->assertOk()->assertSee('Scheduled approvals')->assertSee('Cancel schedule');
-        config(['scheduled_approvals.enabled' => false]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
         $this->post(route('cockpit.schedule.cancel', $this->run))->assertRedirect()->assertSessionHas('success');
         $this->get(route('cockpit.index'))->assertOk()->assertSee('Cancelled');
         $this->assertCount(0, $this->wire);
@@ -402,7 +457,7 @@ class ScheduledMailboxTest extends TestCase
         $id = $this->admit();
         $this->time = $this->time->setTime(1, 0);
         app(MailboxDispatch::class)->run($id);
-        config(['scheduled_approvals.enabled' => false]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
         $this->actingAs($this->user)->get(route('cockpit.index'))->assertOk()->assertSee('Effect unknown. Never retry automatically.')->assertDontSee('Cancel schedule');
         $this->post(route('cockpit.schedule.cancel', $this->run))->assertSessionHas('error');
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));

@@ -65,7 +65,7 @@ class ScheduledTacticalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['scheduled_approvals.enabled' => true]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-16 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -122,6 +122,23 @@ class ScheduledTacticalTest extends TestCase
     {
         return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(TacticalEvidence::class));
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledSettingsTest::class, 'values')]
+    public function test_tactical_evidence_uses_only_strict_setting(?string $value, bool $expected): void
+    {
+        $this->proposal('tactical_stage_reboot', []);
+        Setting::where('key', 'scheduled_approvals_enabled')->delete();
+        if ($value !== null) {
+            Setting::setValue('scheduled_approvals_enabled', $value);
+        }
+        config(['scheduled_approvals.enabled' => ! $expected]);
+        if (! $expected) {
+            $this->expectException(\App\Services\Technician\Scheduled\ScheduledUnavailable::class);
+            $this->expectExceptionMessage('kill_switch');
+        }
+        $binding = app(TacticalEvidence::class)->approve($this->run, $this->user, ['confirm_hostname' => 'fixture-device']);
+        $this->assertNotEmpty($binding['target']);
     }
 
     public function test_real_mcp_lineage_web_admission_and_revocation(): void
@@ -241,7 +258,7 @@ class ScheduledTacticalTest extends TestCase
             'boolean' => $this->agent['site'] = '17',
             'token' => $this->user->update(['is_active' => false]),
             'link' => $this->ticket->assets()->detach(),
-            'kill' => config(['scheduled_approvals.enabled' => false]),
+            'kill' => \App\Models\Setting::setValue('scheduled_approvals_enabled', '0'),
         };
         $this->time = $this->time->setTime(1, 0);
         app(TacticalDispatch::class)->run($id);

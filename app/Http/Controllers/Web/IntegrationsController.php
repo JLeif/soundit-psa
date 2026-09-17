@@ -2304,8 +2304,9 @@ class IntegrationsController extends Controller
      * 2. **It is admin-only.** It is the one action here that spends a live
      *    credential against a third party, so it fails closed rather than
      *    inheriting the page's auth-only middleware. That middleware gap is psa
-     *    #1344 and this guard does NOT close it — every other action on this page
-     *    is still reachable by any authenticated user.
+     *    #1344 and this guard does NOT close it — every action on this page without
+     *    its own route-level `admin` middleware (updateTechnician() has one, because
+     *    it arms scheduled dispatch) is still reachable by any authenticated user.
      */
     public function testHdb(Request $request)
     {
@@ -2632,6 +2633,12 @@ class IntegrationsController extends Controller
         $wasCoverageEnabled = TechnicianConfig::emergencyBackstopEnabled();
         $nowEnabled = $request->has('technician_enabled');
         $nowEmergencyEnabled = $request->has('technician_emergency_enabled');
+        $scheduledEnabled = $request->has('scheduled_approvals_enabled');
+        Setting::setValue('scheduled_approvals_enabled', $scheduledEnabled ? '1' : '0');
+        Log::info('[Technician] Scheduled approvals '.($scheduledEnabled ? 'ENABLED' : 'DISABLED'), [
+            'user_id' => $request->user()?->id,
+            'enabled' => $scheduledEnabled,
+        ]);
         Setting::setValue('technician_enabled', $nowEnabled ? '1' : '0');
         Setting::setValue('technician_emergency_enabled', $nowEmergencyEnabled ? '1' : '0');
 
