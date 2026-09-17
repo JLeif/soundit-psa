@@ -908,6 +908,22 @@
                 @endif
             </div>
 
+            {{-- #2010: a refused Control D Link/Unlink throws ValidationException keyed
+                 `mappings`, and nothing on this page rendered it — the refusal then read as the
+                 silent skip the ruling forbids. Rendered here, outside the tab panes, so it is
+                 visible on whichever tab the redirect lands on. --}}
+            @if($errors->has('mappings'))
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <strong>Integration mapping not changed.</strong>
+                    <ul class="mb-0 ps-3">
+                        @foreach($errors->get('mappings') as $mappingError)
+                            <li>{{ $mappingError }}</li>
+                        @endforeach
+                    </ul>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            @endif
+
             {{-- Integrations Tab (conditional) --}}
             @if(count($integrations) > 0)
             <div class="tab-pane fade" id="integrations" role="tabpanel">
@@ -915,6 +931,77 @@
                     $mapped = collect($integrations)->where('mapped', true);
                     $unmapped = collect($integrations)->where('mapped', false);
                 @endphp
+
+
+                {{-- Control D onboarding button (B4). Rendered ONLY for an Admin, ONLY while the
+                     explicit onboarding switch is on AND all six panel defaults are configured
+                     (ControlDConfig::isOnboardingActive()), and only while the client still has
+                     a step to take: no organization yet, or an organization but no stored code.
+                     It stages a cockpit proposal for a SECOND Admin to approve — it never creates
+                     anything itself. Secrets never appear on this page. --}}
+                @if(auth()->user()?->isAdmin() && \App\Support\ControlDConfig::isEnabled() && \App\Support\ControlDConfig::isConfigured() && \App\Support\ControlDConfig::isOnboardingActive())
+                    @php
+                        $cdMapped = ! empty($client->controld_org_id);
+                        $cdHasCode = $client->getRawOriginal('controld_provisioning_code') !== null || $client->getRawOriginal('controld_deactivation_pin') !== null;
+                        $cdStep = ! $cdMapped ? 'organization' : (! $cdHasCode ? 'code' : null);
+                        $cdTickets = $cdStep ? $client->tickets()->open()->orderByDesc('id')->limit(25)->get(['id', 'halo_id', 'subject']) : collect();
+                    @endphp
+                    <div class="row g-3 mb-3" id="controld-onboarding">
+                        <div class="col-md-6">
+                            <div class="card shadow-sm card-static h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <div class="d-flex align-items-center gap-2">
+                                            <i class="bi bi-shield-lock fs-5"></i>
+                                            <strong>Control D onboarding</strong>
+                                        </div>
+                                        @if($cdStep === null)
+                                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Onboarded</span>
+                                        @elseif($cdStep === 'organization')
+                                            <span class="badge bg-secondary">Step 1 of 2</span>
+                                        @else
+                                            <span class="badge bg-secondary">Step 2 of 2</span>
+                                        @endif
+                                    </div>
+                                    @if($errors->has('controld_onboarding') || $errors->has('ticket_id') || $errors->has('reason'))
+                                        <div class="alert alert-danger small py-2 mb-2" role="alert">
+                                            {{ $errors->first('controld_onboarding') ?: ($errors->first('ticket_id') ?: $errors->first('reason')) }}
+                                        </div>
+                                    @endif
+                                    @if($cdStep === null)
+                                        <div class="text-muted small">Mapped to organization <code>{{ $client->controld_org_id }}</code> with a provisioning code stored encrypted. Re-cutting a code is a separate action.</div>
+                                    @else
+                                        <p class="text-muted small mb-2">
+                                            @if($cdStep === 'organization')
+                                                Creates the client's Control D sub-organization (name and contact email from this record, two-factor required) and binds it here. Step 2 (the provisioning code) is staged separately afterwards.
+                                            @else
+                                                Mapped to organization <code>{{ $client->controld_org_id }}</code>. Cuts one provisioning code under it with the Control D panel defaults; the code is stored encrypted and never shown.
+                                            @endif
+                                            Staging holds a proposal in the cockpit for a <strong>second Admin</strong> to approve; nothing is created by this button.
+                                        </p>
+                                        @if($cdTickets->isEmpty())
+                                            <div class="text-muted small"><i class="bi bi-info-circle me-1"></i>Open a ticket for this client first — the proposal is held on a ticket.</div>
+                                        @else
+                                            <form method="POST" action="{{ route('clients.controld.onboard', $client) }}" class="d-flex flex-column gap-2">
+                                                @csrf
+                                                <select name="ticket_id" class="form-select form-select-sm" required>
+                                                    <option value="">Hold on ticket…</option>
+                                                    @foreach($cdTickets as $cdTicket)
+                                                        <option value="{{ $cdTicket->id }}">{{ $cdTicket->display_id }} — {{ \Illuminate\Support\Str::limit($cdTicket->subject, 60) }}</option>
+                                                    @endforeach
+                                                </select>
+                                                <input type="text" name="reason" class="form-control form-control-sm" maxlength="500" placeholder="Reason (shown to the approver)" required>
+                                                <button type="submit" class="btn btn-primary btn-sm align-self-start">
+                                                    <i class="bi bi-shield-plus me-1"></i>Stage onboarding step {{ $cdStep === 'organization' ? '1' : '2' }} for approval
+                                                </button>
+                                            </form>
+                                        @endif
+                                    @endif
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                @endif
 
                 {{-- Mapped integrations --}}
                 @if($mapped->isNotEmpty())

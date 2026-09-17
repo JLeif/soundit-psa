@@ -107,7 +107,14 @@ class McpToolsListResilienceTest extends TestCase
         // mesh_enabled defaults ON, so each assembly pays the switch read plus
         // the mesh_api_key read — +2 x 2 assemblies = +4 flat, independent of
         // catalog size.
-        $this->assertLessThanOrEqual(98, count($queries), $sql);
+        //
+        // Raised 98 -> 100 for the Control D onboarding write surface (B4, #2010
+        // leg): the publication predicate in liveClientScopedToolDefinitions() reads
+        // the default-OFF controld_onboarding_enabled switch FIRST and short-circuits
+        // there while onboarding is off — +1 x 2 assemblies = +2 flat, independent
+        // of catalog size. (An enabled instance pays the integration switch, key and
+        // six defaults on top; still flat.)
+        $this->assertLessThanOrEqual(100, count($queries), $sql);
     }
 
     public function test_tools_list_repairs_dynamic_cipp_schema_before_publishing(): void

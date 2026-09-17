@@ -22,6 +22,22 @@
             Auto-Match uses exact name matching (case-insensitive).
         </p>
 
+        {{-- A refused save (#2010: an established or B2/B3-bound mapping would be cleared or
+             re-mapped) redirects back here with validation errors. Without this block the
+             refusal is invisible and reads as a silent skip; the invariant only holds if the
+             operator is told why nothing changed. --}}
+        @if ($errors->any())
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <strong>Mappings not saved.</strong>
+                <ul class="mb-0 ps-3">
+                    @foreach ($errors->all() as $error)
+                        <li>{{ $error }}</li>
+                    @endforeach
+                </ul>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        @endif
+
         @if(session('info'))
             <div class="alert alert-info alert-dismissible fade show">
                 {{ session('info') }}
@@ -38,6 +54,17 @@
 
         <form method="POST" action="{{ route('settings.controld-orgs.update') }}">
             @csrf
+            {{-- #2010: declare the organizations this form actually RENDERED a select for. A
+                 mapping whose organization is not in the vendor listing is absent from the POST
+                 for reasons that are not the operator's intent; without this, that absence read
+                 as a clear and one stale mapping refused every later save on this page. The
+                 first entry is a sentinel so the key is submitted even with no organizations. --}}
+            <input type="hidden" name="listed[]" value="">
+            @foreach($subOrgs as $listedOrg)
+                @if(! empty($listedOrg['PK']))
+                    <input type="hidden" name="listed[]" value="{{ $listedOrg['PK'] }}">
+                @endif
+            @endforeach
 
             <div class="card card-static shadow-sm">
                 <div class="table-responsive">

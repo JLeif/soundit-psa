@@ -1225,6 +1225,46 @@ Its `down()` refuses any populated table: intent evidence must not be deleted by
 rollback or client/user deletion. No FK cascade exists. Revert callers only through
 normal review; do not delete vendor objects, clear mappings or release uncertain locks.
 
+**B4 caller (staged verb + client-page button), shipped INERT.** The MCP verb
+`controld_onboard_client` and the Admin-only "Control D onboarding" card on the client
+page are the only callers of the B3 service. Both are inert unless BOTH hold: the six
+Client Onboarding Defaults above are complete AND the separate **Client onboarding
+enabled** switch on the Control D card (setting `controld_onboarding_enabled`, default
+OFF, rendered beside the "Defaults complete" badge) is on. The switch refuses to turn
+on while any default is missing. Turning it on in production, granting the verb to an
+MCP token and the first run against a real client are operator decisions taken
+deliberately; installation and deployment do none of them. The verb is held-only:
+it has no immediate lane whatever mode is granted (`controld_onboard_client:immediate`
+is rejected as a grant), is explicit-grant-only (never inherited by a legacy
+full-surface token), and requires `staged=true`, a `ticket_id` belonging to the client
+and a `reason`. Each proposal is ONE step, decided by the server from the client
+record: `organization` when the client has no `controld_org_id` (creates the
+sub-organization from the client's name and contact email, two-factor required, the
+panel's auto-detected analytics region; binds the returned id), then `code` once
+mapped (cuts one provisioning code with the six defaults, icon `desktop-windows`, no
+deactivation PIN and no hostname prefix — both deferred to a later leg and never
+accepted from callers). Approval happens in the AI Technician cockpit and must come
+from a SECOND active Admin — the person who staged the proposal cannot approve it, and
+a non-Admin can neither stage from the button nor approve. Approval re-derives the
+step from live state and refuses if it changed. Outcomes: `bound` executes; a vendor
+`40301` read-only rejection is terminal for that proposal with nothing created and the
+fix named (replace the API key with a Write token), a fresh proposal may follow; an
+uncertain outcome is terminal, is never re-armed, and leaves the B3 intent holding the
+client's onboarding lock for manual reconciliation. The provisioning code and any PIN
+never appear in a proposal card, audit row, tool result or page. Rollback of this leg
+is reverting the callers through normal review; it changes no schema (no migration
+ships with B4) and must not clear mappings, delete vendor objects or release locks.
+
+The manual **Organization Mapping** page and the client-page **Link/Unlink** for Control
+D now refuse (with a visible error, never a silent skip) to clear or re-point a mapping
+the onboarding writers bound, or to hand a bound, soft-deleted or otherwise still-mapped
+client's organization to another client (#2010). The refusal renders on both pages, names the conflicting
+client/organization, and saves nothing. A mapping the mapping page could not have carried
+(its organization was not listed — deleted upstream or outside the listing — or its owner
+is not among the active clients the select offers) is left untouched rather than read as
+a clear, so one stale mapping cannot block unrelated saves. A manual mapping with no
+onboarding evidence stays removable from the client page.
+
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
 1. Settings > Integrations > Control D DNS Security (Licensing tab)

@@ -217,6 +217,27 @@ class ControlDConfig
         return Setting::getValue('controld_enabled', '1') === '1';
     }
 
+    /**
+     * Explicit activation switch for the onboarding caller (B4): the staged verb
+     * `controld_onboard_client` and the client-page button are inert unless this
+     * is on AND isOnboardingConfigured(). Default OFF, unlike the integration's
+     * master switch — six filled-in defaults are not a decision to start creating
+     * vendor organizations; that decision is the operator's and is taken here.
+     * Turning it on in production is Charlie's call, not part of any build leg.
+     */
+    public const ONBOARDING_ENABLED_SETTING = 'controld_onboarding_enabled';
+
+    public static function isOnboardingEnabled(): bool
+    {
+        return Setting::getValue(self::ONBOARDING_ENABLED_SETTING, '0') === '1';
+    }
+
+    /** Both gates the caller ships behind: the explicit toggle and the six defaults. */
+    public static function isOnboardingActive(): bool
+    {
+        return self::isOnboardingEnabled() && self::isOnboardingConfigured();
+    }
+
     public static function isConfigured(): bool
     {
         return ! empty(self::get('api_key'));

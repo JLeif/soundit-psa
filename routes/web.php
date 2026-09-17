@@ -162,6 +162,9 @@ Route::middleware('auth')->group(function () {
     Route::post('/clients/{client}/integrations/{vendor}/unlink', [ClientIntegrationController::class, 'unlink'])->name('clients.integrations.unlink')
         ->whereIn('vendor', \App\Services\ClientIntegrationService::VENDORS);
     Route::post('/clients/{client}/comet/provision', [ClientIntegrationController::class, 'provisionComet'])->name('clients.comet.provision');
+    // Control D onboarding button (B4): Admin-only; stages the same cockpit proposal as
+    // the controld_onboard_client verb. 404 unless the onboarding switch + six defaults.
+    Route::post('/clients/{client}/controld/onboard', [\App\Http\Controllers\Web\ClientControlDOnboardingController::class, 'stage'])->middleware(['admin', 'throttle:10,1'])->name('clients.controld.onboard');
     Route::post('/clients/{client}/comet/provision-user', [ClientIntegrationController::class, 'provisionCometUser'])->name('clients.comet.provision-user');
     Route::post('/clients/{client}/tactical/provision', [ClientIntegrationController::class, 'provisionTactical'])->name('clients.tactical.provision');
 
