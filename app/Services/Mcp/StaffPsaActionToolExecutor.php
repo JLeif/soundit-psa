@@ -29,6 +29,7 @@ use App\Services\Email\RecipientContext;
 use App\Services\Email\RecipientValidationException;
 use App\Services\EmailService;
 use App\Services\PersonService;
+use App\Services\PhoneCallActionService;
 use App\Services\PhoneCallService;
 use App\Services\Technician\TechnicianActionGate;
 use App\Services\Technician\TechnicianDisclosure;
@@ -140,6 +141,18 @@ class StaffPsaActionToolExecutor
                 : app(\App\Services\PhoneCallResolutionService::class)->execute($arguments, $clientId, $actorLabel, $name === 'stage_resolve_phone_call'),
             'link_call_to_ticket' => $this->linkCallToTicket($arguments, $actorLabel),
             'create_ticket_from_call' => $this->createTicketFromCall($arguments, $actorLabel),
+            // Call-log writes (card 6aac3226dfebbc36fd7ff4f9). Thin reuse of the
+            // same service methods the staff call page uses; the money-touching
+            // and caller-silencing three ride the held-proposal lane, exactly as
+            // resolve_phone_call does, so a bare grant cannot execute now.
+            'set_call_billable', 'stage_set_call_billable' => app(PhoneCallActionService::class)
+                ->execute(PhoneCallActionService::ACTION_BILLABLE, $arguments, $actorLabel, $name === 'stage_set_call_billable'),
+            'block_caller', 'stage_block_caller' => app(PhoneCallActionService::class)
+                ->execute(PhoneCallActionService::ACTION_BLOCK, $arguments, $actorLabel, $name === 'stage_block_caller'),
+            'allow_caller', 'stage_allow_caller' => app(PhoneCallActionService::class)
+                ->execute(PhoneCallActionService::ACTION_ALLOW, $arguments, $actorLabel, $name === 'stage_allow_caller'),
+            'mark_call_followed_up', 'retry_call_transcription' => app(PhoneCallActionService::class)
+                ->execute($name, $arguments, $actorLabel, false),
             default => ['error' => "Unknown PSA action tool: {$name}"],
         };
         TicketToolActivityContext::current()?->finish($result);
