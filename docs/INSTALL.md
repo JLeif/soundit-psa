@@ -1243,9 +1243,16 @@ sub-organization from the client's name and contact email, two-factor required, 
 panel's auto-detected analytics region; binds the returned id), then `code` once
 mapped (cuts one provisioning code with the six defaults, icon `desktop-windows`, no
 deactivation PIN and no hostname prefix — both deferred to a later leg and never
-accepted from callers). Approval happens in the AI Technician cockpit and must come
-from a SECOND active Admin — the person who staged the proposal cannot approve it, and
-a non-Admin can neither stage from the button nor approve. Approval re-derives the
+accepted from callers). Approval happens in the AI Technician cockpit under an active
+Admin, and the two-person rule is applied per lane (B4.1, #2043): a proposal staged from
+the client-page button records the Admin who staged it and refuses that same person as
+approver; a proposal staged through the MCP verb can only come from a token marked
+**ai_actor** (the agent stages, one human approves) — a token that is not an ai_actor
+is refused at staging with an audited reason and is pointed at the button, so no
+person can stage and approve alone through a bearer token. The staging token's id is
+sealed into the held proposal and re-checked at approval (a token whose ai_actor flag
+was cleared, or that was deleted, after staging is refused). A non-Admin can neither
+stage from the button nor approve. Approval re-derives the
 step from live state and refuses if it changed. Outcomes: `bound` executes; a vendor
 `40301` read-only rejection is terminal for that proposal with nothing created and the
 fix named (replace the API key with a Write token), a fresh proposal may follow; an
@@ -1264,6 +1271,46 @@ client/organization, and saves nothing. A mapping the mapping page could not hav
 is not among the active clients the select offers) is left untouched rather than read as
 a clear, so one stale mapping cannot block unrelated saves. A manual mapping with no
 onboarding evidence stays removable from the client page.
+
+**Activating Control D onboarding.** Installation and deployment leave onboarding dark;
+turning it on is a deliberate operator act, taken in this order, each step its own
+decision. **Precondition: the release carrying B4.1 (#2043, the ai_actor binding on the
+MCP lane described above) must be live before any token is granted the verb** — on a
+build without it, a proposal staged through a token records no stager and one Admin could
+stage and approve alone; the button lane was never affected. Then:
+
+1. **The switch.** Settings → Integrations → Control D: complete the six Client
+   Onboarding Defaults (the badge beside them reads "Defaults complete"), then turn on
+   **Client onboarding enabled** (`controld_onboarding_enabled`), the switch beside that
+   badge. It refuses to turn on while any default is missing. Nothing is created by
+   turning it on; it only makes the verb and the button reachable.
+2. **The grant.** Choose ONE lane for the first client. For the agent lane, grant
+   `controld_onboard_client:staged` to exactly ONE MCP token that has the **ai_actor**
+   trust flag set on its token page (Settings → MCP Tokens → the token → "AI
+   attribution for notes and wiki writes"); a token without that flag is granted
+   nothing useful — its calls are refused at staging and audited. The verb is
+   explicit-grant-only and staged-only; `:immediate` is rejected as a grant. For the
+   human lane, grant nothing: an Admin uses the **Control D onboarding** card on the
+   client page instead, and a second Admin approves.
+3. **The first client, two approvals, a second Admin watching.** Pick one client whose
+   record has a valid contact email and no `controld_org_id`. Stage step 1 (the
+   organization) — by the token with a `ticket_id` belonging to that client and a
+   `reason`, or by the button on a ticket of that client. Approve it in the AI Technician
+   cockpit: on the token lane any active Admin; on the button lane an Admin other than the
+   one who staged it. Have a second Admin present for the first run either way. Confirm the
+   client now shows a bound Control D organization on its page, then stage and approve
+   step 2 (the provisioning code) the same way. Refusals are final for that proposal and
+   name the cause; deny and re-stage after fixing it. An `uncertain` outcome stops here and
+   is reconciled by hand — do not re-stage over it.
+4. **Readback.** In the Control D admin portal, confirm exactly one new sub-organization
+   (the client's name, contact email, two-factor required) and exactly one provisioning
+   code under it, and that they match the intent rows the PSA recorded for that client
+   (`controld_onboarding_intents`: one `organization` and one `code` row, both `bound`,
+   with the same organization id the client record carries). Only after that readback
+   is a second client onboarded. The code itself is never displayed anywhere in the PSA.
+
+Turning the switch back off returns both lanes to inert without touching vendor objects,
+mappings, stored codes or intent rows; revoking the grant does the same for the token lane.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
