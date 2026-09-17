@@ -1256,8 +1256,8 @@ ships with B4) and must not clear mappings, delete vendor objects or release loc
 
 The manual **Organization Mapping** page and the client-page **Link/Unlink** for Control
 D now refuse (with a visible error, never a silent skip) to clear or re-point a mapping
-the onboarding writers bound, or to hand a bound or soft-deleted client's organization
-to another client (#2010). The refusal renders on both pages, names the conflicting
+the onboarding writers bound, or to hand a bound, soft-deleted or otherwise still-mapped
+client's organization to another client (#2010). The refusal renders on both pages, names the conflicting
 client/organization, and saves nothing. A mapping the mapping page could not have carried
 (its organization was not listed — deleted upstream or outside the listing — or its owner
 is not among the active clients the select offers) is left untouched rather than read as

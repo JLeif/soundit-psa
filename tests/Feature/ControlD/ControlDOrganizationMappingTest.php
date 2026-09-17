@@ -195,6 +195,28 @@ class ControlDOrganizationMappingTest extends TestCase
         $this->assertSame('org-selectable', $selectable->fresh()->controld_org_id);
     }
 
+    public function test_an_unofferable_owners_organization_is_never_handed_to_another_client(): void
+    {
+        // The owner is untrashed but non-operational, so the select cannot preselect it and its
+        // organization posts empty — an absence the form's shape produced, which is why the clear
+        // is not refused. Re-pointing that SAME organization at another client in the same
+        // submission is the operator's own typing: refused, and never two rows on one org pk.
+        $inactive = Client::factory()->create(['controld_org_id' => 'org-inactive', 'is_active' => false]);
+        $other = Client::factory()->create();
+
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-inactive'], 'mappings' => ['org-inactive' => $other->id]])
+            ->assertSessionHasErrors('mappings');
+        $this->assertSame('org-inactive', $inactive->fresh()->controld_org_id);
+        $this->assertNull($other->fresh()->controld_org_id);
+
+        // Same for a soft-deleted owner the form cannot render at all.
+        $deleted = Client::factory()->create(['controld_org_id' => 'org-deleted']);
+        $deleted->delete();
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-deleted'], 'mappings' => ['org-deleted' => $other->id]])
+            ->assertSessionHasErrors('mappings');
+        $this->assertNull($other->fresh()->controld_org_id);
+    }
+
     private function bound(Client $client): void
     {
         (new ControlDOnboardingIntent)->forceFill([

@@ -40,6 +40,19 @@ class ControlDOrganizationMapping
                 if (! $client || $client->trashed()) {
                     $this->refuse('client #'.(int) $id.' no longer exists or is deleted');
                 }
+                // Per-TARGET holder check, the same one the client page makes
+                // (assertClientChangeAllowed). An organization another row still holds is never
+                // handed over, whatever the page could offer for that holder. The refusal loop
+                // below reads an ABSENT mapping through `$offered`, which answers only "could this
+                // form have carried it?" — that question must not be the only thing standing
+                // between a submission that RE-POINTS a still-held organization (owner deleted or
+                // non-operational, so unofferable) and two client rows claiming one
+                // controld_org_id. Absent-because-unofferable and reassigned-in-this-submission
+                // are different facts and are answered separately.
+                $holder = $clients->first(fn (Client $row): bool => $row->controld_org_id === $pk && (int) $row->id !== (int) $id);
+                if ($holder !== null) {
+                    $this->refuse("organization {$pk} belongs to client #{$holder->id}");
+                }
                 $wanted[(int) $id] = $pk;
             }
             foreach ($clients as $client) {
