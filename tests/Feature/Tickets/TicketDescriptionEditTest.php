@@ -92,6 +92,22 @@ class TicketDescriptionEditTest extends TestCase
         $this->assertSame(0, TicketDescriptionChangeLog::where('ticket_id', $ticket->id)->count());
     }
 
+    public function test_converted_prefill_trims_line_ends_and_cancel_restores_saved_text_after_validation(): void
+    {
+        $ticket = Ticket::factory()->create([
+            'description' => null,
+            'description_html' => "<pre>First  \n \t\n\n\nSecond  </pre>",
+        ]);
+        $this->assertSame("First\n\nSecond", $ticket->description_for_editing);
+        $response = $this->actingAs(User::factory()->create())
+            ->withSession(['_old_input' => ['description' => 'Unsaved attempt']])
+            ->get(route('tickets.show', $ticket))->assertOk();
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $this->assertSame('Unsaved attempt', $dom->getElementById('descriptionInput')->textContent);
+        $response->assertSee('const descriptionOriginal = '.\Illuminate\Support\Js::from("First\n\nSecond").';', false);
+    }
+
     public function test_markdown_prefill_takes_precedence_and_is_not_normalized(): void
     {
         $markdown = "Raw **text**  \n\n\nNext";
