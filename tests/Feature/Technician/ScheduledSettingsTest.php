@@ -73,6 +73,24 @@ class ScheduledSettingsTest extends TestCase
         $this->assertSame('1', Setting::getValue('technician_kill_switch'));
     }
 
+    /**
+     * Arming scheduled execution is what lets the sweep dispatch to live vendors, so the
+     * control is admin-only: the page's auth-only middleware (psa #1344) is not a gate
+     * for a switch that previously required deploy-environment access.
+     */
+    public function test_non_admin_staff_cannot_arm_scheduled_execution(): void
+    {
+        Http::preventStrayRequests();
+        Setting::setValue('scheduled_approvals_enabled', '0');
+        foreach (['tech', 'billing', 'contractor'] as $role) {
+            $user = User::factory()->create(['role' => $role, 'is_active' => true]);
+            $this->actingAs($user)->post(route('settings.integrations.technician.update'), ['scheduled_approvals_enabled' => '1'])
+                ->assertForbidden();
+            $this->assertSame('0', Setting::getValue('scheduled_approvals_enabled'), $role.' armed scheduled execution');
+            $this->assertFalse(TechnicianConfig::scheduledApprovalsEnabled());
+        }
+    }
+
     private function assertCheckbox(bool $checked): void
     {
         $response = $this->get(route('settings.integrations'))->assertOk()

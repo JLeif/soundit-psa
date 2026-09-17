@@ -10,6 +10,9 @@ values remain off. Verify the effective setting with the read-only preflight.
 Its `enabled` and `activation_authorized` fields report that operator choice, not
 clock certification or a new grant of operational authority. Charlie alone authorizes activation in this
 deployment; a reviewed change or dark deployment is not permission to flip it.
+Saving that checkbox is admin-only (`admin` middleware on
+`settings.integrations.technician.update`), so a non-admin staff session cannot arm or
+disarm it; that gate bounds who *can* flip it and is not itself authorization to do so.
 The existing technician kill switch is unchanged.
 
 ### What enabling exposes

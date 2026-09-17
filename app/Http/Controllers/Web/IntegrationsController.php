@@ -2304,8 +2304,9 @@ class IntegrationsController extends Controller
      * 2. **It is admin-only.** It is the one action here that spends a live
      *    credential against a third party, so it fails closed rather than
      *    inheriting the page's auth-only middleware. That middleware gap is psa
-     *    #1344 and this guard does NOT close it — every other action on this page
-     *    is still reachable by any authenticated user.
+     *    #1344 and this guard does NOT close it — every action on this page without
+     *    its own route-level `admin` middleware (updateTechnician() has one, because
+     *    it arms scheduled dispatch) is still reachable by any authenticated user.
      */
     public function testHdb(Request $request)
     {

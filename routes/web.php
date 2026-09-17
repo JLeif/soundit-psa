@@ -520,7 +520,15 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/intake', [IntegrationsController::class, 'updateIntake'])->name('settings.integrations.intake.update');
 
     // Settings — AI Technician
-    Route::post('/settings/integrations/technician', [IntegrationsController::class, 'updateTechnician'])->name('settings.integrations.technician.update');
+    // Admin-gated, not merely `auth`: this form now carries the switch that arms
+    // scheduled execution of already-approved actions, i.e. the control the
+    // every-minute sweep reads before it dispatches to live vendors. That used to be
+    // a deploy-environment control (SCHEDULED_APPROVALS_ENABLED + config:cache), so
+    // leaving it on the page's auth-only middleware would hand any authenticated
+    // staff session — billing, contractor — an activation primitive. The form's
+    // "absent = off" semantics make every save rewrite the other coverage toggles
+    // too. Closes psa #1344 for this action only; the rest of the page is unchanged.
+    Route::post('/settings/integrations/technician', [IntegrationsController::class, 'updateTechnician'])->middleware('admin')->name('settings.integrations.technician.update');
     // psa-2wwh: the emergency brake gets its OWN route, deliberately NOT folded into
     // updateTechnician. That form's semantics are "absent = off", so sharing it would
     // let an unrelated settings save silently disarm the kill switch mid-incident.
