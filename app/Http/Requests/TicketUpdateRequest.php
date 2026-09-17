@@ -85,6 +85,14 @@ class TicketUpdateRequest extends FormRequest
     public function withValidator($validator): void
     {
         $validator->after(function ($validator) {
+            $ticket = $this->route('ticket');
+            // Run after nullable validation: middleware turns blank strings into null.
+            // An omitted key on an unrelated ticket update is not a clear request.
+            if ($this->exists('description') && blank($this->input('description'))
+                && $ticket && (filled($ticket->description) || $ticket->description_html !== null)) {
+                $validator->errors()->add('description', 'The description cannot be emptied from here; replace it instead.');
+            }
+
             $category = $this->input('category');
             $subcategory = $this->input('subcategory');
 

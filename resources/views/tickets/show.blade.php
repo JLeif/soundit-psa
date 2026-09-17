@@ -71,23 +71,23 @@
                 {{-- Description-ONLY form, and that is a correctness constraint, not
                      tidiness: TicketUpdateRequest rules `description` as `nullable`
                      (NOT `sometimes`), and the convert-empty-strings middleware turns
-                     a blank field into null. Any form that posts `description`
-                     alongside other fields therefore blank-clears the description on
-                     every unrelated save where the textarea is not populated. Keeping
-                     this form to the one field means the payload is `description` or
+                     a blank field into null. Blank replacements are now refused when
+                     content exists; unrelated forms must still omit the key rather
+                     than trigger that guard. Keeping this form to the one field
+                     means the payload is `description` or
                      nothing, and the Ticket Info form (subject/category/subcategory/
                      category_id) never carries the key at all — so a category save
                      cannot wipe a description.
-                     The editor is loaded with the RAW markdown ($ticket->description),
-                     never rendered_description: round-tripping rendered HTML back
-                     through the markdown column would corrupt the stored source. --}}
+                     The editor keeps existing raw markdown, falling back to converted
+                     email text only when markdown is blank. Never round-trip rendered
+                     HTML into the markdown column. --}}
                 <form method="POST" action="{{ route('tickets.update', $ticket) }}"
                       id="descriptionEditForm" class="{{ $descriptionEditOpen ? '' : 'd-none' }}">
                     @csrf
                     @method('PATCH')
                     <textarea name="description" id="descriptionInput" rows="10"
                               class="form-control form-control-sm @error('description') is-invalid @enderror"
-                              >{{ old('description', $ticket->description) }}</textarea>
+                              >{{ old('description', $ticket->description_for_editing) }}</textarea>
                     @error('description')
                         <div class="invalid-feedback">{{ $message }}</div>
                     @enderror
@@ -95,6 +95,9 @@
                         Markdown. <strong>Visible to the client.</strong> Saving replaces the
                         description everywhere it is shown, including on email-originated
                         tickets, whose original formatting and inline images are not kept.
+                        @if(blank($ticket->description) && $ticket->description_html !== null)
+                            This text was converted from the original email.
+                        @endif
                     </div>
                     <button type="submit" class="btn btn-primary btn-sm">Save description</button>
                     <button type="button" class="btn btn-outline-secondary btn-sm"
@@ -1489,7 +1492,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Snapshot the value the page was served with, so Cancel restores the
         // SAVED description rather than leaving unsent edits in the textarea to
         // be mistaken for stored text on a later open.
-        const descriptionOriginal = descriptionInput ? descriptionInput.value : '';
+        const descriptionOriginal = {{ \Illuminate\Support\Js::from($ticket->description_for_editing ?? '') }};
 
         editDescriptionBtn.addEventListener('click', function() {
             descriptionEditForm.classList.toggle('d-none');

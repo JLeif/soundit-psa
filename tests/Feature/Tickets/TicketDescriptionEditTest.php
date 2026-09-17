@@ -73,6 +73,93 @@ class TicketDescriptionEditTest extends TestCase
             ->assertSee('id="descriptionEditForm"', false);
     }
 
+    public function test_html_only_editor_converts_and_normalizes_without_writing(): void
+    {
+        $html = '<p>First &amp; foremost</p><br><br><br><p>Second</p>';
+        $ticket = Ticket::factory()->create(['description' => null, 'description_html' => $html]);
+
+        $response = $this->actingAs(User::factory()->create())
+            ->get(route('tickets.show', $ticket))->assertOk();
+
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $prefill = $dom->getElementById('descriptionInput')->textContent;
+        $this->assertSame("First & foremost\n\nSecond", $prefill);
+        $response->assertSee('This text was converted from the original email.');
+        $response->assertSee('const descriptionOriginal = '.\Illuminate\Support\Js::from($prefill).';', false);
+        $this->assertNull($ticket->refresh()->description);
+        $this->assertSame($html, $ticket->description_html);
+        $this->assertSame(0, TicketDescriptionChangeLog::where('ticket_id', $ticket->id)->count());
+    }
+
+    public function test_converted_prefill_trims_line_ends_and_cancel_restores_saved_text_after_validation(): void
+    {
+        $ticket = Ticket::factory()->create([
+            'description' => null,
+            'description_html' => "<pre>First  \n \t\n\n\nSecond  </pre>",
+        ]);
+        $this->assertSame("First\n\nSecond", $ticket->description_for_editing);
+        $response = $this->actingAs(User::factory()->create())
+            ->withSession(['_old_input' => ['description' => 'Unsaved attempt']])
+            ->get(route('tickets.show', $ticket))->assertOk();
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $this->assertSame('Unsaved attempt', $dom->getElementById('descriptionInput')->textContent);
+        $response->assertSee('const descriptionOriginal = '.\Illuminate\Support\Js::from("First\n\nSecond").';', false);
+    }
+
+    public function test_markdown_prefill_takes_precedence_and_is_not_normalized(): void
+    {
+        $markdown = "Raw **text**  \n\n\nNext";
+        $ticket = Ticket::factory()->create(['description' => $markdown, 'description_html' => '<p>Other</p>']);
+        $response = $this->actingAs(User::factory()->create())
+            ->get(route('tickets.show', $ticket))->assertOk();
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $this->assertSame($markdown, $dom->getElementById('descriptionInput')->textContent);
+        $response->assertDontSee('This text was converted from the original email.');
+    }
+
+    public function test_blank_saves_refuse_to_remove_existing_markdown_or_nonnull_html(): void
+    {
+        $this->actingAs(User::factory()->create());
+        foreach ([[null, '<p>Email body</p>'], ['Keep **me**', null], [null, ''], ['0', null]] as [$markdown, $html]) {
+            foreach (['', " \t\r\n ", null] as $blank) {
+                $ticket = Ticket::factory()->create(['description' => $markdown, 'description_html' => $html]);
+                $this->patchJson(route('tickets.update', $ticket), ['description' => $blank])
+                    ->assertUnprocessable()->assertJsonValidationErrors('description')
+                    ->assertJsonPath('errors.description.0', 'The description cannot be emptied from here; replace it instead.');
+                $this->assertSame($markdown, $ticket->refresh()->description);
+                $this->assertSame($html, $ticket->description_html);
+                $this->assertSame(0, TicketDescriptionChangeLog::where('ticket_id', $ticket->id)->count());
+            }
+        }
+    }
+
+    public function test_blank_save_on_empty_ticket_is_a_no_op(): void
+    {
+        $ticket = Ticket::factory()->create(['description' => null, 'description_html' => null]);
+        $this->actingAs(User::factory()->create())
+            ->patch(route('tickets.update', $ticket), ['description' => " \t\n "])
+            ->assertRedirect(route('tickets.show', $ticket))->assertSessionHasNoErrors();
+        $this->assertNull($ticket->refresh()->description);
+        $this->assertNull($ticket->description_html);
+        $this->assertSame(0, TicketDescriptionChangeLog::where('ticket_id', $ticket->id)->count());
+    }
+
+    public function test_html_only_ticket_accepts_a_replacement_and_retains_audit_semantics(): void
+    {
+        $ticket = Ticket::factory()->create(['description' => null, 'description_html' => '<p>Original</p>']);
+        $this->actingAs(User::factory()->create())
+            ->patch(route('tickets.update', $ticket), ['description' => 'Replacement'])
+            ->assertRedirect(route('tickets.show', $ticket))->assertSessionHasNoErrors();
+        $this->assertSame('Replacement', $ticket->refresh()->description);
+        $this->assertNull($ticket->description_html);
+        $log = TicketDescriptionChangeLog::where('ticket_id', $ticket->id)->sole();
+        $this->assertSame('<p>Original</p>', $log->previous_description_html);
+        $this->assertSame('Replacement', $log->new_description);
+    }
+
     // ── WRITE PATH ──
 
     public function test_staff_can_update_a_ticket_description_from_the_web(): void
