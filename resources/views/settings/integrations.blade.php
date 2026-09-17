@@ -418,6 +418,24 @@
                         <span class="text-muted small">Reads gateways only; does not verify invoice permissions or move money.</span>
                     </form>
                 @endif
+                @if(auth()->user()->isAdmin() && ($benjipaysConfigured ?? false))
+                <div class="border-top pt-3 mt-3">
+                    {{-- #2065: admin-only. Off = the portal keeps today's Stripe link,
+                         byte for byte. On = a client-payable invoice with a QBO id
+                         mints an applied link at click time (no money moves by minting). --}}
+                    <form method="POST" action="{{ route('settings.integrations.benjipays.pay-online') }}">
+                        @csrf
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="enabled" value="1"
+                                   id="benjipays_pay_online" {{ ($benjipaysPayOnline ?? false) ? 'checked' : '' }} onchange="this.form.submit()">
+                            <label class="form-check-label" for="benjipays_pay_online">
+                                Use BenjiPays for portal Pay Online
+                                <small class="text-muted d-block">Client-payable invoices with a QuickBooks id open a BenjiPays applied link priced at the remaining balance; everything else keeps the Stripe link.</small>
+                            </label>
+                        </div>
+                    </form>
+                </div>
+                @endif
                 @if($benjipaysLastVerifiedAt ?? null)
                     <p class="small mt-2 mb-0">Last connection attempt: {{ $benjipaysLastVerifiedAt }}.
                         Outcome: {{ in_array($benjipaysLastOutcome, ['ok', '401', '403', 'error'], true) ? $benjipaysLastOutcome : 'error' }}.

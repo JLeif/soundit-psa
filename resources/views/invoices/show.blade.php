@@ -453,6 +453,35 @@
                 @endif
             </div>
         </div>
+
+        {{-- #2065 — admin-only BenjiPays applied-link preview. Minting moves no
+             money; the operator opens the URL to see the amount the vendor
+             presents. Independent of the portal toggle. Staff-only page, never
+             the portal. --}}
+        @if(auth()->user()->isAdmin() && \App\Support\BenjiPaysConfig::isConfigured() && $invoice->qbo_invoice_id && $invoice->status->isClientPayable())
+        <div class="card shadow-sm mt-4">
+            <div class="card-header"><i class="bi bi-link-45deg me-2"></i>BenjiPays</div>
+            <div class="card-body">
+                <form method="POST" action="{{ route('invoices.benjipays-preview', $invoice) }}">
+                    @csrf
+                    <button type="submit" class="btn btn-outline-primary btn-sm">Preview BenjiPays link</button>
+                    <span class="text-muted small d-block mt-1">Mints an applied payment link for this invoice and shows it here. No payment is taken by minting.</span>
+                </form>
+                @if(is_array(session('benjipays_preview')) && is_string(session('benjipays_preview')['url'] ?? null))
+                    @php($benjipaysPreview = session('benjipays_preview'))
+                    <div class="mt-3">
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control font-monospace small" value="{{ $benjipaysPreview['url'] }}" readonly>
+                        </div>
+                        <a href="{{ $benjipaysPreview['url'] }}" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm mt-2">
+                            <i class="bi bi-box-arrow-up-right me-1"></i>Open BenjiPays link
+                        </a>
+                        <p class="text-muted small mb-0 mt-2">Expires {{ $benjipaysPreview['expires_at'] ?? '' }}.</p>
+                    </div>
+                @endif
+            </div>
+        </div>
+        @endif
     </div>
 </div>
 

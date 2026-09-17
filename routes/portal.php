@@ -112,6 +112,11 @@ Route::middleware(['portal.enabled', 'portal.auth', 'portal.scope'])->group(func
     // Invoices
     Route::get('/invoices', [PortalInvoiceController::class, 'index'])->name('portal.invoices.index');
     Route::get('/invoices/{invoice}', [PortalInvoiceController::class, 'show'])->name('portal.invoices.show');
+    // #2065: Pay Online via a BenjiPays applied link. POST + CSRF: minting is a
+    // vendor write (a tokenized link), so a bare GET must not be able to do it.
+    Route::post('/invoices/{invoice}/pay-online', [PortalInvoiceController::class, 'payOnline'])
+        ->name('portal.invoices.pay-online')
+        ->middleware('throttle:10,1');
 
     // Devices (Assets)
     Route::get('/devices', [PortalAssetController::class, 'index'])->name('portal.assets.index');

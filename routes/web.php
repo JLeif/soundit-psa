@@ -508,6 +508,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/autoelevate/test', [IntegrationsController::class, 'testAutoElevate'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.autoelevate.test');
     Route::post('/settings/integrations/benjipays', [IntegrationsController::class, 'updateBenjiPays'])->middleware('admin')->name('settings.integrations.benjipays.update');
     Route::post('/settings/integrations/benjipays/test', [IntegrationsController::class, 'testBenjiPays'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.benjipays.test');
+    Route::post('/settings/integrations/benjipays/pay-online', [IntegrationsController::class, 'updateBenjiPaysPayOnline'])->middleware('admin')->name('settings.integrations.benjipays.pay-online');
     Route::get('/settings/integrations/stripe/customers', [\App\Http\Controllers\Web\StripeCustomerController::class, 'index'])->name('settings.stripe-customers.index');
     Route::post('/settings/integrations/stripe/customers', [\App\Http\Controllers\Web\StripeCustomerController::class, 'update'])->name('settings.stripe-customers.update');
     Route::get('/settings/integrations/stripe/customers/auto-match', [\App\Http\Controllers\Web\StripeCustomerController::class, 'autoMatch'])->name('settings.stripe-customers.auto-match');
@@ -672,6 +673,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/invoices/import-stripe', [InvoiceController::class, 'importFromStripe'])->name('invoices.import-stripe');
     Route::post('/invoices/{invoice}/push-qbo', [InvoiceController::class, 'pushToQbo'])->name('invoices.push-qbo');
     Route::post('/invoices/{invoice}/sync-qbo', [InvoiceController::class, 'syncFromQbo'])->name('invoices.sync-qbo');
+    Route::post('/invoices/{invoice}/benjipays-preview', [InvoiceController::class, 'previewBenjiPaysLink'])->middleware(['admin', 'throttle:6,1'])->name('invoices.benjipays-preview');
     Route::post('/invoices/{invoice}/push-stripe', [InvoiceController::class, 'pushToStripe'])->name('invoices.push-stripe');
     Route::post('/invoices/{invoice}/sync-stripe', [InvoiceController::class, 'syncFromStripe'])->name('invoices.sync-stripe');
     Route::post('/invoices/{invoice}/send-stripe', [InvoiceController::class, 'sendFromStripe'])->name('invoices.send-stripe');
