@@ -39,6 +39,19 @@ class ScheduledSettingsTest extends TestCase
         $this->assertSame($expected, $result['activation_authorized']);
     }
 
+    #[DataProvider('values')]
+    public function test_scheduler_filter_uses_strict_setting(?string $value, bool $expected): void
+    {
+        if ($value !== null) {
+            Setting::setValue('scheduled_approvals_enabled', $value);
+        }
+        config(['scheduled_approvals.enabled' => ! $expected]);
+        $schedule = app(\Illuminate\Console\Scheduling\Schedule::class);
+        $events = array_values(array_filter($schedule->events(), fn ($event) => str_contains($event->command ?? '', 'technician:scheduled-sweep')));
+        $this->assertCount(1, $events);
+        $this->assertSame($expected, $events[0]->filtersPass($this->app));
+    }
+
     public function test_checkbox_roundtrip_is_audited_and_preserves_emergency_stop(): void
     {
         Http::preventStrayRequests();

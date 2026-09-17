@@ -70,6 +70,40 @@ class ScheduledApprovalTest extends TestCase
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $this->evidence);
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledSettingsTest::class, 'values')]
+    public function test_admission_setting_gate_independent_of_evidence(?string $value, bool $expected): void
+    {
+        \App\Models\Setting::where('key', 'scheduled_approvals_enabled')->delete();
+        if ($value !== null) {
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', $value);
+        }
+        config(['scheduled_approvals.enabled' => ! $expected]);
+        if (! $expected) {
+            $this->expectException(\InvalidArgumentException::class);
+            $this->expectExceptionMessage('scheduling_disabled_or_clock_unhealthy');
+        }
+        $this->assertGreaterThan(0, $this->admit());
+        $this->assertDatabaseCount('scheduled_authorizations', 1);
+    }
+
+    public function test_setting_is_rechecked_after_live_evidence_before_intent(): void
+    {
+        $id = $this->admit();
+        $this->time = $this->time->setTime(1, 0);
+        $coordinator = app(ScheduledCoordinator::class);
+        $nonce = $coordinator->claim($id);
+        $this->assertNotNull($nonce);
+        $evidence = Mockery::mock(ScheduledEvidence::class);
+        $evidence->shouldReceive('revalidate')->once()->andReturnUsing(function ($run, $user, $binding) {
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
+            config(['scheduled_approvals.enabled' => true]);
+
+            return $binding;
+        });
+        $this->assertFalse($coordinator->intent($id, $nonce, $evidence));
+        $this->assertSame('claimed', DB::table('scheduled_authorizations')->where('id', $id)->value('state'));
+    }
+
     public function test_admission_double_submit_and_note_delivery_are_idempotent(): void
     {
         $id = $this->admit();
