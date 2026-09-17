@@ -290,7 +290,7 @@ class HdbAuthClientTest extends TestCase
 
     public function test_the_portals_ip_filter_notice_is_its_own_reason_not_unrecognised(): void
     {
-        // OBSERVED 2026-09-17 19:59Z against the real subaccount (prod 4d5152a0):
+        // OBSERVED 2026-09-17 19:59Z against the real service subaccount:
         // the portal answered the credential post with the login page plus a
         // `notify--bad` block naming the account's IP Filter whitelist. That is
         // a perimeter refusal, not a verdict on the credentials, and before this
