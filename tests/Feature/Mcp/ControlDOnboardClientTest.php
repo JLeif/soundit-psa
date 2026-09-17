@@ -614,15 +614,18 @@ class ControlDOnboardClientTest extends TestCase
         $row = McpToken::where('label', 'opsbot')->sole();
         $page = $this->actingAs(User::factory()->admin()->create(['is_active' => true]))->get(route('settings.mcp-tokens.show', $row))->assertOk();
         $page->assertDontSee('grants no permissions');
-        $page->assertSee('controld_onboard_client');
-        $page->assertSee('Admin-managed', false);
-        $page->assertSee('client page');
+        $page->assertSee('staging authority for <code>controld_onboard_client</code>', false);
+        $page->assertSee('only an Admin-managed token with this flag may stage that verb');
+        $page->assertSee('granting the verb to this token is accepting that');
+        $page->assertSee('belongs to the client page button');
 
-        $install = file_get_contents(base_path('docs/INSTALL.md'));
+        // Hard-wrapped prose: compare on collapsed whitespace.
+        $install = preg_replace('/\s+/', ' ', (string) file_get_contents(base_path('docs/INSTALL.md')));
         $this->assertStringNotContainsString('no person can stage and approve alone through a bearer token', $install);
+        $this->assertStringContainsString('token-lane staging requires an Admin-managed ai_actor token', $install);
         $this->assertStringContainsString('the residual the operator accepts by granting the verb', $install);
-        $this->assertStringContainsString('Deny and re-stage', $install, 'the pre-B4.1 drain step is documented');
-        $this->assertStringContainsString('staged before B4.1', $install);
+        $this->assertStringContainsString('Deny and re-stage anything staged before B4.1 first.', $install, 'the pre-B4.1 drain step is documented');
+        $this->assertStringContainsString('This is procedure, not a migration', $install);
     }
 
     /** RED CONTROL: non-admin stages (button) or approves → refused; nothing created. */

@@ -54,9 +54,7 @@ class McpConfig
         // Grant entries may carry per-tool mode suffixes (name:staged /
         // name:immediate) and legacy staged-alias names; parse them into the
         // plain canonical tool list plus the per-tool mode map.
-        $grants = $record->tools === null
-            ? null
-            : McpToolModes::parseGrants(self::normalizeToolList($record->tools));
+        $grants = self::grantedTools($record);
 
         return new McpStaffToken(
             allowedTools: $grants === null ? null : $grants['tools'],
@@ -103,9 +101,7 @@ class McpConfig
             ->where('label', $label)
             ->get()
             ->contains(function (McpToken $record) use ($toolName): bool {
-                $allowedTools = $record->tools === null
-                    ? null
-                    : McpToolModes::parseGrants(self::normalizeToolList($record->tools))['tools'];
+                $allowedTools = self::grantedTools($record)['tools'] ?? null;
 
                 return $allowedTools !== null && in_array($toolName, $allowedTools, true);
             });
@@ -250,6 +246,24 @@ class McpConfig
     private static function tokenPrefix(string $token): string
     {
         return Str::substr($token, 0, 12).'...';
+    }
+
+    /**
+     * THE one projection of a stored token row onto its granted tools + per-tool
+     * modes: normalise (comma-split, trim, dedupe — a legacy blob import may have
+     * stored one comma-joined element) and then parse the mode suffixes. Null for
+     * the legacy full-surface token (tools null). Authentication reads grants
+     * through this, and so must every later re-read that decides on the same
+     * grant (B4.2, #2056 c1:v1:1: the Control D approval re-read) — two readers
+     * with two normalisations refused at approval what they admitted at staging.
+     *
+     * @return array{tools: array<int, string>, modes: array<string, string>}|null
+     */
+    public static function grantedTools(McpToken $record): ?array
+    {
+        return $record->tools === null
+            ? null
+            : McpToolModes::parseGrants(self::normalizeToolList($record->tools));
     }
 
     /** @param array<int, mixed> $tools */

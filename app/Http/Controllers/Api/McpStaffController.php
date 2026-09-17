@@ -487,7 +487,7 @@ class McpStaffController extends Controller
 
         $allTools = array_values(array_filter(
             $allTools,
-            fn (array $tool): bool => $this->toolAllowed($request, (string) ($tool['name'] ?? ''), $liveLookup),
+            fn (array $tool): bool => $this->toolPublished($request, (string) ($tool['name'] ?? ''), $liveLookup),
         ));
 
         // find_persons / find_assets accept an OPTIONAL client_id — they
@@ -2603,6 +2603,34 @@ class McpStaffController extends Controller
     }
 
     /**
+     * PUBLICATION predicate (tools/list, list_tool_surface, search_tools): toolAllowed()
+     * AND "this token could actually succeed". Today that adds one conjunct: Control D
+     * client onboarding is staged only by an ai_actor token (B4.1, #2043 — the executor
+     * refuses any other with an audited reason), so a granted non-ai_actor token is not
+     * shown the verb either (B4.2, #2056 diff:4/contract:4 — publish/dispatch parity).
+     * Deliberately NOT folded into toolAllowed(): tools/call keeps B4.1's refusal in the
+     * executor, which names ai_actor, points at the client-page button and writes the
+     * `rejected` action-log row — the grant gate's generic "Tool not allowed" would lose
+     * all three.
+     *
+     * @param  array<string, true>|null  $liveLookup  see toolAllowed()
+     */
+    private function toolPublished(Request $request, string $toolName, ?array $liveLookup = null): bool
+    {
+        if (! $this->toolAllowed($request, $toolName, $liveLookup)) {
+            return false;
+        }
+
+        if ($this->isControlDOnboardingTool($toolName)) {
+            $token = $request->attributes->get('mcp_staff_token');
+
+            return $token instanceof McpStaffToken && $token->aiActor;
+        }
+
+        return true;
+    }
+
+    /**
      * Whether staged=false may execute a stageable tool now. Delegates to
      * McpStaffToken::allowsImmediate(), which resolves the mode through
      * McpToolModes::effectiveMode() — the same single resolution point
@@ -2875,7 +2903,7 @@ class McpStaffController extends Controller
             return ['error' => 'Unknown category: '.$categoryFilter.'. Valid categories: '.implode(', ', array_keys($categories)).'.'];
         }
 
-        $entries = McpToolSurface::classify(fn (string $tool): bool => $this->toolAllowed($request, $tool));
+        $entries = McpToolSurface::classify(fn (string $tool): bool => $this->toolPublished($request, $tool));
 
         $counts = array_fill_keys(array_keys($states), 0);
         foreach ($entries as $entry) {
@@ -2943,7 +2971,7 @@ class McpStaffController extends Controller
                 'grant_state' => $entry['state'],
                 'description' => $entry['description'],
             ],
-            McpToolSurface::search($query, fn (string $tool): bool => $this->toolAllowed($request, $tool)),
+            McpToolSurface::search($query, fn (string $tool): bool => $this->toolPublished($request, $tool)),
         );
 
         $payload = [
