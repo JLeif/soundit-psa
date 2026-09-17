@@ -20,6 +20,12 @@ class TechnicianConfig
         return (bool) Setting::getValue('technician_enabled');
     }
 
+    /** Scheduled execution is opt-in; the kill switch remains an independent hard stop. */
+    public static function scheduledApprovalsEnabled(): bool
+    {
+        return Setting::getValue('scheduled_approvals_enabled') === '1';
+    }
+
     /** Deterministic emergency backstop on/off, independent from the draft Technician. */
     public static function emergencyEnabled(): bool
     {

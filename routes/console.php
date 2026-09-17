@@ -421,7 +421,7 @@ Schedule::command('technician:scheduled-sweep')
     ->everyMinute()
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => (bool) config('scheduled_approvals.enabled'));
+    ->when(fn () => TechnicianConfig::scheduledApprovalsEnabled());
 
 // AI Technician — stale-claim reaper (psa-xz0z): return runs stranded in 'executing' by a
 // process death or a DEPLOY (PHP-FPM restart mid-approval) to the approval queue, so an

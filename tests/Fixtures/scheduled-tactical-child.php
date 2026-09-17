@@ -12,7 +12,7 @@ if (! $socket || ! str_ends_with($socket, '/test.sock') || ! is_file(dirname($so
 config(['database.default' => 'scheduled_synthetic', 'database.connections.scheduled_synthetic' => [
     'driver' => 'mysql', 'unix_socket' => $socket, 'database' => 'scheduled_synthetic_test',
     'username' => 'root', 'password' => '', 'charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci', 'prefix' => '', 'strict' => true,
-], 'app.key' => getenv('SCHEDULED_CHILD_KEY'), 'cache.default' => 'array', 'scheduled_approvals.enabled' => true]);
+], 'app.key' => getenv('SCHEDULED_CHILD_KEY'), 'cache.default' => 'array']);
 $db = Illuminate\Support\Facades\DB::connection();
 if ($db->selectOne('SELECT DATABASE() AS d')->d !== 'scheduled_synthetic_test' || (int) $db->selectOne('SELECT @@skip_networking AS n')->n !== 1) {
     exit(91);

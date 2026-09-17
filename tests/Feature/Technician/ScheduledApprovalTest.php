@@ -36,7 +36,7 @@ class ScheduledApprovalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['scheduled_approvals.enabled' => true]);
+        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-15 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -208,7 +208,7 @@ class ScheduledApprovalTest extends TestCase
         foreach (['billing', 'contractor', 'inactive', 'missing_provenance', 'disabled', 'clock'] as $case) {
             $this->user->update(['role' => in_array($case, ['billing', 'contractor']) ? $case : 'tech', 'is_active' => $case !== 'inactive']);
             $this->run->update(['proposed_meta' => $case === 'missing_provenance' ? [] : ['scheduled_provenance' => ['version' => 1, 'kind' => 'native_human', 'user_id' => $this->user->id]]]);
-            config(['scheduled_approvals.enabled' => $case !== 'disabled']);
+            \App\Models\Setting::setValue('scheduled_approvals_enabled', $case !== 'disabled' ? '1' : '0');
             $this->healthy = $case !== 'clock';
             try {
                 $this->admit();

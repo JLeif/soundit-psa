@@ -2,11 +2,13 @@
 
 ## Activation runbook
 
-**Readiness is not activation authorization.** The feature defaults off through
-`SCHEDULED_APPROVALS_ENABLED=false`. Only `true`, `1`, `on` or `yes` enable it; any
-other value — including off-looking spellings such as `off`, `no` or `disabled`, and
-typos — resolves to `false` rather than failing open. Still verify the effective
-config rather than trusting the written value. Charlie alone authorizes activation in this
+**Readiness is not activation authorization.** The feature defaults off through the
+**Enable scheduled (deferred) execution of approved actions** checkbox in
+**Settings > Integrations > AI Technician**. Only the stored setting
+`scheduled_approvals_enabled === '1'` enables it; absent, `'0'`, `'yes'` and `'true'`
+values remain off. Verify the effective setting with the read-only preflight.
+Its `enabled` and `activation_authorized` fields report that operator choice, not
+clock certification or a new grant of operational authority. Charlie alone authorizes activation in this
 deployment; a reviewed change or dark deployment is not permission to flip it.
 The existing technician kill switch is unchanged.
 
@@ -70,14 +72,11 @@ is unknown. Reconcile with the relevant vendor (CIPP or Tactical), never auto-re
    command, not a queued dispatch job. An entry in the list alone is not proof of
    execution: inspect recent scheduler completion/errors and private-note delivery.
 
-Only after explicit activation approval, set `SCHEDULED_APPROVALS_ENABLED=true`
-in the deployment environment and run `php artisan config:cache` using the normal
-application deployment context. Verify `php artisan config:show scheduled_approvals`
-reports `enabled true`. Refresh/restart long-lived application/queue/scheduler
-processes through the normal operational procedure so they do not retain old config;
-new web and console processes must agree. Merely editing `.env` does not refresh
-cached config or a process that already loaded it. Verify cockpit availability and
-sweep execution without staging an unapproved live vendor action.
+Only after explicit activation approval, check the scheduled execution checkbox
+in **Settings > Integrations > AI Technician** and save. Verify
+`php artisan technician:scheduled-preflight` reports `enabled true`; no config-cache
+rebuild is needed for this setting. Verify cockpit availability and sweep execution
+without staging an unapproved live vendor action.
 
 ### Container clock diagnostics (not certification)
 
@@ -97,8 +96,8 @@ requires a separately reviewed clock-certification design.
 
 ### Disable and drain safely
 
-Set `SCHEDULED_APPROVALS_ENABLED=false`, rebuild with `php artisan config:cache`,
-refresh long-lived consumers as above, and verify effective `enabled false`.
+Uncheck the scheduled execution checkbox, save, and verify the read-only preflight
+reports `enabled false`.
 This stops new admissions and pre-intent dispatch checks once those consumers see
 it. It does **not** undo a persisted dispatch intent or an already sent operation:
 in-flight work may finish, and a dead intent can become uncertain. Do not promise
@@ -182,7 +181,7 @@ availability**. The activation runbook above describes the shipped PR2/PR3 surfa
 This increment is **not an executable scheduled-action feature**. It adds a dormant
 server-side authorization ledger, not an adapter or a new bearer credential. There
 is no schedule route/UI, production evidence provider, vendor client or action-bus
-call. `config/scheduled_approvals.php` is false by default; the registry has exactly
+call. The original substrate flag was false by default; the registry has exactly
 30 future action contracts but `adapterAvailable()` always returns false. Even a
 locally enabled flag cannot send anything. Immediate approvals and offline queue
 queries remain unchanged. Scheduled runs cannot pass the existing immediate CAS.

@@ -38,7 +38,7 @@ class ScheduledMailboxController extends Controller
     {
         $this->authorizeRun($run);
         abort_if(ActionRegistry::admissionRefusal($run->action_type) !== null, 422, ActionRegistry::admissionRefusal($run->action_type) ?? '');
-        abort_unless(config('scheduled_approvals.enabled') && ActionRegistry::adapterAvailable($run->action_type), 422, 'Scheduling is disabled or unsupported for this action.');
+        abort_unless(\App\Support\TechnicianConfig::scheduledApprovalsEnabled() && ActionRegistry::adapterAvailable($run->action_type), 422, 'Scheduling is disabled or unsupported for this action.');
         abort_unless($this->hasSchedulingLineage($run), 422, 'This proposal carries no recorded staging lineage, so it can never be scheduled. Approve it directly instead.');
         abort_unless($run->state === \App\Enums\TechnicianRunState::AwaitingApproval, 409, 'This proposal is no longer awaiting approval.');
 

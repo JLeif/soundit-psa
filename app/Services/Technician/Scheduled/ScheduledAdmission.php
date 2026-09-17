@@ -18,7 +18,7 @@ final class ScheduledAdmission
         if (app(ScheduledQuiescence::class)->at() !== null) {
             throw new InvalidArgumentException('scheduling_quiesced');
         }
-        if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
+        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             throw new InvalidArgumentException('scheduling_disabled_or_clock_unhealthy');
         }
         $user = $this->policy->approver($approverId);

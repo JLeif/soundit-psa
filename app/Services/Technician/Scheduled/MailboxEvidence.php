@@ -69,7 +69,7 @@ final class MailboxEvidence implements ScheduledEvidence
 
     private function enabled(): void
     {
-        if (! config('scheduled_approvals.enabled') || TechnicianConfig::killSwitchEngaged()) {
+        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged()) {
             throw new ScheduledUnavailable('kill_switch');
         }
         if (! CippConfig::isEnabled() || ! CippConfig::isConfigured()) {

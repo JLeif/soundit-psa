@@ -4461,6 +4461,12 @@
                     </div>
 
                     <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" id="scheduled_approvals_enabled" name="scheduled_approvals_enabled" value="1" aria-describedby="scheduled-approvals-help" {{ \App\Support\TechnicianConfig::scheduledApprovalsEnabled() ? 'checked' : '' }}>
+                        <label class="form-check-label" for="scheduled_approvals_enabled"><strong>Enable scheduled (deferred) execution of approved actions</strong></label>
+                        <div class="form-text" id="scheduled-approvals-help">The technician kill switch remains the emergency stop; it cannot retract actions already sent.</div>
+                    </div>
+
+                    <div class="form-check form-switch mb-3">
                         <input class="form-check-input" type="checkbox" id="technician_emergency_enabled" name="technician_emergency_enabled" {{ $technicianEmergencyEnabled ? 'checked' : '' }}>
                         <label class="form-check-label" for="technician_emergency_enabled"><strong>Enable emergency backstop</strong></label>
                     </div>
