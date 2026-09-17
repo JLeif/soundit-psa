@@ -184,6 +184,20 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertSame(self::uuid(1), $acme->fresh()->autoelevate_company_id, 'first company in name order wins; the second finds no free client');
     }
 
+    public function test_auto_match_never_overwrites_an_already_mapped_client(): void
+    {
+        // Client is mapped to company 1 (by hand); company 2 carries the client's name. The
+        // company-side guard cannot catch this — company 2 is unmapped — so the client-side
+        // whereNull is what keeps the manual mapping intact.
+        $this->fakeCompanies([self::company(self::uuid(2), 'Acme')]);
+        $acme = Client::factory()->create(['name' => 'Acme', 'autoelevate_company_id' => self::uuid(1)]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->get(route('settings.autoelevate-companies.auto-match'))
+            ->assertSessionHas('info', 'No new matches found. Companies may need manual mapping.');
+        $this->assertSame(self::uuid(1), $acme->fresh()->autoelevate_company_id, 'existing mapping survives a name match on another company');
+    }
+
     public function test_auto_match_with_nothing_to_do_reports_info(): void
     {
         $this->fakeCompanies([self::company(self::uuid(1), 'Nobody')]);
