@@ -1020,6 +1020,17 @@ Alternative to QuickBooks Online for invoice creation and payment tracking. Each
 10. Product sync: `php artisan stripe:sync-products --import` imports Stripe Products as SKUs, `--push` pushes local SKUs to Stripe
 11. **Import historical invoices**: Click **Import Invoices** on Settings > Integrations (Stripe card), or run `php artisan stripe:sync-invoices --import`. To re-import from scratch: `php artisan stripe:sync-invoices --import --full`
 
+### BenjiPays (portal Pay Online)
+
+Optional. Lets the client portal's **Pay Online** button open a BenjiPays *applied* (invoice-tied) payment link instead of the Stripe hosted page, so a partially paid QuickBooks invoice is presented with its remaining balance. See `docs/benjipays-stage1.md` and `docs/benjipays-stage2.md`.
+
+1. Generate an API key in your BenjiPays merchant account with the `organizations:payment-links:create` scope (the key owner needs the `companyAdmin` mapping)
+2. Settings > Integrations > BenjiPays: enter the **API Key** (stored encrypted; admin only) and click **Test connection**
+3. On a client-payable invoice with a QuickBooks id, an administrator can click **Preview BenjiPays link** on the invoice page to mint a link and see the amount the vendor presents. Minting takes no payment.
+4. Turn on **Use BenjiPays for portal Pay Online** (admin only; setting `benjipays_pay_online`, default off). Invoices without a QuickBooks id, and every invoice while the switch is off, keep the Stripe link.
+
+No BenjiPays call is made from tests or CI.
+
 ### Tier2Tickets / HelpDesk Buttons
 
 Desktop shortcut/application that lets MSP clients submit support tickets directly from their workstation. Uses a ConnectWise Manage API compatibility layer built into Sound PSA.
