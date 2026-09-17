@@ -20,6 +20,7 @@ use App\Services\Technician\PromptFence;
 use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\ControlDConfig;
 use App\Support\McpStaffToken;
+use App\Support\McpToolModes;
 use App\Support\TechnicianConfig;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
@@ -47,8 +48,10 @@ use Illuminate\Support\Str;
  * approves — the family contract); a non-ai_actor token is refused at staging and
  * pointed at the client-page button, which records who. The staging token's id is
  * bound into the encrypted payload, and approval re-reads that token row and refuses
- * unless it still exists and is still an ai_actor. No token id, or an id that names
- * no row, is refused: unknown is never trusted.
+ * unless it still exists, is still live under the gate authentication applies (activated,
+ * not paused, not revoked), is still an ai_actor, and is still granted this verb — every
+ * documented withdrawal closes the lane. No token id, or an id that names no row, is
+ * refused: unknown is never trusted.
  *
  * TWO STEPS, TWO APPROVALS, NEVER BOTH IN ONE. A client without `controld_org_id`
  * proposes the `organization` step (create the sub-organization, bind the mapping);
@@ -504,7 +507,7 @@ class StaffControlDOnboardingToolExecutor
                     $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $contentHash, "{$targetKey}: approval refused — {$why}", $approverLabel, $run->id, $approverId);
                     $run->releaseClaim();
 
-                    return new TechnicianApprovalResult('gate_declined', message: "Control D onboarding staged through the MCP verb is approved only when the staging token is an ai_actor token ({$why}). Deny this proposal; a person onboards from the client page. Nothing was created.");
+                    return new TechnicianApprovalResult('gate_declined', message: "Control D onboarding staged through the MCP verb is approved only when its staging token is still a live, granted ai_actor token ({$why}). Deny this proposal; a person onboards from the client page. Nothing was created.");
                 }
             }
 
@@ -715,8 +718,11 @@ class StaffControlDOnboardingToolExecutor
 
     /**
      * B4.1: why a token-lane run may NOT be approved, or null when its staging token is
-     * a live ai_actor token. The token row is re-read at approval so trust withdrawn
-     * after staging (flag cleared, token deleted) refuses too. Names ids only.
+     * still a live, granted ai_actor token. The token row is re-read at approval so every
+     * withdrawal the operator is told to use refuses a pending run: the flag cleared, the
+     * token deleted, REVOKED or PAUSED (isActive() is exactly the authentication gate —
+     * McpToken::scopeAuthenticatable), or the verb's grant removed. A token that could no
+     * longer call the verb cannot carry the lane's single signature either. Names ids only.
      */
     private function tokenLaneRefusal(mixed $stagerTokenId): ?string
     {
@@ -728,8 +734,17 @@ class StaffControlDOnboardingToolExecutor
         if (! $token) {
             return "staging token #{$tokenId} no longer exists.";
         }
+        if (! $token->isActive()) {
+            return "staging token #{$tokenId} is no longer active (state: {$token->state()}).";
+        }
         if (! $token->ai_actor) {
             return "staging token #{$tokenId} is not an ai_actor token.";
+        }
+        // The grant is re-read the way authentication reads it: a legacy full-surface
+        // token (tools null) never inherits this verb, so it cannot carry the lane either.
+        $granted = is_array($token->tools) ? McpToolModes::parseGrants($token->tools)['tools'] : [];
+        if (! in_array(self::TOOL, $granted, true)) {
+            return "staging token #{$tokenId} is no longer granted ".self::TOOL.'.';
         }
 
         return null;

@@ -515,6 +515,45 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertNull($third['client']->fresh()->controld_org_id);
     }
 
+    /**
+     * RED CONTROL (B4.1 b, approval arm): the withdrawal actions the operator is told to use —
+     * revoke, pause, or remove the grant — stop a pending token-lane run. Approval re-reads the
+     * row under the same liveness gate authentication applies and the same grant projection, so a
+     * token that can no longer call the verb cannot carry the lane's single signature either.
+     */
+    public function test_approval_refuses_a_token_lane_run_whose_staging_token_is_revoked_paused_or_ungranted(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $approver = User::factory()->admin()->create(['is_active' => true]);
+        $this->vendor([]);
+
+        foreach (['revoked' => ['revoked_at' => now()], 'paused' => ['paused_at' => now()]] as $state => $attributes) {
+            $fixture = $this->fixture();
+            $run = $this->stage($fixture, $this->token(label: "opsbot-{$state}"));
+            McpToken::where('label', "opsbot-{$state}")->sole()->forceFill($attributes)->save();
+            $this->approve($run, $approver);
+            $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, "a {$state} staging token must not carry the token lane");
+            $this->assertSame(0, ControlDOnboardingIntent::count());
+            $this->assertCount(0, $this->history);
+            $this->assertNull($fixture['client']->fresh()->controld_org_id);
+            $blocked = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('approver_user_id', $approver->id)->sole();
+            $this->assertStringContainsString("no longer active (state: {$state})", $blocked->summary);
+            $this->assertStringNotContainsString('psa-mcp-', $blocked->summary);
+        }
+
+        // The grant withdrawn: the row is live and still ai_actor, but it could no longer call the verb.
+        $ungranted = $this->fixture();
+        $run = $this->stage($ungranted, $this->token(label: 'opsbot-ungranted'));
+        McpToken::where('label', 'opsbot-ungranted')->sole()->forceFill(['tools' => []])->save();
+        $this->approve($run, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $this->assertNull($ungranted['client']->fresh()->controld_org_id);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('summary', 'like', '%no longer granted controld_onboard_client%')->count());
+    }
+
     /** RED CONTROL: non-admin stages (button) or approves → refused; nothing created. */
     public function test_non_admin_cannot_stage_from_the_button_or_approve(): void
     {

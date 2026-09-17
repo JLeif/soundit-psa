@@ -1251,7 +1251,8 @@ approver; a proposal staged through the MCP verb can only come from a token mark
 is refused at staging with an audited reason and is pointed at the button, so no
 person can stage and approve alone through a bearer token. The staging token's id is
 sealed into the held proposal and re-checked at approval (a token whose ai_actor flag
-was cleared, or that was deleted, after staging is refused). A non-Admin can neither
+was cleared, or that was revoked, paused, deleted or had the grant removed after staging,
+is refused — the re-read applies the same liveness gate authentication applies). A non-Admin can neither
 stage from the button nor approve. Approval re-derives the
 step from live state and refuses if it changed. Outcomes: `bound` executes; a vendor
 `40301` read-only rejection is terminal for that proposal with nothing created and the
