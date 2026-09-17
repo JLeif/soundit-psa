@@ -2,12 +2,14 @@
 
 namespace App\Services;
 
+use App\Enums\CallDirection;
 use App\Enums\PhoneDirectoryListType;
 use App\Enums\TranscriptionStatus;
 use App\Models\PhoneCall;
 use App\Models\PhoneCallActionProposal;
 use App\Models\PhoneDirectoryEntry;
 use App\Models\TechnicianActionLog;
+use App\Models\Ticket;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use App\Support\TechnicianConfig;
@@ -244,6 +246,10 @@ class PhoneCallActionService
      *  - no ticket link  -> set_call_billable refuses (the prepay contract is
      *    resolved through the ticket; PhoneCallService::setBillable would write
      *    is_billable and debit nothing).
+     *  - an OUTBOUND call -> block/allow refuse. On an outbound call
+     *    from_number holds the number WE dialled, so listing it would silence
+     *    (or allow-list) the wrong party; the staff call page offers these two
+     *    buttons for inbound calls only (calls/show.blade.php).
      *  - unparseable from_number -> block/allow refuse.
      *  - an existing directory entry -> block/allow report it rather than
      *    silently moving a number between lists.
@@ -261,6 +267,12 @@ class PhoneCallActionService
         }
 
         if (in_array($action, [self::ACTION_BLOCK, self::ACTION_ALLOW], true)) {
+            // Direction guard, the same one the staff call page applies to these
+            // two buttons: for an OUTBOUND call from_number is the number this
+            // PSA dialled, so the row would list the wrong party's line.
+            if ($call->direction?->value !== CallDirection::Inbound->value) {
+                throw new \DomainException('Block and allow apply to the caller of an inbound call only; this call is not inbound, and its stored caller number is the number this PSA dialled. Do not retry with this call id; manage such a number in the phone directory instead.');
+            }
             $normalized = PhoneNumber::normalize($call->from_number);
             if (! $normalized) {
                 throw new \DomainException('Could not parse the caller number.');
@@ -302,8 +314,18 @@ class PhoneCallActionService
     private function snapshot(string $action, PhoneCall $call): array
     {
         if ($action === self::ACTION_BILLABLE) {
+            // PrepayService::debitFromPhoneCall resolves the money target THROUGH
+            // the ticket ($ticket->contract_id, else the active contract of
+            // $ticket->client_id), so the ticket's client and contract are part of
+            // what approval must find unchanged. Pinning ticket_id alone let a
+            // ticket reassigned between staging and approval move prepay hours
+            // against a contract nobody reviewed.
+            $ticket = $call->ticket_id === null ? null : Ticket::find($call->ticket_id);
+
             return [
                 'ticket_id' => $call->ticket_id,
+                'ticket_client_id' => $ticket?->client_id === null ? null : (int) $ticket->client_id,
+                'ticket_contract_id' => $ticket?->contract_id === null ? null : (int) $ticket->contract_id,
                 'is_billable' => $call->is_billable === null ? null : (bool) $call->is_billable,
                 'duration_seconds' => $call->effectiveDurationSeconds(),
             ];
@@ -457,7 +479,7 @@ class PhoneCallActionService
     private function staleMessage(string $action): string
     {
         return $action === self::ACTION_BILLABLE
-            ? 'Call billability, ticket link or duration changed since this was proposed; re-stage.'
+            ? 'Call billability, its ticket link, that ticket\'s client or contract, or the billed duration changed since this was proposed; re-stage.'
             : 'Caller number changed since this was proposed; re-stage.';
     }
 

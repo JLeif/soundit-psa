@@ -17,7 +17,7 @@
                 <p class="mb-1">Approving lets future calls from this number ring through. An existing directory entry is never overwritten.</p>
             @endif
             <p>{{ $proposal->payload['reason'] ?? '' }}</p>
-            <small>Proposed by {{ $proposal->drafted_by }}. Approval revalidates the call, its ticket link and the phone directory.</small>
+            <small>Proposed by {{ $proposal->drafted_by }}. Approval revalidates the call, its ticket link — including that ticket's client and contract, which the prepay debit resolves through — and the phone directory.</small>
             @if($canApprovePhoneCallAction ?? false)
                 <form method="POST" action="{{ route('phone-call-actions.approve', $proposal->id) }}" class="d-inline">
                     @csrf <button class="btn btn-sm btn-success">Approve call action</button>

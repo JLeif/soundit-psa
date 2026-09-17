@@ -304,7 +304,17 @@ class PhoneCallAgentActionTest extends TestCase
         $this->assertSame(PhoneDirectoryListType::Allowed, $existing->fresh()->list_type);
         $this->assertDatabaseCount('phone_directory', 1);
 
-        $this->assertSame(4, PhoneCallActionProposal::where('state', 'stale')->count());
+        // (e) the ticket was reassigned to another client under the proposal.
+        // The prepay contract is resolved THROUGH the ticket, so approving here
+        // would debit a contract the approver never saw.
+        $r = $this->decoded($this->callTool($token, 'set_call_billable', $billArgs));
+        $otherClient = \App\Models\Client::factory()->create();
+        $ticket->forceFill(['client_id' => $otherClient->id, 'contract_id' => null])->save();
+        $this->actingAs($admin)->postJson(route('phone-call-actions.approve', $r['proposal_id']))->assertStatus(409);
+        $this->assertFalse((bool) $call->fresh()->is_billable);
+        $this->assertDatabaseCount('prepay_transactions', 0);
+
+        $this->assertSame(5, PhoneCallActionProposal::where('state', 'stale')->count());
         $this->assertSame(0, PhoneCallActionProposal::where('state', 'done')->count());
     }
 
@@ -346,6 +356,18 @@ class PhoneCallAgentActionTest extends TestCase
             $this->assertStringContainsString('Could not parse the caller number',
                 $this->errorText($this->callTool($token, $tool,
                     ['phone_call_id' => $junk->id, 'reason' => 'Synthetic unparseable'])));
+        }
+        $this->assertDatabaseCount('phone_directory', 1);
+
+        // An OUTBOUND call is refused for both verbs: from_number there is the
+        // number this PSA dialled, so the row would list the wrong party's line.
+        // The staff call page offers these buttons for inbound calls only.
+        [$outbound] = $this->fixture(['call_uuid' => 'synthetic-outbound',
+            'direction' => CallDirection::Outbound, 'from_number' => '+15555550199'], []);
+        foreach (['block_caller', 'allow_caller'] as $tool) {
+            $this->assertStringContainsString('inbound call only',
+                $this->errorText($this->callTool($token, $tool,
+                    ['phone_call_id' => $outbound->id, 'reason' => 'Synthetic outbound probe'])));
         }
         $this->assertDatabaseCount('phone_directory', 1);
     }
