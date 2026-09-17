@@ -13,6 +13,7 @@ use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 /**
@@ -213,6 +214,43 @@ class PortalBenjiPaysPayOnlineTest extends TestCase
         $this->actingAs($this->person, 'portal')->get(route('portal.invoices.show', $invoice))
             ->assertOk()->assertSee('Online payment is temporarily unavailable')
             ->assertDontSee('would charge the full');
+    }
+
+    public function test_mint_failure_is_logged_with_status_only_metadata(): void
+    {
+        // The operator-log half of the failure path: one warning naming the invoice,
+        // the safe reason and the HTTP status — never the vendor body or the key.
+        Log::spy();
+        Http::fake(['https://api.benjipays.com/*' => Http::response(['detail' => 'VENDOR-SECRET-TEXT '.self::KEY], 503)]);
+        $invoice = $this->invoice();
+
+        $this->pay($invoice)->assertRedirect(self::STRIPE_URL);
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($invoice) {
+            return str_contains($message, 'BenjiPays')
+                && $context['invoice_id'] === $invoice->getKey()
+                && $context['reason'] === 'http_error'
+                && $context['http_status'] === 503
+                && ! str_contains(json_encode([$message, $context]), 'VENDOR-SECRET-TEXT')
+                && ! str_contains(json_encode([$message, $context]), self::KEY);
+        });
+        foreach (['emergency', 'alert', 'critical', 'error'] as $method) {
+            Log::shouldNotHaveReceived($method);
+        }
+    }
+
+    public function test_a_successful_mint_logs_nothing(): void
+    {
+        // Companion to the log assertion above: the warning is failure-only.
+        Log::spy();
+        $this->fakeMint();
+        $invoice = $this->invoice();
+
+        $this->pay($invoice)->assertRedirect(self::LINK_URL);
+
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $method) {
+            Log::shouldNotHaveReceived($method);
+        }
     }
 
     public function test_two_clicks_mint_once(): void
