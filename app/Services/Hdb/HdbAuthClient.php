@@ -435,7 +435,8 @@ final class HdbAuthClient
     /**
      * Non-rendered containers. libxml's HTML parser is HTML4-era and gives
      * these no special content model, so a notice inside one would sit in the
-     * tree like any other element while a browser shows nothing. Not walked.
+     * tree like any other element while a browser shows nothing. Never walked
+     * into, and never read as a notice themselves when one carries the class.
      */
     private const HIDDEN_CONTAINERS = ['script', 'style', 'template', 'noscript', 'head'];
 
@@ -473,8 +474,11 @@ final class HdbAuthClient
             return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
         }
 
+        // ancestor-or-SELF: an element inside a hidden container is not a
+        // notice, and neither is a hidden container that carries the class
+        // itself — a browser renders its own text no more than a child's.
         $hidden = implode(' or ', array_map(
-            fn (string $tag) => "ancestor::{$tag}",
+            fn (string $tag) => "ancestor-or-self::{$tag}",
             self::HIDDEN_CONTAINERS,
         ));
         $notices = (new \DOMXPath($document))->query("//*[@class][not({$hidden})]");

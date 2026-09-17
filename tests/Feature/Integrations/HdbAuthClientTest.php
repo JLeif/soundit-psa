@@ -309,6 +309,10 @@ class HdbAuthClientTest extends TestCase
             'words in a placeholder whose child is an empty same-tag element' => ['<div class="notify--bad"><div></div></div><div>Invalid email or password</div>'],
             'notice inside a template' => ['<template><div class="notify--bad">Invalid email or password</div></template>'],
             'notice inside noscript' => ['<noscript><div class="notify--bad">Invalid email or password</div></noscript>'],
+            'the token on a script element itself' => ['<script class="notify--bad">var msg = "Invalid email or password";</script>'],
+            'the token on a template element itself' => ['<template class="notify--bad">Invalid email or password</template>'],
+            'the token on a noscript element itself' => ['<noscript class="notify--bad">Invalid Captcha</noscript>'],
+            'the token on a style element itself' => ['<style class="notify--bad">.x:after{content:"Invalid email or password"}</style>'],
             'token joined to another class by a vertical tab' => ["<div class=\"notify--bad\x0Bhint\">Invalid email or password</div>"],
         ];
     }
