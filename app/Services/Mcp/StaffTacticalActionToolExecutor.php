@@ -34,6 +34,7 @@ use App\Services\Tactical\TacticalActionService;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalClientException;
 use App\Services\Tactical\TacticalDeviceSyncService;
+use App\Services\Technician\Scheduled\ExecuteAt;
 use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\TacticalConfig;
 use App\Support\TechnicianConfig;
@@ -190,14 +191,19 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
     {
         if (! TacticalConfig::isConfigured()) {
             return ['error' => 'Tactical RMM is not configured'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId);
+            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+        }
+        if ($executeAt !== null) {
+            // The controller strips execute_at on the staged path only; a direct call
+            // carrying one is a programming error, never a silent run-now.
+            return ['error' => ExecuteAt::refusalFor($name)];
         }
 
         return match ($name) {
@@ -533,8 +539,11 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
     {
+        if ($executeAt !== null && ($scheduledTokenId === null || ! ExecuteAt::supportsStaged($tool))) {
+            return ['error' => $scheduledTokenId === null ? 'execute_at_requires_mcp_token_lineage' : ExecuteAt::refusalFor($tool)];
+        }
         $context = $this->context($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
             return ['error' => $context['error']];
@@ -577,6 +586,12 @@ class StaffTacticalActionToolExecutor
         // reported idempotent rather than refused as a cooldown hit.
         $liveAwaitingRun = $this->liveAwaitingRun($ticket->id, $tool, $contentHash);
         if ($liveAwaitingRun !== null) {
+            // A pending proposal is idempotent only for the SAME instant: a second call
+            // naming a different execute_at (or none) must not be reported as staged.
+            if (($liveAwaitingRun->proposed_meta['scheduled_provenance']['execute_at'] ?? null) !== $executeAt?->utc) {
+                return ['error' => 'execute_at_conflicts_with_pending_proposal'];
+            }
+
             return [
                 'success' => true,
                 'idempotent' => true,
@@ -610,6 +625,14 @@ class StaffTacticalActionToolExecutor
         ];
         if ($scheduledTokenId !== null && \App\Services\Technician\Scheduled\ActionRegistry::directTool($tool) !== null) {
             $meta['scheduled_provenance'] = ['version' => 1, 'kind' => 'mcp', 'token_id' => $scheduledTokenId];
+            if ($executeAt !== null) {
+                // The instant rides in the provenance the cockpit already reads; Approve
+                // derives the admission window from it (ruled design point 2).
+                $meta['scheduled_provenance']['execute_at'] = $executeAt->utc;
+                $meta['scheduled_provenance']['execute_at_offset'] = $executeAt->offset;
+                // The AI's confirmation inputs are the sealed human_inputs at approval.
+                $meta['scheduled_human_inputs'] = $this->scheduledHumanInputs($directTool, $arguments);
+            }
             // Immediate staging historically normalizes bool-like values/service aliases.
             // Do not silently carry that coercion into a future authorization.
             if (\App\Services\Technician\Scheduled\TacticalPlan::supports($tool)) {
@@ -686,8 +709,33 @@ class StaffTacticalActionToolExecutor
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
             'run_id' => $run->id,
-            'message' => 'Staged for cockpit approval.',
+            'message' => $executeAt !== null
+                ? 'Staged for cockpit approval. Runs at '.$executeAt->display().' once approved; nothing executes before then.'
+                : 'Staged for cockpit approval.',
         ];
+    }
+
+    /**
+     * The confirmation fields the scheduled path seals as human_inputs, exactly the keys
+     * assertScheduledTacticalConfirmation() demands for this tool — no more, no less.
+     *
+     * @return array<string, string>
+     */
+    private function scheduledHumanInputs(string $directTool, array $arguments): array
+    {
+        $keys = [];
+        if (in_array($directTool, ['tactical_run_command', 'tactical_reboot_device', 'tactical_shutdown_device', 'tactical_stop_service', 'tactical_restart_service'], true)) {
+            $keys[] = 'confirm_hostname';
+        }
+        if (in_array($directTool, ['tactical_stop_service', 'tactical_restart_service'], true)) {
+            $keys[] = 'confirm_service_name';
+        }
+        $human = [];
+        foreach ($keys as $key) {
+            $human[$key] = is_scalar($arguments[$key] ?? null) ? (string) $arguments[$key] : '';
+        }
+
+        return $human;
     }
 
     /** @return array<string, mixed> */

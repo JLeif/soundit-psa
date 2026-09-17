@@ -202,13 +202,16 @@ MICROSOFT_REDIRECT_URI=https://psa.yourmsp.com/auth/microsoft/callback
 
 #### Other integrations
 
-Scheduled approvals use the **Enable scheduled (deferred) execution of approved actions**
-checkbox in **Settings > Integrations > AI Technician**, off by default. The stored
-`scheduled_approvals_enabled` setting enables execution only when exactly `'1'`.
-Only an Admin-role staff user can save that form.
-Follow the [activation runbook](SCHEDULED-APPROVALS.md#activation-runbook) for
-authorization, pre-flip checks and safe disable/drain steps.
-Run `php artisan technician:scheduled-preflight` for read-only clock certification and exhaustive privacy-safe inventory; see the [runbook](SCHEDULED-APPROVALS.md#before-an-authorized-flip).
+Scheduled execution of approved actions has no settings switch: it is the optional
+`execute_at` parameter an MCP client passes on one of the thirteen scheduling-capable
+action tools, under the per-tool token grant (with-approval / without-approval) on the
+token page. The request goes to the cockpit and the ordinary Approve admits it for the
+requested window; the technician kill switch remains the emergency stop. See
+[SCHEDULED-APPROVALS.md](SCHEDULED-APPROVALS.md) for the parameter, its bounds, the
+fire-time checks and the stop/drain procedure. Run `php artisan
+technician:scheduled-preflight` for read-only clock certification and exhaustive
+privacy-safe inventory; the every-minute `technician:scheduled-sweep` must be on the
+scheduler (`php artisan schedule:list`).
 
 All other integrations (NinjaRMM, Level RMM, QuickBooks Online, Plivo) are configured via **Settings > Integrations** in the web UI after your first login. No `.env` variables are needed for these.
 

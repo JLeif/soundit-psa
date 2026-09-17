@@ -9,6 +9,7 @@ use App\Services\Mcp\StaffHuntressActionToolExecutor;
 use App\Services\Mcp\StaffMeshAdminToolExecutor;
 use App\Services\Mcp\StaffTacticalActionToolExecutor;
 use App\Services\Mcp\StaffTacticalAdminToolExecutor;
+use App\Services\Technician\Scheduled\ExecuteAt;
 
 /**
  * Unified staged/immediate execution modes for MCP action tools.
@@ -482,6 +483,17 @@ class McpToolModes
             $schema['properties']['staged'] = ['type' => 'boolean', 'enum' => [true], 'description' => 'Required true. No immediate execution or automatic downgrade.'];
             $schema['required'] = array_values(array_unique([...($schema['required'] ?? []), 'staged']));
             $description = (string) $direct['description'];
+        }
+
+        // Scheduled execution (ruled design point 1): `execute_at` is advertised ONLY on
+        // the capabilities with a scheduled adapter, in every grant mode. Any other tool
+        // refuses the key by name at call time; it is never a silent run-now.
+        if (ExecuteAt::supportsCanonical((string) ($direct['name'] ?? ''))) {
+            $schema['properties']['execute_at'] = [
+                'type' => 'string',
+                'description' => 'Optional. ISO-8601 instant WITH an explicit offset (e.g. 2026-09-18T17:00:00-07:00) at which to run this action: strictly in the future, at most 7 days ahead. The call is staged for cockpit approval and, once approved, runs in the window [execute_at, execute_at + 60 min] after fire-time rechecks (kill switch, clock, target identity, token grant). Omit to stage or run now as usual. Refused by name on unsupported tools or out-of-bounds values; never silently run now.',
+            ];
+            $description .= ' Supports execute_at to schedule the approved action for a later instant.';
         }
 
         $direct['description'] = $description;

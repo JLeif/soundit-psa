@@ -17,12 +17,11 @@ $db = Illuminate\Support\Facades\DB::connection();
 if ($db->selectOne('SELECT DATABASE() AS d, @@skip_networking AS n')->d !== 'scheduled_synthetic_test' || (int) $db->selectOne('SELECT @@skip_networking AS n')->n !== 1) {
     exit(91);
 }
-// The retired config flag was set here; the persisted setting replaces it. Write it on
-// THIS verified synthetic connection rather than inheriting whatever the parent left:
-// a child running with scheduling off refuses admission/claim and reports a trivially
-// clean result, so the concurrency control would prove nothing. Refuse loudly instead.
-App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
-if (! App\Support\TechnicianConfig::scheduledApprovalsEnabled()) {
+// There is no global scheduling switch any more (the execute_at parameter under the
+// per-tool grant is the feature). The kill switch is the only stop: a child running with
+// it engaged refuses admission/claim and reports a trivially clean result, so the
+// concurrency control would prove nothing. Refuse loudly on THIS verified connection.
+if (App\Support\TechnicianConfig::killSwitchEngaged()) {
     exit(94);
 }
 $app->instance(App\Services\Technician\Scheduled\ScheduledClock::class, new class extends App\Services\Technician\Scheduled\ScheduledClock

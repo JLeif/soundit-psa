@@ -2646,12 +2646,6 @@ class IntegrationsController extends Controller
         $wasCoverageEnabled = TechnicianConfig::emergencyBackstopEnabled();
         $nowEnabled = $request->has('technician_enabled');
         $nowEmergencyEnabled = $request->has('technician_emergency_enabled');
-        $scheduledEnabled = $request->has('scheduled_approvals_enabled');
-        Setting::setValue('scheduled_approvals_enabled', $scheduledEnabled ? '1' : '0');
-        Log::info('[Technician] Scheduled approvals '.($scheduledEnabled ? 'ENABLED' : 'DISABLED'), [
-            'user_id' => $request->user()?->id,
-            'enabled' => $scheduledEnabled,
-        ]);
         Setting::setValue('technician_enabled', $nowEnabled ? '1' : '0');
         Setting::setValue('technician_emergency_enabled', $nowEmergencyEnabled ? '1' : '0');
 

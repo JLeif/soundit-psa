@@ -31,6 +31,8 @@ use App\Services\Mcp\StaffTacticalActionToolExecutor;
 use App\Services\Mcp\StaffTacticalAdminToolExecutor;
 use App\Services\Signals\SignalNudgeNotice;
 use App\Services\Tactical\Actions\ActionRedactor;
+use App\Services\Technician\Scheduled\ExecuteAt;
+use App\Services\Technician\Scheduled\ScheduledClock;
 use App\Support\McpInputSchema;
 use App\Support\McpStaffToken;
 use App\Support\McpToolInstructions;
@@ -635,6 +637,46 @@ class McpStaffController extends Controller
         // still approves the action. Any grant of a stageable tool permits
         // staged=true. After the gate, rewrite to the internal dispatch name.
         $downgradedToStaged = false;
+        // Scheduled execution (ruled design point 1/2): an optional `execute_at` on a
+        // capability with a scheduled adapter. It is stripped from the arguments HERE,
+        // before any executor sees them, and threaded explicitly; on every other tool
+        // it is a named refusal, never a silently-ignored key that runs now. In PR1 an
+        // execute_at call is always staged for the cockpit (the :immediate no-cockpit
+        // lane is PR2), so a token that could run now is told so in the result.
+        $executeAt = null;
+        $executeAtStagedImmediate = false;
+        if (array_key_exists('execute_at', $arguments)) {
+            $executeAtValue = $arguments['execute_at'];
+            unset($arguments['execute_at']);
+            $dispatchName = $stageable ? (string) McpToolModes::stagedInternalFor((string) $name) : (string) $name;
+            if (! $stageable || ! ExecuteAt::supportsStaged($dispatchName)) {
+                $message = ExecuteAt::refusalFor($dispatchName);
+                $this->audit('tools/call', $requestedName, $arguments, 'error', $message, $start, $request);
+
+                return response()->json(['jsonrpc' => '2.0', 'id' => $id, 'result' => [
+                    'content' => [['type' => 'text', 'text' => json_encode(['error' => $message], JSON_THROW_ON_ERROR)]], 'isError' => true,
+                ]]);
+            }
+            try {
+                $executeAt = ExecuteAt::parse($executeAtValue, app(ScheduledClock::class)->now());
+            } catch (\InvalidArgumentException $e) {
+                $this->audit('tools/call', $requestedName, $arguments, 'error', $e->getMessage(), $start, $request);
+
+                return response()->json(['jsonrpc' => '2.0', 'id' => $id, 'result' => [
+                    'content' => [['type' => 'text', 'text' => json_encode(['error' => $e->getMessage()], JSON_THROW_ON_ERROR)]], 'isError' => true,
+                ]]);
+            }
+            if (! $staged) {
+                $executeAtStagedImmediate = $this->allowsImmediateExecution($request, (string) $name);
+                // Compute the downgrade BEFORE forcing staged: a staged-only token that asked
+                // for immediate execution must still get the unmistakable downgraded_to_staged
+                // signal and its explanatory text, exactly as it would without execute_at. The
+                // two notices are mutually exclusive — either the token may run now (staged for
+                // the cockpit anyway in PR1) or it may not (downgraded).
+                $downgradedToStaged = ! $executeAtStagedImmediate;
+                $staged = true;
+            }
+        }
         if ($stageable) {
             if (! $staged && ! $this->allowsImmediateExecution($request, (string) $name)) {
                 $staged = true;
@@ -1109,6 +1151,7 @@ class McpStaffController extends Controller
                     (int) $clientId,
                     $this->actorLabel($request),
                     $staffToken instanceof McpStaffToken ? $staffToken->id : null,
+                    $executeAt,
                 );
             } elseif ($this->isCippAdminTool((string) $name)) {
                 $result = app(StaffCippAdminToolExecutor::class)->execute(
@@ -1132,6 +1175,7 @@ class McpStaffController extends Controller
                     (int) $clientId,
                     $this->actorLabel($request),
                     $staffToken instanceof McpStaffToken ? $staffToken->id : null,
+                    $executeAt,
                 );
             } elseif ($this->isHuntressActionTool((string) $name)) {
                 $result = app(StaffHuntressActionToolExecutor::class)->execute(
@@ -1224,6 +1268,9 @@ class McpStaffController extends Controller
             }
             // Make an auto-downgrade unmistakable to the caller: it asked for
             // immediate execution but got a held proposal instead.
+            if ($executeAtStagedImmediate && is_array($result) && ! isset($result['error'])) {
+                $result['message'] = trim('Scheduled execution is admitted through cockpit approval in this release; the proposal is staged for the cockpit even though this token may run the tool without approval. '.(string) ($result['message'] ?? ''));
+            }
             if ($downgradedToStaged && is_array($result)) {
                 $result['downgraded_to_staged'] = true;
                 if (isset($result['error'])) {

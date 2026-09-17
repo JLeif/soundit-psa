@@ -1,92 +1,107 @@
 # Scheduled approvals (issue #1724)
 
-## Activation runbook
+## The `execute_at` parameter
 
-**Readiness is not activation authorization.** The feature defaults off through the
-**Enable scheduled (deferred) execution of approved actions** checkbox in
-**Settings > Integrations > AI Technician**. Only the stored setting
-`scheduled_approvals_enabled === '1'` enables it; absent, `'0'`, `'yes'` and `'true'`
-values remain off. Verify the effective setting with the read-only preflight.
-Its `enabled` and `activation_authorized` fields report that operator choice, not
-clock certification or a new grant of operational authority. Charlie alone authorizes activation in this
-deployment; a reviewed change or dark deployment is not permission to flip it.
-Saving that checkbox is admin-only (`admin` middleware on
-`settings.integrations.technician.update`), so a non-admin staff session cannot arm or
-disarm it; that gate bounds who *can* flip it and is not itself authorization to do so.
-The existing technician kill switch is unchanged.
+Scheduling is an **optional tool parameter, not a settings switch.** There is no
+global "enable scheduled execution" control: the former `scheduled_approvals_enabled`
+setting and its Settings > Integrations > AI Technician checkbox are removed and are
+read nowhere (a stale settings row of any value changes nothing). The feature is simply
+present; the **per-tool token grant** on the MCP token page (with-approval `:staged` /
+without-approval `:immediate`) is the only permission gate, and the existing
+`technician_kill_switch` remains the emergency stop exactly as before.
 
-### What enabling exposes
+An MCP call to one of the thirteen capabilities with a scheduled adapter may pass
+`execute_at`: an ISO-8601 instant **with an explicit offset** (for example
+`2026-09-18T17:00:00-07:00` or `...Z`), strictly in the future and at most seven days
+ahead — the same bounds `ApprovalWindow` enforces. `tools/list` advertises the
+parameter only on those thirteen canonical tools:
 
-In the cockpit, active Admin/Tech staff see **Schedule approval instead** on
-awaiting proposals with recorded version-1 scheduling provenance and a registered
-action. The form collects a future window, explicit time zone and human
-confirmation; admission and fire-time checks still enforce identity, permissions,
-lineage, clock health and the kill switch. Old proposals without lineage are not
-grandfathered. Scheduling is not immediate approval or a generic delayed task.
+- Mailbox (CIPP): `cipp_set_mailbox_forwarding`, `cipp_set_mailbox_out_of_office`,
+  `cipp_set_mailbox_delegate`, `cipp_set_mailbox_gal_visibility`,
+  `cipp_convert_mailbox`.
+- Tactical: `tactical_run_command`, `tactical_reboot_device`,
+  `tactical_shutdown_device`, `tactical_recover_mesh`, `tactical_set_maintenance`,
+  `tactical_start_service`, `tactical_stop_service`, `tactical_restart_service`.
 
-Installed action types (only these thirteen can dispatch):
+Every refusal is named and nothing runs now in its place: `execute_at` on any other
+tool — including `tactical_run_script` and `tactical_install_approved_patches`, which
+await an immutable/conditional vendor execution primitive (#1911; see
+[SCHEDULED-TACTICAL-POLICY](SCHEDULED-TACTICAL-POLICY.md)) — is refused as
+`unsupported_scheduling_type:<staged type>`; a malformed, past or too-distant value is
+refused as `execute_at_invalid`, `execute_at_not_in_future` or
+`execute_at_too_far_ahead`. A second call for the same content naming a different
+instant (or none) while the first is still awaiting approval is refused as
+`execute_at_conflicts_with_pending_proposal`, never reported as "already staged".
 
-- Mailbox: `cipp_stage_set_mailbox_forwarding`,
-  `cipp_stage_set_mailbox_out_of_office`, `cipp_stage_set_mailbox_delegate`,
-  `cipp_stage_set_mailbox_gal_visibility`, `cipp_stage_convert_mailbox`.
-- Tactical: `tactical_stage_command`, `tactical_stage_reboot`,
-  `tactical_stage_shutdown`, `tactical_stage_recover_mesh`,
-  `tactical_stage_maintenance`, `tactical_stage_start_service`,
-  `tactical_stage_stop_service`, `tactical_stage_restart_service`.
+### Staged mode (token grant `:staged`, or auto-downgrade)
 
-`tactical_stage_script` and `tactical_stage_install_approved_patches` remain
-registered but visibly refuse at admission with their named
-`unsupported_scheduling_type:<type>` reason. Neither silently executes immediately.
-They await an immutable/conditional vendor execution primitive (#1911); see
-[SCHEDULED-TACTICAL-POLICY](SCHEDULED-TACTICAL-POLICY.md). Other registry entries
-without adapters are not enabled by this flag. Immediate approval paths are unchanged.
+The call is staged exactly as today (`McpStaffController` tools/call → the executor's
+`stageAction`) with the instant recorded in the proposal's existing
+`scheduled_provenance` (`execute_at` normalised to UTC, `execute_at_offset` as the
+caller wrote it). The cockpit card shows **Runs at <local time>** in the deployment's
+display time zone, with the caller's instant beside it. The ordinary **Approve** button
+(`TechnicianCockpitController::approve` → `ScheduledApproval`) admits it through
+`ScheduledAdmission` with the window **[execute_at, execute_at + 60 min]** instead of
+executing now; the response and flash say "Approved to run at …; it has not executed".
+**Hold it** (deny) and expiry are unchanged. The run time is a property of the proposal:
+an approve request that itself carries `execute_at`, `schedule`, `start`, `end` or
+`timezone` is refused with 422 and does not fall through to immediate execution.
 
-The cockpit's **Scheduled approvals — latest 100** result table and the recorded
-approver's **Cancel schedule** control for waiting/claimed rows remain available
-when the flag is off; they are not new permissions granted by activation. Cancellation
-can lose the intent race. Inspect the recorded result rather than assuming prevention.
-Submitted means an observed send, not completed execution; uncertain means the effect
-is unknown. Reconcile with the relevant vendor (CIPP or Tactical), never auto-retry.
+The approver's click is the human factor. The AI's own confirmation inputs are the
+sealed `human_inputs`: for Tactical, `confirm_hostname` / `confirm_service_name` are
+captured from the call at staging (`scheduled_human_inputs`) and verified again at
+admission exactly as `assertScheduledTacticalConfirmation` does for an immediate call
+(a wrong hostname refuses at Approve and the proposal stays awaiting). For mailbox
+actions the sensitive inputs a staged proposal never stores (`external_smtp`, the
+out-of-office bodies) are still typed by the approver on the card, with the same
+validation rules as the immediate approval, and sealed into the envelope.
 
-### Before an authorized flip
+In this release an `execute_at` call on a token that holds the `:immediate` grant is
+**also staged for the cockpit**, and the response says so; the no-cockpit lane
+(admission straight into `scheduled_authorizations` under token lineage) is a separate
+increment. `ScheduledPolicy::lineage` accepts a token that still holds the capability
+in either mode (`:immediate` implies `:staged` in the grant grammar), so a
+human-approved row from such a token is not refused at fire time.
 
-1. Confirm the reviewed readiness release, migrations and retained evidence schema
-   are present. Run `php artisan technician:scheduled-preflight` in the application
-   runtime. This read-only command checks DB UTC through `ScheduledClock` (MySQL
-   and MariaDB) and emits exhaustive state counts, including unknown states, with
-   no row IDs, nonces, payloads or client/ticket data. It has no 100-row limit.
-   Exit 0 means clock certified and no pending/unresolved inventory; exit 1 means
-   clock unverified, reconciliation required or unavailable inventory. Neither
-   exit code authorizes activation. Counts are a point-in-time observation, not
-   a quiescence guarantee; repeat after controlled reconciliation and before any
-   separately authorized flip. Inspect existing waiting/claimed/intent rows and unresolved results;
-   enabling also allows still-valid pending work to resume. The cockpit is bounded
-   to the latest 100, not an exhaustive reconciliation inventory.
-2. Verify production MariaDB UTC and system clock health using `ScheduledClock`:
-   absolute skew at both read edges must be <=2 seconds, and the application runtime
-   must be able to run `timedatectl show --property=NTPSynchronized --value` with a
-   positive `yes` within its one-second timeout. SQLite is not clock certification.
-3. Check the technician kill switch deliberately and verify existing integration
-   availability, approver roles, staging lineage and explicit token grants. Do not
-   change those settings or grants as an incidental part of this flag operation.
-4. Verify the scheduler is running and `php artisan schedule:list` includes
-   `technician:scheduled-sweep` every minute; verify the configured queue workers
-   and their normal health checks too. The scheduled sweep itself runs as a console
-   command, not a queued dispatch job. An entry in the list alone is not proof of
-   execution: inspect recent scheduler completion/errors and private-note delivery.
+The former **Schedule approval instead** link, the `cockpit.schedule` form and
+`ScheduledMailboxController::create/store` are removed; the cockpit's
+**Scheduled approvals — latest 100** result table and the recorded approver's
+**Cancel schedule** control for waiting/claimed rows remain. Cancellation can lose the
+intent race: inspect the recorded result rather than assuming prevention. Submitted
+means an observed send, not completed execution; uncertain means the effect is unknown.
+Reconcile with the relevant vendor (CIPP or Tactical), never auto-retry.
 
-Only after explicit activation approval, check the scheduled execution checkbox
-in **Settings > Integrations > AI Technician** and save. Verify
-`php artisan technician:scheduled-preflight` reports `enabled true`; no config-cache
-rebuild is needed for this setting. Verify cockpit availability and sweep execution
-without staging an unapproved live vendor action.
+### Fire time
+
+Unchanged: the every-minute `technician:scheduled-sweep` (no longer filtered by a
+setting; it is a no-op on an empty table) dispatches rows whose window has opened after
+re-checking the kill switch, clock health, target identity, ticket binding and the
+originating token's grant lineage. Old proposals without recorded staging lineage are
+not grandfathered. Scheduling is not immediate approval or a generic delayed task.
+
+### Operational checks
+
+`php artisan technician:scheduled-preflight` is read-only: it certifies DB UTC through
+`ScheduledClock` (MySQL and MariaDB) and emits exhaustive state counts, including
+unknown states, with no row IDs, nonces, payloads or client/ticket data
+(`clock`, `inventory`, `total`, `reconciliation_required`; there is no `enabled` or
+`activation_authorized` field any more). Exit 0 means clock certified and no
+pending/unresolved inventory; exit 1 means clock unverified, reconciliation required
+or unavailable inventory. Counts are a point-in-time observation, not a quiescence
+guarantee. Verify `php artisan schedule:list` includes `technician:scheduled-sweep`
+every minute and inspect recent scheduler completion and private-note delivery; an
+entry in the list alone is not proof of execution.
+
+Clock health requires absolute skew at both read edges <=2 seconds and a positive
+`timedatectl show --property=NTPSynchronized --value` within its one-second timeout
+from the application runtime. SQLite is not clock certification.
 
 ### Container clock diagnostics (not certification)
 
 The stock Docker runtime is **unsupported for operational clock certification**:
 `healthy()` requires an in-runtime positive `timedatectl` result as well as the
-DB UTC comparison. Do not enable scheduled approvals in that runtime merely
-because the host is synchronized. On the host, `timedatectl show
+DB UTC comparison. Do not rely on scheduled execution in that runtime merely
+because the host is synchronized: admission and dispatch refuse while `healthy()` is false. On the host, `timedatectl show
 --property=NTPSynchronized --value` and `date -u` are diagnostics. Inside the
 application container, run `date -u` and
 `php artisan technician:scheduled-preflight` (using your normal container exec
@@ -97,14 +112,15 @@ are explicitly unverified. No privileged container, host socket mount, fake
 binary or alternative trust primitive is prescribed here. Supporting that runtime
 requires a separately reviewed clock-certification design.
 
-### Disable and drain safely
+### Stop and drain safely
 
-Uncheck the scheduled execution checkbox, save, and verify the read-only preflight
-reports `enabled false`.
-This stops new admissions and pre-intent dispatch checks once those consumers see
-it. It does **not** undo a persisted dispatch intent or an already sent operation:
-in-flight work may finish, and a dead intent can become uncertain. Do not promise
-that disabling or the kill switch retracts work past the intent boundary.
+There is no scheduling switch to turn off. To stop new admissions and pre-intent
+dispatch, engage the **technician kill switch** (its own route, deliberately separate
+from the AI Technician form) and/or revoke or narrow the originating token's grant;
+the read-only preflight then reports the remaining inventory. Neither undoes a
+persisted dispatch intent or an already sent operation: in-flight work may finish,
+and a dead intent can become uncertain. Do not promise that the kill switch retracts
+work past the intent boundary.
 
 Under an explicitly approved operational procedure, run
 `php artisan technician:scheduled-drain`. This MUTATES a live persisted DB marker
@@ -167,19 +183,21 @@ The additive evidence migration refuses destructive down. There is deliberately
 no automatic marker clear or resume command: retain the marker across restarts;
 clearing it requires separate authorization and complete inventory reconciliation.
 Cancel waiting/claimed approvals through the recorded approver's stop-only control
-where appropriate; disabling does not itself cancel them, so account for them before
-any re-enable. Keep intent/submitted/uncertain evidence for reconciliation, preserve
+where appropriate; the kill switch does not itself cancel them, so account for them
+before releasing it. Keep intent/submitted/uncertain evidence for reconciliation, preserve
 uncertain fences, and never revive a Scheduled proposal, drop populated tables or
 replay an unknown effect. An inverse vendor operation needs separate approval.
 
-Sources: `ScheduledMailboxController`, cockpit views, `ActionRegistry`,
-`MailboxPlan`, `TacticalPlan`, `ScheduledAdmission`, `ScheduledCoordinator`,
+Sources: `ExecuteAt`, `ScheduledApproval`, `McpStaffController` (tools/call),
+`McpToolModes::unifyDefinition`, `TechnicianCockpitController::approve`,
+`ScheduledMailboxController::cancel`, cockpit views, `ActionRegistry`, `MailboxPlan`,
+`TacticalPlan`, `ScheduledAdmission`, `ScheduledPolicy`, `ScheduledCoordinator`,
 `ScheduledClock`, `ScheduledSweep` and `routes/console.php` at this repository tip.
 
 ## Historical PR1 substrate notes
 
 The following describes the original PR1 increment, **not current adapter/UI
-availability**. The activation runbook above describes the shipped PR2/PR3 surface.
+availability**. The sections above describe the shipped surface.
 
 This increment is **not an executable scheduled-action feature**. It adds a dormant
 server-side authorization ledger, not an adapter or a new bearer credential. There
@@ -206,8 +224,9 @@ queries remain unchanged. Scheduled runs cannot pass the existing immediate CAS.
   Legacy staged rows lack instrumented provenance and refuse. The future staging
   integration must write real source token identity; no label-based grandfathering.
 - Active Admin/Tech only; Billing/Contractor denied. Token must remain active and
-  explicitly contain the staged capability. Broad/null and immediate-only grants
-  are intentionally insufficient. Native-human provenance must identify an active
+  explicitly hold the capability (`:staged` or `:immediate`; immediate implies
+  staged). Broad/null full-surface grants and bare legacy names are intentionally
+  insufficient. Native-human provenance must identify an active
   authorized human. Future token client-scope extensions must be checked too.
 - Admission locks the proposal, creates the sealed row, reserves run and target,
   changes its state to `scheduled`, and inserts the initial note in one transaction.

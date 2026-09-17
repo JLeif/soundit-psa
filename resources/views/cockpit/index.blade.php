@@ -477,8 +477,11 @@
 
                         <p class="small text-danger-emphasis fw-semibold mb-2"><i class="bi bi-exclamation-triangle me-1"></i>Executes on the endpoint or account when approved</p>
                         <pre class="cockpit-readout mb-2">{{ $run->proposed_content }}</pre>
-                        @if(\App\Support\TechnicianConfig::scheduledApprovalsEnabled() && \App\Services\Technician\Scheduled\ActionRegistry::directTool($run->action_type) !== null && data_get($run->proposed_meta, 'scheduled_provenance.version') === 1 && auth()->user()?->is_active && (auth()->user()->isAdmin() || auth()->user()->isTech()))
-                            <a class="btn btn-sm btn-outline-primary mb-2" href="{{ route('cockpit.schedule', $run) }}">Schedule approval instead</a>
+                        @php($runsAt = \App\Services\Technician\Scheduled\ScheduledApproval::executeAtFor($run))
+                        @if($runsAt !== null)
+                            <p class="small fw-semibold mb-2 text-primary-emphasis"><i class="bi bi-clock me-1"></i>Runs at {{ \Carbon\CarbonImmutable::parse($runsAt->utc)->setTimezone(\App\Support\AppTimezone::get())->format('Y-m-d H:i T') }} <span class="text-muted fw-normal">(requested as {{ $runsAt->display() }}) — approving schedules it for that window; nothing executes now.</span></p>
+                        @elseif(\App\Services\Technician\Scheduled\ScheduledApproval::wantsScheduling($run))
+                            <p class="small fw-semibold mb-2 text-danger-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>This proposal names a run time that cannot be read; approving will refuse rather than run it now.</p>
                         @endif
                         @if(!empty($run->proposed_meta['drafted_by']))
                             <p class="text-muted small mb-2">Drafted by: {{ $run->proposed_meta['drafted_by'] }}</p>

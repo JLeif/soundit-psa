@@ -416,12 +416,15 @@ Schedule::command('technician:emergency-sweep')
     ->runInBackground()
     ->when(fn () => TechnicianConfig::emergencyBackstopEnabled());
 
-// Scheduled approvals: default-off substrate. No mutation adapters are installed.
+// Scheduled execution: every minute, dispatch scheduled_authorizations whose window has
+// opened and deliver their private result notes. There is no global on/off (the
+// execute_at parameter on a granted tool is the feature); the sweep itself is a no-op
+// on an empty table, and every dispatch re-checks the technician kill switch, clock
+// health, token grant lineage and target identity before any vendor I/O.
 Schedule::command('technician:scheduled-sweep')
     ->everyMinute()
     ->withoutOverlapping()
-    ->runInBackground()
-    ->when(fn () => TechnicianConfig::scheduledApprovalsEnabled());
+    ->runInBackground();
 
 // AI Technician — stale-claim reaper (psa-xz0z): return runs stranded in 'executing' by a
 // process death or a DEPLOY (PHP-FPM restart mid-approval) to the approval queue, so an

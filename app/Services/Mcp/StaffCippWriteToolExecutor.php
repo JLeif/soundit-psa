@@ -19,6 +19,7 @@ use App\Services\Cipp\ResolvedCippLicense;
 use App\Services\Cipp\ResolvedCippPerson;
 use App\Services\Cipp\ResolvedIntuneDevice;
 use App\Services\Tactical\Actions\ActionRedactor;
+use App\Services\Technician\Scheduled\ExecuteAt;
 use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\CippConfig;
 use App\Support\TechnicianConfig;
@@ -678,10 +679,15 @@ class StaffCippWriteToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
     {
         if (! CippConfig::isEnabled() || ! CippConfig::isConfigured()) {
             return ['error' => 'CIPP is not enabled or configured'];
+        }
+        if ($executeAt !== null && (! isset(self::STAGED_TO_DIRECT[$name]) || ! ExecuteAt::supportsStaged($name))) {
+            // The controller strips execute_at on the staged path of an adapter capability
+            // only; anything else reaching here is refused by name, never run now.
+            return ['error' => ExecuteAt::refusalFor($name)];
         }
 
         if (in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true)) {
@@ -742,7 +748,7 @@ class StaffCippWriteToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId);
+            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
         }
 
         return $this->executeDirect($name, $arguments, $clientId, $actorLabel);
@@ -1308,8 +1314,11 @@ class StaffCippWriteToolExecutor
         ];
     }
 
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
     {
+        if ($executeAt !== null && $scheduledTokenId === null) {
+            return ['error' => 'execute_at_requires_mcp_token_lineage'];
+        }
         $context = $this->context($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
             return ['error' => $context['error']];
@@ -1375,6 +1384,12 @@ class StaffCippWriteToolExecutor
         // reported idempotent rather than refused as a cooldown hit.
         $liveAwaitingRun = $this->liveAwaitingRun($ticket->id, $tool, $contentHash);
         if ($liveAwaitingRun !== null) {
+            // A pending proposal is idempotent only for the SAME instant: a second call
+            // naming a different execute_at (or none) must not be reported as staged.
+            if (($liveAwaitingRun->proposed_meta['scheduled_provenance']['execute_at'] ?? null) !== $executeAt?->utc) {
+                return ['error' => 'execute_at_conflicts_with_pending_proposal'];
+            }
+
             return [
                 'success' => true,
                 'idempotent' => true,
@@ -1409,6 +1424,15 @@ class StaffCippWriteToolExecutor
         ];
         if ($scheduledTokenId !== null && \App\Services\Technician\Scheduled\MailboxPlan::supports($tool)) {
             $meta['scheduled_provenance'] = ['version' => 1, 'kind' => 'mcp', 'token_id' => $scheduledTokenId];
+            if ($executeAt !== null) {
+                // The instant rides in the provenance the cockpit already reads; Approve
+                // derives the admission window from it (ruled design point 2). The
+                // mailbox sensitive inputs (external_smtp, OOO bodies) stay re-entered by
+                // the approver on the cockpit card exactly as an immediate approval does —
+                // a staged mailbox proposal never stores them.
+                $meta['scheduled_provenance']['execute_at'] = $executeAt->utc;
+                $meta['scheduled_provenance']['execute_at_offset'] = $executeAt->offset;
+            }
         }
         $proposedContent = $this->stagedDisplay($directTool, $person, $license, $state, $mailbox)."\nReason: ".$reason;
 
@@ -1470,7 +1494,9 @@ class StaffCippWriteToolExecutor
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
             'run_id' => $run->id,
-            'message' => 'Staged for cockpit approval.',
+            'message' => $executeAt !== null
+                ? 'Staged for cockpit approval. Runs at '.$executeAt->display().' once approved; nothing executes before then.'
+                : 'Staged for cockpit approval.',
         ];
     }
 
