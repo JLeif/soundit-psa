@@ -245,8 +245,11 @@ class ScheduledExecuteAtTest extends TestCase
         $this->post(route('cockpit.approve', $run))->assertRedirect(route('cockpit.index'))->assertSessionHas('success');
         $row = DB::table('scheduled_authorizations')->sole();
         $this->assertSame('waiting', $row->state);
-        $this->assertSame('2026-09-16 03:30:00', $row->not_before);
-        $this->assertSame('2026-09-16 04:30:00', $row->expires_at);
+        // local_* are the sealed wall-time strings (driver-independent); not_before/expires_at
+        // are datetime(6) and print with microseconds on MariaDB.
+        $this->assertSame(['2026-09-16 03:30:00', '2026-09-16 04:30:00'], [$row->local_start, $row->local_end]);
+        $this->assertStringStartsWith('2026-09-16 03:30:00', (string) $row->not_before);
+        $this->assertStringStartsWith('2026-09-16 04:30:00', (string) $row->expires_at);
         $this->assertSame('UTC', $row->display_timezone);
         $this->assertSame((int) $this->user->id, (int) $row->approver_user_id);
         $this->assertSame($token->id, (int) $row->originating_mcp_token_id);

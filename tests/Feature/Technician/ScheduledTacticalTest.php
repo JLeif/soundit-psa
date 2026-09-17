@@ -160,8 +160,9 @@ class ScheduledTacticalTest extends TestCase
         $this->actingAs($this->user)->post(route('cockpit.approve', $this->run))->assertRedirect()->assertSessionHasNoErrors()->assertSessionMissing('error');
         $row = DB::table('scheduled_authorizations')->sole();
         $id = $row->id;
-        $this->assertSame('2026-09-16 01:00:00', $row->not_before);
-        $this->assertSame('2026-09-16 02:00:00', $row->expires_at);
+        $this->assertSame(['2026-09-16 01:00:00', '2026-09-16 02:00:00'], [$row->local_start, $row->local_end]);
+        $this->assertStringStartsWith('2026-09-16 01:00:00', (string) $row->not_before);
+        $this->assertStringStartsWith('2026-09-16 02:00:00', (string) $row->expires_at);
         $token->update(['tools' => []]);
         $this->time = $this->time->setTime(1, 0);
         app(TacticalDispatch::class)->run($id);

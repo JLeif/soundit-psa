@@ -375,7 +375,8 @@ class ScheduledMailboxTest extends TestCase
         $this->post(route('cockpit.approve', $this->run))->assertRedirect(route('cockpit.index'))->assertSessionHas('success');
         $this->assertDatabaseCount('scheduled_authorizations', 1);
         $row = DB::table('scheduled_authorizations')->sole();
-        $this->assertSame(['2026-09-16 01:00:00', '2026-09-16 02:00:00'], [$row->not_before, $row->expires_at]);
+        $this->assertSame(['2026-09-16 01:00:00', '2026-09-16 02:00:00'], [$row->local_start, $row->local_end]);
+        $this->assertStringStartsWith('2026-09-16 01:00:00', (string) $row->not_before);
         $this->get(route('cockpit.index'))->assertOk()->assertSee('Scheduled approvals')->assertSee('Cancel schedule');
         $this->post(route('cockpit.schedule.cancel', $this->run))->assertRedirect()->assertSessionHas('success');
         $this->get(route('cockpit.index'))->assertOk()->assertSee('Cancelled');
