@@ -55,7 +55,12 @@ class ControlDOrganizationMappingTest extends TestCase
         $deleted->delete();
         $new = Client::factory()->create();
         $this->postJson(route('settings.controld-orgs.update'), ['mappings' => ['org-reserved' => $new->id]])->assertUnprocessable();
-        $this->assertFalse(app(ControlDOrganizationMapping::class)->autoMatch($new->id, 'org-reserved'));
+        try {
+            $matched = app(ControlDOrganizationMapping::class)->autoMatch($new->id, 'org-reserved');
+        } catch (\Throwable $e) {
+            $this->fail('autoMatch must decline a soft-deleted owner\'s pk by lookup, not by hitting the unique constraint: '.$e::class);
+        }
+        $this->assertFalse($matched);
         $this->assertNull($new->fresh()->controld_org_id);
         $this->assertTrue(app(ControlDOrganizationMapping::class)->autoMatch($new->id, 'org-free'));
         $this->assertSame('org-free', $new->fresh()->controld_org_id);

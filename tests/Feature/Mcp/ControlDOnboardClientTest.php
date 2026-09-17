@@ -211,6 +211,7 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertStringContainsString('not allowed', (string) $response->json('result.content.0.text'));
         // And the executor itself refuses if reached directly.
         $direct = app(StaffControlDOnboardingToolExecutor::class)->execute('controld_stage_onboard_client', ['ticket_id' => $fixture['ticket']->id, 'reason' => 'x'], $fixture['client']->id, 'test');
+        $this->assertArrayHasKey('error', $direct, json_encode($direct));
         $this->assertStringContainsString('not enabled', $direct['error']);
         $this->assertSame(0, TechnicianRun::count());
         $this->assertSame(0, ControlDOnboardingIntent::count());
@@ -227,7 +228,8 @@ class ControlDOnboardClientTest extends TestCase
         $result = $this->decoded($response);
         // Staged-only grant downgrades to staged: that is the #1277 contract, and the
         // staged path then needs a ticket. Either way there is no immediate lane.
-        $this->assertArrayHasKey('error', $result);
+        $this->assertArrayHasKey('error', $result, json_encode($result));
+        $this->assertSame(0, TechnicianRun::count());
         $this->assertSame(0, ControlDOnboardingIntent::count());
         $this->assertNull($fixture['client']->fresh()->controld_org_id);
         $this->assertCount(0, $this->history);
@@ -235,7 +237,9 @@ class ControlDOnboardClientTest extends TestCase
         // The canonical name reached directly (no alias, no downgrade) is refused by the executor.
         $executor = app(StaffControlDOnboardingToolExecutor::class);
         $direct = $executor->execute('controld_onboard_client', ['reason' => 'now'], $fixture['client']->id, 'test');
+        $this->assertArrayHasKey('error', $direct, json_encode($direct));
         $this->assertStringContainsString('held-only', $direct['error']);
+        $this->assertSame(0, TechnicianRun::count());
         $this->assertDatabaseHas('technician_action_logs', ['action_type' => 'controld_onboard_client', 'result_status' => 'rejected', 'client_id' => $fixture['client']->id]);
         $this->assertSame(0, ControlDOnboardingIntent::count());
     }
@@ -247,7 +251,9 @@ class ControlDOnboardClientTest extends TestCase
         $fixture = $this->fixture();
         foreach (['pin' => '1234', 'name_prefix' => 'ACME-', 'icon' => 'router', 'org_pk' => 'x', 'profile_id' => 'p'] as $key => $value) {
             $response = $this->callTool($this->token(), 'controld_onboard_client', ['client_id' => $fixture['client']->id, 'ticket_id' => $fixture['ticket']->id, 'reason' => 'x', 'staged' => true, $key => $value]);
-            $error = (string) $this->decoded($response)['error'];
+            $result = $this->decoded($response);
+            $this->assertArrayHasKey('error', $result, "{$key} must be refused: ".json_encode($result));
+            $error = (string) $result['error'];
             $this->assertStringContainsString("refused: {$key}", $error);
             $this->assertStringNotContainsString('1234', $error);
         }
@@ -301,9 +307,11 @@ class ControlDOnboardClientTest extends TestCase
         $this->vendor([]);
         $response = $this->approve($orgRun, User::factory()->admin()->create(['is_active' => true]));
         $this->assertSame(TechnicianRunState::AwaitingApproval, $orgRun->fresh()->state);
-        $this->assertSame(0, ControlDOnboardingIntent::where('operation', 'organization')->count());
+        $this->assertSame(0, ControlDOnboardingIntent::count(), 'drift is refused by the executor before any intent is staged');
         $this->assertCount(0, $this->history);
         $this->assertSame('racedOrg01', $unmapped['client']->fresh()->controld_org_id);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $orgRun->id)->where('result_status', 'blocked')->where('summary', 'like', "%the client now needs the 'code' step, not 'organization'%")->count());
+        $this->assertStringContainsString('Deny this proposal and stage again', (string) session('error'));
     }
 
     // ── step 2: code ────────────────────────────────────────────────────────────
@@ -385,13 +393,15 @@ class ControlDOnboardClientTest extends TestCase
         $this->vendor([]);
         $this->approve($run, $tech);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
-        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertSame(0, ControlDOnboardingIntent::count(), 'the executor refuses before B3 is ever reached');
         $this->assertCount(0, $this->history);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('summary', 'like', '%approver is not an active Admin%')->where('approver_user_id', $tech->id)->count());
 
         $inactive = User::factory()->admin()->create(['is_active' => false]);
         $this->approve($run, $inactive);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
         $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('summary', 'like', '%approver is not an active Admin%')->where('approver_user_id', $inactive->id)->count());
     }
 
     /** RED CONTROL: the button is not rendered with the toggle off (nor for a non-admin). */
