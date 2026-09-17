@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Enums\CallDirection;
+use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Models\SipEndpoint;
 use App\Models\User;
@@ -82,6 +83,66 @@ class OutboundCallAnsweredByTest extends TestCase
 
         $this->assertSame($user->id, $stored->answered_by);
         $this->assertSame(1, PhoneCall::where('call_uuid', 'outbound-answered-by-2')->count());
+    }
+
+    /**
+     * Adjudication context:1/diff:1 on review 01a0b139: the earlier repeat-webhook test
+     * resolved the endpoint on BOTH deliveries, so it could not see the destructive case.
+     * Plivo re-delivers webhooks; if the endpoint no longer resolves on the later delivery,
+     * the attribution already resolved must survive. answered_by fills in, never clears.
+     */
+    public function test_a_repeat_webhook_with_an_unresolved_endpoint_keeps_the_resolved_answered_by(): void
+    {
+        Queue::fake();
+        $user = User::factory()->create();
+        $endpoint = $this->endpointFor($user, 'sip:tester@phone.plivo.com');
+        $service = app(PhoneCallService::class);
+
+        $payload = [
+            'CallUUID' => 'outbound-answered-by-monotonic',
+            'From' => 'sip:tester@phone.plivo.com',
+            'To' => '+15555550199',
+        ];
+
+        $service->logOutboundCall($payload);
+        $this->assertSame($user->id, PhoneCall::where('call_uuid', $payload['CallUUID'])->firstOrFail()->answered_by);
+
+        // The endpoint is deactivated (or simply fails to match) before redelivery.
+        $endpoint->update(['is_active' => false]);
+        $service->logOutboundCall($payload);
+
+        $this->assertSame($user->id, PhoneCall::where('call_uuid', $payload['CallUUID'])->firstOrFail()->answered_by,
+            'a redelivered webhook must never null an attribution that was already resolved');
+    }
+
+    /**
+     * The inbound path resolves attribution from DialBLegTo. A later outbound webhook for
+     * the same call_uuid whose endpoint does not resolve must not undo that either.
+     */
+    public function test_an_unresolved_outbound_webhook_does_not_clear_an_existing_attribution(): void
+    {
+        Queue::fake();
+        $user = User::factory()->create();
+
+        PhoneCall::create([
+            'call_uuid' => 'outbound-answered-by-preexisting',
+            'direction' => CallDirection::Outbound,
+            'from_number' => '+15555550125',
+            'to_number' => '+15555550126',
+            'answered_by' => $user->id,
+            'status' => CallStatus::Ringing,
+            'started_at' => now(),
+        ]);
+
+        // No SipEndpoint exists for this URI, so the lookup resolves nothing.
+        app(PhoneCallService::class)->logOutboundCall([
+            'CallUUID' => 'outbound-answered-by-preexisting',
+            'From' => 'sip:nobody@phone.plivo.com',
+            'To' => '+15555550126',
+        ]);
+
+        $this->assertSame($user->id, PhoneCall::where('call_uuid', 'outbound-answered-by-preexisting')->firstOrFail()->answered_by,
+            'an unresolved endpoint leaves the existing attribution alone');
     }
 
     public function test_answered_by_is_mass_assignable_on_the_model_itself(): void

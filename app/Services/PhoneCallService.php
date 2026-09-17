@@ -88,16 +88,28 @@ class PhoneCallService
                 'from_number' => $toNumber,
                 'to_number' => \App\Support\PlivoConfig::get('did_number'),
                 'sip_endpoint' => $fromSip,
-                // Mass assignment: 'answered_by' is only stored because it is
-                // listed in PhoneCall::$fillable. It was not, and Laravel
-                // discarded it without a word, so every outbound call landed
-                // with no staff attribution while the inbound path (which sets
-                // the property directly in handleCallAnswered) worked.
-                'answered_by' => $endpoint?->user_id,
+                // 'answered_by' is deliberately NOT in this array. It is stored
+                // below instead, because updateOrCreate applies these values on
+                // the UPDATE branch as well as the create branch: Plivo
+                // re-delivers webhooks, and an unresolved endpoint on a later
+                // delivery would write null over an attribution that the first
+                // delivery (or handleCallAnswered, from DialBLegTo) had already
+                // resolved. Mass assignment was the original bug - 'answered_by'
+                // was missing from PhoneCall::$fillable and Laravel discarded it
+                // without a word - but making it fillable is exactly what would
+                // turn this slot into a destructive write.
                 'status' => CallStatus::Ringing,
                 'started_at' => now(),
             ]
         );
+
+        // Attribution only ever fills in, never clears: write it when this
+        // delivery resolved an endpoint, and otherwise leave what is already
+        // there. Keeps the column monotonic across webhook redelivery.
+        if ($endpoint?->user_id !== null && $call->answered_by !== $endpoint->user_id) {
+            $call->answered_by = $endpoint->user_id;
+            $call->save();
+        }
 
         if ($call->wasRecentlyCreated && $toNumber) {
             ResolveCallerFromPeople::dispatch($call->id);
