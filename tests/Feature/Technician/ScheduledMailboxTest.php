@@ -323,15 +323,17 @@ class ScheduledMailboxTest extends TestCase
     public function test_out_of_office_uses_exact_encrypted_bodies_not_lengths(): void
     {
         $this->proposal('cipp_stage_set_mailbox_out_of_office', ['state' => 'Enabled', 'internal_message_length' => 5, 'external_message_length' => 5]);
-        $id = $this->admit(['internal_message' => 'hello', 'external_message' => 'world']);
+        // A punctuation-bearing sentinel cannot occur accidentally in random base64 ciphertext.
+        $internal = 'synthetic private message: hello <fixture@example.test>';
+        $id = $this->admit(['internal_message' => $internal, 'external_message' => 'world']);
         $row = DB::table('scheduled_authorizations')->find($id);
         $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
-        $this->assertSame('hello', $sealed['human_inputs']['internal_message']);
-        $this->assertStringNotContainsString('hello', json_encode($row));
+        $this->assertSame($internal, $sealed['human_inputs']['internal_message']);
+        $this->assertStringNotContainsString($internal, json_encode($row));
         $this->time = $this->time->setTime(1, 0);
         $this->result = ['Results' => 'Set Out-of-office for owner@synthetic.test to Enabled.'];
         app(MailboxDispatch::class)->run($id);
-        $this->assertSame('hello', $this->wire[0]['body']['InternalMessage']);
+        $this->assertSame($internal, $this->wire[0]['body']['InternalMessage']);
         $this->assertSame('world', $this->wire[0]['body']['ExternalMessage']);
         $this->assertSame('completed', DB::table('scheduled_authorizations')->value('state'));
     }
