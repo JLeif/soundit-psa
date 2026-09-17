@@ -19,8 +19,40 @@ final readonly class HdbAuthResult
     /** No email or no password stored — nothing was sent anywhere. */
     public const REASON_MISSING_CREDENTIALS = 'missing_credentials';
 
-    /** The portal re-served its login form: email/password pair refused. */
+    /**
+     * The portal's own refusal notice (a `notify--bad` block) said the
+     * email/password pair was invalid. A POSITIVE marker, measured 2026-09-17:
+     * a re-served login form WITHOUT that notice is never this — see
+     * REASON_LOGIN_NOT_EVALUATED.
+     */
     public const REASON_CREDENTIALS_REJECTED = 'credentials_rejected';
+
+    /**
+     * The portal's refusal notice was its bot-guard one ("Invalid Captcha"):
+     * the portal judged the hidden `g` field, not the credentials. Measured
+     * 2026-09-17 by posting the HTML's ASCII `g` deliberately; this client
+     * posts the JavaScript value, so seeing it live means the portal's guard
+     * has changed underneath us.
+     */
+    public const REASON_FORM_GUARD_REFUSED = 'form_guard_refused';
+
+    /**
+     * The portal answered the credential post with its unauthenticated page and
+     * NO refusal notice — the login form again, or the landing redirect. The
+     * post was not evaluated as a login at all (measured 2026-09-17: an empty
+     * `submit` field produced exactly this, byte-identical to the plain page
+     * fetch, for every credential pair), or the portal's refusal shape has
+     * changed. Either way it is a request-shape fact, not a verdict on the
+     * stored credentials, and it must never read as "credentials rejected".
+     */
+    public const REASON_LOGIN_NOT_EVALUATED = 'login_not_evaluated';
+
+    /**
+     * The portal showed a refusal notice, but not one of the two this client
+     * recognises. Fail-closed on purpose: an unread notice is not evidence
+     * about the credentials, and its text never leaves the client.
+     */
+    public const REASON_LOGIN_REFUSED_UNRECOGNISED = 'login_refused_unrecognised';
 
     /** Password accepted, a second factor was demanded, no seed is stored. */
     public const REASON_TOTP_REQUIRED_NO_SEED = 'totp_required_no_seed';
@@ -95,6 +127,9 @@ final readonly class HdbAuthResult
             self::REASON_OK => 'Signed in to the HDB report portal successfully.',
             self::REASON_MISSING_CREDENTIALS => 'Enter the service subaccount email and password first, then save.',
             self::REASON_CREDENTIALS_REJECTED => 'The portal refused the service subaccount email and password.',
+            self::REASON_FORM_GUARD_REFUSED => 'The portal refused the sign-in at its bot check before judging the credentials. The login form has probably changed; nothing was retried.',
+            self::REASON_LOGIN_NOT_EVALUATED => 'The portal answered with its signed-out page and no refusal notice, so there is no verdict on the credentials either way. Check the request shape, session handling or a portal change before the password; nothing was retried.',
+            self::REASON_LOGIN_REFUSED_UNRECOGNISED => 'The portal refused the sign-in with a notice this integration does not recognise. The portal may have changed; nothing was retried.',
             self::REASON_TOTP_REQUIRED_NO_SEED => 'The password was accepted but the portal asked for a two-factor code, and no seed is stored. Paste the enrollment seed into the Two-Factor Seed field.',
             self::REASON_TOTP_SEED_UNUSABLE => 'The stored two-factor seed is not valid base32 — re-enrol two-factor and paste the seed exactly as shown.',
             self::REASON_TOTP_CHALLENGE_UNRECOGNISED => 'The password was accepted but the two-factor prompt was not in a form this integration recognises. The portal may have changed; nothing was retried.',

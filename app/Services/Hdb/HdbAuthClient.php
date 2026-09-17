@@ -23,6 +23,23 @@ use Illuminate\Support\Facades\Http;
  * - `/` serves a 182-byte JS redirect to `login.php`; `login.php` 307s to `/login`.
  * - `/login` posts to ITSELF (`<form action="" method="post" id="theOnlyForm">`)
  *   with `email`, `password`, a submit named `submit`, and a hidden field `g`.
+ * - **`submit` must be NON-EMPTY or the portal never evaluates the login.**
+ *   Measured 2026-09-17 (made-up accounts, never the service credentials): a
+ *   browser posts `submit=Submit`; posting `submit=` gets the blank login form
+ *   back, byte-identical to a plain GET, for every credential pair — no error,
+ *   no flash, no cookie change. Until this was measured, that silent re-serve
+ *   was read as `credentials_rejected`. {@see FORM_SUBMIT_VALUE} posts the
+ *   browser's value, and {@see classify} now refuses to call a re-serve a
+ *   rejection (REASON_LOGIN_NOT_EVALUATED).
+ * - **A refusal is a `notify--bad` block.** With a non-empty submit the portal
+ *   answers a wrong pair with the login page plus a notice whose class carries
+ *   `notify--bad` and whose text is `Invalid email or password`; a post whose
+ *   `g` is the HTML's ASCII value gets `Invalid Captcha` in the same block.
+ *   Everything this client reads off a page — the notice text, the login-form
+ *   and landing-redirect markers, the second-factor markers, the challenge
+ *   form's action and field names and hidden values — is read only to pick a
+ *   closed-vocabulary symbol or to address the next post; none of it leaves
+ *   here.
  * - **`g` is a bot trap.** The HTML ships `value='g'` (ASCII) and a DOMContentLoaded
  *   handler overwrites it with `ɡ` — U+0261 LATIN SMALL LETTER SCRIPT G. A client
  *   that posts the value it found in the HTML identifies itself as not having run
@@ -43,8 +60,11 @@ use Illuminate\Support\Facades\Http;
  * 2. **Success is a NEGATIVE test.** With no observed authenticated page there
  *    is no positive marker to assert, so "authenticated" means the portal
  *    answered 2xx with a non-empty body carrying neither an unauthenticated
- *    marker nor a second-factor prompt. That is the weakest link in this class
- *    and the first thing to tighten once someone has seen a real signed-in page.
+ *    marker, a refusal notice, nor a second-factor prompt. That is the weakest
+ *    link in this class and the first thing to tighten once someone has seen a
+ *    real signed-in page. REJECTION, by contrast, is now a positive test: the
+ *    `notify--bad` notice above. An unauthenticated page without it is reported
+ *    as REASON_LOGIN_NOT_EVALUATED, never as a credential verdict.
  */
 final class HdbAuthClient
 {
@@ -53,6 +73,14 @@ final class HdbAuthClient
      * field, replacing the ASCII `g` that ships in the HTML.
      */
     public const FORM_GUARD_VALUE = "\u{0261}";
+
+    /**
+     * The value a browser posts for the form's submit control. The portal
+     * treats an EMPTY `submit` as "no submission" and re-serves the form without
+     * evaluating the credentials (measured 2026-09-17), so this is not
+     * decorative: it is the field that makes the post a login attempt at all.
+     */
+    public const FORM_SUBMIT_VALUE = 'Submit';
 
     /**
      * Top-level requests one attempt may issue: GET the login page, POST the
@@ -95,6 +123,31 @@ final class HdbAuthClient
      * consulted after the second-factor tests have had their say.
      */
     private const LOGGED_OUT_REDIRECT_MARKER = 'login.php';
+
+    /**
+     * The class token the portal puts on its refusal notice. Structural: the
+     * element is found by this whole-class token on its `class` attribute,
+     * and only its own visible text is then compared against the two known
+     * notices below. An element carrying the token but no text is a
+     * placeholder, not a notice.
+     */
+    private const REFUSAL_NOTICE_CLASS = 'notify--bad';
+
+    /**
+     * The two refusal notices measured 2026-09-17, each mapped to the
+     * closed-vocabulary symbol it means. Matched case-insensitively as a
+     * substring of a notice's visible text only. Any other notice text reports
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, and the text stays here.
+     *
+     * The captcha notice is mapped even though this client always posts the
+     * JS guard value: it is the portal's word that the guard, not the
+     * credentials, was judged — which is what to report if the guard's
+     * expected value ever changes underneath us.
+     */
+    private const REFUSAL_NOTICES = [
+        'invalid captcha' => HdbAuthResult::REASON_FORM_GUARD_REFUSED,
+        'invalid email or password' => HdbAuthResult::REASON_CREDENTIALS_REJECTED,
+    ];
 
     /**
      * Field names a second-factor prompt might use. Matched case-insensitively
@@ -192,12 +245,14 @@ final class HdbAuthClient
                 return $page;
             }
 
-            // Leg 2 — the credentials, with the JS-set guard value.
+            // Leg 2 — the credentials, with the JS-set guard value and the
+            // browser's submit value. Both are load-bearing: see the class
+            // docblock for what the portal does when either is wrong.
             $posted = $this->request('post', $loginUrl, [
                 'email' => HdbPortalConfig::email(),
                 'password' => (string) HdbPortalConfig::password(),
                 'g' => self::FORM_GUARD_VALUE,
-                'submit' => '',
+                'submit' => self::FORM_SUBMIT_VALUE,
             ]);
             if ($posted instanceof HdbAuthResult) {
                 return $posted;
@@ -205,14 +260,25 @@ final class HdbAuthClient
 
             $body = (string) $posted;
 
+            // The portal's own refusal notice outranks everything else on the
+            // page, INCLUDING a code-shaped form: a page that has just said the
+            // credentials were refused is not a second-factor prompt, and a
+            // live one-time code is never posted to it.
+            $noticed = $this->refusalNoticeReason($body);
+            if ($noticed !== null) {
+                return $this->result(HdbAuthStatus::Rejected, $noticed);
+            }
+
             $challenge = $this->findChallengeForm($body, $this->effectiveUrl);
             if ($challenge !== null) {
                 return $this->answerChallenge($challenge);
             }
 
+            // No notice, no drivable challenge: an unauthenticated page here is
+            // the portal not having evaluated the post — not a credential verdict.
             return $this->classify(
                 $body,
-                HdbAuthResult::REASON_CREDENTIALS_REJECTED,
+                HdbAuthResult::REASON_LOGIN_NOT_EVALUATED,
                 HdbAuthResult::REASON_TOTP_CHALLENGE_UNRECOGNISED,
             );
         } catch (HdbRedirectRefusedException) {
@@ -311,7 +377,13 @@ final class HdbAuthClient
         $body = (string) $answered;
 
         // Every remaining unhappy shape after a submitted code means the same
-        // thing to the operator: the code did not get them in.
+        // thing to the operator: the code did not get them in. That includes a
+        // refusal notice — this leg has never been observed live, so its notice
+        // texts are not read into finer symbols.
+        if ($this->refusalNoticeReason($body) !== null) {
+            return $this->result(HdbAuthStatus::Rejected, HdbAuthResult::REASON_TOTP_REJECTED);
+        }
+
         return $this->classify(
             $body,
             HdbAuthResult::REASON_TOTP_REJECTED,
@@ -322,16 +394,24 @@ final class HdbAuthClient
     /**
      * Decide what a returned page means, fail-closed.
      *
-     * Ordered strongest evidence first: a password field is structural proof of
-     * the login page, second-factor prose is proof the password leg SUCCEEDED,
-     * and only a page carrying neither is read as signed in — the negative
-     * success test declared on the class docblock.
+     * Called only for a page that carries NO refusal notice — each leg reads
+     * the notice first ({@see refusalNoticeReason}) and returns on it, because
+     * the notice is the portal's own POSITIVE word that it evaluated the post
+     * and said no. From there, strongest evidence first: a password field is
+     * structural proof of the login page — which, without a notice, means the
+     * post was NOT evaluated; second-factor prose is proof the password leg
+     * SUCCEEDED; and only a page carrying none of these is read as signed in —
+     * the negative success test declared on the class docblock. That last
+     * branch is where a notice this client failed to find would land, which is
+     * why the notice read is a real HTML parse and not a substring hunt.
+     *
+     * @param  string  $reServedReason  the symbol an unauthenticated page reports
      */
-    private function classify(string $body, string $rejectedReason, string $secondFactorReason): HdbAuthResult
+    private function classify(string $body, string $reServedReason, string $secondFactorReason): HdbAuthResult
     {
         foreach (self::LOGIN_FORM_MARKERS as $marker) {
             if (stripos($body, $marker) !== false) {
-                return $this->result(HdbAuthStatus::Rejected, $rejectedReason);
+                return $this->result(HdbAuthStatus::Rejected, $reServedReason);
             }
         }
 
@@ -342,7 +422,7 @@ final class HdbAuthClient
         }
 
         if (stripos($body, self::LOGGED_OUT_REDIRECT_MARKER) !== false) {
-            return $this->result(HdbAuthStatus::Rejected, $rejectedReason);
+            return $this->result(HdbAuthStatus::Rejected, $reServedReason);
         }
 
         if (trim($body) === '') {
@@ -350,6 +430,178 @@ final class HdbAuthClient
         }
 
         return $this->result(HdbAuthStatus::Authenticated, HdbAuthResult::REASON_OK);
+    }
+
+    /**
+     * Non-rendered containers. libxml's HTML parser is HTML4-era and gives
+     * these no special content model, so a notice inside one would sit in the
+     * tree like any other element while a browser shows nothing. Never walked
+     * into, and never read as a notice themselves when one carries the class.
+     */
+    private const HIDDEN_CONTAINERS = ['script', 'style', 'template', 'noscript', 'head'];
+
+    /**
+     * The closed-vocabulary symbol for the portal's refusal notice on a page,
+     * or null when the page carries no notice.
+     *
+     * Structural first, textual second, and the text is read ONLY inside the
+     * notice element. The page is parsed as HTML by libxml (an HTML4-era
+     * recovering parser — not a browser's tree builder, which is why the
+     * containers a browser would not render are excluded by hand), every
+     * rendered element whose `class` attribute carries
+     * {@see REFUSAL_NOTICE_CLASS} as a whole class name is a notice, and its
+     * own visible text — script and style content dropped, whitespace
+     * collapsed — is compared against the two measured notices. Words in a
+     * comment, a script, another attribute, an attribute merely NAMED like
+     * `class`, or a template/noscript block are not a notice. An empty notice
+     * is a placeholder and reports nothing on its own.
+     *
+     * Every notice on the page is read. The guard sentence outranks the
+     * credentials sentence, because a page carrying both has judged the guard
+     * and that is the fact the operator needs. A page whose notices are all
+     * unfamiliar reports REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, the
+     * text discarded here. So does a page libxml could not parse, or a notice
+     * whose text is not valid UTF-8: the portal said something this client
+     * could not read, which is never "no notice".
+     *
+     * Nothing off the page reaches the returned symbol: the match selects a
+     * constant, and the notice text is discarded here.
+     */
+    private function refusalNoticeReason(string $body): ?string
+    {
+        $document = $this->parseHtml($body);
+        if ($document === null) {
+            return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
+        }
+
+        // ancestor-or-SELF: an element inside a hidden container is not a
+        // notice, and neither is a hidden container that carries the class
+        // itself — a browser renders its own text no more than a child's.
+        $hidden = implode(' or ', array_map(
+            fn (string $tag) => "ancestor-or-self::{$tag}",
+            self::HIDDEN_CONTAINERS,
+        ));
+        $notices = (new \DOMXPath($document))->query("//*[@class][not({$hidden})]");
+
+        $texts = [];
+
+        foreach ($notices ?: [] as $element) {
+            if (! $element instanceof \DOMElement) {
+                continue;
+            }
+
+            // HTML splits a class attribute on ASCII whitespace only — space,
+            // tab, LF, FF, CR — never on VT or Unicode spaces.
+            $classes = preg_split('~[ \t\n\f\r]+~', trim($element->getAttribute('class'), " \t\n\f\r")) ?: [];
+            if (! in_array(self::REFUSAL_NOTICE_CLASS, $classes, true)) {
+                continue;
+            }
+
+            $text = $this->visibleText($element);
+            if ($text === null) {
+                return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
+            }
+
+            if ($text !== '') {
+                $texts[] = $text;
+            }
+        }
+
+        if ($texts === []) {
+            return null;
+        }
+
+        // Guard first, then credentials: REFUSAL_NOTICES is ordered that way.
+        foreach (self::REFUSAL_NOTICES as $needle => $reason) {
+            foreach ($texts as $text) {
+                if (mb_stripos($text, $needle) !== false) {
+                    return $reason;
+                }
+            }
+        }
+
+        return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
+    }
+
+    /**
+     * Parse a page as HTML, or null when libxml could not.
+     *
+     * Told to read the bytes as UTF-8 via a leading XML encoding declaration —
+     * the one hint libxml's HTML parser honours ahead of a <meta charset>. It
+     * is a recovering parser: malformed markup produces a partial tree, not a
+     * failure, and only a total failure returns null. A refusal page whose
+     * notice was lost to recovery therefore reads as "no notice" here and
+     * lands on the structural markers in {@see classify}; that is the negative
+     * success test's own documented weakness, not a new one.
+     *
+     * Entities are substituted by the parser, so `&amp;` and friends never
+     * reach the comparison as markup. libxml's external entity loader is off
+     * by default and neither LIBXML_DTDLOAD nor LIBXML_NOENT is set, so no
+     * external DTD or entity is loaded from anywhere; LIBXML_NONET is belt
+     * and braces on top of that, not the thing doing the work. Keep it so.
+     *
+     * The error buffer is process-global. Internal-error mode is restored
+     * after the parse, and the buffer is cleared only when this call was the
+     * one that switched it on — a caller already collecting its own
+     * diagnostics keeps them (with this parse's appended, which it can see).
+     */
+    private function parseHtml(string $body): ?\DOMDocument
+    {
+        $document = new \DOMDocument;
+        $previous = libxml_use_internal_errors(true);
+
+        try {
+            $loaded = $document->loadHTML(
+                '<?xml encoding="UTF-8">'.$body,
+                LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR,
+            );
+        } finally {
+            if (! $previous) {
+                libxml_clear_errors();
+            }
+            libxml_use_internal_errors($previous);
+        }
+
+        return $loaded ? $document : null;
+    }
+
+    /**
+     * The text a person would see inside an element: hidden containers
+     * skipped, comments ignored, element boundaries treated as whitespace so
+     * an inline tag never glues two words together, whitespace collapsed.
+     *
+     * Null when the text is not valid UTF-8 — the caller reports that as an
+     * unrecognised notice rather than as a placeholder.
+     */
+    private function visibleText(\DOMNode $node): ?string
+    {
+        $parts = [];
+
+        foreach ($node->childNodes as $child) {
+            if ($child instanceof \DOMText) {
+                $parts[] = $child->wholeText;
+            } elseif ($child instanceof \DOMElement) {
+                if (in_array(strtolower($child->tagName), self::HIDDEN_CONTAINERS, true)) {
+                    continue;
+                }
+
+                $inner = $this->visibleText($child);
+                if ($inner === null) {
+                    return null;
+                }
+
+                $parts[] = $inner;
+            }
+        }
+
+        $joined = implode(' ', $parts);
+        if (! mb_check_encoding($joined, 'UTF-8')) {
+            return null;
+        }
+
+        $collapsed = preg_replace('~\s+~u', ' ', $joined);
+
+        return $collapsed === null ? null : trim($collapsed);
     }
 
     /**
