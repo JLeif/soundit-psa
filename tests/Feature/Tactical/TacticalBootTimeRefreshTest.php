@@ -2,8 +2,12 @@
 
 namespace Tests\Feature\Tactical;
 
+use App\Enums\TechnicianRunState;
+use App\Jobs\SweepQueuedActionsForAgent;
 use App\Models\Asset;
 use App\Models\TacticalAsset;
+use App\Models\TechnicianRun;
+use App\Models\Ticket;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalDeviceSyncService;
 use GuzzleHttp\Client as GuzzleClient;
@@ -12,6 +16,7 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Bus;
 use Tests\TestCase;
 
 /**
@@ -21,15 +26,36 @@ use Tests\TestCase;
  * whatever the original import left and read as a months-old uptime for the
  * whole Tactical-only fleet — while AssetHealthService::patchFactor() scored it
  * as "up {N}d (patches may be pending)". The agent DETAIL payload carries
- * boot_time (epoch seconds) and is the only Tactical payload that does.
+ * boot_time (epoch seconds), which this refresh reads.
  *
  * These cases pin the write AND its limits: it fills in and moves forward, it
  * never drags the column backwards over another integration (Ninja and Level
  * write the same column), and no observation is never a blanking.
+ *
+ * The type cases exist because the vendor's real type is psutil's FLOAT epoch and
+ * a JSON round-trip can present it as a numeric STRING, while a near-empty string
+ * must never be parsed (Carbon::parse(' ') returns NOW, which would fabricate a
+ * boot time that always beats the never-backwards guard).
  */
 class TacticalBootTimeRefreshTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Fixtures below are absolute instants; without a frozen clock the headline
+        // case's "hours ago" would depend on the wall-clock hour the suite runs.
+        Carbon::setTestNow('2026-09-17 12:00:00');
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
 
     private function syncService(array $queue): TacticalDeviceSyncService
     {
@@ -260,33 +286,194 @@ class TacticalBootTimeRefreshTest extends TestCase
         $this->assertSame(0, $freshPatch['points']);
     }
 
-    /** An unlinked snapshot has no asset to write; the sync must not fail over it. */
-    public function test_an_unlinked_agent_snapshot_is_handled_without_error(): void
+    /**
+     * The vendor's real type. Tactical serialises psutil's boot_time, which is a
+     * FLOAT epoch — is_int() is false for it, so a parser that only special-cases
+     * int sends the true production value down the string path and drops it.
+     */
+    public function test_a_float_epoch_is_a_real_observation(): void
     {
-        $ta = TacticalAsset::create([
-            'asset_id' => null,
-            'agent_id' => 'AGENT-2',
-            'hostname' => 'BOX-2',
-            'status' => 'offline',
-            'synced_at' => now()->subDay(),
-        ]);
-
-        $asset = Asset::factory()->create(['hostname' => 'BOX-3']);
-        TacticalAsset::create([
-            'asset_id' => $asset->id,
-            'agent_id' => 'AGENT-3',
-            'hostname' => 'BOX-3',
-            'status' => 'offline',
-            'synced_at' => now()->subDay(),
-        ]);
+        $asset = $this->linkedAsset(['last_boot_at' => '2026-06-24 19:47:00']);
 
         $service = $this->syncService([
-            new Response(200, [], $this->agentDetail(['boot_time' => now()->subHour()->timestamp])),
+            new Response(200, [], $this->agentDetail([
+                'boot_time' => 1789617600.7267435,
+            ])),
         ]);
 
-        $result = $service->syncDeviceDetail($asset->refresh());
+        $service->syncDeviceDetail($asset);
+
+        $this->assertSame(
+            Carbon::createFromTimestamp(1789617600.7267435)->toDateTimeString(),
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+        );
+    }
+
+    /** A JSON round-trip can present the same epoch as a numeric string. */
+    public function test_a_numeric_string_epoch_is_a_real_observation(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => '2026-06-24 19:47:00']);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => '1789617600'])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertSame(
+            Carbon::createFromTimestamp(1789617600)->toDateTimeString(),
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+        );
+    }
+
+    /**
+     * Carbon::parse(' ') returns NOW. A whitespace boot_time must therefore be
+     * refused outright — otherwise it fabricates an observation of this instant,
+     * which is newer than anything stored and so always wins the forward guard.
+     */
+    public function test_a_whitespace_boot_time_never_fabricates_now(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => '2026-06-24 19:47:00']);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => '  '])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertSame(
+            '2026-06-24 19:47:00',
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+        );
+    }
+
+    /**
+     * A plausibility floor, not just a 0 sentinel: a small or negative epoch is a
+     * garbled read, never a machine that has been up since 1970.
+     *
+     * @dataProvider implausibleEpochs
+     */
+    public function test_an_implausible_epoch_is_refused_on_an_empty_column(mixed $bootTime): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertNull($asset->refresh()->last_boot_at);
+    }
+
+    /** @return array<string, array{mixed}> */
+    public static function implausibleEpochs(): array
+    {
+        return [
+            'one' => [1],
+            'negative' => [-1],
+            'truncated' => [17581],
+            'float zero' => [0.0],
+            'numeric string zero' => ['0'],
+        ];
+    }
+
+    /**
+     * boot_time arrives straight from a decoded vendor payload, so a non-scalar is
+     * reachable. It must be refused as "no observation" rather than raising a
+     * TypeError at the parameter boundary — which would escape syncDeviceDetail's
+     * try/catch entirely and 500 the refresh.
+     *
+     * @dataProvider nonScalarBootTimes
+     */
+    public function test_a_non_scalar_boot_time_does_not_break_the_sync(mixed $bootTime): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => '2026-06-24 19:47:00']);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
 
         $this->assertTrue($result->ok);
-        $this->assertNull($ta->refresh()->asset_id);
+        $this->assertSame(
+            '2026-06-24 19:47:00',
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+        );
+    }
+
+    /** @return array<string, array{mixed}> */
+    public static function nonScalarBootTimes(): array
+    {
+        return [
+            'array' => [['1789617600']],
+            'bool' => [true],
+            'nested object' => [['epoch' => 1789617600]],
+        ];
+    }
+
+    /**
+     * A bool on an EMPTY column. Without strict_types a bool coerces to int 1 at a
+     * narrowly-typed boundary, and 1 is epoch 1970-01-01 — which on an empty column
+     * has no stored value to block it and would be written as a 56-year uptime.
+     * The never-backwards guard masks this whenever a value already exists, so an
+     * empty column is the only place the hazard is visible.
+     */
+    public function test_a_bool_boot_time_on_an_empty_column_writes_nothing(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => true])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue($result->ok);
+        $this->assertNull($asset->refresh()->last_boot_at);
+    }
+
+    /**
+     * The queued-action sweep is unrelated work and must not be collateral damage
+     * from the boot-time write: it is dispatched even when the asset row the write
+     * targets is gone underneath us.
+     */
+    public function test_the_queued_action_sweep_survives_a_failed_boot_time_write(): void
+    {
+        Bus::fake();
+
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+        $agentId = TacticalAsset::where('asset_id', $asset->id)->value('agent_id');
+        $ticket = Ticket::factory()->create();
+
+        TechnicianRun::create([
+            'ticket_id' => $ticket->id,
+            'client_id' => $ticket->client_id,
+            'action_type' => 'tactical_stage_script',
+            'content_hash' => str_repeat('a', 64),
+            'state' => TechnicianRunState::QueuedOffline,
+            'queued_agent_id' => $agentId,
+            'queued_dedup_key' => 'k',
+            'queued_at' => now()->subMinutes(10),
+            'expires_at' => now()->addDays(7),
+        ]);
+
+        // The asset row disappears underneath the write (a real race: a merge or a
+        // delete between the detail read and the column refresh). The sweep is
+        // unrelated work and must still be dispatched.
+        Asset::where('id', $asset->id)->delete();
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail([
+                'status' => 'online',
+                'boot_time' => 1789617600,
+            ])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue($result->ok);
+        Bus::assertDispatched(SweepQueuedActionsForAgent::class);
     }
 }

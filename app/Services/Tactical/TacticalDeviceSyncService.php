@@ -20,6 +20,15 @@ class TacticalDeviceSyncService
     /** Per-request timeout for the on-demand detail read (~3s, §11.5). */
     public const DETAIL_TIMEOUT_SECONDS = 3;
 
+    /**
+     * Smallest epoch we will believe as a real boot time: 2001-09-09.
+     *
+     * Below this a value is a sentinel or a garbled read (0, 1, -1, a truncated
+     * epoch), not a machine that has been up since 1970. No PSA-managed device
+     * booted before this and never rebooted.
+     */
+    private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
+
     public function __construct(
         private readonly TacticalClient $client,
     ) {}
@@ -103,23 +112,32 @@ class TacticalDeviceSyncService
         $wasOnline = $ta->status === 'online';
         $ta->update($update);
 
-        // The agent DETAIL is the only Tactical payload that carries boot_time, so
-        // this is the only place the fleet's reboot time can be observed: the daily
-        // list sync has no boot field at all (see mapAgentToTacticalAsset). Without
-        // this write, assets.last_boot_at keeps whatever the original import wrote
-        // and reads as a months-old uptime forever, which AssetHealthService::
-        // patchFactor() then scores as "up {N}d (patches may be pending)".
-        //
-        // Deliberately forward-only and detail-only: it corrects a row when someone
-        // refreshes that device, and does NOT backfill history. Rows never refreshed
-        // stay stale — see the card for the backfill decision, which is a data
-        // migration and not part of this change.
-        $this->refreshAssetBootTime($ta, $agent['boot_time'] ?? null);
-
         // Offline→online: run any actions queued for this device (bd psa-xr84).
+        //
+        // This runs BEFORE the boot-time write on purpose: the sweep is unrelated
+        // work and must not be suppressed by a failure in an opportunistic column
+        // refresh (review 01a0b1a7 contract:9).
         if (! $wasOnline && $ta->status === 'online') {
             $this->dispatchSweepIfQueued((string) $ta->agent_id);
         }
+
+        // Without this write, assets.last_boot_at keeps whatever the original import
+        // wrote and reads as a months-old uptime forever, which AssetHealthService::
+        // patchFactor() then scores as "up {N}d (patches may be pending)".
+        //
+        // NOTE on where boot_time comes from: our list mapper (mapAgentToTacticalAsset)
+        // does not read boot_time, but that is a fact about OUR MAPPER, not about the
+        // vendor payload — the pinned upstream capture in
+        // tests/Fixtures/tactical/upstream_producers.json lists boot_time in the
+        // agents/ LIST row too (agent_table_serializer_fields, beside last_seen).
+        // So refreshing here is a choice, not the only possibility; widening it to the
+        // list sync is a separate change with its own fleet-wide blast radius.
+        //
+        // Deliberately forward-only: it corrects a row when someone refreshes that
+        // device, and does NOT backfill history. Rows never refreshed stay stale —
+        // see the card for the backfill decision, which is a data migration and not
+        // part of this change.
+        $this->refreshAssetBootTime($ta, $agent['boot_time'] ?? null);
 
         return DetailSyncResult::success($ta->status, $ta->synced_at);
     }
@@ -136,24 +154,42 @@ class TacticalDeviceSyncService
      *
      * An absent/unparseable boot_time is no observation: leave the column untouched
      * rather than blanking a value another integration is maintaining.
+     *
+     * $bootTime is mixed on purpose: it comes straight from a decoded vendor payload,
+     * so a non-scalar would raise an uncaught TypeError at this boundary if the
+     * parameter were narrowly typed — and this method's own try/catch cannot catch
+     * its own signature (review 01a0b1a7 contract:1). Refusal happens in parseBootTime.
      */
-    private function refreshAssetBootTime(TacticalAsset $ta, int|string|null $bootTime): void
+    private function refreshAssetBootTime(TacticalAsset $ta, mixed $bootTime): void
     {
-        if (! $ta->asset_id || $bootTime === null || $bootTime === '' || $bootTime === 0 || $bootTime === '0') {
+        if (! $ta->asset_id) {
             return;
         }
 
-        try {
-            $observed = is_int($bootTime)
-                ? Carbon::createFromTimestamp($bootTime)
-                : Carbon::parse($bootTime);
-        } catch (\Throwable) {
+        $observed = $this->parseBootTime($bootTime);
+
+        if (! $observed) {
+            // Not an error: an absent boot_time is the normal shape for a payload
+            // that carries none. A PRESENT but unusable one is worth a trace, so a
+            // degraded vendor read is diagnosable instead of silent (C-56).
+            if ($bootTime !== null) {
+                Log::debug('Tactical boot_time ignored: not a usable observation.', [
+                    'agent_id' => $ta->agent_id,
+                    'type' => get_debug_type($bootTime),
+                ]);
+            }
+
             return;
         }
 
         // A boot time in the future is not a reboot we can believe; a clock-skewed
         // agent must not park the column ahead of every real observation.
         if ($observed->isFuture()) {
+            Log::debug('Tactical boot_time refused: future value.', [
+                'agent_id' => $ta->agent_id,
+                'observed' => $observed->toDateTimeString(),
+            ]);
+
             return;
         }
 
@@ -163,11 +199,65 @@ class TacticalDeviceSyncService
             return;
         }
 
+        // Never drag the column backwards. NOTE this is deliberately one-directional
+        // and therefore cannot repair a wrong stored value written by another
+        // integration — the arbitration question ("strictly newer wins" vs "most
+        // recent observation wins") is on the card for a product ruling.
         if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
             return;
         }
 
         Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
+    }
+
+    /**
+     * Parse a vendor boot_time into a believable instant, or null for "no observation".
+     *
+     * Tactical serialises psutil's boot_time, which is a FLOAT epoch, and a payload
+     * that has round-tripped through a JSON encoder can present the same value as a
+     * numeric STRING. Both are real observations and both are handled here as epochs.
+     *
+     * Everything else is refused rather than guessed. In particular Carbon::parse('')
+     * and Carbon::parse(' ') return NOW, so a near-empty string would otherwise
+     * fabricate a boot time of this instant and — being newer than anything stored —
+     * would always win the never-backwards guard (review 01a0b1a7 contract:4).
+     */
+    private function parseBootTime(mixed $bootTime): ?Carbon
+    {
+        if (is_bool($bootTime) || $bootTime === null) {
+            return null;
+        }
+
+        // Numeric epoch in any of the three shapes the vendor/JSON can deliver:
+        // int, float (psutil's native type) or a numeric string.
+        if (is_int($bootTime) || is_float($bootTime)
+            || (is_string($bootTime) && is_numeric(trim($bootTime)))) {
+            $epoch = (float) (is_string($bootTime) ? trim($bootTime) : $bootTime);
+
+            // A plausibility floor, not just a 0 sentinel: 0, 1, -1 and other small
+            // or negative values are "no reading", not a machine that booted in 1970
+            // (review 01a0b1a7 contract:5).
+            if ($epoch < self::BOOT_TIME_EPOCH_FLOOR) {
+                return null;
+            }
+
+            try {
+                return Carbon::createFromTimestamp($epoch);
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        // A genuine date string is still accepted, but never a blank/whitespace one.
+        if (is_string($bootTime) && trim($bootTime) !== '') {
+            try {
+                return Carbon::parse(trim($bootTime));
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     /**
