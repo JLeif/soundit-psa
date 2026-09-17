@@ -19,8 +19,8 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Technician\PromptFence;
 use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\ControlDConfig;
+use App\Support\McpConfig;
 use App\Support\McpStaffToken;
-use App\Support\McpToolModes;
 use App\Support\TechnicianConfig;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
@@ -740,9 +740,12 @@ class StaffControlDOnboardingToolExecutor
         if (! $token->ai_actor) {
             return "staging token #{$tokenId} is not an ai_actor token.";
         }
-        // The grant is re-read the way authentication reads it: a legacy full-surface
-        // token (tools null) never inherits this verb, so it cannot carry the lane either.
-        $granted = is_array($token->tools) ? McpToolModes::parseGrants($token->tools)['tools'] : [];
+        // The grant is re-read through THE projection authentication uses
+        // (McpConfig::grantedTools — normalise, then parse; B4.2 #2056 c1:v1:1), so a
+        // legacy comma-joined stored entry that stages also approves. A legacy
+        // full-surface token (tools null) never inherits this verb, so it cannot
+        // carry the lane either.
+        $granted = McpConfig::grantedTools($token)['tools'] ?? [];
         if (! in_array(self::TOOL, $granted, true)) {
             return "staging token #{$tokenId} is no longer granted ".self::TOOL.'.';
         }

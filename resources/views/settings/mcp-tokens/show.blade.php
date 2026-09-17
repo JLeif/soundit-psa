@@ -383,7 +383,7 @@
                             </div>
                             <div>
                                 <label for="flagAiActor" class="fw-semibold mb-0">AI attribution for notes and wiki writes <code class="small text-muted">ai_actor</code></label>
-                                <div class="text-muted small">Uses the configured AI user for add_ticket_note, wiki_add_fact, wiki_create_page and wiki_update_page. On requires a valid configured AI user; off uses the service-account resolver, which may fall back to the first user. Assistant notes remain AI-authored in either case. This does not change attribution for replies or other tools and grants no permissions.</div>
+                                <div class="text-muted small">Uses the configured AI user for add_ticket_note, wiki_add_fact, wiki_create_page and wiki_update_page. On requires a valid configured AI user; off uses the service-account resolver, which may fall back to the first user. Assistant notes remain AI-authored in either case. This does not change attribution for replies or other tools. It is also the token lane's staging authority for <code>controld_onboard_client</code>: only an Admin-managed token with this flag may stage that verb, and ONE active Admin then approves — so an Admin who controls this token and also approves acts alone; granting the verb to this token is accepting that. The rule that the person who stages may not approve belongs to the client page button.</div>
                                 <div class="small text-muted mt-2">Saves automatically.</div>
                             </div>
                         </div>

@@ -487,7 +487,7 @@ class McpStaffController extends Controller
 
         $allTools = array_values(array_filter(
             $allTools,
-            fn (array $tool): bool => $this->toolAllowed($request, (string) ($tool['name'] ?? ''), $liveLookup),
+            fn (array $tool): bool => $this->toolPublished($request, (string) ($tool['name'] ?? ''), $liveLookup),
         ));
 
         // find_persons / find_assets accept an OPTIONAL client_id — they
@@ -2603,6 +2603,44 @@ class McpStaffController extends Controller
     }
 
     /**
+     * PUBLICATION predicate for the ADVERTISED surface (tools/list): toolAllowed()
+     * AND "this token could actually succeed". Today that adds one conjunct: Control D
+     * client onboarding is staged only by an ai_actor token (B4.1, #2043 — the executor
+     * refuses any other with an audited reason), so a granted non-ai_actor token is not
+     * shown the verb either (B4.2, #2056 diff:4/contract:4 — publish/dispatch parity).
+     * Deliberately NOT folded into toolAllowed(): tools/call keeps B4.1's refusal in the
+     * executor, which names ai_actor, points at the client-page button and writes the
+     * `rejected` action-log row — the grant gate's generic "Tool not allowed" would lose
+     * all three.
+     *
+     * NOT the predicate list_tool_surface / search_tools classify with (B4.2, #2056 diff:5).
+     * Those report a `grant_state` per catalog entry, and both publication answers are wrong
+     * for a granted non-ai_actor token: classifying by publication calls the verb
+     * `available_ungranted` ("not in this token's allowlist — an operator token grant enables
+     * it"), which sends the operator to re-grant a grant it already holds, and dropping the
+     * entry instead puts it under `absent_means` ("does not exist on this server — request_tool
+     * records it as a build request"). So the catalog keeps classifying by the GRANT, which is
+     * what `grant_state` names, and the caller learns about the lane where B4.1 says it: the
+     * executor's refusal, which names ai_actor and points at the client-page button.
+     *
+     * @param  array<string, true>|null  $liveLookup  see toolAllowed()
+     */
+    private function toolPublished(Request $request, string $toolName, ?array $liveLookup = null): bool
+    {
+        if (! $this->toolAllowed($request, $toolName, $liveLookup)) {
+            return false;
+        }
+
+        if ($this->isControlDOnboardingTool($toolName)) {
+            $token = $request->attributes->get('mcp_staff_token');
+
+            return $token instanceof McpStaffToken && $token->aiActor;
+        }
+
+        return true;
+    }
+
+    /**
      * Whether staged=false may execute a stageable tool now. Delegates to
      * McpStaffToken::allowsImmediate(), which resolves the mode through
      * McpToolModes::effectiveMode() — the same single resolution point
@@ -2875,6 +2913,10 @@ class McpStaffController extends Controller
             return ['error' => 'Unknown category: '.$categoryFilter.'. Valid categories: '.implode(', ', array_keys($categories)).'.'];
         }
 
+        // The GRANT predicate, not toolPublished(): `grant_state` names the grant, so a
+        // publication verdict here would report a granted non-ai_actor token's
+        // controld_onboard_client as `available_ungranted` (B4.2, #2056 diff:5). tools/list
+        // still withholds the verb; the executor still refuses it, naming ai_actor.
         $entries = McpToolSurface::classify(fn (string $tool): bool => $this->toolAllowed($request, $tool));
 
         $counts = array_fill_keys(array_keys($states), 0);
@@ -2943,6 +2985,8 @@ class McpStaffController extends Controller
                 'grant_state' => $entry['state'],
                 'description' => $entry['description'],
             ],
+            // The same GRANT predicate list_tool_surface classifies with — state parity by
+            // construction, and no publication verdict inside `grant_state` (diff:5).
             McpToolSurface::search($query, fn (string $tool): bool => $this->toolAllowed($request, $tool)),
         );
 

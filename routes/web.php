@@ -310,22 +310,27 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/staff/{user}/avatar', [StaffController::class, 'updateAvatar'])->middleware('throttle:6,1')->name('settings.staff.avatar.update');
     Route::delete('/settings/staff/{user}/avatar', [StaffController::class, 'destroyAvatar'])->name('settings.staff.avatar.destroy');
 
-    // Settings — MCP Tokens
+    // Settings — MCP Tokens. The read-only GETs (index, show) stay under `auth`: the
+    // index lists tokens read-only for non-admins. Every MUTATING route is Admin-only
+    // (B4.2, #2056): an `ai_actor` token granted controld_onboard_client is the token
+    // lane's whole staging authority (B4.1), so minting, flagging, granting, activating,
+    // renaming, regenerating or revoking one is an Admin's act — RequireAdmin (#762),
+    // the same gate the client-page onboarding button carries.
     Route::get('/settings/mcp-tokens', [McpTokensController::class, 'index'])->name('settings.mcp-tokens.index');
-    Route::post('/settings/mcp-tokens', [McpTokensController::class, 'store'])->name('settings.mcp-tokens.store');
-    Route::patch('/settings/mcp-tokens/tool-instructions', [McpTokensController::class, 'updateToolInstructions'])->name('settings.mcp-tokens.tool-instructions');
+    Route::post('/settings/mcp-tokens', [McpTokensController::class, 'store'])->middleware('admin')->name('settings.mcp-tokens.store');
+    Route::patch('/settings/mcp-tokens/tool-instructions', [McpTokensController::class, 'updateToolInstructions'])->middleware('admin')->name('settings.mcp-tokens.tool-instructions');
     Route::get('/settings/mcp-tokens/{token}', [McpTokensController::class, 'show'])->name('settings.mcp-tokens.show');
-    Route::patch('/settings/mcp-tokens/{token}/tools', [McpTokensController::class, 'updateTools'])->name('settings.mcp-tokens.tools');
-    Route::patch('/settings/mcp-tokens/{token}/directive', [McpTokensController::class, 'updateDirective'])->name('settings.mcp-tokens.directive');
-    Route::patch('/settings/mcp-tokens/{token}/trust-flags', [McpTokensController::class, 'updateTrustFlags'])->name('settings.mcp-tokens.trust-flags');
-    Route::patch('/settings/mcp-tokens/{token}/rename', [McpTokensController::class, 'rename'])->name('settings.mcp-tokens.rename');
-    Route::post('/settings/mcp-tokens/{token}/activate', [McpTokensController::class, 'activate'])->name('settings.mcp-tokens.activate');
-    Route::post('/settings/mcp-tokens/{token}/pause', [McpTokensController::class, 'pause'])->name('settings.mcp-tokens.pause');
-    Route::post('/settings/mcp-tokens/{token}/resume', [McpTokensController::class, 'resume'])->name('settings.mcp-tokens.resume');
-    Route::post('/settings/mcp-tokens/{token}/regenerate', [McpTokensController::class, 'regenerate'])->name('settings.mcp-tokens.regenerate');
-    Route::post('/settings/mcp-tokens/{token}/signal-destinations', [McpTokensController::class, 'linkSignalDestination'])->name('settings.mcp-tokens.signal-destinations.link');
-    Route::delete('/settings/mcp-tokens/{token}/signal-destinations/{destination}', [McpTokensController::class, 'unlinkSignalDestination'])->name('settings.mcp-tokens.signal-destinations.unlink');
-    Route::delete('/settings/mcp-tokens/{token}', [McpTokensController::class, 'revoke'])->name('settings.mcp-tokens.revoke');
+    Route::patch('/settings/mcp-tokens/{token}/tools', [McpTokensController::class, 'updateTools'])->middleware('admin')->name('settings.mcp-tokens.tools');
+    Route::patch('/settings/mcp-tokens/{token}/directive', [McpTokensController::class, 'updateDirective'])->middleware('admin')->name('settings.mcp-tokens.directive');
+    Route::patch('/settings/mcp-tokens/{token}/trust-flags', [McpTokensController::class, 'updateTrustFlags'])->middleware('admin')->name('settings.mcp-tokens.trust-flags');
+    Route::patch('/settings/mcp-tokens/{token}/rename', [McpTokensController::class, 'rename'])->middleware('admin')->name('settings.mcp-tokens.rename');
+    Route::post('/settings/mcp-tokens/{token}/activate', [McpTokensController::class, 'activate'])->middleware('admin')->name('settings.mcp-tokens.activate');
+    Route::post('/settings/mcp-tokens/{token}/pause', [McpTokensController::class, 'pause'])->middleware('admin')->name('settings.mcp-tokens.pause');
+    Route::post('/settings/mcp-tokens/{token}/resume', [McpTokensController::class, 'resume'])->middleware('admin')->name('settings.mcp-tokens.resume');
+    Route::post('/settings/mcp-tokens/{token}/regenerate', [McpTokensController::class, 'regenerate'])->middleware('admin')->name('settings.mcp-tokens.regenerate');
+    Route::post('/settings/mcp-tokens/{token}/signal-destinations', [McpTokensController::class, 'linkSignalDestination'])->middleware('admin')->name('settings.mcp-tokens.signal-destinations.link');
+    Route::delete('/settings/mcp-tokens/{token}/signal-destinations/{destination}', [McpTokensController::class, 'unlinkSignalDestination'])->middleware('admin')->name('settings.mcp-tokens.signal-destinations.unlink');
+    Route::delete('/settings/mcp-tokens/{token}', [McpTokensController::class, 'revoke'])->middleware('admin')->name('settings.mcp-tokens.revoke');
 
     // Settings — AI Tooling Gaps (agent-reported missing/unused/broken tools + operator corrections)
     Route::get('/settings/tooling-gaps', [\App\Http\Controllers\Web\ToolingGapController::class, 'index'])->name('settings.tooling-gaps.index');

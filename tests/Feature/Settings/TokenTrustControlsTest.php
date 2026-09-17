@@ -49,7 +49,9 @@ class TokenTrustControlsTest extends TestCase
             $row = McpToken::where('label', 'actor')->firstOrFail();
             $this->page($row)->assertSee('AI attribution for notes and wiki writes')
                 ->assertSee('Uses the configured AI user for add_ticket_note, wiki_add_fact, wiki_create_page and wiki_update_page.')
-                ->assertSee('This does not change attribution for replies or other tools and grants no permissions.')
+                // B4.2 (#2056): the flag IS the token lane's staging authority for controld_onboard_client, so the help no longer says it "grants no permissions".
+                ->assertSee('This does not change attribution for replies or other tools. It is also the token lane')
+                ->assertDontSee('grants no permissions')
                 ->assertDontSee('Notes, replies, and changes made with this token');
             $request = Request::create('/');
             $request->attributes->set('mcp_staff_token', McpConfig::resolveStaffToken($plain));
