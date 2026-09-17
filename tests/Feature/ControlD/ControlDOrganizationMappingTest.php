@@ -77,6 +77,73 @@ class ControlDOrganizationMappingTest extends TestCase
         $this->assertNull($client->fresh()->controld_org_id);
     }
 
+    public function test_bound_org_is_never_handed_to_another_client_even_after_its_owner_was_cleared(): void
+    {
+        $owner = Client::factory()->create(['controld_org_id' => 'org-bound']);
+        $this->bound($owner);
+        $owner->forceFill(['controld_org_id' => null])->save();
+        $other = Client::factory()->create();
+        $this->postJson(route('settings.controld-orgs.update'), ['mappings' => ['org-bound' => $other->id]])->assertUnprocessable();
+        $this->assertNull($other->fresh()->controld_org_id);
+        // Restoring the bound owner to its own org is the one allowed direction.
+        $this->postJson(route('settings.controld-orgs.update'), ['mappings' => ['org-bound' => $owner->id]])->assertRedirect();
+        $this->assertSame('org-bound', $owner->fresh()->controld_org_id);
+        // A deleted owner whose column was cleared still reserves its bound org.
+        $owner = $owner->fresh();
+        $owner->forceFill(['controld_org_id' => null])->save();
+        $owner->delete();
+        $this->assertNull(Client::withTrashed()->findOrFail($owner->id)->controld_org_id);
+        $this->postJson(route('settings.controld-orgs.update'), ['mappings' => ['org-bound' => $other->id]])->assertUnprocessable();
+        $this->assertNull($other->fresh()->controld_org_id);
+    }
+
+    public function test_refusal_is_rendered_on_the_mapping_page_not_silently_skipped(): void
+    {
+        $client = Client::factory()->create(['controld_org_id' => 'org-original']);
+        $this->bound($client);
+        $response = $this->from(route('settings.controld-orgs.index'))
+            ->post(route('settings.controld-orgs.update'), ['mappings' => ['org-original' => '']]);
+        $response->assertRedirect(route('settings.controld-orgs.index'))->assertSessionHasErrors('mappings');
+        $this->assertSame('org-original', $client->fresh()->controld_org_id);
+        $blade = (string) file_get_contents(resource_path('views/settings/controld-organizations.blade.php'));
+        $this->assertStringContainsString('$errors->any()', $blade);
+        $this->assertStringContainsString('Mappings not saved.', $blade);
+    }
+
+    public function test_client_page_unlink_refuses_a_bound_mapping_but_clears_a_manual_one(): void
+    {
+        $bound = Client::factory()->create(['controld_org_id' => 'org-bound']);
+        $this->bound($bound);
+        $manual = Client::factory()->create(['controld_org_id' => 'org-manual']);
+        $this->post(route('clients.integrations.unlink', [$bound, 'controld']))->assertSessionHasErrors('mappings');
+        $this->assertSame('org-bound', $bound->fresh()->controld_org_id);
+        $this->post(route('clients.integrations.unlink', [$manual, 'controld']))->assertRedirect();
+        $this->assertNull($manual->fresh()->controld_org_id);
+    }
+
+    public function test_client_page_link_refuses_to_repoint_a_bound_mapping_or_take_a_bound_or_deleted_org(): void
+    {
+        $bound = Client::factory()->create(['controld_org_id' => 'org-bound']);
+        $this->bound($bound);
+        $this->post(route('clients.integrations.link', [$bound, 'controld']), ['entity_id' => 'org-other'])->assertSessionHasErrors('mappings');
+        $this->assertSame('org-bound', $bound->fresh()->controld_org_id);
+
+        $cleared = Client::factory()->create(['controld_org_id' => 'org-cleared']);
+        $this->bound($cleared);
+        $cleared->forceFill(['controld_org_id' => null])->save();
+        $other = Client::factory()->create();
+        $this->post(route('clients.integrations.link', [$other, 'controld']), ['entity_id' => 'org-cleared'])->assertSessionHasErrors('mappings');
+        $this->assertNull($other->fresh()->controld_org_id);
+
+        $deleted = Client::factory()->create(['controld_org_id' => 'org-reserved']);
+        $deleted->delete();
+        $this->post(route('clients.integrations.link', [$other, 'controld']), ['entity_id' => 'org-reserved'])->assertSessionHasErrors('mappings');
+        $this->assertNull($other->fresh()->controld_org_id);
+
+        $this->post(route('clients.integrations.link', [$other, 'controld']), ['entity_id' => 'org-free'])->assertRedirect();
+        $this->assertSame('org-free', $other->fresh()->controld_org_id);
+    }
+
     private function bound(Client $client): void
     {
         (new ControlDOnboardingIntent)->forceFill([

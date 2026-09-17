@@ -7,6 +7,7 @@ use App\Models\License;
 use App\Models\Setting;
 use App\Services\Cipp\CippClient;
 use App\Services\ControlD\ControlDClient;
+use App\Services\ControlD\ControlDOrganizationMapping;
 use App\Services\Huntress\HuntressClient;
 use App\Services\Level\LevelClient;
 use App\Services\Mesh\MeshClient;
@@ -178,6 +179,13 @@ class ClientIntegrationService
                 abort(409, "This {$config['label']} entity is already mapped to another client.");
             }
 
+            // #2010: a Control D mapping written by the onboarding writers (a `bound`
+            // intent exists) is never re-pointed from here, and an org a bound intent
+            // or a soft-deleted client owns is never handed to another client.
+            if ($vendor === 'controld') {
+                app(ControlDOrganizationMapping::class)->assertClientChangeAllowed($client->fresh() ?? $client, (string) $castId);
+            }
+
             $updates = [$column => $castId];
 
             if ($vendor === 'qbo' && $displayName) {
@@ -207,6 +215,12 @@ class ClientIntegrationService
         $column = $config['column'];
 
         DB::transaction(function () use ($client, $vendor, $config, $column) {
+            // #2010: a Control D mapping the onboarding writers bound is not cleared
+            // from the client page; a manual mapping with no bound evidence still is.
+            if ($vendor === 'controld') {
+                app(ControlDOrganizationMapping::class)->assertClientChangeAllowed($client->fresh() ?? $client, null);
+            }
+
             $updates = [$column => null];
 
             if ($vendor === 'qbo') {

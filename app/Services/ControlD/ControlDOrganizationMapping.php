@@ -47,6 +47,11 @@ class ControlDOrganizationMapping
                     if (! $client->trashed() && $pk !== $intent->org_pk) {
                         $this->refuse();
                     }
+                    // Bound evidence reserves its org for its owner even after the column was
+                    // cleared or the owner deleted: nobody else may be handed a B2/B3 org.
+                    if (in_array($intent->org_pk, $wanted, true) && $pk !== $intent->org_pk) {
+                        $this->refuse();
+                    }
                 }
             }
             foreach ($wanted as $id => $pk) {
@@ -75,6 +80,31 @@ class ControlDOrganizationMapping
 
             return true;
         });
+    }
+
+    /**
+     * Single-client guard for the client-page Link/Unlink (ClientIntegrationService).
+     * The bulk form above is not the only sibling writer of `controld_org_id`; the
+     * client page can clear or set it one client at a time. A mapping written by B2/B3
+     * (a `bound` intent exists for the client) may not be cleared or re-pointed there
+     * either, and a new link may not take an org a bound intent or a soft-deleted
+     * client already owns. A manual mapping with no bound evidence stays removable
+     * from the client page: that is the explicit single-client removal path.
+     * $orgPk null means "clear".
+     */
+    public function assertClientChangeAllowed(Client $client, ?string $orgPk): void
+    {
+        $bound = ControlDOnboardingIntent::where('client_id', $client->id)->where('state', 'bound');
+        if ($client->controld_org_id !== null && $orgPk !== $client->controld_org_id && (clone $bound)->exists()) {
+            $this->refuse();
+        }
+        if ($orgPk !== null) {
+            if ((clone $bound)->where('org_pk', '!=', $orgPk)->exists()
+                || ControlDOnboardingIntent::where('state', 'bound')->where('org_pk', $orgPk)->where('client_id', '!=', $client->id)->exists()
+                || Client::withTrashed()->where('controld_org_id', $orgPk)->where('id', '!=', $client->id)->exists()) {
+                $this->refuse();
+            }
+        }
     }
 
     private function refuse(): never
