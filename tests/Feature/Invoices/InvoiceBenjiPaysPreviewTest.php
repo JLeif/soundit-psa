@@ -83,8 +83,24 @@ class InvoiceBenjiPaysPreviewTest extends TestCase
         $this->get(route('invoices.show', $invoice))->assertOk()
             ->assertSee('value="'.self::LINK_URL.'"', false)
             ->assertSee('href="'.self::LINK_URL.'"', false)
-            ->assertSee('Expires 2030-01-01T12:00:00+00:00')
+            ->assertSee('Expires Jan 1, 2030 12:00 UTC')
             ->assertDontSee(self::KEY);
+    }
+
+    public function test_preview_expiry_is_shown_in_the_app_timezone(): void
+    {
+        // C-14: the vendor's expiresAt is UTC; an operator in Los Angeles must read
+        // 2030-01-01T02:30Z as the evening of Dec 31, not 2:30 in the morning.
+        Setting::setValue('app_timezone', 'America/Los_Angeles');
+        Http::fake(['https://api.benjipays.com/v2/payment-links/applied/*' => Http::response(['url' => self::LINK_URL, 'expiresAt' => '2030-01-01T02:30:00.000Z'])]);
+        $invoice = $this->invoice();
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->post(route('invoices.benjipays-preview', $invoice))->assertRedirect(route('invoices.show', $invoice));
+
+        $this->get(route('invoices.show', $invoice))->assertOk()
+            ->assertSee('Expires Dec 31, 2029 18:30 PST')
+            ->assertDontSee('2030-01-01T02:30:00');
     }
 
     public function test_the_button_is_rendered_for_admins_on_eligible_invoices_only(): void

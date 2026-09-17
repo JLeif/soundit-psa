@@ -476,7 +476,13 @@
                         <a href="{{ $benjipaysPreview['url'] }}" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm mt-2">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Open BenjiPays link
                         </a>
-                        <p class="text-muted small mb-0 mt-2">Expires {{ $benjipaysPreview['expires_at'] ?? '' }}.</p>
+                        {{-- C-14: the vendor's expiry is UTC; show it in the app timezone like
+                             every other timestamp on this page, or the operator misreads how
+                             long the link is good for by the UTC offset. --}}
+                        @php($benjipaysExpiry = rescue(fn () => \Carbon\CarbonImmutable::parse($benjipaysPreview['expires_at'] ?? ''), null, false))
+                        @if($benjipaysExpiry)
+                            <p class="text-muted small mb-0 mt-2">Expires {{ $benjipaysExpiry->toAppTz()->format('M j, Y H:i T') }}.</p>
+                        @endif
                     </div>
                 @endif
             </div>
