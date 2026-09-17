@@ -7,6 +7,7 @@ use App\Models\SignalDestination;
 use App\Models\User;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -76,9 +77,8 @@ class McpTokensAdminGateTest extends TestCase
     /**
      * RED CONTROL: a non-admin is refused (403, RequireAdmin's existing refusal) on every
      * per-token mutating route, JSON and form alike, and the token row is byte-identical after.
-     *
-     * @dataProvider mutatingRoutes
      */
+    #[DataProvider('mutatingRoutes')]
     public function test_non_admin_is_refused_on_every_per_token_mutating_route(string $method, string $route, array $body): void
     {
         $token = $this->token();
