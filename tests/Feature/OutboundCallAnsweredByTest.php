@@ -13,15 +13,24 @@ use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 /**
- * logOutboundCall() resolves the placing user from the SIP endpoint and hands
- * 'answered_by' to PhoneCall::updateOrCreate(...) — a MASS-ASSIGNMENT path.
- * Before this guard existed, `answered_by` was absent from PhoneCall::$fillable,
- * so Eloquent silently discarded it and every outbound call was stored with a
- * null answered_by. The inbound path (handleCallAnswered) assigns the property
- * directly, which is not mass assignment, which is why only outbound was blind.
+ * logOutboundCall() resolves the placing user from the SIP endpoint and stores
+ * it as answered_by. The original defect was mass assignment: the value was
+ * handed to PhoneCall::updateOrCreate(...) while `answered_by` was absent from
+ * PhoneCall::$fillable, so Eloquent silently discarded it and every outbound
+ * call was stored unattributed. The inbound path (handleCallAnswered) assigns
+ * the property directly, which is why only outbound was blind.
  *
- * These tests assert the STORED row, not the in-memory object: the drop happens
- * inside fill(), so a fresh read from the database is the only honest witness.
+ * The fix landed in two parts and the second changed the mechanism: the column
+ * is now assigned directly by logOutboundCall() as well, OUTSIDE the
+ * updateOrCreate values array, because that array is applied on the UPDATE
+ * branch and a redelivered webhook with an unresolved endpoint would null an
+ * attribution already resolved. So no production writer mass-assigns this
+ * column today; $fillable is still exercised by DevDataSeeder and fixtures
+ * (see test_answered_by_is_mass_assignable_on_the_model_itself).
+ *
+ * These tests assert the STORED row, not the in-memory object: a silent drop
+ * happens inside fill(), so a fresh read from the database is the only honest
+ * witness.
  */
 class OutboundCallAnsweredByTest extends TestCase
 {
@@ -145,6 +154,12 @@ class OutboundCallAnsweredByTest extends TestCase
             'an unresolved endpoint leaves the existing attribution alone');
     }
 
+    /**
+     * $fillable is no longer load-bearing for a production webhook writer (both
+     * now assign the property directly), but DevDataSeeder mass-assigns
+     * answered_by, as do fixtures here and in CallLogIndexDisplayTest. This pins
+     * that surface deliberately rather than by accident.
+     */
     public function test_answered_by_is_mass_assignable_on_the_model_itself(): void
     {
         $user = User::factory()->create();
@@ -160,7 +175,7 @@ class OutboundCallAnsweredByTest extends TestCase
         $this->assertSame(
             $user->id,
             $call->fresh()->answered_by,
-            'answered_by must appear in PhoneCall::$fillable — the outbound writer sets it through updateOrCreate().'
+            'answered_by must stay in PhoneCall::$fillable — DevDataSeeder and test fixtures mass-assign it.'
         );
     }
 

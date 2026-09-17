@@ -20,11 +20,15 @@ class PhoneCall extends Model
         'sip_endpoint',
         'status',
         'started_at',
-        // Written by PhoneCallService::logOutboundCall() through
-        // PhoneCall::updateOrCreate(...) — a mass-assignment path, so it MUST be
-        // listed here or Eloquent discards it in silence and every outbound call
-        // is stored with no staff attribution. Never populated from request
-        // input; the value comes from SipEndpoint->user_id.
+        // NOT written by mass assignment in app/ any more. Both service writers
+        // assign the property directly: handleCallAnswered() always did, and
+        // logOutboundCall() was moved out of its updateOrCreate() values array
+        // because that array is applied on the UPDATE branch too, so a
+        // redelivered webhook with an unresolved endpoint would null an
+        // attribution already established. Listed here for the remaining
+        // mass-assigning writers — DevDataSeeder and test fixtures — and never
+        // populated from request input: no controller or form request writes
+        // this column.
         'answered_by',
         'ticket_id',
         'notes',
