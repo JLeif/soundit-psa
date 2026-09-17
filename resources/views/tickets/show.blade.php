@@ -1981,7 +1981,7 @@ window.runTicketScript = function() {
 @media (min-width: 992px) {
     .ticket-main { display: flex; flex-direction: column; }
     .ticket-main > :not(.ticket-notes) { flex-shrink: 0; }
-    .ticket-notes { flex: 1 1 auto; min-height: 20rem; }
+    .ticket-notes { flex: 1 1 auto; min-height: max(20rem, 60vh); }
     .ticket-notes-scroll { contain: size; flex: 1 1 0; min-height: 0; overflow-y: auto; }
 }
 .ticket-notes-scroll:focus-visible { outline: 2px solid #234179; outline-offset: -2px; }
