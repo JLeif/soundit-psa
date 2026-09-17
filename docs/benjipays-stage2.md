@@ -51,15 +51,21 @@ to it. Any `BenjiPaysException` is logged with its reason and HTTP status
 only.
 
 Both ways of giving up on the link — the failed mint and the predicate
-re-read — exit through the one private `stripeFallback()`, which carries the
-guard: a **partially paid** invoice (`qboPartialBalanceLog()`) that has a
-`stripe_invoice_url` goes back to the invoice with the full amount named,
-never a silent 302 to the full-amount Stripe page, which is the overpayment
-#1173 exists to prevent and which this surface no longer warns about. An
-invoice with no Stripe page has no full-amount route to withhold, so it is not
-told one was withheld; it, and anything else, falls back to
-`stripe_invoice_url` when present, else back to the invoice with a generic
-flash. No vendor string reaches the client or the log.
+re-read — exit through the one private `stripeFallback()`, but only the
+mint-failure exit asks it for the partial-balance guard: a **partially paid**
+invoice (`qboPartialBalanceLog()`) that has a `stripe_invoice_url` goes back
+to the invoice with the full amount named, never a silent 302 to the
+full-amount Stripe page, because the BenjiPays surface it was clicked from
+drops that caveat — the overpayment #1173 exists to prevent. The predicate
+re-read exit does not ask for the guard: `paysOnlineViaBenjiPays()` is false
+for every invoice while the toggle is off or no key is stored — the shipped
+default — and on that surface the balance note names the full amount itself,
+so the invoice keeps today's Stripe link rather than being refused forever
+with a "temporarily unavailable" flash. An invoice with no Stripe page has no
+full-amount route to withhold, so it is not told one was withheld; it, and
+anything else, falls back to `stripe_invoice_url` when present, else back to
+the invoice with a generic flash. No vendor string reaches the client or the
+log.
 
 `BenjiPaysPayOnline::linkFor()` caches the minted link per invoice
 (`benjipays:applied-link:{id}:{sha1(qbo id)}`) for `expiresAt − 60 s`, capped

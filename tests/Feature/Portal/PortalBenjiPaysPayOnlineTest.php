@@ -216,39 +216,40 @@ class PortalBenjiPaysPayOnlineTest extends TestCase
             ->assertDontSee('would charge the full');
     }
 
-    public function test_toggle_off_on_a_partially_paid_invoice_is_not_sent_to_the_full_amount_stripe_page(): void
+    public function test_toggle_off_on_a_partially_paid_invoice_keeps_todays_stripe_link(): void
     {
-        // The predicate re-read is the SECOND exit to Stripe. A stale form clicked
-        // after the toggle was turned off must not 302 a partially paid invoice to
-        // the full-amount page either: the page the client loaded had the caveat
-        // dropped. Remove the guard from stripeFallback() and this must fail.
+        // The predicate re-read exit does NOT withhold the Stripe page. With the
+        // toggle off (the shipped default) paysOnlineViaBenjiPays() is false for
+        // every invoice, the balance note on that surface names the full amount
+        // itself, and the client keeps the route they have always had. Guard this
+        // exit and every partially paid invoice on a BenjiPays-less install loses
+        // Pay Online permanently — and is told the loss is temporary.
         Setting::setValue(BenjiPaysConfig::PAY_ONLINE_SETTING, '0');
         $this->fakeMint();
         $invoice = $this->invoice(['status' => InvoiceStatus::Paid]);
         $this->partiallyRevert($invoice, 120.50);
 
-        $this->pay($invoice)
-            ->assertRedirect(route('portal.invoices.show', $invoice))
-            ->assertSessionHas('error');
+        $this->pay($invoice)->assertRedirect(self::STRIPE_URL);
 
-        $this->assertStringContainsString('$500.00', session('error'));
+        $this->actingAs($this->person, 'portal')->get(route('portal.invoices.show', $invoice))
+            ->assertOk()->assertSee('Paying online will charge the full $500.00');
         Http::assertNothingSent();
     }
 
-    public function test_key_cleared_on_a_partially_paid_invoice_is_not_sent_to_the_full_amount_stripe_page(): void
+    public function test_key_cleared_on_a_partially_paid_invoice_keeps_todays_stripe_link(): void
     {
         // Same exit, reached the other way: the toggle is still on but the key was
-        // cleared or rotated to empty, so the predicate re-read turns false.
+        // cleared or rotated to empty, so the predicate re-read turns false — and
+        // the surface the client loaded names the full amount again.
         Http::fake();
         Setting::where('key', 'benjipays_api_key')->delete();
         $invoice = $this->invoice(['status' => InvoiceStatus::Paid]);
         $this->partiallyRevert($invoice, 120.50);
 
-        $this->pay($invoice)
-            ->assertRedirect(route('portal.invoices.show', $invoice))
-            ->assertSessionHas('error');
+        $this->pay($invoice)->assertRedirect(self::STRIPE_URL);
 
-        $this->assertStringContainsString('$500.00', session('error'));
+        $this->actingAs($this->person, 'portal')->get(route('portal.invoices.show', $invoice))
+            ->assertOk()->assertSee('Paying online will charge the full $500.00');
         Http::assertNothingSent();
     }
 

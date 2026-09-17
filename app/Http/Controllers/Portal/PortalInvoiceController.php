@@ -65,17 +65,18 @@ class PortalInvoiceController extends Controller
      * the toggle was turned off falls back to Stripe like the button would.
      *
      * A mint failure is logged (reason and status only, never a vendor
-     * string). BOTH exits to Stripe — a failed mint and the predicate re-read
-     * above — go through stripeFallback(), which carries the one guard that
-     * matters here: a PARTIALLY PAID invoice is never silently bounced to the
-     * Stripe hosted page, because that page is priced at the full total and
-     * the balance note drops the full-amount caveat on this path, so the
-     * client would be one click from the overpayment #1173 exists to prevent.
-     * Putting the guard on only the mint-failure exit left a stale form,
-     * clicked after a toggle-off or a cleared key, doing exactly what the
-     * other exit refuses to do. Otherwise the client goes to the Stripe page
-     * if the invoice has one, else back to the invoice with a generic flash —
-     * never a vendor message.
+     * string). Both exits to Stripe go through stripeFallback(), but only the
+     * mint-failure exit asks it for the partial-balance guard: that click came
+     * from the BenjiPays surface, whose balance note drops the full-amount
+     * caveat, so a PARTIALLY PAID invoice must not be silently bounced to the
+     * full-total Stripe page — the overpayment #1173 exists to prevent. The
+     * predicate re-read exit does NOT ask for it: paysOnlineViaBenjiPays() is
+     * false for every invoice while the toggle is off or no key is stored —
+     * the shipped default — and on that surface the balance note names the
+     * full amount itself, so refusing the click there would permanently
+     * remove a working payment route and call the removal temporary. Either
+     * way the client goes to the Stripe page if the invoice has one, else back
+     * to the invoice with a generic flash — never a vendor message.
      */
     public function payOnline(Request $request, Invoice $invoice, BenjiPaysPayOnline $payOnline): RedirectResponse
     {
@@ -86,7 +87,8 @@ class PortalInvoiceController extends Controller
         }
 
         if (! $invoice->paysOnlineViaBenjiPays()) {
-            return $this->stripeFallback($invoice);
+            // The surface this click came from names the full amount itself.
+            return $this->stripeFallback($invoice, guardPartialBalance: false);
         }
 
         try {
@@ -100,28 +102,36 @@ class PortalInvoiceController extends Controller
                 'http_status' => $e->httpStatus,
             ]);
 
-            return $this->stripeFallback($invoice);
+            return $this->stripeFallback($invoice, guardPartialBalance: true);
         }
 
         return redirect()->away($link->url);
     }
 
     /**
-     * The single exit to Stripe: every path that gives up on the BenjiPays
-     * link lands here, so the partial-balance guard cannot be honoured by one
-     * caller and skipped by another.
+     * The single exit to Stripe for both give-up paths.
      *
-     * The Stripe page charges the FULL total and this surface no longer says
-     * so (the BenjiPays page is priced at the balance), so a partially paid
-     * invoice must not be sent there without the amount — whether the mint
-     * failed or the predicate re-read turned false under a stale form.
+     * $guardPartialBalance is set by the mint-failure exit only. There the
+     * client clicked from the BenjiPays surface, which drops the "will charge
+     * the full $X" caveat because the vendor page is priced at the balance, so
+     * a partially paid invoice must not be sent to the full-total Stripe page
+     * without the amount named — the overpayment #1173 exists to prevent.
+     *
+     * The predicate re-read exit does not set it. paysOnlineViaBenjiPays() is
+     * false for EVERY invoice whenever the toggle is off or no key is stored,
+     * which is the shipped default and the steady state of any deployment not
+     * using BenjiPays; on that surface the balance note renders the
+     * full-amount caveat, so there is nothing withheld to compensate for, and
+     * guarding here would refuse online payment for every partially paid
+     * invoice forever while calling the refusal temporary.
+     *
      * Guarded on the Stripe URL too: with no Stripe page there is no
      * full-amount route to withhold, and saying otherwise would tell the
      * client something false about their own invoice.
      */
-    private function stripeFallback(Invoice $invoice): RedirectResponse
+    private function stripeFallback(Invoice $invoice, bool $guardPartialBalance): RedirectResponse
     {
-        if ($invoice->qboPartialBalanceLog() !== null && $invoice->stripe_invoice_url) {
+        if ($guardPartialBalance && $invoice->qboPartialBalanceLog() !== null && $invoice->stripe_invoice_url) {
             return redirect()->route('portal.invoices.show', $invoice)
                 ->with('error', 'Online payment for the remaining balance is temporarily unavailable. Paying online would charge the full $'
                     .number_format((float) $invoice->total, 2)
