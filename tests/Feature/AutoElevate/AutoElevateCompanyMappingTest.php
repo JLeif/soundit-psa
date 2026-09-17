@@ -238,6 +238,32 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertNull($b->fresh()->autoelevate_company_id);
     }
 
+    public function test_save_refuses_the_same_company_under_two_case_variant_keys(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $b = Client::factory()->create(['name' => 'Acme Inc']);
+        $c = Client::factory()->create(['name' => 'Beta Inc']);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        // The uuid key is accepted in either hex case and the write path lowercases it, so these
+        // two keys are one company. Applied, both UPDATEs would write the same company id and
+        // two clients would resolve to one AutoElevate company (the second invisible on this
+        // screen, because the index keys mapped clients by the lowercased id).
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->post(route('settings.autoelevate-companies.update'), ['mappings' => [
+                self::COMPANY_B => $b->id,
+                strtoupper(self::COMPANY_B) => $c->id,
+            ]])
+            ->assertRedirect(route('settings.autoelevate-companies.index'))
+            ->assertSessionHasErrors('mappings')
+            ->assertSessionMissing('success');
+
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id, 'the clear step never ran');
+        $this->assertNull($b->fresh()->autoelevate_company_id);
+        $this->assertNull($c->fresh()->autoelevate_company_id);
+        $this->assertSame(0, Client::where('autoelevate_company_id', strtolower(self::COMPANY_B))->count());
+    }
+
     public function test_save_refuses_a_client_id_that_does_not_exist(): void
     {
         $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);

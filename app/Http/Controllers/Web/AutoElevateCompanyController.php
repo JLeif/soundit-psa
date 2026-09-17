@@ -65,10 +65,21 @@ class AutoElevateCompanyController extends Controller
         // exactly one company id, so the same client under two company keys is a refusal — both
         // UPDATEs would hit one row and the last write would silently win.
         $requested = [];
+        $seenCompanies = [];
         foreach ($mappings as $companyId => $clientId) {
             if (! is_string($companyId) || ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $companyId)) {
                 return back()->withErrors(['mappings' => 'Invalid AutoElevate company id.']);
             }
+            // The uuid regex accepts either hex case and the write path folds the key, so two
+            // keys differing only in case are ONE company. Accepting both would land two
+            // UPDATEs on the same lowercased autoelevate_company_id and map two clients to one
+            // company — the invariant this controller owns (see the migration docblock) and that
+            // index()'s keyBy and the client panel rely on. Normalize, then refuse a repeat.
+            $companyKey = strtolower($companyId);
+            if (in_array($companyKey, $seenCompanies, true)) {
+                return back()->withErrors(['mappings' => 'The same AutoElevate company was submitted twice. Map each company once.']);
+            }
+            $seenCompanies[] = $companyKey;
             if ($clientId === null || $clientId === '') {
                 continue;
             }
