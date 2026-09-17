@@ -320,12 +320,25 @@ class PhoneCallActionService
             // what approval must find unchanged. Pinning ticket_id alone let a
             // ticket reassigned between staging and approval move prepay hours
             // against a contract nobody reviewed.
+            //
+            // ticket_contract_id is NOT sufficient on its own. When it is null —
+            // the common intake case — the debit falls back to an unordered
+            // first() over the client's active hours prepay contracts, so the
+            // contract actually debited is not named anywhere on the ticket. Two
+            // different contracts both compare equal as "null", and a prepay
+            // rollover between staging and approval (expire C1, activate C2) is
+            // an ordinary billing event, not a contrivance. So we additionally
+            // pin resolved_contract_id: the id PrepayService itself would pick,
+            // read from the one producer of that answer so this cannot drift
+            // from the query it mirrors.
             $ticket = $call->ticket_id === null ? null : Ticket::find($call->ticket_id);
+            $resolved = app(PrepayService::class)->resolveContractForPhoneCall($call);
 
             return [
                 'ticket_id' => $call->ticket_id,
                 'ticket_client_id' => $ticket?->client_id === null ? null : (int) $ticket->client_id,
                 'ticket_contract_id' => $ticket?->contract_id === null ? null : (int) $ticket->contract_id,
+                'resolved_contract_id' => $resolved?->id === null ? null : (int) $resolved->id,
                 'is_billable' => $call->is_billable === null ? null : (bool) $call->is_billable,
                 'duration_seconds' => $call->effectiveDurationSeconds(),
             ];
@@ -479,7 +492,7 @@ class PhoneCallActionService
     private function staleMessage(string $action): string
     {
         return $action === self::ACTION_BILLABLE
-            ? 'Call billability, its ticket link, that ticket\'s client or contract, or the billed duration changed since this was proposed; re-stage.'
+            ? 'Call billability, its ticket link, that ticket\'s client, the prepay contract the debit resolves to, or the billed duration changed since this was proposed; re-stage.'
             : 'Caller number changed since this was proposed; re-stage.';
     }
 

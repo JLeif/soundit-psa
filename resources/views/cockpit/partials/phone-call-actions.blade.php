@@ -17,7 +17,18 @@
                 <p class="mb-1">Approving lets future calls from this number ring through. An existing directory entry is never overwritten.</p>
             @endif
             <p>{{ $proposal->payload['reason'] ?? '' }}</p>
-            <small>Proposed by {{ $proposal->drafted_by }}. Approval revalidates the call, its ticket link — including that ticket's client and contract, which the prepay debit resolves through — and the phone directory.</small>
+            {{-- The assurance MUST match what approve() actually rechecks for THIS
+                 action type. snapshot() returns the ticket/client/contract keys only
+                 for set_call_billable; for block/allow the stale check is the caller
+                 number and the directory alone. A shared sentence made the billable
+                 card claim a directory recheck and the block/allow cards claim a
+                 ticket/client/contract recheck, neither of which happens — false
+                 assurance on the one surface whose whole job is to inform approval. --}}
+            @if($proposal->action_type === 'set_call_billable')
+                <small>Proposed by {{ $proposal->drafted_by }}. Approval revalidates the call, its ticket link, that ticket's client, the prepay contract the debit resolves to, and the billed duration. It does not check the phone directory.</small>
+            @else
+                <small>Proposed by {{ $proposal->drafted_by }}. Approval revalidates the call, that it is inbound, the caller number, and that the phone directory still has no entry for it. It does not check any ticket, client or contract.</small>
+            @endif
             @if($canApprovePhoneCallAction ?? false)
                 <form method="POST" action="{{ route('phone-call-actions.approve', $proposal->id) }}" class="d-inline">
                     @csrf <button class="btn btn-sm btn-success">Approve call action</button>

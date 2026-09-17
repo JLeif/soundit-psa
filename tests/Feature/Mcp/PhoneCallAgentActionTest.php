@@ -319,6 +319,103 @@ class PhoneCallAgentActionTest extends TestCase
     }
 
     /**
+     * The null-contract_id money-target drift (review r1 finding c1:v1:1).
+     *
+     * With ticket.contract_id NULL — the common intake case —
+     * PrepayService::debitFromPhoneCall does NOT read the ticket for the money
+     * target: it falls back to an unordered first() over the client's active
+     * hours prepay contracts. So pinning ticket_id, ticket_client_id and
+     * ticket_contract_id leaves the contract that is actually debited unpinned:
+     * a prepay rollover between staging and approval (expire C1, activate C2)
+     * leaves every one of those keys equal while the money lands somewhere the
+     * approver never saw. The snapshot pins the RESOLVED contract id for that
+     * reason, and this is the case that proves it.
+     *
+     * Red-check: drop 'resolved_contract_id' from snapshot() and this goes red
+     * with a 200 where a 409 is required, and a debit against C2.
+     */
+    public function test_prepay_rollover_under_a_null_contract_ticket_is_caught_as_stale(): void
+    {
+        [$call, $ticket] = $this->fixture();
+        $this->assertNull($ticket->fresh()->contract_id, 'this case is only meaningful on the fallback path');
+        $c1 = $this->prepayContract($ticket);
+        $admin = $this->admin();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['set_call_billable:staged']);
+
+        $r = $this->decoded($this->callTool($token, 'set_call_billable',
+            ['phone_call_id' => $call->id, 'billable' => true, 'reason' => 'Synthetic rollover']));
+        $this->assertTrue($r['staged']);
+        $this->assertSame($c1->id, (int) PhoneCallActionProposal::find($r['proposal_id'])
+            ->payload['snapshot']['resolved_contract_id'], 'the staged target is C1');
+
+        // Billing rolls the client's prepay: C1 expires, renewal C2 goes active.
+        // The ticket is untouched — same id, same client, contract_id still null.
+        $c1->forceFill(['status' => 'expired'])->save();
+        $c2 = $this->prepayContract($ticket);
+        $ticket->refresh();
+        $this->assertNull($ticket->contract_id);
+        $this->assertSame($c2->id, app(\App\Services\PrepayService::class)
+            ->resolveContractForPhoneCall($call->fresh())?->id, 'the money target moved to C2');
+
+        $this->actingAs($admin)->postJson(route('phone-call-actions.approve', $r['proposal_id']))
+            ->assertStatus(409)
+            ->assertJsonPath('error', fn ($e) => str_contains((string) $e, 'prepay contract the debit resolves to'));
+
+        // Nothing moved on EITHER contract, and the proposal is consumed.
+        $this->assertDatabaseCount('prepay_transactions', 0);
+        $this->assertSame(10.0, (float) $c1->fresh()->prepay_balance);
+        $this->assertSame(10.0, (float) $c2->fresh()->prepay_balance);
+        $this->assertFalse((bool) $call->fresh()->is_billable);
+        $this->assertSame('stale', PhoneCallActionProposal::find($r['proposal_id'])->state);
+    }
+
+    /**
+     * The cockpit approval card must not promise a recheck that approve() does
+     * not perform for that action type (review r1 finding c1:v2:2). snapshot()
+     * returns the ticket/client/contract keys only for set_call_billable, and
+     * staleMessage() for block/allow is the caller number alone — so a shared
+     * footer asserting ticket/client/contract revalidation is false on a
+     * block/allow card, and a 'phone directory' claim is false on a billable
+     * card. This is the one surface whose entire job is to inform the approval
+     * decision, so the copy is part of the control.
+     *
+     * Red-check: restore the single shared <small> footer and this goes red.
+     */
+    public function test_approval_card_assurance_matches_what_each_action_actually_revalidates(): void
+    {
+        [$call, $ticket] = $this->fixture();
+        $this->prepayContract($ticket);
+        $admin = $this->admin();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['set_call_billable:staged', 'block_caller:staged']);
+
+        $this->decoded($this->callTool($token, 'set_call_billable',
+            ['phone_call_id' => $call->id, 'billable' => true, 'reason' => 'Synthetic copy check']));
+        $billableCard = $this->actingAs($admin)->get(route('cockpit.index'))->assertOk()->getContent();
+
+        $billableSection = $this->actionSection($billableCard);
+        $this->assertStringContainsString('the prepay contract the debit resolves to', $billableSection);
+        $this->assertStringContainsString('It does not check the phone directory.', $billableSection);
+        $this->assertStringNotContainsString('the phone directory still has no entry for it', $billableSection,
+            'a billable approval rechecks no directory entry');
+
+        PhoneCallActionProposal::query()->delete();
+        $this->decoded($this->callTool($token, 'block_caller',
+            ['phone_call_id' => $call->id, 'reason' => 'Synthetic copy check']));
+        $blockCard = $this->actingAs($admin)->get(route('cockpit.index'))->assertOk()->getContent();
+
+        $blockSection = $this->actionSection($blockCard);
+        $this->assertStringContainsString('the phone directory still has no entry for it', $blockSection);
+        // Scoped to the call-log action section: "contract" appears legitimately
+        // elsewhere on the cockpit, and this card's own copy names it only to
+        // DENY the recheck. What must be absent is any CLAIM of one.
+        $this->assertStringContainsString('It does not check any ticket, client or contract.', $blockSection);
+        $this->assertStringNotContainsString("that ticket's client", $blockSection,
+            'a block approval rechecks no ticket, client or contract');
+        $this->assertStringNotContainsString('the prepay contract the debit resolves to', $blockSection,
+            'a block approval resolves no prepay contract');
+    }
+
+    /**
      * (2)+(4) block_caller holds on a bare grant, writes the same
      * PhoneDirectoryEntry the web path writes on approval, and refuses an
      * unparseable number. allow_caller cannot un-block: an existing entry is
@@ -485,6 +582,19 @@ class PhoneCallAgentActionTest extends TestCase
         $this->assertStringNotContainsString('5555550142', $mcpJson);
         $this->assertStringNotContainsString('Synthetic audited', $mcpJson);
         $this->assertStringContainsString('reason_length', $mcpJson);
+    }
+
+    /**
+     * Just the "Call log action approvals" <section> of a rendered cockpit page,
+     * so copy assertions cannot be satisfied or broken by unrelated widgets.
+     */
+    private function actionSection(string $html): string
+    {
+        $start = strpos($html, 'Call log action approvals');
+        $this->assertNotFalse($start, 'the call-log action card did not render');
+        $end = strpos($html, '</section>', $start);
+
+        return substr($html, $start, $end === false ? null : $end - $start);
     }
 
     /**
