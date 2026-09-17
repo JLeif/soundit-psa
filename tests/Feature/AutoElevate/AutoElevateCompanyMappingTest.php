@@ -58,7 +58,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->actingAs(User::factory()->create(['role' => $role]));
 
         $this->get(route('settings.autoelevate-companies.index'))->assertForbidden();
-        $this->get(route('settings.autoelevate-companies.auto-match'))->assertForbidden();
+        $this->post(route('settings.autoelevate-companies.auto-match'))->assertForbidden();
         $this->post(route('settings.autoelevate-companies.update'), ['mappings' => [self::COMPANY_A => $client->id]])->assertForbidden();
 
         $this->assertNull($client->fresh()->autoelevate_company_id, $role->value.' must not write a mapping');
@@ -158,7 +158,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $delta = Client::factory()->create(['name' => 'Delta Freight', 'is_active' => false]);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
-        $this->get(route('settings.autoelevate-companies.auto-match'))
+        $this->post(route('settings.autoelevate-companies.auto-match'))
             ->assertRedirect(route('settings.autoelevate-companies.index'))
             ->assertSessionHas('success', 'Auto-matched 1 company(ies) by name. 1 company(ies) left unmapped: more than one client shares that name.');
 
@@ -180,7 +180,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $acme = Client::factory()->create(['name' => 'Acme']);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
-        $this->get(route('settings.autoelevate-companies.auto-match'))->assertSessionHas('success', 'Auto-matched 1 company(ies) by name.');
+        $this->post(route('settings.autoelevate-companies.auto-match'))->assertSessionHas('success', 'Auto-matched 1 company(ies) by name.');
         $this->assertSame(self::uuid(1), $acme->fresh()->autoelevate_company_id, 'first company in name order wins; the second finds no free client');
     }
 
@@ -193,7 +193,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $acme = Client::factory()->create(['name' => 'Acme', 'autoelevate_company_id' => self::uuid(1)]);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
-        $this->get(route('settings.autoelevate-companies.auto-match'))
+        $this->post(route('settings.autoelevate-companies.auto-match'))
             ->assertSessionHas('info', 'No new matches found. Companies may need manual mapping.');
         $this->assertSame(self::uuid(1), $acme->fresh()->autoelevate_company_id, 'existing mapping survives a name match on another company');
     }
@@ -202,7 +202,7 @@ class AutoElevateCompanyMappingTest extends TestCase
     {
         $this->fakeCompanies([self::company(self::uuid(1), 'Nobody')]);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
-        $this->get(route('settings.autoelevate-companies.auto-match'))
+        $this->post(route('settings.autoelevate-companies.auto-match'))
             ->assertSessionHas('info', 'No new matches found. Companies may need manual mapping.');
     }
 
@@ -211,10 +211,67 @@ class AutoElevateCompanyMappingTest extends TestCase
         Http::fake([self::BASE.'/*' => Http::response('', 503)]);
         $acme = Client::factory()->create(['name' => 'Acme']);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
-        $this->get(route('settings.autoelevate-companies.auto-match'))
+        $this->post(route('settings.autoelevate-companies.auto-match'))
             ->assertRedirect(route('settings.autoelevate-companies.index'))
             ->assertSessionHas('error', fn ($m) => str_contains($m, 'http_503'));
         $this->assertNull($acme->fresh()->autoelevate_company_id);
+    }
+
+    public function test_save_refuses_one_client_under_two_companies_and_changes_nothing(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $b = Client::factory()->create(['name' => 'Acme Inc']);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        // The screen renders the same client list in every row, so this is a normal UI action:
+        // it must be refused, not applied with the last write winning and the flash saying 2.
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->post(route('settings.autoelevate-companies.update'), ['mappings' => [
+                self::COMPANY_A => $b->id,
+                self::COMPANY_B => $b->id,
+            ]])
+            ->assertRedirect(route('settings.autoelevate-companies.index'))
+            ->assertSessionHasErrors('mappings')
+            ->assertSessionMissing('success');
+
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id, 'the clear step never ran');
+        $this->assertNull($b->fresh()->autoelevate_company_id);
+    }
+
+    public function test_save_refuses_a_client_id_that_does_not_exist(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->post(route('settings.autoelevate-companies.update'), ['mappings' => [self::COMPANY_B => 999999]])
+            ->assertSessionHasErrors('mappings')
+            ->assertSessionMissing('success');
+
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
+    }
+
+    public function test_a_mapped_client_that_is_no_longer_operational_is_offered_and_survives_a_save(): void
+    {
+        $this->fakeCompanies([
+            self::company(self::COMPANY_A, 'Delta Freight'),
+            self::company(self::COMPANY_B, 'Zeta Widgets'),
+        ]);
+        $delta = Client::factory()->create(['name' => 'Delta Freight', 'is_active' => false, 'autoelevate_company_id' => self::COMPANY_A]);
+        $zeta = Client::factory()->create(['name' => 'Zeta Widgets']);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        // Without an <option> the select posts "" and clear-then-apply destroys the mapping.
+        $response = $this->get(route('settings.autoelevate-companies.index'))->assertOk();
+        $this->assertContains($delta->id, $response->viewData('allClients')->pluck('id')->all(), 'a mapped non-operational client must still be selectable');
+
+        $this->post(route('settings.autoelevate-companies.update'), ['mappings' => [
+            self::COMPANY_A => $delta->id,
+            self::COMPANY_B => $zeta->id,
+        ]])->assertSessionHas('success', 'Saved 2 AutoElevate company mapping(s).');
+
+        $this->assertSame(self::COMPANY_A, $delta->fresh()->autoelevate_company_id, 'unrelated save must not clear it');
+        $this->assertSame(self::COMPANY_B, $zeta->fresh()->autoelevate_company_id);
     }
 
     public function test_integrations_settings_links_to_map_companies_for_admins_only(): void

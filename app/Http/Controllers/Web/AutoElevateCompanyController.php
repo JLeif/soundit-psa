@@ -38,7 +38,14 @@ class AutoElevateCompanyController extends Controller
             ->get(['id', 'name', 'autoelevate_company_id'])
             ->keyBy(fn ($c) => strtolower($c->autoelevate_company_id));
 
-        $allClients = Client::operational()->orderBy('name')->get(['id', 'name']);
+        // The dropdown must also offer every client that already HOLDS a mapping: a mapped
+        // client that has since left the operational set would have no <option>, so the select
+        // would post "" and the clear-then-apply save below would silently destroy its mapping.
+        $allClients = Client::operational()->orderBy('name')->get(['id', 'name'])
+            ->concat($mappedClients->values())
+            ->unique('id')
+            ->sortBy(fn ($c) => mb_strtolower($c->name))
+            ->values();
 
         return view('settings.autoelevate-companies', [
             'companies' => $companies,
@@ -54,31 +61,48 @@ class AutoElevateCompanyController extends Controller
             $mappings = [];
         }
 
-        // Every key must be a company UUID; every non-empty value a client id.
+        // Every key must be a company UUID; every non-empty value a client id. A client holds
+        // exactly one company id, so the same client under two company keys is a refusal — both
+        // UPDATEs would hit one row and the last write would silently win.
+        $requested = [];
         foreach ($mappings as $companyId => $clientId) {
             if (! is_string($companyId) || ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $companyId)) {
                 return back()->withErrors(['mappings' => 'Invalid AutoElevate company id.']);
             }
-            if ($clientId !== null && $clientId !== '' && ! ctype_digit((string) $clientId)) {
+            if ($clientId === null || $clientId === '') {
+                continue;
+            }
+            if ((! is_string($clientId) && ! is_int($clientId)) || ! ctype_digit((string) $clientId)) {
                 return back()->withErrors(['mappings' => 'Invalid client id.']);
             }
+            $clientId = (int) $clientId;
+            if (in_array($clientId, $requested, true)) {
+                return back()->withErrors(['mappings' => 'One client cannot be mapped to two AutoElevate companies. Pick a different client for each company.']);
+            }
+            $requested[] = $clientId;
         }
 
-        DB::transaction(function () use ($mappings) {
+        // A posted id matching no client would write nothing while the flash claimed a save.
+        if ($requested !== [] && Client::whereIn('id', $requested)->count() !== count($requested)) {
+            return back()->withErrors(['mappings' => 'Unknown client id.']);
+        }
+
+        $applied = 0;
+
+        DB::transaction(function () use ($mappings, &$applied) {
             // Clear existing mappings, then apply the submitted set (Huntress shape).
             Client::whereNotNull('autoelevate_company_id')->update(['autoelevate_company_id' => null]);
 
             foreach ($mappings as $companyId => $clientId) {
                 if ($clientId) {
-                    Client::where('id', (int) $clientId)->update(['autoelevate_company_id' => strtolower($companyId)]);
+                    // Count rows actually written, never the submitted payload.
+                    $applied += Client::where('id', (int) $clientId)->update(['autoelevate_company_id' => strtolower($companyId)]);
                 }
             }
         });
 
-        $mapped = collect($mappings)->filter()->count();
-
         return redirect()->route('settings.autoelevate-companies.index')
-            ->with('success', "Saved {$mapped} AutoElevate company mapping(s).");
+            ->with('success', "Saved {$applied} AutoElevate company mapping(s).");
     }
 
     /**

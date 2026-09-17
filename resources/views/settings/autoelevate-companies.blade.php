@@ -8,9 +8,14 @@
         <div class="d-flex align-items-center justify-content-between mb-3">
             <h2 class="section-title mb-0">AutoElevate Company Mapping</h2>
             <div class="d-flex gap-2">
-                <a href="{{ route('settings.autoelevate-companies.auto-match') }}" class="btn btn-outline-primary btn-sm">
-                    <i class="bi bi-magic me-1"></i>Auto-Match by Name
-                </a>
+                {{-- Auto-match writes mappings and spends a vendor read: POST with a CSRF token,
+                     never a link a prefetcher could follow. --}}
+                <form method="POST" action="{{ route('settings.autoelevate-companies.auto-match') }}" class="d-inline">
+                    @csrf
+                    <button type="submit" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-magic me-1"></i>Auto-Match by Name
+                    </button>
+                </form>
                 <a href="{{ route('settings.integrations') }}" class="btn btn-outline-secondary btn-sm">
                     <i class="bi bi-arrow-left me-1"></i>Back to Integrations
                 </a>

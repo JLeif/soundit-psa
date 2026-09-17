@@ -511,7 +511,9 @@ Route::middleware('auth')->group(function () {
     // Settings — AutoElevate Company Mapping (stage 2; admin-only like the stage 1 routes)
     Route::get('/settings/integrations/autoelevate/companies', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'index'])->middleware('admin')->name('settings.autoelevate-companies.index');
     Route::post('/settings/integrations/autoelevate/companies', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'update'])->middleware('admin')->name('settings.autoelevate-companies.update');
-    Route::get('/settings/integrations/autoelevate/companies/auto-match', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'autoMatch'])->middleware('admin')->name('settings.autoelevate-companies.auto-match');
+    // POST, not GET: autoMatch() writes client rows and spends a vendor read, so it must carry
+    // the CSRF token and must not be reachable by an <img> tag or a link prefetcher.
+    Route::post('/settings/integrations/autoelevate/companies/auto-match', [\App\Http\Controllers\Web\AutoElevateCompanyController::class, 'autoMatch'])->middleware('admin')->name('settings.autoelevate-companies.auto-match');
     Route::post('/settings/integrations/benjipays', [IntegrationsController::class, 'updateBenjiPays'])->middleware('admin')->name('settings.integrations.benjipays.update');
     Route::post('/settings/integrations/benjipays/test', [IntegrationsController::class, 'testBenjiPays'])->middleware(['admin', 'throttle:6,1'])->name('settings.integrations.benjipays.test');
     Route::get('/settings/integrations/stripe/customers', [\App\Http\Controllers\Web\StripeCustomerController::class, 'index'])->name('settings.stripe-customers.index');
