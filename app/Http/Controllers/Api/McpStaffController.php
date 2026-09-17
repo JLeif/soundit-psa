@@ -668,6 +668,12 @@ class McpStaffController extends Controller
             }
             if (! $staged) {
                 $executeAtStagedImmediate = $this->allowsImmediateExecution($request, (string) $name);
+                // Compute the downgrade BEFORE forcing staged: a staged-only token that asked
+                // for immediate execution must still get the unmistakable downgraded_to_staged
+                // signal and its explanatory text, exactly as it would without execute_at. The
+                // two notices are mutually exclusive — either the token may run now (staged for
+                // the cockpit anyway in PR1) or it may not (downgraded).
+                $downgradedToStaged = ! $executeAtStagedImmediate;
                 $staged = true;
             }
         }
