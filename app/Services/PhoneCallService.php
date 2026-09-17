@@ -88,6 +88,11 @@ class PhoneCallService
                 'from_number' => $toNumber,
                 'to_number' => \App\Support\PlivoConfig::get('did_number'),
                 'sip_endpoint' => $fromSip,
+                // Mass assignment: 'answered_by' is only stored because it is
+                // listed in PhoneCall::$fillable. It was not, and Laravel
+                // discarded it without a word, so every outbound call landed
+                // with no staff attribution while the inbound path (which sets
+                // the property directly in handleCallAnswered) worked.
                 'answered_by' => $endpoint?->user_id,
                 'status' => CallStatus::Ringing,
                 'started_at' => now(),

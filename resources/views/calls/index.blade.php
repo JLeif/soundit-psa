@@ -78,6 +78,7 @@
                     <th>Status</th>
                     {{-- Answered By shown inline in From/To --}}
                     <th></th>
+                    <th style="width: 1%"></th>
                 </tr>
             </thead>
             <tbody>
@@ -95,11 +96,10 @@
                     </td>
                     <td>
                         @if($call->direction === \App\Enums\CallDirection::Inbound)
-                            <a href="{{ route('calls.show', $call) }}">
-                                {{ \App\Support\PhoneNumber::format($call->from_number) }}
-                            </a>
+                            {{-- Plain number: the row's Open button is the way into the call detail. --}}
+                            <span class="text-nowrap">{{ \App\Support\PhoneNumber::format($call->from_number) }}</span>
                             @if($call->person)
-                                <small class="d-block text-muted"><x-person-badge :person="$call->person" :size="16" :link="false" /></small>
+                                <small class="d-block text-muted"><x-person-badge :person="$call->person" :size="16" /></small>
                             @endif
                             @if($call->from_number)
                                 <a href="#" data-phone="{{ $call->from_number }}" class="ms-1 text-decoration-none" title="Call back">
@@ -110,17 +110,18 @@
                             @if($call->answeredBy)
                                 <x-user-badge :user="$call->answeredBy" :size="16" />
                             @else
-                                <span class="text-muted">Staff</span>
+                                {{-- Honest absence: answered_by is unknown for this call, so do
+                                     not imply a person handled it (the old literal was "Staff"). --}}
+                                <span class="text-muted" title="No staff member recorded on this call">Unassigned</span>
                             @endif
                         @endif
                     </td>
                     <td>
                         @if($call->direction === \App\Enums\CallDirection::Outbound)
-                            <a href="{{ route('calls.show', $call) }}">
-                                {{ \App\Support\PhoneNumber::format($call->from_number) }}
-                            </a>
+                            {{-- Plain number: the row's Open button is the way into the call detail. --}}
+                            <span class="text-nowrap">{{ \App\Support\PhoneNumber::format($call->from_number) }}</span>
                             @if($call->person)
-                                <small class="d-block text-muted"><x-person-badge :person="$call->person" :size="16" :link="false" /></small>
+                                <small class="d-block text-muted"><x-person-badge :person="$call->person" :size="16" /></small>
                             @endif
                             @if($call->from_number)
                                 <a href="#" data-phone="{{ $call->from_number }}" class="ms-1 text-decoration-none" title="Call">
@@ -131,7 +132,7 @@
                             @if($call->answeredBy)
                                 <x-user-badge :user="$call->answeredBy" :size="16" />
                             @else
-                                <span class="text-muted">—</span>
+                                <span class="text-muted" title="No staff member recorded on this call">Unassigned</span>
                             @endif
                         @endif
                     </td>
@@ -168,10 +169,19 @@
                             <span class="spinner-border spinner-border-sm text-muted" style="width: 14px; height: 14px;" title="Transcribing..."></span>
                         @endif
                     </td>
+                    {{-- Dedicated row action, its own last column so it sits in the same
+                         place on every row regardless of the badges/icons beside it.
+                         Same control as the other index tables (settings/alerts,
+                         settings/mcp-tokens): btn-sm btn-outline-secondary + "Open". --}}
+                    <td class="text-end">
+                        <a href="{{ route('calls.show', $call) }}" class="btn btn-sm btn-outline-secondary" title="Open call detail">
+                            <i class="bi bi-box-arrow-up-right me-1"></i>Open
+                        </a>
+                    </td>
                 </tr>
                 @empty
                 <tr>
-                    <td colspan="8" class="text-center text-muted py-4">
+                    <td colspan="9" class="text-center text-muted py-4">
                         <i class="bi bi-telephone-x fs-3 d-block mb-2"></i>
                         @if(array_filter($filters))
                             No calls found for the selected filters.

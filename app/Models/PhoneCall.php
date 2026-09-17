@@ -20,6 +20,12 @@ class PhoneCall extends Model
         'sip_endpoint',
         'status',
         'started_at',
+        // Written by PhoneCallService::logOutboundCall() through
+        // PhoneCall::updateOrCreate(...) — a mass-assignment path, so it MUST be
+        // listed here or Eloquent discards it in silence and every outbound call
+        // is stored with no staff attribution. Never populated from request
+        // input; the value comes from SipEndpoint->user_id.
+        'answered_by',
         'ticket_id',
         'notes',
         'transcription',
