@@ -69,6 +69,27 @@ class TicketContactUxTest extends TestCase
         $this->assertStringNotContainsString('data-ticket-contact', view('tickets._contact-details', ['entity' => null, 'person' => true])->render());
     }
 
+    public function test_desktop_notes_floor_and_inner_scroll_are_scoped_to_the_desktop_breakpoint(): void
+    {
+        $ticket = Ticket::factory()->create(['client_id' => null, 'contact_id' => null]);
+        $response = $this->actingAs(User::factory()->create())->get(route('tickets.show', $ticket))->assertOk();
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $xpath = new \DOMXPath($dom);
+        $this->assertCount(1, $xpath->query('//*[@id="notes" and contains(concat(" ", normalize-space(@class), " "), " ticket-notes ")]'));
+        $css = implode("\n", array_map(fn ($node) => $node->textContent, iterator_to_array($xpath->query('//style'))));
+        // Pin the small desktop layout contract, including its closing media brace:
+        // the viewport floor and containment must not apply to stacked/mobile flow.
+        $this->assertMatchesRegularExpression(
+            '/@media\s*\(min-width:\s*992px\)\s*\{\s*'
+            .'\.ticket-main\s*\{\s*display:\s*flex;\s*flex-direction:\s*column;\s*\}\s*'
+            .'\.ticket-main\s*>\s*:not\(\.ticket-notes\)\s*\{\s*flex-shrink:\s*0;\s*\}\s*'
+            .'\.ticket-notes\s*\{\s*flex:\s*1 1 auto;\s*min-height:\s*max\(20rem,\s*60vh\);\s*\}\s*'
+            .'\.ticket-notes-scroll\s*\{\s*contain:\s*size;\s*flex:\s*1 1 0;\s*min-height:\s*0;\s*overflow-y:\s*auto;\s*\}\s*\}/',
+            $css
+        );
+    }
+
     public function test_unlinked_ticket_renders_without_contact_details_and_notes_remain_keyboard_reachable(): void
     {
         $ticket = Ticket::factory()->create(['client_id' => null, 'contact_id' => null]);
