@@ -216,6 +216,58 @@ class PortalBenjiPaysPayOnlineTest extends TestCase
             ->assertDontSee('would charge the full');
     }
 
+    public function test_toggle_off_on_a_partially_paid_invoice_is_not_sent_to_the_full_amount_stripe_page(): void
+    {
+        // The predicate re-read is the SECOND exit to Stripe. A stale form clicked
+        // after the toggle was turned off must not 302 a partially paid invoice to
+        // the full-amount page either: the page the client loaded had the caveat
+        // dropped. Remove the guard from stripeFallback() and this must fail.
+        Setting::setValue(BenjiPaysConfig::PAY_ONLINE_SETTING, '0');
+        $this->fakeMint();
+        $invoice = $this->invoice(['status' => InvoiceStatus::Paid]);
+        $this->partiallyRevert($invoice, 120.50);
+
+        $this->pay($invoice)
+            ->assertRedirect(route('portal.invoices.show', $invoice))
+            ->assertSessionHas('error');
+
+        $this->assertStringContainsString('$500.00', session('error'));
+        Http::assertNothingSent();
+    }
+
+    public function test_key_cleared_on_a_partially_paid_invoice_is_not_sent_to_the_full_amount_stripe_page(): void
+    {
+        // Same exit, reached the other way: the toggle is still on but the key was
+        // cleared or rotated to empty, so the predicate re-read turns false.
+        Http::fake();
+        Setting::where('key', 'benjipays_api_key')->delete();
+        $invoice = $this->invoice(['status' => InvoiceStatus::Paid]);
+        $this->partiallyRevert($invoice, 120.50);
+
+        $this->pay($invoice)
+            ->assertRedirect(route('portal.invoices.show', $invoice))
+            ->assertSessionHas('error');
+
+        $this->assertStringContainsString('$500.00', session('error'));
+        Http::assertNothingSent();
+    }
+
+    public function test_toggle_off_on_a_partially_paid_qbo_only_invoice_flashes_the_generic_message(): void
+    {
+        // No Stripe page: nothing full-amount was withheld, so don't claim it was.
+        Setting::setValue(BenjiPaysConfig::PAY_ONLINE_SETTING, '0');
+        Http::fake();
+        $invoice = $this->invoice(['status' => InvoiceStatus::Paid, 'stripe_invoice_url' => null]);
+        $this->partiallyRevert($invoice, 120.50);
+
+        $this->pay($invoice)
+            ->assertRedirect(route('portal.invoices.show', $invoice))
+            ->assertSessionHas('error', 'Online payment is temporarily unavailable. Please try again later or contact us.');
+
+        $this->assertStringNotContainsString('would charge the full', json_encode(session()->all()));
+        Http::assertNothingSent();
+    }
+
     public function test_mint_failure_is_logged_with_status_only_metadata(): void
     {
         // The operator-log half of the failure path: one warning naming the invoice,

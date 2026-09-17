@@ -65,16 +65,17 @@ class PortalInvoiceController extends Controller
      * the toggle was turned off falls back to Stripe like the button would.
      *
      * A mint failure is logged (reason and status only, never a vendor
-     * string) and does NOT silently bounce a PARTIALLY PAID invoice to the
-     * Stripe hosted page: that page is priced at the full total and the
-     * balance note drops the full-amount caveat on this path, so the client
-     * would be one click from the overpayment #1173 exists to prevent. Such
-     * an invoice goes back to the invoice page with the full amount named —
-     * but only when it actually HAS a Stripe page to withhold: a QBO-only
-     * invoice has no full-amount online route, so naming one would be its own
-     * quiet inaccuracy. Otherwise the client goes to the Stripe page if the
-     * invoice has one, else back to the invoice with a generic flash — never a
-     * vendor message.
+     * string). BOTH exits to Stripe — a failed mint and the predicate re-read
+     * above — go through stripeFallback(), which carries the one guard that
+     * matters here: a PARTIALLY PAID invoice is never silently bounced to the
+     * Stripe hosted page, because that page is priced at the full total and
+     * the balance note drops the full-amount caveat on this path, so the
+     * client would be one click from the overpayment #1173 exists to prevent.
+     * Putting the guard on only the mint-failure exit left a stale form,
+     * clicked after a toggle-off or a cleared key, doing exactly what the
+     * other exit refuses to do. Otherwise the client goes to the Stripe page
+     * if the invoice has one, else back to the invoice with a generic flash —
+     * never a vendor message.
      */
     public function payOnline(Request $request, Invoice $invoice, BenjiPaysPayOnline $payOnline): RedirectResponse
     {
@@ -99,27 +100,34 @@ class PortalInvoiceController extends Controller
                 'http_status' => $e->httpStatus,
             ]);
 
-            // The Stripe page charges the FULL total and this surface no longer
-            // says so (the BenjiPays page is priced at the balance), so a
-            // partially paid invoice must not be sent there without the amount.
-            // Guarded on the Stripe URL too: with no Stripe page there is no
-            // full-amount route to withhold, and saying otherwise would tell the
-            // client something false about their own invoice.
-            if ($invoice->qboPartialBalanceLog() !== null && $invoice->stripe_invoice_url) {
-                return redirect()->route('portal.invoices.show', $invoice)
-                    ->with('error', 'Online payment for the remaining balance is temporarily unavailable. Paying online would charge the full $'
-                        .number_format((float) $invoice->total, 2)
-                        .', so we have not sent you there — please try again later, or contact us to settle just the balance.');
-            }
-
             return $this->stripeFallback($invoice);
         }
 
         return redirect()->away($link->url);
     }
 
+    /**
+     * The single exit to Stripe: every path that gives up on the BenjiPays
+     * link lands here, so the partial-balance guard cannot be honoured by one
+     * caller and skipped by another.
+     *
+     * The Stripe page charges the FULL total and this surface no longer says
+     * so (the BenjiPays page is priced at the balance), so a partially paid
+     * invoice must not be sent there without the amount — whether the mint
+     * failed or the predicate re-read turned false under a stale form.
+     * Guarded on the Stripe URL too: with no Stripe page there is no
+     * full-amount route to withhold, and saying otherwise would tell the
+     * client something false about their own invoice.
+     */
     private function stripeFallback(Invoice $invoice): RedirectResponse
     {
+        if ($invoice->qboPartialBalanceLog() !== null && $invoice->stripe_invoice_url) {
+            return redirect()->route('portal.invoices.show', $invoice)
+                ->with('error', 'Online payment for the remaining balance is temporarily unavailable. Paying online would charge the full $'
+                    .number_format((float) $invoice->total, 2)
+                    .', so we have not sent you there — please try again later, or contact us to settle just the balance.');
+        }
+
         if ($invoice->stripe_invoice_url && $invoice->status->isClientPayable()) {
             return redirect()->away($invoice->stripe_invoice_url);
         }
