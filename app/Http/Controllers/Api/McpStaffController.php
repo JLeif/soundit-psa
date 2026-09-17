@@ -22,6 +22,7 @@ use App\Services\Cipp\CippMcpDynamicToolExecutor;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Services\Mcp\StaffCippAdminToolExecutor;
 use App\Services\Mcp\StaffCippWriteToolExecutor;
+use App\Services\Mcp\StaffControlDOnboardingToolExecutor;
 use App\Services\Mcp\StaffHuntressActionToolExecutor;
 use App\Services\Mcp\StaffMeshAdminToolExecutor;
 use App\Services\Mcp\StaffPsaActionToolExecutor;
@@ -968,7 +969,7 @@ class McpStaffController extends Controller
             ]);
         }
 
-        if ($this->isHuntressActionTool((string) $name) && $clientId === null) {
+        if (($this->isHuntressActionTool((string) $name) || $this->isControlDOnboardingTool((string) $name)) && $clientId === null) {
             $message = "client_id is required for {$name}.";
             $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
 
@@ -1134,6 +1135,13 @@ class McpStaffController extends Controller
                 );
             } elseif ($this->isHuntressActionTool((string) $name)) {
                 $result = app(StaffHuntressActionToolExecutor::class)->execute(
+                    (string) $name,
+                    $arguments,
+                    (int) $clientId,
+                    $this->actorLabel($request),
+                );
+            } elseif ($this->isControlDOnboardingTool((string) $name)) {
+                $result = app(StaffControlDOnboardingToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
                     (int) $clientId,
@@ -2566,6 +2574,14 @@ class McpStaffController extends Controller
             return $token->allowedTools !== null && $token->allows($toolName);
         }
 
+        // Control D client onboarding (B4): EXPLICIT-GRANT-ONLY, never inherited by
+        // the legacy full-surface token. It creates vendor organizations and
+        // provisioning codes; the operator's per-tool grant is the decision point
+        // and is Charlie's to give on prod. Mirrors the Huntress and Mesh gates.
+        if ($this->isControlDOnboardingTool($toolName)) {
+            return $token->allowedTools !== null && $token->allows($toolName);
+        }
+
         if (CippMcpTool::handles($toolName)) {
             return $token->allowedTools !== null && $token->allows($toolName);
         }
@@ -2751,6 +2767,11 @@ class McpStaffController extends Controller
     private function isMeshAdminTool(string $toolName): bool
     {
         return StaffMeshAdminToolExecutor::handles($toolName);
+    }
+
+    private function isControlDOnboardingTool(string $toolName): bool
+    {
+        return StaffControlDOnboardingToolExecutor::handles($toolName);
     }
 
     private function isTacticalAdminTool(string $toolName): bool

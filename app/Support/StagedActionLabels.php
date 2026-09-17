@@ -107,6 +107,9 @@ class StagedActionLabels
         'mesh_stage_add_allow_rule' => 'Mesh allow rule',
         'mesh_stage_remove_allow_rule' => 'Mesh allow rule removal',
         'mesh_stage_edit_allow_rule' => 'Mesh allow rule expiry edit',
+
+        // Control D client onboarding (B4)
+        'controld_stage_onboard_client' => 'Control D client onboarding',
     ];
 
     /**
@@ -126,7 +129,7 @@ class StagedActionLabels
      *
      * @var array<int, string>
      */
-    private const VENDOR_SIDE_EFFECT_PREFIXES = ['tactical_stage_', 'cipp_stage_', 'calendar_stage_', 'huntress_stage_', 'mesh_stage_'];
+    private const VENDOR_SIDE_EFFECT_PREFIXES = ['tactical_stage_', 'cipp_stage_', 'calendar_stage_', 'huntress_stage_', 'mesh_stage_', 'controld_stage_'];
 
     /**
      * Whether a staged action_type is an externally side-effecting vendor write —

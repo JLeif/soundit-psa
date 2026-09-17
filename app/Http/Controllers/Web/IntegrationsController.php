@@ -220,6 +220,7 @@ class IntegrationsController extends Controller
         $controldCodeAnalyticsLevel = (string) (ControlDConfig::get('code_analytics_level') ?? '');
         $controldCodeInterceptMode = (string) (ControlDConfig::get('code_intercept_mode') ?? '');
         $controldOnboardingConfigured = ControlDConfig::isOnboardingConfigured();
+        $controldOnboardingEnabled = ControlDConfig::isOnboardingEnabled();
 
         // Keyed by the input NAME so the view can warn beside the field it concerns.
         $controldNumericUnusable = array_filter([
@@ -557,7 +558,7 @@ class IntegrationsController extends Controller
             'controldConfigured', 'controldConnected', 'controldEnabled',
             'controldTacticalFieldId', 'controldDefaultProfileId', 'controldCodeExpiryDays',
             'controldCodeHeadroom', 'controldCodeAnalyticsLevel', 'controldCodeInterceptMode',
-            'controldOnboardingConfigured', 'controldNumericUnusable',
+            'controldOnboardingConfigured', 'controldOnboardingEnabled', 'controldNumericUnusable',
             'zorusConfigured', 'zorusConnected', 'zorusEnabled',
             'appriverConfigured', 'appriverConnected', 'appriverConnectedAt', 'appriverEnabled',
             'printixConfigured', 'printixPartnerId', 'printixHasSecret', 'printixConnected', 'printixEnabled',
@@ -593,7 +594,7 @@ class IntegrationsController extends Controller
     public function toggleIntegration(Request $request)
     {
         $allowed = [
-            'ninja', 'level', 'mesh', 'cipp', 'cipp_mcp', 'cipp_contact_sync', 'cipp_device_sync', 'cipp_mcp_catalog_sync', 'huntress', 'unifi', 'powerdmarc', 'servosity', 'controld', 'zorus', 'appriver', 'printix',
+            'ninja', 'level', 'mesh', 'cipp', 'cipp_mcp', 'cipp_contact_sync', 'cipp_device_sync', 'cipp_mcp_catalog_sync', 'huntress', 'unifi', 'powerdmarc', 'servosity', 'controld', 'controld_onboarding', 'zorus', 'appriver', 'printix',
             'plivo', 'graph', 'stripe', 't2t', 'ai', 'screenconnect', 'tactical',
         ];
 
@@ -618,11 +619,23 @@ class IntegrationsController extends Controller
                 ->with('error', 'CIPP MCP catalog auto-sync requires MCP Client ID and secret before it can be enabled.');
         }
 
+        // The onboarding caller's switch (B4) is explicit and separate from the
+        // integration's master switch: it cannot be turned on while any of the six
+        // onboarding defaults is missing, and turning it on never fills one in.
+        if ($request->input('integration') === 'controld_onboarding' && $enabled === '1' && ! ControlDConfig::isOnboardingConfigured()) {
+            Setting::setValue(ControlDConfig::ONBOARDING_ENABLED_SETTING, '0');
+
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Control D client onboarding requires all six Client Onboarding Defaults before it can be enabled.');
+        }
+
         Setting::setValue($key, $enabled);
 
         $label = $request->input('integration');
         $state = $enabled === '1' ? 'enabled' : 'disabled';
-        $message = ucfirst($label)." integration {$state}.";
+        $message = $label === 'controld_onboarding'
+            ? "Control D client onboarding {$state}."
+            : ucfirst($label)." integration {$state}.";
 
         if ($surfaces = self::AI_GATING_INTEGRATIONS[$label] ?? null) {
             $message .= $enabled === '1'

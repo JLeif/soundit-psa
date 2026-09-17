@@ -2095,6 +2095,15 @@
                             @else
                                 <span class="badge bg-secondary ms-1">Incomplete</span>
                             @endif
+                            {{-- The caller's own switch (B4), beside the badge on purpose: the badge says
+                                 the six values are filled in, this says whether anything may act on them.
+                                 Default OFF. The verb and the client-page button are inert while it is off
+                                 or while the badge reads Incomplete. --}}
+                            @if($controldOnboardingEnabled ?? false)
+                                <span class="badge bg-success ms-1"><i class="bi bi-toggle-on me-1"></i>Onboarding enabled</span>
+                            @else
+                                <span class="badge bg-secondary ms-1"><i class="bi bi-toggle-off me-1"></i>Onboarding off</span>
+                            @endif
                         </p>
 
                         @php
@@ -2274,6 +2283,28 @@
                         </button>
                     </div>
                 </form>
+
+                {{-- Onboarding activation switch: its own form, posting to the shared toggle
+                     route as `controld_onboarding`. Separate from the integration master switch
+                     below, which governs sync and the read tools; this one governs only whether
+                     the staged onboarding verb and the client-page button may act. The controller
+                     refuses to turn it on while the defaults above are incomplete. --}}
+                <div class="border-top pt-3 mt-3">
+                    <form method="POST" action="{{ route('settings.integrations.toggle') }}">
+                        @csrf
+                        <input type="hidden" name="integration" value="controld_onboarding">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="enabled" value="1"
+                                   id="controld_onboarding_enabled" {{ ($controldOnboardingEnabled ?? false) ? 'checked' : '' }}
+                                   {{ ($controldOnboardingConfigured ?? false) || ($controldOnboardingEnabled ?? false) ? '' : 'disabled' }}
+                                   onchange="this.form.submit()">
+                            <label class="form-check-label" for="controld_onboarding_enabled">
+                                Client onboarding enabled
+                                <small class="text-muted d-block">Default off. While off, the <code>controld_onboard_client</code> verb and the client-page Onboard button are inert. Requires all six Client Onboarding Defaults. Each onboarding is still a staged proposal approved by a second Admin in the cockpit.</small>
+                            </label>
+                        </div>
+                    </form>
+                </div>
                 <div id="test-result-controld" class="alert mt-2" style="display:none;"></div>
 
                 @if($controldConnected ?? false)

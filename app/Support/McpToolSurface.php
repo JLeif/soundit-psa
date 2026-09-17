@@ -153,6 +153,13 @@ class McpToolSurface
             MeshConfig::isEnabled() && MeshConfig::isConfigured()
                 ? McpToolRegistry::meshAdminTools()
                 : [],
+            // Control D client onboarding (B4): gated on exactly the predicate
+            // StaffControlDOnboardingToolExecutor refuses on — integration on, key
+            // present, AND the explicit default-off onboarding switch with all six
+            // defaults (psa-wzjzz: publish and dispatch answer one question).
+            ControlDConfig::isEnabled() && ControlDConfig::isConfigured() && ControlDConfig::isOnboardingActive()
+                ? McpToolRegistry::controldOnboardingTools()
+                : [],
         );
     }
 

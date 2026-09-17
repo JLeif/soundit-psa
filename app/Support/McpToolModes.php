@@ -4,6 +4,7 @@ namespace App\Support;
 
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Services\Mcp\StaffCippWriteToolExecutor;
+use App\Services\Mcp\StaffControlDOnboardingToolExecutor;
 use App\Services\Mcp\StaffHuntressActionToolExecutor;
 use App\Services\Mcp\StaffMeshAdminToolExecutor;
 use App\Services\Mcp\StaffTacticalActionToolExecutor;
@@ -72,6 +73,7 @@ class McpToolModes
             StaffCalendarToolExecutor::stagedToDirectMap(),
             StaffHuntressActionToolExecutor::stagedToDirectMap(),
             StaffMeshAdminToolExecutor::stagedToDirectMap(),
+            StaffControlDOnboardingToolExecutor::stagedToDirectMap(),
         );
     }
 
@@ -140,6 +142,11 @@ class McpToolModes
         // a deploy trigger. Immediate execution requires an explicit grant; a
         // full-surface token must not inherit it.
         'tactical_set_client_custom_field',
+        // controld_onboard_client (B4) has no immediate implementation
+        // (StaffControlDOnboardingToolExecutor::execute refuses the canonical name).
+        // It creates a vendor organization or a provisioning code; the second lock
+        // behind the refusal in the executor, same construction as tactical_remove_agent.
+        StaffControlDOnboardingToolExecutor::TOOL,
     ];
 
     /** Capabilities with no immediate execution lane, regardless of grant. */
@@ -149,6 +156,7 @@ class McpToolModes
         'mesh_remove_allow_rule',
         'mesh_edit_allow_rule',
         'tactical_remove_agent',
+        StaffControlDOnboardingToolExecutor::TOOL,
     ];
 
     public static function isHeldOnly(string $name): bool

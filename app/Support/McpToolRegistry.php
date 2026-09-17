@@ -10,6 +10,7 @@ use App\Services\Chet\OperatorBridgeTools;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Services\Mcp\StaffCippAdminToolExecutor;
 use App\Services\Mcp\StaffCippWriteToolExecutor;
+use App\Services\Mcp\StaffControlDOnboardingToolExecutor;
 use App\Services\Mcp\StaffHuntressActionToolExecutor;
 use App\Services\Mcp\StaffMeshAdminToolExecutor;
 use App\Services\Mcp\StaffPsaTaxonomyToolExecutor;
@@ -94,6 +95,7 @@ class McpToolRegistry
             $tacticalAdmin = self::shape(self::withoutStagedAliases(self::tacticalAdminTools()));
             $huntressActions = self::shape(self::withoutStagedAliases(self::huntressActionTools()));
             $meshAdmin = self::shape(self::withoutStagedAliases(self::meshAdminTools()));
+            $controldOnboarding = self::shape(self::withoutStagedAliases(self::controldOnboardingTools()));
             $psaRecords = self::shape(self::psaRecordsTools());
             $psaRead = self::shape(self::psaReadTools());
             $intakeManage = self::shape(self::withoutStagedAliases(self::intakeManageTools()));
@@ -117,6 +119,7 @@ class McpToolRegistry
                 'tactical_admin' => ['label' => 'Tactical admin/provisioning (sensitive)', 'sensitive' => true, 'tools' => $tacticalAdmin],
                 'huntress_action' => ['label' => 'Huntress SOC escalation actions (sensitive)', 'sensitive' => true, 'tools' => $huntressActions],
                 'mesh_admin' => ['label' => 'Mesh Email Security allow-list writes (sensitive)', 'sensitive' => true, 'tools' => $meshAdmin],
+                'controld_onboarding' => ['label' => 'Control D client onboarding (sensitive)', 'sensitive' => true, 'tools' => $controldOnboarding],
                 'wiki_write' => ['label' => 'Wiki write (sensitive)', 'sensitive' => true, 'tools' => $wikiWrites],
                 'psa_action' => ['label' => 'PSA actions (sensitive)', 'sensitive' => true, 'tools' => $psaActions],
                 'psa_records' => ['label' => 'PSA records — clients, people, assets (sensitive)', 'sensitive' => true, 'tools' => $psaRecords],
@@ -188,6 +191,9 @@ class McpToolRegistry
                 // under a bucket labelled for read-only odds and ends is the mislabelled-tier
                 // hazard psa-lulgh names — the operator grants it believing it is something else.
                 'mesh_admin' => ['mesh', 'write', 'Allow-list writes', 2],
+                // Creates vendor organizations and provisioning codes: a sensitive write tier
+                // under its own integration card, never a line in "Other integrations".
+                'controld_onboarding' => ['controld', 'write', 'Client onboarding', 2],
                 'wiki_write' => ['wiki', 'write', 'Write', 2],
                 'bridge' => ['teams', 'bridge', 'Operator bridge', 2],
             ];
@@ -284,7 +290,8 @@ class McpToolRegistry
             'screenconnect' => ['label' => 'ScreenConnect', 'blurb' => 'Remote-access session & online state (read-only)', 'icon' => 'bi-display', 'accent' => '#ea580c'],
             'teams' => ['label' => 'Teams & Operator', 'blurb' => 'Teams chat reads & the operator bridge', 'icon' => 'bi-chat-dots', 'accent' => '#4b53bc'],
             'calendar' => ['label' => 'Calendar & Scheduling', 'blurb' => 'Staff calendar reads & scheduling (Microsoft Graph)', 'icon' => 'bi-calendar-event', 'accent' => '#6d28d9'],
-            'other' => ['label' => 'Other integrations', 'blurb' => 'Level · Mailprotector · Comet · Servosity · Control D · Zorus · DNS', 'icon' => 'bi-plugin', 'accent' => '#7c3aed'],
+            'controld' => ['label' => 'Control D', 'blurb' => 'DNS filtering: device reads & staged client onboarding', 'icon' => 'bi-shield-lock', 'accent' => '#0f766e'],
+            'other' => ['label' => 'Other integrations', 'blurb' => 'Level · Mailprotector · Comet · Servosity · Zorus · DNS', 'icon' => 'bi-plugin', 'accent' => '#7c3aed'],
             'wiki' => ['label' => 'Wiki & runbooks', 'blurb' => 'Client wiki & internal SOP / runbook store', 'icon' => 'bi-journal-text', 'accent' => '#b45309'],
         ];
     }
@@ -307,9 +314,9 @@ class McpToolRegistry
             str_starts_with($name, 'wiki_') => 'wiki',
             str_starts_with($name, 'calendar_') => 'calendar',
             str_starts_with($name, 'mesh_') => 'mesh',
+            str_starts_with($name, 'controld_') => 'controld',
             str_starts_with($name, 'comet_'),
             str_starts_with($name, 'servosity_'),
-            str_starts_with($name, 'controld_'),
             str_starts_with($name, 'zorus_'),
             str_starts_with($name, 'dns_'),
             str_starts_with($name, 'level_') => 'other',
@@ -399,6 +406,12 @@ class McpToolRegistry
     public static function meshAdminTools(): array
     {
         return StaffMeshAdminToolExecutor::definitions();
+    }
+
+    /** @return array<int, array<string, mixed>> */
+    public static function controldOnboardingTools(): array
+    {
+        return StaffControlDOnboardingToolExecutor::definitions();
     }
 
     /** @return array<int, array<string, mixed>> */

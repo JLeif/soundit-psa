@@ -16,7 +16,7 @@ class McpToolRegistryTest extends TestCase
     {
         $groups = McpToolRegistry::groups();
 
-        $this->assertSame(['general', 'client', 'integration', 'cipp_write', 'cipp_admin', 'tactical_action', 'tactical_admin', 'huntress_action', 'mesh_admin', 'wiki_write', 'psa_action', 'psa_records', 'psa_read', 'psa_raw_file', 'intake_manage', 'taxonomy', 'calendar', 'calendar_write', 'bridge'], array_keys($groups));
+        $this->assertSame(['general', 'client', 'integration', 'cipp_write', 'cipp_admin', 'tactical_action', 'tactical_admin', 'huntress_action', 'mesh_admin', 'controld_onboarding', 'wiki_write', 'psa_action', 'psa_records', 'psa_read', 'psa_raw_file', 'intake_manage', 'taxonomy', 'calendar', 'calendar_write', 'bridge'], array_keys($groups));
 
         $names = fn (string $group): array => array_column($groups[$group]['tools'], 'name');
 
@@ -80,6 +80,9 @@ class McpToolRegistryTest extends TestCase
         $this->assertTrue($groups['calendar']['sensitive']);
         $this->assertTrue($groups['bridge']['sensitive']);
         $this->assertTrue($groups['cipp_write']['sensitive']);
+        $this->assertContains('controld_onboard_client', $names('controld_onboarding'));
+        $this->assertNotContains('controld_stage_onboard_client', $names('controld_onboarding'));
+        $this->assertTrue($groups['controld_onboarding']['sensitive']);
         $this->assertFalse($groups['general']['sensitive']);
     }
 
