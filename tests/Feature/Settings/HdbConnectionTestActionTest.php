@@ -80,7 +80,7 @@ class HdbConnectionTestActionTest extends TestCase
                 ->push('<html><body><!-- '.self::BEACON.' --><div class="notify notify--bad">Invalid email or password. Try again.</div>'
                     .'<form action="" method="post" id="theOnlyForm">'
                     .'<input type="email" name="email"><input type="password" name="password">'
-                    .'<input type="hidden" name="g" value="g"><input type="submit" name="submit" value="Submit"></form></body></html>'),
+                    .'<input type="hidden" name="g" value="g"><input type="submit" name="submit"></form></body></html>'),
         ]);
     }
 

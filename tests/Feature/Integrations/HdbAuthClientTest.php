@@ -95,14 +95,15 @@ class HdbAuthClientTest extends TestCase
      * The login form re-served WITH the portal's refusal notice, as measured
      * 2026-09-17: the page is the login page plus a block whose class carries
      * `notify--bad` and whose text is the portal's sentence. The beacon rides
-     * inside the notice too, so a client that copied notice text out would fail
-     * the leak assertions.
+     * inside the notice as VISIBLE text (a trailing span), not only as a
+     * comment, so a client that copied notice text out would fail the leak
+     * assertions on every notice test.
      */
     private function refusedLoginPage(string $notice): string
     {
         return <<<HTML
             <html><body><!-- VENDOR-TEXT-<script>alert(1)</script>-BEACON -->
-            <div class="notify notify--bad" role="alert"><span class="notify__text">{$notice}</span><!-- VENDOR-TEXT-<script>alert(1)</script>-BEACON --></div>
+            <div class="notify notify--bad" role="alert"><span class="notify__text">{$notice}</span> <span class="notify__ref">VENDOR-TEXT-<script>alert(1)</script>-BEACON</span></div>
             <form action="" method="post" id="theOnlyForm">
                 <input type="email" name="email" id="email">
                 <input type="password" name="password" id="password">
@@ -306,6 +307,9 @@ class HdbAuthClientTest extends TestCase
             'token inside another attribute value' => ['<div title=\'class="notify--bad"\'>Invalid email or password</div>'],
             'token as a prefix of a longer class' => ['<div class="notify--bad-hint">Invalid email or password</div>'],
             'words in a placeholder whose child is an empty same-tag element' => ['<div class="notify--bad"><div></div></div><div>Invalid email or password</div>'],
+            'notice inside a template' => ['<template><div class="notify--bad">Invalid email or password</div></template>'],
+            'notice inside noscript' => ['<noscript><div class="notify--bad">Invalid email or password</div></noscript>'],
+            'token joined to another class by a vertical tab' => ["<div class=\"notify--bad\x0Bhint\">Invalid email or password</div>"],
         ];
     }
 
@@ -343,6 +347,7 @@ class HdbAuthClientTest extends TestCase
             'entity-encoded text' => ['<div class="notify--bad">Invalid&nbsp;email&#32;or&#x20;password</div>'],
             'an unfamiliar notice stacked before the real one' => ['<div class="notify--bad">Your session expired.</div><div class="notify--bad">Invalid email or password</div>'],
             'a later > inside an earlier attribute' => ['<div title="a>b" class="notify--bad">Invalid email or password</div>'],
+            'classes separated by a tab and a newline' => ["<div class=\"notify\tnotify--bad\nis-open\">Invalid email or password</div>"],
         ];
     }
 
@@ -359,6 +364,42 @@ class HdbAuthClientTest extends TestCase
 
         $this->assertSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
         $this->assertNothingLeaked($result);
+    }
+
+    public function test_the_guard_notice_outranks_the_credentials_notice_when_both_are_shown(): void
+    {
+        // A page that judged the guard did not judge the credentials, whatever
+        // else it printed. The guard symbol is the one the operator can act on.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push(str_replace(
+                    '<form ',
+                    '<div class="notify--bad">Invalid email or password</div><div class="notify--bad">Invalid Captcha</div><form ',
+                    $this->loginPage(),
+                )),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthResult::REASON_FORM_GUARD_REFUSED, $result->reason);
+    }
+
+    public function test_a_notice_that_is_not_valid_utf8_is_unrecognised_not_a_placeholder(): void
+    {
+        // A stray latin-1 byte inside the notice must not collapse it to an
+        // empty placeholder: the portal said something, and the client could
+        // not read it. Fail-closed, and never through to the success branch.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push("<html><body><div class=\"notify--bad\">Acc\xE9s refus\xE9</div></body></html>"),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertFalse($result->ok());
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED, $result->reason);
     }
 
     public function test_a_refusal_notice_with_no_login_form_is_still_a_refusal_not_a_pass(): void

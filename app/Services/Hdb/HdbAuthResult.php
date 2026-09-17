@@ -128,7 +128,7 @@ final readonly class HdbAuthResult
             self::REASON_MISSING_CREDENTIALS => 'Enter the service subaccount email and password first, then save.',
             self::REASON_CREDENTIALS_REJECTED => 'The portal refused the service subaccount email and password.',
             self::REASON_FORM_GUARD_REFUSED => 'The portal refused the sign-in at its bot check before judging the credentials. The login form has probably changed; nothing was retried.',
-            self::REASON_LOGIN_NOT_EVALUATED => 'The portal answered with its signed-out page and no refusal notice, so there is no verdict on the credentials. That points at the request shape or a portal change rather than the password; nothing was retried.',
+            self::REASON_LOGIN_NOT_EVALUATED => 'The portal answered with its signed-out page and no refusal notice, so there is no verdict on the credentials either way. Check the request shape, session handling or a portal change before the password; nothing was retried.',
             self::REASON_LOGIN_REFUSED_UNRECOGNISED => 'The portal refused the sign-in with a notice this integration does not recognise. The portal may have changed; nothing was retried.',
             self::REASON_TOTP_REQUIRED_NO_SEED => 'The password was accepted but the portal asked for a two-factor code, and no seed is stored. Paste the enrollment seed into the Two-Factor Seed field.',
             self::REASON_TOTP_SEED_UNUSABLE => 'The stored two-factor seed is not valid base32 — re-enrol two-factor and paste the seed exactly as shown.',
