@@ -428,6 +428,27 @@ class Ticket extends Model
     // ── Accessors ──
 
     /**
+     * Editor-only fallback for HTML email bodies; never rewrite either stored column.
+     * Existing markdown is returned verbatim, including its formatting whitespace.
+     */
+    public function getDescriptionForEditingAttribute(): ?string
+    {
+        if (filled($this->description)) {
+            return $this->description;
+        }
+
+        if ($this->description_html === null) {
+            return $this->description;
+        }
+
+        $text = \Soundasleep\Html2Text::convert($this->description_html, ['ignore_errors' => true]);
+        $text = str_replace(["\r\n", "\r"], "\n", $text);
+        $text = preg_replace('/[^\S\n]+$/m', '', $text);
+
+        return preg_replace('/\n{3,}/', "\n\n", $text);
+    }
+
+    /**
      * Rendered description: prefer pre-rendered HTML (from email), fall back to markdown.
      */
     public function getRenderedDescriptionAttribute(): ?string
