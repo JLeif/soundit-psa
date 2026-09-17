@@ -62,6 +62,25 @@ class HdbAuthClientTest extends TestCase
     /** base32 of the RFC 6238 secret; any decodable seed would do. */
     private const SEED = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 
+    /**
+     * The IP-filter refusal notice, in the shape observed 2026-09-17 against the
+     * real subaccount: a `notify--bad` block whose sentence names the account's
+     * IP Filter whitelist. The sentence is reproduced here and NOWHERE else —
+     * the whole point of the case is that it never leaves the client.
+     */
+    private const IP_FILTER_NOTICE = 'Your IP address is not on the account IP Filter whitelist.';
+
+    /**
+     * An address, a host and an address-shaped string planted inside the notice
+     * for the leak assertions. Documentation-range values (RFC 5737 / RFC 2606):
+     * no real infrastructure is named in this file.
+     */
+    private const LEAK_ADDRESS = '203.0.113.47';
+
+    private const LEAK_HOST = 'psa.example.invalid';
+
+    private const LEAK_EMAIL = 'support@example.invalid';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -267,6 +286,124 @@ class HdbAuthClientTest extends TestCase
         $this->assertSame(HdbAuthResult::REASON_FORM_GUARD_REFUSED, $result->reason);
         $this->assertNotSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
         $this->assertNothingLeaked($result);
+    }
+
+    public function test_the_portals_ip_filter_notice_is_its_own_reason_not_unrecognised(): void
+    {
+        // OBSERVED 2026-09-17 19:59Z against the real subaccount (prod 4d5152a0):
+        // the portal answered the credential post with the login page plus a
+        // `notify--bad` block naming the account's IP Filter whitelist. That is
+        // a perimeter refusal, not a verdict on the credentials, and before this
+        // case existed it reported REASON_LOGIN_REFUSED_UNRECOGNISED — which
+        // tells an operator to suspect a portal change when the actual fix is a
+        // whitelist entry. No live call is made here: fixture only.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->refusedLoginPage(self::IP_FILTER_NOTICE)),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertFalse($result->ok());
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_PORTAL_IP_FILTERED, $result->reason);
+        $this->assertNotSame(HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED, $result->reason);
+        $this->assertNotSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+        $this->assertNothingLeaked($result);
+    }
+
+    public function test_the_ip_filter_branch_leaks_no_vendor_sentence_address_host_or_email(): void
+    {
+        // Same leak contract as the other two notices, and the reason this case
+        // is worth its own test: the notice a real portal prints here is the one
+        // most likely to carry an ADDRESS, and the integrations page renders a
+        // test result through `innerHTML`. Nothing off the page may reach the
+        // symbol, the operator sentence, the log or the audit row.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->refusedLoginPage(
+                    'Your IP address '.self::LEAK_ADDRESS.' is not on the account IP Filter whitelist. '
+                    .'Contact '.self::LEAK_EMAIL.' or visit '.self::LEAK_HOST.' to add it.',
+                )),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthResult::REASON_PORTAL_IP_FILTERED, $result->reason);
+        $this->assertNothingLeaked($result);
+
+        foreach ([$result->reason, $result->message()] as $emitted) {
+            $this->assertStringNotContainsString(self::LEAK_ADDRESS, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_HOST, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_EMAIL, $emitted);
+            $this->assertStringNotContainsString('Your IP address', $emitted);
+            $this->assertStringNotContainsString('IP Filter whitelist', $emitted);
+            $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', $emitted);
+        }
+
+        // The operator sentence must still name the fix, or the new symbol buys
+        // nothing over the unrecognised one it replaces.
+        $this->assertStringContainsString('hitelist', $result->message());
+    }
+
+    public function test_the_ip_filter_notice_outranks_the_credentials_notice_when_both_are_shown(): void
+    {
+        // PRECEDENCE, decided deliberately: a perimeter refusal is a fact about
+        // WHERE the request came from, so a page showing it has not judged the
+        // stored password — exactly the argument that puts the guard notice
+        // ahead of the credentials one. The IP-filter entry therefore sits with
+        // the guard, ABOVE credentials.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push(str_replace(
+                    '<form ',
+                    '<div class="notify--bad">Invalid email or password</div>'
+                    .'<div class="notify--bad">'.self::IP_FILTER_NOTICE.'</div><form ',
+                    $this->loginPage(),
+                )),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthResult::REASON_PORTAL_IP_FILTERED, $result->reason);
+        $this->assertNotSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->reason);
+    }
+
+    public function test_the_guard_notice_still_outranks_the_ip_filter_notice(): void
+    {
+        // And the existing top of the order is not disturbed: the guard notice
+        // means the portal judged the hidden field this client posts, which is
+        // a change underneath us and the only one an operator cannot fix by
+        // editing an account setting.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push(str_replace(
+                    '<form ',
+                    '<div class="notify--bad">'.self::IP_FILTER_NOTICE.'</div>'
+                    .'<div class="notify--bad">Invalid Captcha</div><form ',
+                    $this->loginPage(),
+                )),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthResult::REASON_FORM_GUARD_REFUSED, $result->reason);
+    }
+
+    public function test_the_status_vocabulary_is_still_four_cases(): void
+    {
+        // A new REASON is the closed-vocabulary extension point; a new STATUS is
+        // not. An IP-filter refusal is a Rejected, like every other refusal
+        // notice, and this pins that nobody added a fifth case to say so.
+        $this->assertCount(4, HdbAuthStatus::cases());
+        $this->assertSame(
+            ['authenticated', 'rejected', 'unreachable', 'not_configured'],
+            array_map(fn (HdbAuthStatus $case) => $case->value, HdbAuthStatus::cases()),
+        );
     }
 
     public function test_an_unfamiliar_refusal_notice_is_reported_as_unrecognised_not_as_credentials(): void

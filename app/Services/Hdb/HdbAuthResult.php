@@ -48,7 +48,21 @@ final readonly class HdbAuthResult
     public const REASON_LOGIN_NOT_EVALUATED = 'login_not_evaluated';
 
     /**
-     * The portal showed a refusal notice, but not one of the two this client
+     * The portal's refusal notice was its IP-filter one: the sign-in was
+     * refused because of WHERE the request came from, so the stored password
+     * was never judged. OBSERVED 2026-09-17 against the real service
+     * subaccount, which is why this is its own symbol rather than
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — that symbol tells an operator to
+     * suspect a portal change, and the actual fix is an account setting.
+     *
+     * The notice text, the address it names and any host or contact in it stay
+     * inside {@see HdbAuthClient}: this symbol and {@see message()}'s fixed
+     * sentence are the entire output, same as the other two notices.
+     */
+    public const REASON_PORTAL_IP_FILTERED = 'portal_ip_filtered';
+
+    /**
+     * The portal showed a refusal notice, but not one of the three this client
      * recognises. Fail-closed on purpose: an unread notice is not evidence
      * about the credentials, and its text never leaves the client.
      */
@@ -129,6 +143,7 @@ final readonly class HdbAuthResult
             self::REASON_CREDENTIALS_REJECTED => 'The portal refused the service subaccount email and password.',
             self::REASON_FORM_GUARD_REFUSED => 'The portal refused the sign-in at its bot check before judging the credentials. The login form has probably changed; nothing was retried.',
             self::REASON_LOGIN_NOT_EVALUATED => 'The portal answered with its signed-out page and no refusal notice, so there is no verdict on the credentials either way. Check the request shape, session handling or a portal change before the password; nothing was retried.',
+            self::REASON_PORTAL_IP_FILTERED => 'The portal refused the sign-in because this server\'s address is not on the HDB account\'s IP filter whitelist, so the stored password was never judged. Whitelist the PSA server\'s address on the HDB account, then test again; nothing was retried.',
             self::REASON_LOGIN_REFUSED_UNRECOGNISED => 'The portal refused the sign-in with a notice this integration does not recognise. The portal may have changed; nothing was retried.',
             self::REASON_TOTP_REQUIRED_NO_SEED => 'The password was accepted but the portal asked for a two-factor code, and no seed is stored. Paste the enrollment seed into the Two-Factor Seed field.',
             self::REASON_TOTP_SEED_UNUSABLE => 'The stored two-factor seed is not valid base32 — re-enrol two-factor and paste the seed exactly as shown.',

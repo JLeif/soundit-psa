@@ -9,6 +9,7 @@ use App\Services\Hdb\HdbAuthResult;
 use App\Support\HdbPortalConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 /**
@@ -35,6 +36,17 @@ class HdbConnectionTestActionTest extends TestCase
     private const LOGIN_URL = 'portal.example.test/login';
 
     private const BEACON = 'VENDOR-TEXT-<script>alert(1)</script>-BEACON';
+
+    /**
+     * Planted in the IP-filter notice for the leak assertions.
+     * Documentation-range values (RFC 5737 / RFC 2606): no real infrastructure
+     * is named in this file.
+     */
+    private const LEAK_ADDRESS = '203.0.113.47';
+
+    private const LEAK_HOST = 'psa.example.invalid';
+
+    private const LEAK_EMAIL = 'support@example.invalid';
 
     protected function setUp(): void
     {
@@ -235,6 +247,95 @@ class HdbConnectionTestActionTest extends TestCase
             (new HdbAuthResult(\App\Services\Hdb\HdbAuthStatus::Rejected, HdbAuthResult::REASON_CREDENTIALS_REJECTED))->message(),
             $response->getContent(),
         );
+    }
+
+    /**
+     * The IP-filter refusal, in the shape observed 2026-09-17 against the real
+     * service subaccount — a `notify--bad` block naming the account's IP Filter
+     * whitelist, here carrying a documentation-range address, a host and a
+     * contact so the leak assertions have something to catch. No live call: the
+     * HTTP layer is faked.
+     */
+    private function fakeIpFilteredLogin(): void
+    {
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push('<html><body><!-- '.self::BEACON.' --><div class="notify notify--bad">'
+                    .'Your IP address '.self::LEAK_ADDRESS.' is not on the account IP Filter whitelist. '
+                    .'Contact '.self::LEAK_EMAIL.' or visit '.self::LEAK_HOST.' to add it.</div>'
+                    .'<form action="" method="post" id="theOnlyForm">'
+                    .'<input type="email" name="email"><input type="password" name="password">'
+                    .'<input type="hidden" name="g" value="g"><input type="submit" name="submit"></form></body></html>'),
+        ]);
+    }
+
+    public function test_an_ip_filtered_refusal_audits_its_own_symbol_and_no_vendor_text(): void
+    {
+        // The new branch gets the same treatment as the other two notices: the
+        // audit row carries the SYMBOL, the operator sentence is the fixed one
+        // for that symbol, and the notice's sentence, address, host and contact
+        // reach neither — nor the log, which is checked below.
+        $this->fakeIpFilteredLogin();
+
+        Log::spy();
+
+        $response = $this->actingAs(User::factory()->create())
+            ->postJson(route('settings.integrations.hdb.test'))
+            ->assertOk()
+            ->assertJson(['success' => false]);
+
+        $row = McpAuditLog::where('method', 'hdb/test_connection')->sole();
+
+        $this->assertSame('error', $row->status);
+        $this->assertSame(HdbAuthResult::REASON_PORTAL_IP_FILTERED, $row->error_message);
+        $this->assertNull(Setting::getValue('hdb_connected_at'));
+
+        $this->assertSame(
+            (new HdbAuthResult(
+                \App\Services\Hdb\HdbAuthStatus::Rejected,
+                HdbAuthResult::REASON_PORTAL_IP_FILTERED,
+            ))->message(),
+            $response->json('message'),
+        );
+
+        // Not the credentials sentence: a perimeter refusal never reads as a
+        // verdict on the stored password.
+        $this->assertStringNotContainsString(
+            (new HdbAuthResult(
+                \App\Services\Hdb\HdbAuthStatus::Rejected,
+                HdbAuthResult::REASON_CREDENTIALS_REJECTED,
+            ))->message(),
+            $response->getContent(),
+        );
+
+        $serializedRow = json_encode($row->toArray());
+
+        foreach ([$response->getContent(), $serializedRow] as $emitted) {
+            $this->assertStringNotContainsString(self::BEACON, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_ADDRESS, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_HOST, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_EMAIL, $emitted);
+            $this->assertStringNotContainsString('Your IP address', $emitted);
+            $this->assertStringNotContainsString('IP Filter whitelist', $emitted);
+        }
+
+        // No address-SHAPED string on either vendor-derived surface. Scoped to
+        // those fields deliberately: the row's `source_ip` is an address, but it
+        // is the TESTER's own, written by the controller from the request and
+        // never read off the portal's page — so it is asserted for what it is
+        // rather than swept up by a whole-row regex that would have to be
+        // loosened later.
+        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', $response->getContent());
+        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', (string) $row->error_message);
+        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', json_encode($row->arguments));
+        $this->assertSame('127.0.0.1', $row->source_ip);
+
+        // Nothing about this outcome is logged at all — so there is no log line
+        // for the notice to leak into. Asserted rather than assumed.
+        Log::shouldNotHaveReceived('warning');
+        Log::shouldNotHaveReceived('error');
+        Log::shouldNotHaveReceived('info');
     }
 
     public function test_it_never_stores_the_password_or_seed_in_the_audit_row(): void
