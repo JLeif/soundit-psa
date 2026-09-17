@@ -75,9 +75,12 @@ final class ScheduledPolicy
         }
         $token = McpToken::find($tokenId);
         $tool = ActionRegistry::directTool($run->action_type);
+        // A human-approved row needs the token to still hold the capability in EITHER
+        // mode: `:immediate` implies staged in the grant grammar (McpToolModes), so a
+        // token that could have run the tool now is not refused the safer approved path.
+        // Deliberately no null/full-surface fallback and no bare-name grandfathering.
         if (! $token || ! $token->isActive() || ! is_array($token->tools)
-            || ! in_array($tool.':staged', $token->tools, true)) {
-            // Deliberately require the explicit staged capability; no null/full-surface fallback.
+            || ! (in_array($tool.':staged', $token->tools, true) || in_array($tool.':immediate', $token->tools, true))) {
             throw new InvalidArgumentException('lineage_revoked');
         }
     }

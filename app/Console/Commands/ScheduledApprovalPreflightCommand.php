@@ -3,7 +3,6 @@
 namespace App\Console\Commands;
 
 use App\Services\Technician\Scheduled\ScheduledClock;
-use App\Support\TechnicianConfig;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -35,13 +34,11 @@ class ScheduledApprovalPreflightCommand extends Command
                 'inventory' => $counts,
                 'total' => array_sum($counts),
                 'reconciliation_required' => $pending > 0,
-                'enabled' => TechnicianConfig::scheduledApprovalsEnabled(),
-                'activation_authorized' => TechnicianConfig::scheduledApprovalsEnabled(),
             ], JSON_THROW_ON_ERROR));
 
             return $healthy && $pending === 0 ? self::SUCCESS : self::FAILURE;
         } catch (\Throwable) {
-            $this->line('{"status":"unavailable","activation_authorized":false}');
+            $this->line('{"status":"unavailable"}');
 
             return self::FAILURE;
         }

@@ -50,10 +50,10 @@ final class ScheduledSweep
             try {
                 $this->coordinator->recover($id);
                 $counts['recovered']++;
-                if (\App\Support\TechnicianConfig::scheduledApprovalsEnabled()) {
-                    app(MailboxDispatch::class)->run($id);
-                    app(TacticalDispatch::class)->run($id);
-                }
+                // No global switch: each dispatch re-checks the kill switch, clock, grant
+                // lineage and target identity itself before any vendor I/O.
+                app(MailboxDispatch::class)->run($id);
+                app(TacticalDispatch::class)->run($id);
             } catch (\Throwable) {
                 $counts['errors']++;
             }

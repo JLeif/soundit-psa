@@ -13,6 +13,7 @@ use App\Models\TechnicianRun;
 use App\Models\TicketNote;
 use App\Services\Technician\Cockpit\CockpitQuery;
 use App\Services\Technician\Cockpit\CockpitUndoToken;
+use App\Services\Technician\Scheduled\ScheduledApproval;
 use App\Services\Technician\TechnicianApprovalService;
 use App\Services\Technician\TechnicianDisclosure;
 use App\Services\TicketService;
@@ -71,11 +72,21 @@ class TechnicianCockpitController extends Controller
 
     public function approve(Request $request, TechnicianRun $run, TechnicianApprovalService $service)
     {
-        // A crafted deferral must never silently fall through to immediate execution.
-        abort_if($request->hasAny(['execute_not_before', 'schedule', 'start', 'end', 'timezone']), 422, 'Use the explicit scheduled-approval form; immediate approval does not accept deferral.');
+        // The run time is a property of the PROPOSAL (execute_at, stamped at staging), never
+        // of the approve request: a crafted deferral in the form must not be honoured and
+        // must not silently fall through to immediate execution either.
+        abort_if($request->hasAny(['execute_at', 'execute_not_before', 'schedule', 'start', 'end', 'timezone']), 422, 'The run time is part of the proposal, not the approval; immediate approval does not accept deferral.');
+        // Scheduled execution (ruled design point 2): a staged proposal that names
+        // execute_at is admitted into scheduled_authorizations by this same Approve,
+        // with the window derived from the instant — it is never executed now. This
+        // branch is taken BEFORE the type dispatch so a scheduled proposal cannot reach
+        // an immediate lane by its action_type.
+        $result = ScheduledApproval::wantsScheduling($run)
+            ? app(ScheduledApproval::class)->approve($run, (int) auth()->id(), $this->scheduledCockpitInputs($request, $run))
+            : null;
         // Dispatch on action_type so future tools (reply, escalate) plug in without rework.
         // Fail-closed: an unrecognized action type must NOT fall through to a send.
-        $result = match ($run->action_type) {
+        $result ??= match ($run->action_type) {
             // psa-d9ayt: the staged close (stage_close_ticket) records a propose_close run,
             // so it approves through the same approveClose lane. The alias is kept in the
             // match so the every-staged-type-can-be-approved guard holds.
@@ -158,8 +169,10 @@ class TechnicianCockpitController extends Controller
         // 'offboarding_admission' is a CONFIRMED queue-accepted, committed, non-replayable send:
         // it must render on the success channel, or the operator reads a landed admission as a
         // failure and retries. Its unconfirmed sibling is deliberately absent from this list.
-        $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline', 'offboarding_admission'], true);
+        $ok = in_array($result->status, ['sent', 'closed', 'resolved', 'published', 'merged', 'executed', 'queued_offline', 'offboarding_admission', 'scheduled'], true);
         $message = match ($result->status) {
+            // Admitted into scheduled_authorizations for a later window: approved, NOT executed.
+            'scheduled' => $result->message ?? 'Approved to run later. It has not executed.',
             'offboarding_admission' => $result->message ?? 'Offboarding admission recorded; execution and effects remain unverified.',
             // The single send was committed but its receipt is unknown (transport failure,
             // uncorrelated body, receipt-persist failure) or the dispatch was already claimed.
@@ -491,6 +504,21 @@ class TechnicianCockpitController extends Controller
     }
 
     /** @return array<string, mixed> */
+    /**
+     * The sensitive mailbox inputs the approver re-types on the card for a scheduled
+     * mailbox proposal — the same fields and rules as the immediate approval, so the
+     * scheduled path cannot accept less than the immediate one does. Tactical scheduled
+     * proposals take nothing from the form: their confirmations were sealed at staging.
+     */
+    private function scheduledCockpitInputs(Request $request, TechnicianRun $run): array
+    {
+        if (! \App\Services\Technician\Scheduled\MailboxPlan::supports($run->action_type)) {
+            return [];
+        }
+
+        return $this->cippApprovalInputs($request, $run);
+    }
+
     private function cippApprovalInputs(Request $request, TechnicianRun $run): array
     {
         if ($run->action_type === 'cipp_stage_offboard_user') {

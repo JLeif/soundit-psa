@@ -18,8 +18,10 @@ final class ScheduledAdmission
         if (app(ScheduledQuiescence::class)->at() !== null) {
             throw new InvalidArgumentException('scheduling_quiesced');
         }
-        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
-            throw new InvalidArgumentException('scheduling_disabled_or_clock_unhealthy');
+        // No global on/off (ruled design point 4): the per-tool token grant is the only
+        // permission gate; the kill switch stays the emergency stop, the clock the sanity gate.
+        if (TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
+            throw new InvalidArgumentException('kill_switch_or_clock_unhealthy');
         }
         $user = $this->policy->approver($approverId);
         $run = TechnicianRun::findOrFail($runId);

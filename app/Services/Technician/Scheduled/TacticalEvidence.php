@@ -20,7 +20,7 @@ final class TacticalEvidence implements ScheduledEvidence
 
     public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
     {
-        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged()) {
+        if (TechnicianConfig::killSwitchEngaged()) {
             throw new ScheduledUnavailable('kill_switch');
         }
         if (! TacticalConfig::isEnabled() || ! TacticalConfig::isConfigured() || ! TacticalPlan::supports($run->action_type)) {

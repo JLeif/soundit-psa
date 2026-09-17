@@ -15,7 +15,7 @@ final class ScheduledCoordinator
 
     public function claim(int $id): ?string
     {
-        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
+        if (TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             return null;
         }
         // Quiescing is not cancellation. A live sweep reads the marker HERE, before it
@@ -67,7 +67,7 @@ final class ScheduledCoordinator
         if (! $row || $row->state !== 'claimed' || $row->nonce !== $nonce) {
             return false;
         }
-        if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged()) {
+        if (TechnicianConfig::killSwitchEngaged()) {
             $this->defer($id, $nonce, 'kill_switch');
 
             return false;
@@ -132,7 +132,7 @@ final class ScheduledCoordinator
 
                 return false;
             }
-            if (! TechnicianConfig::scheduledApprovalsEnabled() || TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy() || $now->lt($row->not_before)) {
+            if (TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy() || $now->lt($row->not_before)) {
                 return false;
             }
             // Only the explicitly installed mailbox slice may create dispatch intent.

@@ -528,14 +528,12 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/intake', [IntegrationsController::class, 'updateIntake'])->name('settings.integrations.intake.update');
 
     // Settings — AI Technician
-    // Admin-gated, not merely `auth`: this form now carries the switch that arms
-    // scheduled execution of already-approved actions, i.e. the control the
-    // every-minute sweep reads before it dispatches to live vendors. That used to be
-    // a deploy-environment control (SCHEDULED_APPROVALS_ENABLED + config:cache), so
-    // leaving it on the page's auth-only middleware would hand any authenticated
-    // staff session — billing, contractor — an activation primitive. The form's
-    // "absent = off" semantics make every save rewrite the other coverage toggles
-    // too. Closes psa #1344 for this action only; the rest of the page is unchanged.
+    // Admin-gated, not merely `auth`: the form's "absent = off" semantics make every
+    // save rewrite the coverage toggles (technician_enabled, emergency backstop), so
+    // an authenticated non-admin staff session must not reach it (psa #1344 for this
+    // action only; the rest of the page is unchanged). The scheduled-execution
+    // checkbox this form once carried is gone: scheduling is the execute_at tool
+    // parameter under the per-tool token grant, not a settings switch.
     Route::post('/settings/integrations/technician', [IntegrationsController::class, 'updateTechnician'])->middleware('admin')->name('settings.integrations.technician.update');
     // psa-2wwh: the emergency brake gets its OWN route, deliberately NOT folded into
     // updateTechnician. That form's semantics are "absent = off", so sharing it would
@@ -774,8 +772,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/cockpit/email-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\EmailResolutionController::class, 'approve'])->name('email-resolutions.approve')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\EmailResolutionController::class, 'deny'])->name('email-resolutions.deny')->middleware('throttle:30,1');
 
-    Route::get('/cockpit/runs/{run}/schedule', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'create'])->name('cockpit.schedule');
-    Route::post('/cockpit/runs/{run}/schedule', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'store'])->name('cockpit.schedule.store')->middleware('throttle:30,1');
+    // Scheduled execution: the schedule form is gone (the run time is the execute_at
+    // parameter on the proposal; the ordinary cockpit Approve admits it). Cancel stays.
     Route::post('/cockpit/runs/{run}/schedule/cancel', [\App\Http\Controllers\Web\ScheduledMailboxController::class, 'cancel'])->name('cockpit.schedule.cancel')->middleware('throttle:30,1');
 
     // AI Technician cockpit (Plan 1B)
