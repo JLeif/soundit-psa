@@ -103,12 +103,71 @@ class TacticalDeviceSyncService
         $wasOnline = $ta->status === 'online';
         $ta->update($update);
 
+        // The agent DETAIL is the only Tactical payload that carries boot_time, so
+        // this is the only place the fleet's reboot time can be observed: the daily
+        // list sync has no boot field at all (see mapAgentToTacticalAsset). Without
+        // this write, assets.last_boot_at keeps whatever the original import wrote
+        // and reads as a months-old uptime forever, which AssetHealthService::
+        // patchFactor() then scores as "up {N}d (patches may be pending)".
+        //
+        // Deliberately forward-only and detail-only: it corrects a row when someone
+        // refreshes that device, and does NOT backfill history. Rows never refreshed
+        // stay stale — see the card for the backfill decision, which is a data
+        // migration and not part of this change.
+        $this->refreshAssetBootTime($ta, $agent['boot_time'] ?? null);
+
         // Offline→online: run any actions queued for this device (bd psa-xr84).
         if (! $wasOnline && $ta->status === 'online') {
             $this->dispatchSweepIfQueued((string) $ta->agent_id);
         }
 
         return DetailSyncResult::success($ta->status, $ta->synced_at);
+    }
+
+    /**
+     * Write the observed boot time onto the linked PSA asset.
+     *
+     * Mirrors the last_seen_at guard in the list refresh: an asset may have been
+     * ADOPTED from Ninja or Level, and both of those write last_boot_at from their
+     * own device payloads. So this never drags the column BACKWARDS — it writes only
+     * when the observed boot time is strictly newer than what is already stored (or
+     * when the column is empty). A machine that genuinely has not rebooted reports
+     * the same boot time every sync and is left alone.
+     *
+     * An absent/unparseable boot_time is no observation: leave the column untouched
+     * rather than blanking a value another integration is maintaining.
+     */
+    private function refreshAssetBootTime(TacticalAsset $ta, int|string|null $bootTime): void
+    {
+        if (! $ta->asset_id || $bootTime === null || $bootTime === '' || $bootTime === 0 || $bootTime === '0') {
+            return;
+        }
+
+        try {
+            $observed = is_int($bootTime)
+                ? Carbon::createFromTimestamp($bootTime)
+                : Carbon::parse($bootTime);
+        } catch (\Throwable) {
+            return;
+        }
+
+        // A boot time in the future is not a reboot we can believe; a clock-skewed
+        // agent must not park the column ahead of every real observation.
+        if ($observed->isFuture()) {
+            return;
+        }
+
+        $asset = Asset::find($ta->asset_id);
+
+        if (! $asset) {
+            return;
+        }
+
+        if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
+            return;
+        }
+
+        Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
     }
 
     /**
