@@ -6,6 +6,7 @@ use App\Enums\TechnicianRunState;
 use App\Enums\TechnicianTier;
 use App\Models\Client;
 use App\Models\ControlDOnboardingIntent;
+use App\Models\McpToken;
 use App\Models\TechnicianActionLog;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
@@ -18,6 +19,8 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Technician\PromptFence;
 use App\Services\Technician\TechnicianApprovalResult;
 use App\Support\ControlDConfig;
+use App\Support\McpStaffToken;
+use App\Support\McpToolModes;
 use App\Support\TechnicianConfig;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
@@ -26,7 +29,8 @@ use Illuminate\Support\Str;
 /**
  * Control D client onboarding — the B4 caller for the dark B1–B3 services, in the
  * shape `tactical_set_client_custom_field` (#1277) already has: ONE staged verb
- * `controld_onboard_client`, held for cockpit approval by a second active Admin,
+ * `controld_onboard_client`, held for cockpit approval by an active Admin (a second one
+ * on the button lane; see TWO LANES below),
  * idempotent, audited, secret-free. Plus the client-page button (ClientControlD
  * OnboardingController), which stages the SAME proposal through stageForClient().
  *
@@ -35,6 +39,19 @@ use Illuminate\Support\Str;
  * `:immediate` grant is rejected at parse time. Approval is the only path to
  * ControlDOnboardingStaged, and approval happens in the cockpit under a logged-in
  * Admin who is NOT the stager.
+ *
+ * TWO LANES, ONE TWO-PERSON RULE (B4.1, #2043). The button lane is staged by a
+ * logged-in Admin whose id is recorded, so approval refuses that same person. The
+ * token lane is staged by an MCP token that stands for no person, so a human's
+ * bearer could otherwise stage and approve alone. Hence: the verb may be staged ONLY
+ * by a token whose `ai_actor` flag is true (the agent stages, one active Admin
+ * approves — the family contract); a non-ai_actor token is refused at staging and
+ * pointed at the client-page button, which records who. The staging token's id is
+ * bound into the encrypted payload, and approval re-reads that token row and refuses
+ * unless it still exists, is still live under the gate authentication applies (activated,
+ * not paused, not revoked), is still an ai_actor, and is still granted this verb — every
+ * documented withdrawal closes the lane. No token id, or an id that names no row, is
+ * refused: unknown is never trusted.
  *
  * TWO STEPS, TWO APPROVALS, NEVER BOTH IN ONE. A client without `controld_org_id`
  * proposes the `organization` step (create the sub-organization, bind the mapping);
@@ -129,8 +146,12 @@ class StaffControlDOnboardingToolExecutor
         return self::STAGED_TO_DIRECT;
     }
 
-    /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
+    /**
+     * @param  McpStaffToken|null  $staffToken  The authenticated caller. Staging needs an `ai_actor`
+     *                                          token (B4.1); null (legacy / unknown caller) is refused.
+     * @return array<string, mixed>
+     */
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?McpStaffToken $staffToken = null): array
     {
         if (! ControlDConfig::isEnabled() || ! ControlDConfig::isConfigured()) {
             return ['error' => 'Control D is not configured'];
@@ -141,12 +162,12 @@ class StaffControlDOnboardingToolExecutor
         }
 
         if ($name === self::STAGED_TOOL) {
-            return $this->stageOnboarding($arguments, $clientId, $actorLabel);
+            return $this->stageOnboarding($arguments, $clientId, $actorLabel, $staffToken);
         }
 
         if ($name === self::TOOL) {
             $contentHash = $this->contentHash(self::TOOL, $clientId, null, $arguments);
-            $message = self::TOOL.' is held-only — creating a vendor organization or a provisioning code is never executed immediately, whatever mode was granted; call it with staged=true and a ticket_id for cockpit approval by a second Admin. Nothing was created.';
+            $message = self::TOOL.' is held-only — creating a vendor organization or a provisioning code is never executed immediately, whatever mode was granted; call it with staged=true and a ticket_id for cockpit approval by an active Admin. Nothing was created.';
             $this->auditAttempt(self::TOOL, 'rejected', $clientId, null, $contentHash, $message, $actorLabel);
 
             return ['error' => $message];
@@ -158,10 +179,21 @@ class StaffControlDOnboardingToolExecutor
     // ── staging (MCP verb) ──────────────────────────────────────────────────────
 
     /** @return array<string, mixed> */
-    private function stageOnboarding(array $arguments, int $clientId, string $actorLabel): array
+    private function stageOnboarding(array $arguments, int $clientId, string $actorLabel, ?McpStaffToken $staffToken): array
     {
         $tool = self::STAGED_TOOL;
         $contentHash = $this->contentHash($tool, $clientId, null, $arguments);
+
+        // B4.1: only an ai_actor token stages this verb. A human's bearer stands for a
+        // person the payload cannot name, so the second-Admin rule could not bind;
+        // the client-page button is that person's lane. Refused before any argument
+        // is read, audited under the token's label (never the token itself).
+        if (! $staffToken instanceof McpStaffToken || $staffToken->id === null || ! $staffToken->aiActor) {
+            $message = self::TOOL.' may be staged only by an MCP token marked ai_actor (the agent stages, one active Admin approves). This token is not an ai_actor token: a person onboards a client from the Control D card on the client page, which records who staged it for the second-Admin rule. Nothing was staged.';
+            $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, 'staging refused — caller is not an ai_actor token (B4.1); use the client-page button.', $actorLabel);
+
+            return ['error' => $message];
+        }
 
         if ($unexpected = $this->unexpectedArgumentKeys($arguments)) {
             $known = array_values(array_intersect($unexpected, self::KNOWN_REFUSED_KEYS));
@@ -203,7 +235,7 @@ class StaffControlDOnboardingToolExecutor
             return ['error' => 'ticket_id is required for staged Control D onboarding and must belong to this client'];
         }
 
-        return $this->stageProposal($client, $ticket, $reason, $actorLabel, $tool, null);
+        return $this->stageProposal($client, $ticket, $reason, $actorLabel, $tool, null, (int) $staffToken->id);
     }
 
     /**
@@ -232,7 +264,7 @@ class StaffControlDOnboardingToolExecutor
             return ['error' => 'Technician kill-switch engaged; Control D onboarding refused'];
         }
 
-        return $this->stageProposal($client, $ticket, $reason, 'staff:'.$stager->id, self::STAGED_TOOL, (int) $stager->id);
+        return $this->stageProposal($client, $ticket, $reason, 'staff:'.$stager->id, self::STAGED_TOOL, (int) $stager->id, null);
     }
 
     // ── step derivation ─────────────────────────────────────────────────────────
@@ -288,7 +320,12 @@ class StaffControlDOnboardingToolExecutor
     // ── proposal ────────────────────────────────────────────────────────────────
 
     /** @return array<string, mixed> */
-    private function stageProposal(Client $client, Ticket $ticket, string $reason, string $actorLabel, string $tool, ?int $stagerUserId): array
+    /**
+     * Exactly one of $stagerUserId (button lane: the Admin who staged) and
+     * $stagerTokenId (token lane: the ai_actor token that staged) is set; approval
+     * applies the lane's half of the two-person rule from whichever is present.
+     */
+    private function stageProposal(Client $client, Ticket $ticket, string $reason, string $actorLabel, string $tool, ?int $stagerUserId, ?int $stagerTokenId): array
     {
         $clientId = (int) $client->id;
         $derived = $this->nextStep($client);
@@ -339,11 +376,13 @@ class StaffControlDOnboardingToolExecutor
             'redacted_params' => ['step' => $step, 'client_name' => (string) $client->name],
             'sensitive_inputs' => [],
             'staged_by_user_id' => $stagerUserId,
+            'staged_by_token_id' => $stagerTokenId,
             // Only ids and the step: approval re-derives every input from the client
             // record and the panel, so nothing here is a value that could be replayed.
+            // The stager (user id OR token id) is read from THIS sealed copy at approval.
             'encrypted_payload' => Crypt::encryptString(json_encode([
                 'direct_tool' => self::TOOL, 'client_id' => $clientId, 'ticket_id' => $ticket->id, 'step' => $step,
-                'staged_by_user_id' => $stagerUserId,
+                'staged_by_user_id' => $stagerUserId, 'staged_by_token_id' => $stagerTokenId,
             ], JSON_THROW_ON_ERROR)),
         ];
 
@@ -398,7 +437,8 @@ class StaffControlDOnboardingToolExecutor
 
     /**
      * Cockpit approval: the ONLY path to ControlDOnboardingStaged. The approver must
-     * be an active Admin and must not be the stager (a second Admin, by ruling). The
+     * be an active Admin and, on the button lane, must not be the stager (a second
+     * Admin, by ruling); on the token lane the stager must be a live ai_actor token. The
      * step is re-derived from the client's live state and must equal the staged step.
      * Then exactly one intent: stageOrganization + execute, or stageCode + execute.
      *
@@ -449,12 +489,26 @@ class StaffControlDOnboardingToolExecutor
                 return new TechnicianApprovalResult('gate_declined', message: 'Control D onboarding must be approved by an active Admin — nothing was created.');
             }
 
+            // The two-person rule, by lane (B4.1). Button lane: a person staged, so the
+            // approver must be someone else. Token lane: no person staged, so the stager
+            // must be an ai_actor token — still one, re-read now — and this Admin is the
+            // one human signature. A payload naming neither is refused, never approved.
             $stagerId = $payload['staged_by_user_id'] ?? null;
-            if ($stagerId !== null && (int) $stagerId === (int) $approverId) {
-                $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $contentHash, "{$targetKey}: approval refused — approver is the stager.", $approverLabel, $run->id, $approverId);
-                $run->releaseClaim();
+            if ($stagerId !== null) {
+                if ((int) $stagerId === (int) $approverId) {
+                    $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $contentHash, "{$targetKey}: approval refused — approver is the stager.", $approverLabel, $run->id, $approverId);
+                    $run->releaseClaim();
 
-                return new TechnicianApprovalResult('gate_declined', message: 'Control D onboarding needs a second Admin: the person who staged this proposal cannot approve it. Nothing was created.');
+                    return new TechnicianApprovalResult('gate_declined', message: 'Control D onboarding needs a second Admin: the person who staged this proposal cannot approve it. Nothing was created.');
+                }
+            } else {
+                $why = $this->tokenLaneRefusal($payload['staged_by_token_id'] ?? null);
+                if ($why !== null) {
+                    $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $contentHash, "{$targetKey}: approval refused — {$why}", $approverLabel, $run->id, $approverId);
+                    $run->releaseClaim();
+
+                    return new TechnicianApprovalResult('gate_declined', message: "Control D onboarding staged through the MCP verb is approved only when its staging token is still a live, granted ai_actor token ({$why}). Deny this proposal; a person onboards from the client page. Nothing was created.");
+                }
             }
 
             if (! ControlDConfig::isEnabled() || ! ControlDConfig::isConfigured() || ! ControlDConfig::isOnboardingActive()) {
@@ -662,6 +716,40 @@ class StaffControlDOnboardingToolExecutor
         ]);
     }
 
+    /**
+     * B4.1: why a token-lane run may NOT be approved, or null when its staging token is
+     * still a live, granted ai_actor token. The token row is re-read at approval so every
+     * withdrawal the operator is told to use refuses a pending run: the flag cleared, the
+     * token deleted, REVOKED or PAUSED (isActive() is exactly the authentication gate —
+     * McpToken::scopeAuthenticatable), or the verb's grant removed. A token that could no
+     * longer call the verb cannot carry the lane's single signature either. Names ids only.
+     */
+    private function tokenLaneRefusal(mixed $stagerTokenId): ?string
+    {
+        $tokenId = $this->positiveInt($stagerTokenId);
+        if ($tokenId === null) {
+            return 'the payload names no staging token (B4.1: token-lane runs must be staged by an ai_actor token).';
+        }
+        $token = McpToken::find($tokenId);
+        if (! $token) {
+            return "staging token #{$tokenId} no longer exists.";
+        }
+        if (! $token->isActive()) {
+            return "staging token #{$tokenId} is no longer active (state: {$token->state()}).";
+        }
+        if (! $token->ai_actor) {
+            return "staging token #{$tokenId} is not an ai_actor token.";
+        }
+        // The grant is re-read the way authentication reads it: a legacy full-surface
+        // token (tools null) never inherits this verb, so it cannot carry the lane either.
+        $granted = is_array($token->tools) ? McpToolModes::parseGrants($token->tools)['tools'] : [];
+        if (! in_array(self::TOOL, $granted, true)) {
+            return "staging token #{$tokenId} is no longer granted ".self::TOOL.'.';
+        }
+
+        return null;
+    }
+
     private function decryptRunPayload(TechnicianRun $run): ?array
     {
         $ciphertext = $run->proposed_meta['encrypted_payload'] ?? null;
@@ -722,7 +810,7 @@ class StaffControlDOnboardingToolExecutor
     {
         return [
             'name' => self::TOOL,
-            'description' => 'Onboard ONE PSA client to Control D: step 1 creates the client\'s Control D sub-organization (name and contact email from the client record, two-factor required, the panel\'s analytics region) and binds the returned organization id to the client; step 2, staged separately once the mapping is bound, cuts one provisioning code under that organization with the Settings > Integrations > Control D defaults (enforced profile, expiry, device limit = asset count + headroom, analytics level, intercept mode). HELD-ONLY: never executes immediately, whatever mode was granted — every call needs staged=true and a ticket_id and is approved in the cockpit by a second active Admin (the stager cannot approve). The server decides which step the client needs; one proposal is one step. No PIN, hostname prefix, icon, profile, limit or vendor PK is accepted from the caller; secrets are stored encrypted on the client record and never returned. Inert unless the Control D onboarding switch is on and all six defaults are configured. Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'description' => 'Onboard ONE PSA client to Control D: step 1 creates the client\'s Control D sub-organization (name and contact email from the client record, two-factor required, the panel\'s analytics region) and binds the returned organization id to the client; step 2, staged separately once the mapping is bound, cuts one provisioning code under that organization with the Settings > Integrations > Control D defaults (enforced profile, expiry, device limit = asset count + headroom, analytics level, intercept mode). HELD-ONLY: never executes immediately, whatever mode was granted — every call needs staged=true and a ticket_id and is approved in the cockpit by an active Admin. Only an MCP token marked ai_actor may stage it (the agent stages, one human approves); a person onboards from the Control D card on the client page, where a second Admin must approve. The server decides which step the client needs; one proposal is one step. No PIN, hostname prefix, icon, profile, limit or vendor PK is accepted from the caller; secrets are stored encrypted on the client record and never returned. Inert unless the Control D onboarding switch is on and all six defaults are configured. Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
             'input_schema' => ['type' => 'object', 'properties' => self::properties(), 'required' => ['reason']],
         ];
     }
@@ -732,7 +820,7 @@ class StaffControlDOnboardingToolExecutor
     {
         return [
             'name' => self::STAGED_TOOL,
-            'description' => 'Stage the next Control D onboarding step for one client (organization create, or provisioning code once mapped) for cockpit approval by a second Admin. The MCP call makes no Control D write; the held proposal stores only ids and the step, and approval re-derives every input from the client record and the panel. Held-only — there is no immediate execution path.',
+            'description' => 'Stage the next Control D onboarding step for one client (organization create, or provisioning code once mapped) for cockpit approval by an active Admin. Staging requires an ai_actor token (a person uses the client-page button, which needs a second Admin). The MCP call makes no Control D write; the held proposal stores only ids and the step, and approval re-derives every input from the client record and the panel. Held-only — there is no immediate execution path.',
             'input_schema' => ['type' => 'object', 'properties' => self::properties(true), 'required' => ['ticket_id', 'reason']],
         ];
     }

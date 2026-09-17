@@ -5,6 +5,7 @@ namespace Tests\Feature\Mcp;
 use App\Enums\TechnicianRunState;
 use App\Models\Client;
 use App\Models\ControlDOnboardingIntent;
+use App\Models\McpToken;
 use App\Models\Setting;
 use App\Models\TechnicianActionLog;
 use App\Models\TechnicianRun;
@@ -24,6 +25,7 @@ use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Testing\RefreshDatabaseState;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
@@ -80,9 +82,34 @@ class ControlDOnboardClientTest extends TestCase
         return $actor;
     }
 
-    private function token(array $tools = ['controld_onboard_client:staged']): string
+    /** The agent's token: `ai_actor` true, the only kind that may stage this verb (B4.1). */
+    private function token(array $tools = ['controld_onboard_client:staged'], string $label = 'opsbot', bool $aiActor = true): string
     {
-        return McpConfig::rotateStaffToken(allowedTools: $tools, label: 'opsbot');
+        return McpConfig::rotateStaffToken(allowedTools: $tools, label: $label, aiActor: $aiActor);
+    }
+
+    /** A staff token that is NOT an ai_actor — a human's bearer. Granted the verb, still refused at staging (B4.1). */
+    private function humanToken(): string
+    {
+        return $this->token(label: 'human-bearer', aiActor: false);
+    }
+
+    private function tokenId(string $label = 'opsbot'): int
+    {
+        return (int) McpToken::where('label', $label)->sole()->id;
+    }
+
+    /** @return array<string, mixed> */
+    private function payload(TechnicianRun $run): array
+    {
+        return json_decode(Crypt::decryptString((string) $run->proposed_meta['encrypted_payload']), true);
+    }
+
+    private function rewritePayload(TechnicianRun $run, array $payload): void
+    {
+        $meta = $run->proposed_meta;
+        $meta['encrypted_payload'] = Crypt::encryptString(json_encode($payload, JSON_THROW_ON_ERROR));
+        $run->forceFill(['proposed_meta' => $meta])->save();
     }
 
     private function callTool(string $token, string $name, array $arguments = []): TestResponse
@@ -363,6 +390,7 @@ class ControlDOnboardClientTest extends TestCase
             ->assertRedirect()->assertSessionHas('success');
         $run = TechnicianRun::sole();
         $this->assertSame($admin->id, $run->proposed_meta['staged_by_user_id']);
+        $this->assertNull($this->payload($run)['staged_by_token_id'] ?? null, 'the button lane is staged by a person, not a token');
 
         $this->vendor([]);
         $this->approve($run, $admin);
@@ -379,6 +407,153 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertSame('syntheticOrg01', $fixture['client']->fresh()->controld_org_id);
     }
 
+    // ── B4.1 (#2043): the token lane is bound to ai_actor ─────────────────────────────────
+
+    /** RED CONTROL (B4.1 a): a granted staff token that is NOT an ai_actor may not stage the verb at all. */
+    public function test_a_non_ai_actor_token_cannot_stage_the_verb(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $fixture = $this->fixture();
+        $this->vendor([]);
+        $token = $this->humanToken();
+        $this->assertFalse(McpToken::where('label', 'human-bearer')->sole()->ai_actor);
+        // The grant is honoured (the verb is published to this token) — the refusal is the executor's, not the grant gate's.
+        $this->assertContains('controld_onboard_client', array_column($this->listTools($token), 'name'));
+
+        $response = $this->callTool($token, 'controld_onboard_client', ['client_id' => $fixture['client']->id, 'ticket_id' => $fixture['ticket']->id, 'reason' => 'new client', 'staged' => true]);
+        $result = $this->decoded($response);
+        $this->assertArrayHasKey('error', $result, json_encode($result));
+        $this->assertStringContainsString('ai_actor', $result['error']);
+        $this->assertStringContainsString('client page', $result['error']);
+        $this->assertStringNotContainsString('psa-mcp-', $result['error']);
+        $this->assertSame(0, TechnicianRun::count(), 'nothing is staged');
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $log = TechnicianActionLog::where('action_type', 'controld_stage_onboard_client')->where('result_status', 'rejected')->where('client_id', $fixture['client']->id)->sole();
+        $this->assertStringContainsString('not an ai_actor', $log->summary);
+        $this->assertSame('mcp-staff:human-bearer', $log->actor_label);
+        $this->assertStringNotContainsString('psa-mcp-', $log->summary);
+
+        // The executor reached directly with no token at all (legacy / unknown caller) refuses the same way.
+        $direct = app(StaffControlDOnboardingToolExecutor::class)->execute('controld_stage_onboard_client', ['ticket_id' => $fixture['ticket']->id, 'reason' => 'x'], $fixture['client']->id, 'test');
+        $this->assertArrayHasKey('error', $direct, json_encode($direct));
+        $this->assertStringContainsString('ai_actor', $direct['error']);
+        $this->assertSame(0, TechnicianRun::count());
+    }
+
+    /**
+     * RED CONTROL (B4.1 b): an ai_actor-staged run records the token id in the encrypted
+     * payload and is approved by ONE active Admin (agent-stages / one-human-approves).
+     * Before B4.1 the same call was accepted for the wrong reason — the payload carried
+     * no stager at all — so this test asserts the binding, not merely the outcome.
+     */
+    public function test_an_ai_actor_staged_run_is_bound_to_its_token_and_approved_by_a_single_admin(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $fixture = $this->fixture();
+        $run = $this->stage($fixture);
+        $tokenId = $this->tokenId('opsbot');
+        $this->assertTrue(McpToken::findOrFail($tokenId)->ai_actor);
+
+        $payload = $this->payload($run);
+        $this->assertSame($tokenId, $payload['staged_by_token_id'] ?? null, 'the staging token is bound into the encrypted payload: '.json_encode($payload));
+        $this->assertNull($payload['staged_by_user_id']);
+        $this->assertSame($tokenId, $run->proposed_meta['staged_by_token_id'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+        $this->assertStringNotContainsString('psa-mcp-', json_encode($run->proposed_meta));
+
+        $this->vendor([$this->ok(['organization' => $this->orgRow()]), $this->ok(['sub_organizations' => [$this->orgRow()]])]);
+        $approver = User::factory()->admin()->create(['is_active' => true]);
+        $this->approve($run, $approver);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $this->assertSame('syntheticOrg01', $fixture['client']->fresh()->controld_org_id);
+        $this->assertSame(1, ControlDOnboardingIntent::count());
+        $this->assertCount(2, $this->history);
+    }
+
+    /** RED CONTROL (B4.1 b, approval arm): a token-lane run whose stager is not (or no longer) an ai_actor token is refused at approval. */
+    public function test_approval_refuses_a_token_lane_run_whose_stager_is_not_an_ai_actor_token(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $approver = User::factory()->admin()->create(['is_active' => true]);
+
+        // (1) The token's trust was withdrawn after staging: ai_actor flipped to false.
+        $fixture = $this->fixture();
+        $run = $this->stage($fixture);
+        McpToken::findOrFail($this->tokenId('opsbot'))->forceFill(['ai_actor' => false])->save();
+        $this->vendor([]);
+        $this->approve($run, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $blocked = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('approver_user_id', $approver->id)->sole();
+        $this->assertStringContainsString('not an ai_actor token', $blocked->summary);
+
+        // (2) A token-lane payload carrying no token id at all (pre-B4.1 shape, or a legacy caller) is refused, never approved on one signature.
+        $other = $this->fixture();
+        $run2 = $this->stage($other, $this->token(label: 'opsbot-2'));
+        $payload = $this->payload($run2);
+        unset($payload['staged_by_token_id']);
+        $this->rewritePayload($run2, $payload);
+        $this->approve($run2, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run2->fresh()->state);
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run2->id)->where('result_status', 'blocked')->where('summary', 'like', '%no staging token%')->count());
+
+        // (3) A token id that names no token row (deleted) is refused: unknown is not trusted.
+        $third = $this->fixture();
+        $run3 = $this->stage($third, $this->token(label: 'opsbot-3'));
+        McpToken::where('label', 'opsbot-3')->delete();
+        $this->approve($run3, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run3->fresh()->state);
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $this->assertNull($third['client']->fresh()->controld_org_id);
+    }
+
+    /**
+     * RED CONTROL (B4.1 b, approval arm): the withdrawal actions the operator is told to use —
+     * revoke, pause, or remove the grant — stop a pending token-lane run. Approval re-reads the
+     * row under the same liveness gate authentication applies and the same grant projection, so a
+     * token that can no longer call the verb cannot carry the lane's single signature either.
+     */
+    public function test_approval_refuses_a_token_lane_run_whose_staging_token_is_revoked_paused_or_ungranted(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $approver = User::factory()->admin()->create(['is_active' => true]);
+        $this->vendor([]);
+
+        foreach (['revoked' => ['revoked_at' => now()], 'paused' => ['paused_at' => now()]] as $state => $attributes) {
+            $fixture = $this->fixture();
+            $run = $this->stage($fixture, $this->token(label: "opsbot-{$state}"));
+            McpToken::where('label', "opsbot-{$state}")->sole()->forceFill($attributes)->save();
+            $this->approve($run, $approver);
+            $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, "a {$state} staging token must not carry the token lane");
+            $this->assertSame(0, ControlDOnboardingIntent::count());
+            $this->assertCount(0, $this->history);
+            $this->assertNull($fixture['client']->fresh()->controld_org_id);
+            $blocked = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('approver_user_id', $approver->id)->sole();
+            $this->assertStringContainsString("no longer active (state: {$state})", $blocked->summary);
+            $this->assertStringNotContainsString('psa-mcp-', $blocked->summary);
+        }
+
+        // The grant withdrawn: the row is live and still ai_actor, but it could no longer call the verb.
+        $ungranted = $this->fixture();
+        $run = $this->stage($ungranted, $this->token(label: 'opsbot-ungranted'));
+        McpToken::where('label', 'opsbot-ungranted')->sole()->forceFill(['tools' => []])->save();
+        $this->approve($run, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame(0, ControlDOnboardingIntent::count());
+        $this->assertCount(0, $this->history);
+        $this->assertNull($ungranted['client']->fresh()->controld_org_id);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('summary', 'like', '%no longer granted controld_onboard_client%')->count());
+    }
+
     /** RED CONTROL: non-admin stages (button) or approves → refused; nothing created. */
     public function test_non_admin_cannot_stage_from_the_button_or_approve(): void
     {
@@ -390,6 +565,8 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertSame(0, TechnicianRun::count());
 
         $run = $this->stage($fixture);
+        // B4.1: this is an ai_actor-staged run (token bound in the payload); the approver still has to be an active Admin.
+        $this->assertSame($this->tokenId('opsbot'), $this->payload($run)['staged_by_token_id'] ?? null);
         $this->vendor([]);
         $this->approve($run, $tech);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
