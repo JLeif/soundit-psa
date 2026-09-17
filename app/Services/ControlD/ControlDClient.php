@@ -131,7 +131,7 @@ class ControlDClient
             if ($error instanceof \stdClass && ($error->success ?? null) === false
                 && ($error->error ?? null) instanceof \stdClass && is_int($error->error->code ?? null)) {
                 if ($method === 'POST') {
-                    throw new ControlDWriteRejectedException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
+                    throw new ControlDWriteRejectedException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).', $error->error->code, $response->getStatusCode());
                 }
                 throw new ControlDClientException('Control D scoped request was explicitly rejected by the vendor envelope (HTTP 4xx).');
             }
@@ -189,7 +189,7 @@ class ControlDClient
         if ($method === 'POST' && $status >= 400 && $status < 500
             && $decoded instanceof \stdClass && ($decoded->success ?? null) === false
             && ($decoded->error ?? null) instanceof \stdClass && is_int($decoded->error->code ?? null)) {
-            throw new ControlDWriteRejectedException('Control D parent POST was explicitly rejected by the vendor envelope.');
+            throw new ControlDWriteRejectedException('Control D parent POST was explicitly rejected by the vendor envelope.', $decoded->error->code, $status);
         }
         if ($status < 200 || $status >= 300 || ! $decoded instanceof \stdClass
             || ($decoded->success ?? null) !== true || ! ($decoded->body ?? null) instanceof \stdClass) {

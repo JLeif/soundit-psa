@@ -1187,10 +1187,42 @@ soft-deleted clients too. A `ControlDOrganizationUncertainException` carries opt
 org PK and phase (`post`, `readback`, `local-persistence`) for manual reconciliation;
 never automatically retry or delete an orphan. The audit contains only actor/client
 IDs and org PK. No route, command, MCP grant, activation or pilot is installed.
-B3 still owns staged intent/crash recovery; this is not crash-safe orchestration.
+The direct B1/B2 methods remain caller-less and do not themselves provide B3 admission.
 Rollback before any authorized caller: leave the branch unmerged; after a separately
 authorized release, revert callers/service through normal review, never delete vendor
 organizations or overwrite mappings as an automatic rollback.
+
+The dark B3 `ControlDOnboardingStaged` service provides separate `stageOrganization`
+and `stageCode` intents plus one-shot `execute` under the same server-resolved active
+Admin identity. Nothing publishes a route, command, MCP grant or UI. Staging commits
+an encrypted, serialization-hidden payload to the additive `controld_onboarding_intents`
+table. Its unique `active_client_id` is a durable per-client lock acquired BEFORE any
+vendor request; a second intent is refused, not queued. Vendor requests hold no SQL
+transaction. Execution atomically admits only `staged` to `posted`, at the last moment
+before the intended write: local eligibility/settings refusals and read-only preflight
+failures happen while the intent is still `staged`, stay definite refusals that record no
+possible POST, and leave it executable once the cause is fixed. Once admitted, `posted`
+means the POST may have happened, NOT that it succeeded. Own-POST PK checkpoints precede
+read-back;
+verified client binding and `bound` commit together. Rejected/bound intents release the
+lock. Uncertain and crash-left posted/staged records retain it indefinitely; no automatic
+retry, timeout release, cleanup, resume or reconciliation endpoint is installed. Manual
+reconciliation requires a separate bounded ruling, not direct row edits or a re-cut.
+
+Capability is observed ONLY at the intended write. HTTP403 with vendor `success:false`
+and integer `error.code:40301` records terminal `rejected`, phase `post`, reason code
+40301 and fixed reason `vendor key is read-only`, with no created PK or follow-up GET.
+Other POST failures preserve envelope-only rejection versus uncertainty. No key-type
+probe or cached capability exists: changing token type in place can affect a later
+explicit intent, never cause an automatic retry. No schema operation here authorizes
+a production migration or caller activation. The existing manual mapping writer remains
+a separate activation dependency (#2010), not covered by the new lock. Direct B1/B2
+calls also do not share B3 admission; every future caller must use B3.
+
+Retain the intent table, encrypted payload/hidden model and APP_KEY on rollback.
+Its `down()` refuses any populated table: intent evidence must not be deleted by a code
+rollback or client/user deletion. No FK cascade exists. Revert callers only through
+normal review; do not delete vendor objects, clear mappings or release uncertain locks.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
