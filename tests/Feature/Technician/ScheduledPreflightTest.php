@@ -47,7 +47,9 @@ class ScheduledPreflightTest extends TestCase
         $output = json_decode(Artisan::output(), true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('healthy', $output['clock']);
         $this->assertSame(0, $output['total']);
-        $this->assertFalse($output['activation_authorized']);
+        // Read-only clock + inventory certification only: no enabled/activation field exists
+        // since the global toggle was removed (the execute_at parameter is the feature).
+        $this->assertEqualsCanonicalizing(['clock', 'inventory', 'total', 'reconciliation_required'], array_keys($output));
     }
 
     public function test_unhealthy_clock_never_certifies_empty_inventory(): void
@@ -91,6 +93,7 @@ class ScheduledPreflightTest extends TestCase
         $this->assertSame(0, $output['inventory']['unknown']);
         $this->assertSame(1, $output['total']);
         $this->assertFalse($output['reconciliation_required']);
-        $this->assertFalse($output['activation_authorized']);
+        $this->assertArrayNotHasKey('activation_authorized', $output);
+        $this->assertArrayNotHasKey('enabled', $output);
     }
 }

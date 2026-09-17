@@ -36,7 +36,6 @@ class ScheduledApprovalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-15 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -70,23 +69,40 @@ class ScheduledApprovalTest extends TestCase
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $this->evidence);
     }
 
-    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledSettingsTest::class, 'values')]
-    public function test_admission_setting_gate_independent_of_evidence(?string $value, bool $expected): void
+    /**
+     * Removed-key guard (ruled design point 4): the former global toggle has NO effect in
+     * any state. A stale settings row of any value, or a stale config key, neither gates
+     * admission nor enables anything; the kill switch stays the independent hard stop.
+     */
+    public static function staleToggleValues(): array
+    {
+        return [[null], ['0'], ['yes'], ['true'], ['1']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('staleToggleValues')]
+    public function test_removed_toggle_has_no_effect_on_admission_and_kill_switch_still_gates(?string $value): void
     {
         \App\Models\Setting::where('key', 'scheduled_approvals_enabled')->delete();
         if ($value !== null) {
             \App\Models\Setting::setValue('scheduled_approvals_enabled', $value);
         }
-        config(['scheduled_approvals.enabled' => ! $expected]);
-        if (! $expected) {
-            $this->expectException(\InvalidArgumentException::class);
-            $this->expectExceptionMessage('scheduling_disabled_or_clock_unhealthy');
-        }
+        config(['scheduled_approvals.enabled' => false]);
         $this->assertGreaterThan(0, $this->admit());
+        $this->assertDatabaseCount('scheduled_authorizations', 1);
+        $this->assertSame($value, \App\Models\Setting::getValue('scheduled_approvals_enabled'), 'the stale row must be left alone');
+        \App\Models\Setting::setValue('technician_kill_switch', '1');
+        $this->run->update(['content_hash' => str_repeat('b', 64)]);
+        try {
+            app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+                '2026-09-15 03:00:00', '2026-09-15 04:00:00', 'UTC', [], $this->evidence);
+            $this->fail('kill switch did not gate admission');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame('kill_switch_or_clock_unhealthy', $e->getMessage());
+        }
         $this->assertDatabaseCount('scheduled_authorizations', 1);
     }
 
-    public function test_setting_is_rechecked_after_live_evidence_before_intent(): void
+    public function test_kill_switch_is_rechecked_after_live_evidence_before_intent(): void
     {
         $id = $this->admit();
         $this->time = $this->time->setTime(1, 0);
@@ -95,8 +111,7 @@ class ScheduledApprovalTest extends TestCase
         $this->assertNotNull($nonce);
         $evidence = Mockery::mock(ScheduledEvidence::class);
         $evidence->shouldReceive('revalidate')->once()->andReturnUsing(function ($run, $user, $binding) {
-            \App\Models\Setting::setValue('scheduled_approvals_enabled', '0');
-            config(['scheduled_approvals.enabled' => true]);
+            \App\Models\Setting::setValue('technician_kill_switch', '1');
 
             return $binding;
         });
@@ -152,7 +167,7 @@ class ScheduledApprovalTest extends TestCase
         $this->assertSame('cancelled', DB::table('scheduled_authorizations')->value('state'));
     }
 
-    public function test_uninstalled_adapter_cannot_fire_even_when_flag_and_clock_are_healthy(): void
+    public function test_uninstalled_adapter_cannot_fire_even_when_kill_switch_off_and_clock_healthy(): void
     {
         // PR3 now installs reboot; the not-yet-enrolled CIPP sign-in adapter stays absent.
         $this->run->update(['action_type' => 'cipp_stage_disable_user_sign_in']);
@@ -237,12 +252,12 @@ class ScheduledApprovalTest extends TestCase
         $this->assertSame('blocked', DB::table('scheduled_authorizations')->value('state'));
     }
 
-    public function test_disabled_feature_and_unprivileged_admission_refuse(): void
+    public function test_kill_switch_clock_and_unprivileged_admission_refuse(): void
     {
-        foreach (['billing', 'contractor', 'inactive', 'missing_provenance', 'disabled', 'clock'] as $case) {
+        foreach (['billing', 'contractor', 'inactive', 'missing_provenance', 'kill_switch', 'clock'] as $case) {
             $this->user->update(['role' => in_array($case, ['billing', 'contractor']) ? $case : 'tech', 'is_active' => $case !== 'inactive']);
             $this->run->update(['proposed_meta' => $case === 'missing_provenance' ? [] : ['scheduled_provenance' => ['version' => 1, 'kind' => 'native_human', 'user_id' => $this->user->id]]]);
-            \App\Models\Setting::setValue('scheduled_approvals_enabled', $case !== 'disabled' ? '1' : '0');
+            \App\Models\Setting::setValue('technician_kill_switch', $case === 'kill_switch' ? '1' : '0');
             $this->healthy = $case !== 'clock';
             try {
                 $this->admit();

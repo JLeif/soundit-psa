@@ -65,7 +65,6 @@ class ScheduledTacticalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        \App\Models\Setting::setValue('scheduled_approvals_enabled', '1');
         $this->time = CarbonImmutable::parse('2026-09-16 00:00:00', 'UTC');
         $clock = Mockery::mock(ScheduledClock::class);
         $clock->shouldReceive('now')->andReturnUsing(fn () => $this->time);
@@ -124,21 +123,22 @@ class ScheduledTacticalTest extends TestCase
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(TacticalEvidence::class));
     }
 
-    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledSettingsTest::class, 'values')]
-    public function test_tactical_evidence_uses_only_strict_setting(?string $value, bool $expected): void
+    /** Removed-key guard: a stale toggle row of any value neither gates nor enables evidence. */
+    #[\PHPUnit\Framework\Attributes\DataProviderExternal(ScheduledApprovalTest::class, 'staleToggleValues')]
+    public function test_tactical_evidence_ignores_the_removed_toggle_and_honours_the_kill_switch(?string $value): void
     {
         $this->proposal('tactical_stage_reboot', []);
         Setting::where('key', 'scheduled_approvals_enabled')->delete();
         if ($value !== null) {
             Setting::setValue('scheduled_approvals_enabled', $value);
         }
-        config(['scheduled_approvals.enabled' => ! $expected]);
-        if (! $expected) {
-            $this->expectException(\App\Services\Technician\Scheduled\ScheduledUnavailable::class);
-            $this->expectExceptionMessage('kill_switch');
-        }
+        config(['scheduled_approvals.enabled' => false]);
         $binding = app(TacticalEvidence::class)->approve($this->run, $this->user, ['confirm_hostname' => 'fixture-device']);
         $this->assertNotEmpty($binding['target']);
+        Setting::setValue('technician_kill_switch', '1');
+        $this->expectException(\App\Services\Technician\Scheduled\ScheduledUnavailable::class);
+        $this->expectExceptionMessage('kill_switch');
+        app(TacticalEvidence::class)->approve($this->run, $this->user, ['confirm_hostname' => 'fixture-device']);
     }
 
     public function test_real_mcp_lineage_web_admission_and_revocation(): void
@@ -147,18 +147,21 @@ class ScheduledTacticalTest extends TestCase
         $reply = $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->postJson('/api/mcp/staff', [
             'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'tactical_set_maintenance',
                 'arguments' => ['client_id' => $this->client->id, 'asset_id' => $this->asset->id, 'ticket_id' => $this->ticket->id,
-                    'enabled' => true, 'reason' => 'Synthetic control', 'staged' => true]],
+                    'enabled' => true, 'reason' => 'Synthetic control', 'staged' => true, 'execute_at' => '2026-09-16T01:00:00+00:00']],
         ])->assertOk();
         $result = json_decode($reply->json('result.content.0.text'), true);
         $this->assertTrue($result['success'] ?? false, $reply->getContent());
         $this->run = TechnicianRun::findOrFail($result['run_id']);
         $token = \App\Models\McpToken::where('label', 'synthetic-tactical')->sole();
         $this->assertSame($token->id, $this->run->proposed_meta['scheduled_provenance']['token_id']);
+        $this->assertSame('2026-09-16T01:00:00+00:00', $this->run->proposed_meta['scheduled_provenance']['execute_at']);
         $this->assertFalse($this->run->proposed_meta['scheduled_argument_refusal'] ?? false);
-        $this->actingAs($this->user)->post(route('cockpit.schedule.store', $this->run), [
-            'content_hash' => $this->run->content_hash, 'start' => '2026-09-16T01:00', 'end' => '2026-09-16T02:00', 'timezone' => 'UTC', 'confirm' => '1',
-        ])->assertRedirect()->assertSessionHasNoErrors()->assertSessionMissing('error');
-        $id = DB::table('scheduled_authorizations')->sole()->id;
+        // The ordinary cockpit Approve admits it (window derived from execute_at); no form.
+        $this->actingAs($this->user)->post(route('cockpit.approve', $this->run))->assertRedirect()->assertSessionHasNoErrors()->assertSessionMissing('error');
+        $row = DB::table('scheduled_authorizations')->sole();
+        $id = $row->id;
+        $this->assertSame('2026-09-16 01:00:00', $row->not_before);
+        $this->assertSame('2026-09-16 02:00:00', $row->expires_at);
         $token->update(['tools' => []]);
         $this->time = $this->time->setTime(1, 0);
         app(TacticalDispatch::class)->run($id);
@@ -206,8 +209,13 @@ class ScheduledTacticalTest extends TestCase
         $this->assertSame(0, $this->reads);
         $this->assertCount(0, $this->wire);
         $this->assertDatabaseCount('scheduled_authorizations', 0);
-        $this->actingAs($this->user)->get(route('cockpit.schedule', $this->run))->assertStatus(422)->assertSee($reason);
-        $this->actingAs($this->user)->post(route('cockpit.schedule.store', $this->run), [])->assertStatus(422)->assertSee($reason);
+        // A proposal of this type that somehow carries execute_at refuses at Approve by the
+        // same name and is NOT executed now.
+        $this->run->update(['proposed_meta' => array_merge($this->run->proposed_meta, ['scheduled_provenance' => ['version' => 1, 'kind' => 'native_human', 'user_id' => $this->user->id, 'execute_at' => '2026-09-16T01:00:00+00:00', 'execute_at_offset' => '+00:00']])]);
+        $this->actingAs($this->user)->post(route('cockpit.approve', $this->run))->assertRedirect()->assertSessionHas('error', fn ($m) => str_contains($m, $reason));
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertCount(0, $this->wire);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $this->run->fresh()->state);
     }
 
     public static function invalidArguments(): array
@@ -258,7 +266,7 @@ class ScheduledTacticalTest extends TestCase
             'boolean' => $this->agent['site'] = '17',
             'token' => $this->user->update(['is_active' => false]),
             'link' => $this->ticket->assets()->detach(),
-            'kill' => \App\Models\Setting::setValue('scheduled_approvals_enabled', '0'),
+            'kill' => \App\Models\Setting::setValue('technician_kill_switch', '1'),
         };
         $this->time = $this->time->setTime(1, 0);
         app(TacticalDispatch::class)->run($id);
@@ -301,7 +309,10 @@ class ScheduledTacticalTest extends TestCase
         app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class)->runQueuedOnReconnect($this->run->fresh());
         $this->assertCount(0, $this->wire);
         $this->assertSame('waiting', DB::table('scheduled_authorizations')->find($id)->state);
-        $this->actingAs($this->user)->get(route('cockpit.schedule', $this->run))->assertStatus(409);
+        // Scheduled is a tombstone for the immediate lane too.
+        $this->actingAs($this->user)->post(route('cockpit.approve', $this->run))->assertRedirect()->assertSessionHas('error');
+        $this->assertCount(0, $this->wire);
+        $this->assertDatabaseCount('scheduled_authorizations', 1);
     }
 
     public function test_provably_unsent_bus_refusal_settles_failed_not_uncertain(): void

@@ -48,7 +48,9 @@ final class ScheduledApproval
             return new TechnicianApprovalResult('gate_declined', message: 'This proposal names a run time that cannot be read. It was not executed; ask for a fresh proposal.');
         }
         if (! ExecuteAt::supportsStaged($run->action_type)) {
-            return new TechnicianApprovalResult('gate_declined', message: ExecuteAt::refusalFor($run->action_type));
+            // The registry's fixed reason first (never echo an unregistered type), then the
+            // named unsupported-type refusal for a registered type without an adapter.
+            return new TechnicianApprovalResult('gate_declined', message: ActionRegistry::admissionRefusal($run->action_type) ?? ExecuteAt::refusalFor($run->action_type));
         }
         $provenance = $run->proposed_meta['scheduled_provenance'];
         $tokenId = ($provenance['kind'] ?? null) === 'mcp' ? ($provenance['token_id'] ?? null) : null;
