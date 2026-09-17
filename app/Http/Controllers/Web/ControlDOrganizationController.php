@@ -48,8 +48,22 @@ class ControlDOrganizationController extends Controller
 
     public function update(Request $request)
     {
-        $validated = $request->validate(['mappings' => ['sometimes', 'array']]);
-        $mapped = app(ControlDOrganizationMapping::class)->replace($validated['mappings'] ?? []);
+        // `listed[]` is what the FORM rendered a select for (#2010). Without it, the absence of
+        // an org pk from `mappings` cannot be told apart from a deliberate clear, so a mapping
+        // this page never offered (org gone upstream, owner not selectable) refused every save.
+        // A caller that declares nothing still fails closed.
+        $validated = $request->validate([
+            'mappings' => ['sometimes', 'array'],
+            'listed' => ['sometimes', 'array'],
+            'listed.*' => ['nullable', 'string', 'max:50'],
+        ]);
+        $listed = $request->has('listed')
+            ? array_values(array_filter(
+                array_map(static fn ($pk): string => (string) $pk, $validated['listed'] ?? []),
+                static fn (string $pk): bool => $pk !== '',
+            ))
+            : null;
+        $mapped = app(ControlDOrganizationMapping::class)->replace($validated['mappings'] ?? [], $listed);
 
         return redirect()->route('settings.controld-orgs.index')
             ->with('success', "Saved {$mapped} Control D organization mapping(s).");

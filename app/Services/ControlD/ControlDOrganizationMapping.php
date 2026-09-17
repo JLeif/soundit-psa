@@ -10,9 +10,16 @@ use Illuminate\Validation\ValidationException;
 /** Manual mapping may add identities, never erase or replace established ones (#2010). */
 class ControlDOrganizationMapping
 {
-    public function replace(array $mappings): int
+    /**
+     * @param  array<string, mixed>  $mappings  submitted organization pk => client id
+     * @param  array<int, string>|null  $listed  the organization pks the submitting form actually
+     *                                           rendered a select for. Null means the caller
+     *                                           declared nothing, so an absent pk is still read as
+     *                                           a clear and the save fails closed, as before.
+     */
+    public function replace(array $mappings, ?array $listed = null): int
     {
-        return DB::transaction(function () use ($mappings) {
+        return DB::transaction(function () use ($mappings, $listed) {
             // Same client locks as the onboarding writers. Include deleted owners.
             $clients = Client::withTrashed()->orderBy('id')->lockForUpdate()->get();
             $wanted = [];
@@ -27,30 +34,38 @@ class ControlDOrganizationMapping
                 }
                 $client = $clients->firstWhere('id', (int) $id);
                 if (! $client || $client->trashed()) {
-                    $this->refuse();
+                    $this->refuse('client #'.(int) $id.' no longer exists or is deleted');
                 }
                 $wanted[(int) $id] = $pk;
             }
             foreach ($clients as $client) {
                 $pk = $wanted[$client->id] ?? null;
                 if ($client->controld_org_id !== null) {
+                    // A mapping counts as CLEARED only when the submitting form actually offered
+                    // its organization. An org the page never rendered (gone upstream, outside
+                    // the listing, owner not selectable) is absent from the POST for reasons that
+                    // are not the operator's intent, and reading that absence as a clear made one
+                    // stale mapping refuse every later save on the page, additive ones included.
                     // Deleted rows are not in the form, but still reserve their identity.
-                    if (! $client->trashed() && $pk !== $client->controld_org_id) {
-                        $this->refuse();
+                    $offered = $listed === null || in_array($client->controld_org_id, $listed, true);
+                    if (! $client->trashed() && $pk !== $client->controld_org_id && ($pk !== null || $offered)) {
+                        $this->refuse("client #{$client->id} is already mapped to organization {$client->controld_org_id}");
                     }
                     if (in_array($client->controld_org_id, $wanted, true)
                         && ($wanted[$client->id] ?? null) !== $client->controld_org_id) {
-                        $this->refuse();
+                        $this->refuse("organization {$client->controld_org_id} belongs to client #{$client->id}");
                     }
                 }
                 foreach (ControlDOnboardingIntent::where('client_id', $client->id)->where('state', 'bound')->get(['org_pk']) as $intent) {
-                    if (! $client->trashed() && $pk !== $intent->org_pk) {
-                        $this->refuse();
+                    // A submission that re-points a bound client is refused; one that is merely
+                    // silent about it changes nothing (the column branch above owns the clear).
+                    if (! $client->trashed() && $pk !== null && $pk !== $intent->org_pk) {
+                        $this->refuse("client #{$client->id} was onboarded to organization {$intent->org_pk}");
                     }
                     // Bound evidence reserves its org for its owner even after the column was
                     // cleared or the owner deleted: nobody else may be handed a B2/B3 org.
                     if (in_array($intent->org_pk, $wanted, true) && $pk !== $intent->org_pk) {
-                        $this->refuse();
+                        $this->refuse("organization {$intent->org_pk} was onboarded for client #{$client->id}");
                     }
                 }
             }
@@ -107,8 +122,10 @@ class ControlDOrganizationMapping
         }
     }
 
-    private function refuse(): never
+    /** $detail names the conflicting client/organization so the operator can resolve it. */
+    private function refuse(?string $detail = null): never
     {
-        throw ValidationException::withMessages(['mappings' => 'Existing Control D identities cannot be cleared, reassigned or replaced. Resolve mapping conflicts before saving.']);
+        throw ValidationException::withMessages(['mappings' => 'Existing Control D identities cannot be cleared, reassigned or replaced. Resolve mapping conflicts before saving.'
+            .($detail !== null ? " Conflict: {$detail}." : '')]);
     }
 }

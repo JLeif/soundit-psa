@@ -54,6 +54,17 @@
 
         <form method="POST" action="{{ route('settings.controld-orgs.update') }}">
             @csrf
+            {{-- #2010: declare the organizations this form actually RENDERED a select for. A
+                 mapping whose organization is not in the vendor listing is absent from the POST
+                 for reasons that are not the operator's intent; without this, that absence read
+                 as a clear and one stale mapping refused every later save on this page. The
+                 first entry is a sentinel so the key is submitted even with no organizations. --}}
+            <input type="hidden" name="listed[]" value="">
+            @foreach($subOrgs as $listedOrg)
+                @if(! empty($listedOrg['PK']))
+                    <input type="hidden" name="listed[]" value="{{ $listedOrg['PK'] }}">
+                @endif
+            @endforeach
 
             <div class="card card-static shadow-sm">
                 <div class="table-responsive">

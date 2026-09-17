@@ -908,6 +908,22 @@
                 @endif
             </div>
 
+            {{-- #2010: a refused Control D Link/Unlink throws ValidationException keyed
+                 `mappings`, and nothing on this page rendered it — the refusal then read as the
+                 silent skip the ruling forbids. Rendered here, outside the tab panes, so it is
+                 visible on whichever tab the redirect lands on. --}}
+            @if($errors->has('mappings'))
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <strong>Integration mapping not changed.</strong>
+                    <ul class="mb-0 ps-3">
+                        @foreach($errors->get('mappings') as $mappingError)
+                            <li>{{ $mappingError }}</li>
+                        @endforeach
+                    </ul>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            @endif
+
             {{-- Integrations Tab (conditional) --}}
             @if(count($integrations) > 0)
             <div class="tab-pane fade" id="integrations" role="tabpanel">

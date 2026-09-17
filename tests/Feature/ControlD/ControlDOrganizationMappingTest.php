@@ -122,6 +122,11 @@ class ControlDOrganizationMappingTest extends TestCase
         $manual = Client::factory()->create(['controld_org_id' => 'org-manual']);
         $this->post(route('clients.integrations.unlink', [$bound, 'controld']))->assertSessionHasErrors('mappings');
         $this->assertSame('org-bound', $bound->fresh()->controld_org_id);
+        // The refusal must be RENDERED on the client page, not merely flashed: an invisible
+        // refusal is exactly the silent skip the ruling forbids (#2010).
+        $this->get(route('clients.show', $bound))->assertOk()
+            ->assertSee('Integration mapping not changed.')
+            ->assertSee('Existing Control D identities cannot be cleared');
         $this->post(route('clients.integrations.unlink', [$manual, 'controld']))->assertRedirect();
         $this->assertNull($manual->fresh()->controld_org_id);
     }
@@ -147,6 +152,24 @@ class ControlDOrganizationMappingTest extends TestCase
 
         $this->post(route('clients.integrations.link', [$other, 'controld']), ['entity_id' => 'org-free'])->assertRedirect();
         $this->assertSame('org-free', $other->fresh()->controld_org_id);
+    }
+
+    public function test_a_mapping_the_form_never_offered_does_not_block_unrelated_saves(): void
+    {
+        $stale = Client::factory()->create(['controld_org_id' => 'org-gone-upstream']);
+        $new = Client::factory()->create();
+
+        // The page listed org-new only (org-gone-upstream is no longer in the vendor listing),
+        // so that mapping's absence from the POST is not a clear request and must not refuse.
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-new'], 'mappings' => ['org-new' => $new->id]])
+            ->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertSame('org-gone-upstream', $stale->fresh()->controld_org_id);
+        $this->assertSame('org-new', $new->fresh()->controld_org_id);
+
+        // Blanking an organization the form DID offer is still a refused clear.
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-new', 'org-gone-upstream'], 'mappings' => ['org-new' => $new->id]])
+            ->assertSessionHasErrors('mappings');
+        $this->assertSame('org-gone-upstream', $stale->fresh()->controld_org_id);
     }
 
     private function bound(Client $client): void
