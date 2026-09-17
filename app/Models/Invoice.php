@@ -319,6 +319,24 @@ class Invoice extends Model
     }
 
     /**
+     * Whether the portal's Pay Online for THIS invoice mints a BenjiPays
+     * applied link (#2065) rather than opening the Stripe hosted page.
+     *
+     * All three must hold: the admin toggle is on (and a key is stored),
+     * the invoice carries a QuickBooks id (the applied link is addressed by
+     * it), and the status is client-payable. Every Blade surface and the
+     * portal action read this one predicate, so "toggle off" or "no QBO id"
+     * is Stripe on all of them at once.
+     */
+    public function paysOnlineViaBenjiPays(): bool
+    {
+        return $this->qbo_invoice_id !== null
+            && trim((string) $this->qbo_invoice_id) !== ''
+            && $this->status->isClientPayable()
+            && \App\Support\BenjiPaysConfig::payOnlineEnabled();
+    }
+
+    /**
      * Atomically record a billing-backend push result at the invoice row.
      *
      * The single guarded write-point every push writer funnels through — QBO

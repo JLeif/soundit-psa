@@ -152,7 +152,13 @@
                                             @include('portal.invoices.partials.qbo-balance-note')
                                         </td>
                                         <td class="text-end">
-                                            @if($invoice->stripe_invoice_url && $invoice->status->isClientPayable())
+                                            @if($invoice->paysOnlineViaBenjiPays())
+                                                {{-- #2065: POST mints a BenjiPays applied link priced at the balance. --}}
+                                                <form method="POST" action="{{ route('portal.invoices.pay-online', $invoice) }}" class="d-inline">
+                                                    @csrf
+                                                    <button type="submit" class="btn btn-sm btn-accent">Pay Online</button>
+                                                </form>
+                                            @elseif($invoice->stripe_invoice_url && $invoice->status->isClientPayable())
                                                 <a href="{{ $invoice->stripe_invoice_url }}" target="_blank" class="btn btn-sm btn-accent">Pay Online</a>
                                             @endif
                                         </td>

@@ -129,6 +129,7 @@ class IntegrationsController extends Controller
         $benjipaysConfigured = BenjiPaysConfig::isConfigured();
         $benjipaysLastVerifiedAt = $fmtTs(Setting::getValue('benjipays_last_verified_at'));
         $benjipaysLastOutcome = Setting::getValue('benjipays_last_verification_outcome');
+        $benjipaysPayOnline = Setting::getValue(BenjiPaysConfig::PAY_ONLINE_SETTING, '0') === '1';
 
         // Level
         $levelHasApiKey = (bool) (Setting::getValue('level_api_key') ?? config('services.level.api_key'));
@@ -547,6 +548,7 @@ class IntegrationsController extends Controller
             'benjipaysConfigured',
             'benjipaysLastVerifiedAt',
             'benjipaysLastOutcome',
+            'benjipaysPayOnline',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
@@ -779,6 +781,30 @@ class IntegrationsController extends Controller
         Setting::setValue('benjipays_last_verification_outcome', $outcome);
 
         return redirect()->route('settings.integrations')->with($outcome === 'ok' ? 'success' : 'error', $message);
+    }
+
+    /**
+     * Admin-only switch: route portal Pay Online through a BenjiPays applied
+     * link (#2065). Refuses to turn on without a stored key; turning off never
+     * touches the key. Stored '1'/'0' like every sibling *_enabled setting.
+     */
+    public function updateBenjiPaysPayOnline(Request $request)
+    {
+        $enabled = $request->boolean('enabled');
+
+        if ($enabled && ! BenjiPaysConfig::isConfigured()) {
+            Setting::setValue(BenjiPaysConfig::PAY_ONLINE_SETTING, '0');
+
+            return redirect()->route('settings.integrations')
+                ->with('error', 'BenjiPays Pay Online requires a stored API key before it can be enabled.');
+        }
+
+        Setting::setValue(BenjiPaysConfig::PAY_ONLINE_SETTING, $enabled ? '1' : '0');
+
+        return redirect()->route('settings.integrations')
+            ->with('success', $enabled
+                ? 'Portal Pay Online now uses BenjiPays applied links.'
+                : 'Portal Pay Online uses Stripe.');
     }
 
     public function updateBenjiPays(Request $request)

@@ -11,6 +11,8 @@ use App\Models\Contract;
 use App\Models\Invoice;
 use App\Models\Setting;
 use App\Models\Sku;
+use App\Services\BenjiPays\BenjiPaysException;
+use App\Services\BenjiPays\BenjiPaysPayOnline;
 use App\Services\InvoiceService;
 use App\Services\InvoiceVoidService;
 use App\Services\Qbo\QboClientException;
@@ -18,6 +20,7 @@ use App\Services\Qbo\QboSyncService;
 use App\Services\Stripe\StripeClient;
 use App\Services\Stripe\StripeClientException;
 use App\Services\Stripe\StripeSyncService;
+use App\Support\BenjiPaysConfig;
 use App\Support\StripeConfig;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -158,6 +161,39 @@ class InvoiceController extends Controller
 
         return redirect()->route('invoices.show', $invoice)
             ->with('success', 'Invoice updated.');
+    }
+
+    /**
+     * Admin-only "Preview BenjiPays link" (#2065): mint an applied link for
+     * this invoice and show the URL and expiry on the page, so an operator
+     * can open it and see what amount the vendor presents for a real
+     * partially paid invoice. Minting moves no money. Independent of the
+     * portal toggle so it can be checked before the toggle is flipped;
+     * needs a stored key, a QBO id and a client-payable status. Any failure
+     * is the client's own status-only message, never a vendor string.
+     */
+    public function previewBenjiPaysLink(Invoice $invoice, BenjiPaysPayOnline $payOnline)
+    {
+        if (! BenjiPaysConfig::isConfigured()) {
+            return redirect()->route('invoices.show', $invoice)
+                ->with('error', 'BenjiPays is not configured.');
+        }
+        if (! $invoice->qbo_invoice_id || ! $invoice->status->isClientPayable()) {
+            return redirect()->route('invoices.show', $invoice)
+                ->with('error', 'A BenjiPays link needs a client-payable invoice with a QuickBooks id.');
+        }
+
+        try {
+            $link = $payOnline->linkFor($invoice);
+        } catch (BenjiPaysException $e) {
+            return redirect()->route('invoices.show', $invoice)
+                ->with('error', 'BenjiPays link preview failed: '.$e->getMessage());
+        }
+
+        return redirect()->route('invoices.show', $invoice)->with('benjipays_preview', [
+            'url' => $link->url,
+            'expires_at' => $link->expiresAt->toIso8601String(),
+        ]);
     }
 
     public function pushToQbo(Invoice $invoice, QboSyncService $syncService)

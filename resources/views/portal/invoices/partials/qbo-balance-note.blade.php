@@ -21,7 +21,11 @@
         {{-- toAppTz(): created_at is stored UTC, and an as-of date the client
              reads a day out is the same quiet lie as no date at all. --}}
         still owed per QuickBooks as of {{ $qboBalanceLog->created_at->toAppTz()->format('M j, Y') }}.
-        @if($invoice->stripe_invoice_url && $invoice->status->isClientPayable())
+        @if($invoice->paysOnlineViaBenjiPays())
+            {{-- #2065: Pay Online opens a BenjiPays applied link, which the
+                 vendor prices at the invoice's remaining balance, so the
+                 Stripe full-amount warning below would now be false. --}}
+        @elseif($invoice->stripe_invoice_url && $invoice->status->isClientPayable())
             {{-- Pay Online is a hosted payment page created for the FULL
                  invoice amount; nothing here can re-price it. Saying so beside
                  the button is the honest v1 — quietly letting a client pay the
