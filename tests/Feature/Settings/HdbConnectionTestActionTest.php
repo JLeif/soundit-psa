@@ -205,6 +205,38 @@ class HdbConnectionTestActionTest extends TestCase
         $this->assertStringNotContainsString(self::BEACON, json_encode($row->toArray()));
     }
 
+    public function test_an_unevaluated_post_reports_its_own_symbol_through_the_action_not_a_credential_verdict(): void
+    {
+        // The portal re-serving its bare login form (measured 2026-09-17 for
+        // an empty submit field) is not a credential verdict, and neither the
+        // audit row nor the operator sentence may say it is.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->loginPage()),
+        ]);
+
+        $response = $this->actingAs(User::factory()->create())
+            ->postJson(route('settings.integrations.hdb.test'))
+            ->assertOk()
+            ->assertJson(['success' => false]);
+
+        $row = McpAuditLog::where('method', 'hdb/test_connection')->sole();
+
+        $this->assertSame('error', $row->status);
+        $this->assertSame(HdbAuthResult::REASON_LOGIN_NOT_EVALUATED, $row->error_message);
+        $this->assertNull(Setting::getValue('hdb_connected_at'));
+        $this->assertSame(
+            (new HdbAuthResult(\App\Services\Hdb\HdbAuthStatus::Rejected, HdbAuthResult::REASON_LOGIN_NOT_EVALUATED))->message(),
+            $response->json('message'),
+        );
+        $this->assertStringNotContainsString(self::BEACON, $response->getContent());
+        $this->assertStringNotContainsString(
+            (new HdbAuthResult(\App\Services\Hdb\HdbAuthStatus::Rejected, HdbAuthResult::REASON_CREDENTIALS_REJECTED))->message(),
+            $response->getContent(),
+        );
+    }
+
     public function test_it_never_stores_the_password_or_seed_in_the_audit_row(): void
     {
         Setting::setEncrypted('hdb_totp_secret', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');

@@ -35,9 +35,9 @@ use Illuminate\Support\Facades\Http;
  *   answers a wrong pair with the login page plus a notice whose class carries
  *   `notify--bad` and whose text is `Invalid email or password`; a post whose
  *   `g` is the HTML's ASCII value gets `Invalid Captcha` in the same block.
- *   Those two sentences and the second-factor markers are the only portal
- *   prose this client reads, and it reads them only to pick a closed-vocabulary
- *   symbol — the text never leaves here.
+ *   The notice text, the second-factor markers and the challenge form's
+ *   field names are the portal prose this client reads, each only to pick a
+ *   closed-vocabulary symbol or a field to post to — none of it leaves here.
  * - **`g` is a bot trap.** The HTML ships `value='g'` (ASCII) and a DOMContentLoaded
  *   handler overwrites it with `ɡ` — U+0261 LATIN SMALL LETTER SCRIPT G. A client
  *   that posts the value it found in the HTML identifies itself as not having run
@@ -124,17 +124,23 @@ final class HdbAuthClient
 
     /**
      * The class token the portal puts on its refusal notice. Structural: the
-     * element is found by this token, and only its own text is then compared
-     * against the two known notices below. An element carrying the token but
-     * no text is a placeholder, not a notice.
+     * element is found by this whole-class token on its `class` attribute,
+     * and only its own visible text is then compared against the two known
+     * notices below. An element carrying the token but no text is a
+     * placeholder, not a notice.
      */
     private const REFUSAL_NOTICE_CLASS = 'notify--bad';
 
     /**
      * The two refusal notices measured 2026-09-17, each mapped to the
      * closed-vocabulary symbol it means. Matched case-insensitively as a
-     * substring of the notice's text only. Any other notice text reports
+     * substring of a notice's visible text only. Any other notice text reports
      * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, and the text stays here.
+     *
+     * The captcha notice is mapped even though this client always posts the
+     * JS guard value: it is the portal's word that the guard, not the
+     * credentials, was judged — which is what to report if the guard's
+     * expected value ever changes underneath us.
      */
     private const REFUSAL_NOTICES = [
         'invalid email or password' => HdbAuthResult::REASON_CREDENTIALS_REJECTED,
@@ -251,6 +257,15 @@ final class HdbAuthClient
             }
 
             $body = (string) $posted;
+
+            // The portal's own refusal notice outranks everything else on the
+            // page, INCLUDING a code-shaped form: a page that has just said the
+            // credentials were refused is not a second-factor prompt, and a
+            // live one-time code is never posted to it.
+            $noticed = $this->refusalNoticeReason($body);
+            if ($noticed !== null) {
+                return $this->result(HdbAuthStatus::Rejected, $noticed);
+            }
 
             $challenge = $this->findChallengeForm($body, $this->effectiveUrl);
             if ($challenge !== null) {
@@ -381,7 +396,9 @@ final class HdbAuthClient
      * structural proof of the login page — which, without a notice, means the
      * post was NOT evaluated; second-factor prose is proof the password leg
      * SUCCEEDED; and only a page carrying none of these is read as signed in —
-     * the negative success test declared on the class docblock.
+     * the negative success test declared on the class docblock. That last
+     * branch is where a notice this client failed to find would land, which is
+     * why the notice read is a real HTML parse and not a substring hunt.
      *
      * @param  ?string  $noticeReason  the symbol a refusal notice reports on this
      *                                 leg, or null to let the notice's own kind
@@ -424,52 +441,110 @@ final class HdbAuthClient
      * or null when the page carries no notice.
      *
      * Structural first, textual second, and the text is read ONLY inside the
-     * notice element: an element whose `class` attribute carries the
-     * {@see REFUSAL_NOTICE_CLASS} token is the notice, and its own text — tags
-     * stripped, entities decoded, whitespace collapsed — is compared against
-     * the two measured notices. Anything else on the page, including the same
-     * words in a script or a comment, is not a notice. A notice this client
-     * has not seen reports REASON_LOGIN_REFUSED_UNRECOGNISED; an empty one is a
-     * placeholder and reports nothing.
+     * notice element. The page is parsed as HTML (libxml, the same parser the
+     * browser-side observation was made with, minus scripting), every element
+     * whose `class` attribute carries {@see REFUSAL_NOTICE_CLASS} as a whole
+     * class name is a notice, and its own visible text — script and style
+     * content dropped, whitespace collapsed — is compared against the two
+     * measured notices. Words in a comment, a script, another attribute, or
+     * an attribute merely NAMED like `class` are not a notice. An empty notice
+     * is a placeholder and reports nothing on its own.
+     *
+     * Every notice on the page is read: a recognised sentence wins wherever it
+     * sits, and a page whose notices are all unfamiliar reports
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, the text discarded here.
+     * A page libxml cannot parse at all reports the same: the portal said
+     * something and this client could not read it, which is never "no notice".
      *
      * Nothing off the page reaches the returned symbol: the match selects a
      * constant, and the notice text is discarded here.
      */
     private function refusalNoticeReason(string $body): ?string
     {
-        // The opening tag of every element whose class attribute carries the
-        // token as a whole class name, then that element's inner text up to
-        // the next closing tag. The notice is a leaf-ish block; nested inline
-        // tags inside it are stripped, a nested block would end the read early
-        // and, at worst, produce the unrecognised symbol — fail-closed.
-        $pattern = '~<([a-z][a-z0-9]*)\b[^>]*\bclass\s*=\s*(?:"[^"]*(?<![\w-])'
-            .preg_quote(self::REFUSAL_NOTICE_CLASS, '~')
-            .'(?![\w-])[^"]*"|\'[^\']*(?<![\w-])'
-            .preg_quote(self::REFUSAL_NOTICE_CLASS, '~')
-            .'(?![\w-])[^\']*\')[^>]*>(.*?)</\1\s*>~is';
-
-        if (! preg_match_all($pattern, $body, $notices, PREG_SET_ORDER)) {
-            return null;
+        $document = $this->parseHtml($body);
+        if ($document === null) {
+            return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
         }
 
-        foreach ($notices as $notice) {
-            $text = html_entity_decode(strip_tags($notice[2]), ENT_QUOTES | ENT_HTML5);
-            $text = trim((string) preg_replace('~\s+~u', ' ', $text));
+        $sawNotice = false;
+        $token = self::REFUSAL_NOTICE_CLASS;
 
+        foreach ((new \DOMXPath($document))->query('//*[@class]') ?: [] as $element) {
+            if (! $element instanceof \DOMElement) {
+                continue;
+            }
+
+            $classes = preg_split('~\s+~', trim($element->getAttribute('class'))) ?: [];
+            if (! in_array($token, $classes, true)) {
+                continue;
+            }
+
+            $text = $this->visibleText($element);
             if ($text === '') {
                 continue;
             }
 
+            $sawNotice = true;
+
             foreach (self::REFUSAL_NOTICES as $needle => $reason) {
-                if (stripos($text, $needle) !== false) {
+                if (mb_stripos($text, $needle) !== false) {
                     return $reason;
                 }
             }
-
-            return HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED;
         }
 
-        return null;
+        return $sawNotice ? HdbAuthResult::REASON_LOGIN_REFUSED_UNRECOGNISED : null;
+    }
+
+    /**
+     * Parse a page as HTML, or null when libxml could not.
+     *
+     * Parsed as UTF-8 regardless of what the page declares: the portal serves
+     * UTF-8, and a page in some other encoding degrades to mismatched text —
+     * an unrecognised notice — rather than to "no notice". Entities are
+     * substituted by the parser, so `&amp;` and friends never reach the
+     * comparison as markup. No network access is possible from here: no
+     * external DTD or entity is ever loaded.
+     */
+    private function parseHtml(string $body): ?\DOMDocument
+    {
+        $document = new \DOMDocument;
+        $previous = libxml_use_internal_errors(true);
+
+        try {
+            $loaded = $document->loadHTML(
+                '<?xml encoding="UTF-8">'.$body,
+                LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR,
+            );
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+
+        return $loaded ? $document : null;
+    }
+
+    /**
+     * The text a person would see inside an element: script and style content
+     * dropped, comments ignored, element boundaries treated as whitespace so
+     * an inline tag never glues two words together, whitespace collapsed.
+     */
+    private function visibleText(\DOMNode $node): string
+    {
+        $parts = [];
+
+        foreach ($node->childNodes as $child) {
+            if ($child instanceof \DOMText) {
+                $parts[] = $child->wholeText;
+            } elseif ($child instanceof \DOMElement) {
+                if (in_array(strtolower($child->tagName), ['script', 'style', 'template'], true)) {
+                    continue;
+                }
+                $parts[] = $this->visibleText($child);
+            }
+        }
+
+        return trim((string) preg_replace('~\s+~u', ' ', implode(' ', $parts)));
     }
 
     /**
