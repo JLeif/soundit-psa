@@ -194,6 +194,30 @@ class TicketDescriptionEditTest extends TestCase
         $this->assertStringNotContainsString('ACME Corp', (string) $ticket->rendered_description);
     }
 
+    public function test_an_edited_description_with_line_breaks_renders_them(): void
+    {
+        // Charlie, 2026-09-17: after editing an email-originated description the
+        // line breaks he typed were lost on save. The prefill is one line per
+        // line, so under strict CommonMark soft breaks the saved text rendered
+        // as run-on paragraphs. Jeeves's ruling: a typed line break is a
+        // rendered line break (card 6aab4346, 10:57 PT).
+        $ticket = Ticket::factory()->create([
+            'description' => null,
+            'description_html' => '<p>Original email body</p>',
+        ]);
+
+        $this->actingAs(User::factory()->create())
+            ->patch(route('tickets.update', $ticket), ['description' => "First line\nSecond line\n\nNew paragraph"])
+            ->assertRedirect(route('tickets.show', $ticket));
+
+        $this->actingAs(User::factory()->create())
+            ->get(route('tickets.show', $ticket))
+            ->assertOk()
+            ->assertSee("First line<br />\nSecond line", false)
+            ->assertSee('<p>New paragraph</p>', false)
+            ->assertDontSee('Original email body');
+    }
+
     public function test_a_writer_that_supplies_both_fields_keeps_its_own_rendered_html(): void
     {
         // The email ingest and importers set description and description_html in
