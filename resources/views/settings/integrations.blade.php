@@ -470,6 +470,12 @@
                         <button type="submit" class="btn btn-outline-primary btn-sm">Test connection</button>
                         <span class="text-muted small">Reads one company (companyView). No polling, elevation changes, or verification of other scopes.</span>
                     </form>
+                    <div class="mt-3 pt-3 border-top">
+                        <a href="{{ route('settings.autoelevate-companies.index') }}" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-diagram-3 me-1"></i>Map companies
+                        </a>
+                        <span class="text-muted small ms-1">Link AutoElevate companies to clients; read-only.</span>
+                    </div>
                 @endif
                 @if($autoelevateLastVerifiedAt)
                     <p class="small mt-2 mb-0">Last connection attempt: {{ $autoelevateLastVerifiedAt }}.

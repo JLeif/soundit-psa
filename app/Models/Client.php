@@ -37,6 +37,7 @@ class Client extends Model
         'unifi_host_id',
         'servosity_company_id',
         'controld_org_id',
+        'autoelevate_company_id',
         'zorus_customer_id',
         'appriver_customer_id',
         'printix_tenant_id',
