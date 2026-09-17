@@ -124,9 +124,12 @@ class ControlDOrganizationMappingTest extends TestCase
         $this->assertSame('org-bound', $bound->fresh()->controld_org_id);
         // The refusal must be RENDERED on the client page, not merely flashed: an invisible
         // refusal is exactly the silent skip the ruling forbids (#2010).
+        // The rendered refusal must also name the conflict, as the client page has no other
+        // way to tell the operator which identity is in the way.
         $this->get(route('clients.show', $bound))->assertOk()
             ->assertSee('Integration mapping not changed.')
-            ->assertSee('Existing Control D identities cannot be cleared');
+            ->assertSee('Existing Control D identities cannot be cleared')
+            ->assertSee('was onboarded to organization org-bound');
         $this->post(route('clients.integrations.unlink', [$manual, 'controld']))->assertRedirect();
         $this->assertNull($manual->fresh()->controld_org_id);
     }
@@ -170,6 +173,26 @@ class ControlDOrganizationMappingTest extends TestCase
         $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-new', 'org-gone-upstream'], 'mappings' => ['org-new' => $new->id]])
             ->assertSessionHasErrors('mappings');
         $this->assertSame('org-gone-upstream', $stale->fresh()->controld_org_id);
+    }
+
+    public function test_a_mapped_owner_the_select_cannot_offer_does_not_block_unrelated_saves(): void
+    {
+        // The select's options are Client::operational() only, so a deactivated (not deleted)
+        // owner cannot be preselected and its organization posts empty even though the page
+        // listed that organization. That absence is the form's shape, not a clear request.
+        $inactive = Client::factory()->create(['controld_org_id' => 'org-inactive', 'is_active' => false]);
+        $new = Client::factory()->create();
+
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-inactive', 'org-new'], 'mappings' => ['org-new' => $new->id]])
+            ->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertSame('org-inactive', $inactive->fresh()->controld_org_id);
+        $this->assertSame('org-new', $new->fresh()->controld_org_id);
+
+        // An owner the select DOES offer is still a refused clear when its org was listed.
+        $selectable = Client::factory()->create(['controld_org_id' => 'org-selectable']);
+        $this->post(route('settings.controld-orgs.update'), ['listed' => ['org-selectable', 'org-new'], 'mappings' => ['org-new' => $new->id]])
+            ->assertSessionHasErrors('mappings');
+        $this->assertSame('org-selectable', $selectable->fresh()->controld_org_id);
     }
 
     private function bound(Client $client): void

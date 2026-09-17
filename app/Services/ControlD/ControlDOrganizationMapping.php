@@ -22,6 +22,10 @@ class ControlDOrganizationMapping
         return DB::transaction(function () use ($mappings, $listed) {
             // Same client locks as the onboarding writers. Include deleted owners.
             $clients = Client::withTrashed()->orderBy('id')->lockForUpdate()->get();
+            // The select's options are Client::operational() only, so a mapped owner outside
+            // that set cannot be preselected and its organization posts empty however the page
+            // listed it. Same predicate as the controller that builds the options.
+            $selectable = Client::operational()->pluck('id')->map(fn ($id): int => (int) $id)->all();
             $wanted = [];
             foreach ($mappings as $pk => $id) {
                 if ($id === null || $id === '') {
@@ -41,13 +45,16 @@ class ControlDOrganizationMapping
             foreach ($clients as $client) {
                 $pk = $wanted[$client->id] ?? null;
                 if ($client->controld_org_id !== null) {
-                    // A mapping counts as CLEARED only when the submitting form actually offered
-                    // its organization. An org the page never rendered (gone upstream, outside
-                    // the listing, owner not selectable) is absent from the POST for reasons that
+                    // A mapping counts as CLEARED only when the submitting form could actually
+                    // have carried it: its organization was rendered AND its owner is among the
+                    // clients the select offers. An org the page never rendered (gone upstream,
+                    // outside the listing) or an owner the select cannot preselect (not
+                    // operational, so not an option) is absent from the POST for reasons that
                     // are not the operator's intent, and reading that absence as a clear made one
                     // stale mapping refuse every later save on the page, additive ones included.
                     // Deleted rows are not in the form, but still reserve their identity.
-                    $offered = $listed === null || in_array($client->controld_org_id, $listed, true);
+                    $offered = $listed === null
+                        || (in_array($client->controld_org_id, $listed, true) && in_array((int) $client->id, $selectable, true));
                     if (! $client->trashed() && $pk !== $client->controld_org_id && ($pk !== null || $offered)) {
                         $this->refuse("client #{$client->id} is already mapped to organization {$client->controld_org_id}");
                     }
@@ -110,14 +117,19 @@ class ControlDOrganizationMapping
     public function assertClientChangeAllowed(Client $client, ?string $orgPk): void
     {
         $bound = ControlDOnboardingIntent::where('client_id', $client->id)->where('state', 'bound');
-        if ($client->controld_org_id !== null && $orgPk !== $client->controld_org_id && (clone $bound)->exists()) {
-            $this->refuse();
+        if ($client->controld_org_id !== null && $orgPk !== $client->controld_org_id
+            && ($onboarded = (clone $bound)->first(['org_pk'])) !== null) {
+            $this->refuse("client #{$client->id} was onboarded to organization {$onboarded->org_pk}");
         }
         if ($orgPk !== null) {
-            if ((clone $bound)->where('org_pk', '!=', $orgPk)->exists()
-                || ControlDOnboardingIntent::where('state', 'bound')->where('org_pk', $orgPk)->where('client_id', '!=', $client->id)->exists()
-                || Client::withTrashed()->where('controld_org_id', $orgPk)->where('id', '!=', $client->id)->exists()) {
-                $this->refuse();
+            if (($elsewhere = (clone $bound)->where('org_pk', '!=', $orgPk)->first(['org_pk'])) !== null) {
+                $this->refuse("client #{$client->id} was onboarded to organization {$elsewhere->org_pk}");
+            }
+            if (($onboardedFor = ControlDOnboardingIntent::where('state', 'bound')->where('org_pk', $orgPk)->where('client_id', '!=', $client->id)->first(['client_id'])) !== null) {
+                $this->refuse("organization {$orgPk} was onboarded for client #{$onboardedFor->client_id}");
+            }
+            if (($holder = Client::withTrashed()->where('controld_org_id', $orgPk)->where('id', '!=', $client->id)->first(['id'])) !== null) {
+                $this->refuse("organization {$orgPk} belongs to client #{$holder->id}");
             }
         }
     }
