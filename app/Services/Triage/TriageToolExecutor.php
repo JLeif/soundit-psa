@@ -26,6 +26,7 @@ use App\Services\Tactical\TacticalPlatform;
 use App\Services\Wiki\HandlesWikiTools;
 use App\Support\ControlDConfig;
 use App\Support\PaginatesTicketLists;
+use App\Support\TacticalConfig;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
@@ -998,6 +999,10 @@ class TriageToolExecutor
 
     private function tacticalGetDevice(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1060,6 +1065,10 @@ class TriageToolExecutor
 
     private function tacticalGetDeviceChecks(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1124,6 +1133,10 @@ class TriageToolExecutor
 
     private function tacticalGetDeviceNetwork(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1149,6 +1162,10 @@ class TriageToolExecutor
 
     private function tacticalGetDeviceSoftware(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1189,6 +1206,10 @@ class TriageToolExecutor
 
     private function tacticalGetDeviceServices(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1242,6 +1263,10 @@ class TriageToolExecutor
 
     private function tacticalGetDeviceDisks(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         if (! $hostname) {
             return ['error' => 'hostname is required'];
@@ -1438,6 +1463,10 @@ class TriageToolExecutor
 
     private function tacticalRunDiagnostic(array $input): array
     {
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM integration is disabled'];
+        }
+
         $hostname = $input['hostname'] ?? null;
         $diagnostic = $input['diagnostic'] ?? null;
 

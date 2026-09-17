@@ -861,15 +861,16 @@ class TriageToolDefinitions
         }
     }
 
-    // Tactical and Comet need no change: for both, isEnabled() is defined AS isConfigured()
-    // (TacticalConfig.php:51, CometConfig.php:35), so there is no separate master switch to
-    // ignore and adding the conjunct would be a no-op. Verified, not assumed — this is a
-    // deliberate exclusion, not an oversight.
+    // Comet needs no change: CometConfig::isEnabled() is defined AS isConfigured(), so there
+    // is no separate master switch to ignore. Tactical DOES have one — Settings has always
+    // rendered a `tactical_enabled` "Integration enabled" switch — and an earlier note here
+    // wrongly claimed otherwise, so switching Tactical off left its tools live. isAvailable()
+    // is switch AND credentials.
 
     public static function isTacticalAvailable(): bool
     {
         try {
-            return TacticalConfig::isConfigured();
+            return TacticalConfig::isAvailable();
         } catch (\Throwable) {
             return false;
         }

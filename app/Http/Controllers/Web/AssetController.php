@@ -113,6 +113,7 @@ class AssetController extends Controller
     {
         $asset = Asset::withTrashed()->findOrFail($asset);
         $asset->load(['client', 'contracts', 'activeAlerts', 'users', 'tacticalAsset']);
+        $this->hideTacticalWhenDisabled($asset);
 
         // On-access full enrichment for Ninja-linked assets
         $backupJobs = null;
@@ -385,6 +386,20 @@ class AssetController extends Controller
     }
 
     /**
+     * OFF=OFF for the asset page: with the Tactical integration switched off the
+     * synced tactical_assets row stays in the DB, but the page must behave as if
+     * the asset were unlinked — no Tactical card, actions, panels, or OS-conflict
+     * badge. Every one of those keys off the relation, so blanking it here hides
+     * them all without threading a flag through the view.
+     */
+    private function hideTacticalWhenDisabled(Asset $asset): void
+    {
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            $asset->setRelation('tacticalAsset', null);
+        }
+    }
+
+    /**
      * The snapshot-only EndpointInsight for the eager card health line + freshness
      * (P4 amendments B/H). forAsset() (no $live) makes ZERO outbound Tactical
      * calls — the page renders instantly from the snapshot + local DB. Null when
@@ -440,6 +455,7 @@ class AssetController extends Controller
 
         // Load same data as show()
         $asset->load(['client', 'contracts', 'activeAlerts', 'users', 'tacticalAsset']);
+        $this->hideTacticalWhenDisabled($asset);
 
         $this->refreshHealth($asset);
 
@@ -757,7 +773,7 @@ class AssetController extends Controller
         $tacticalAsset = $asset->tacticalAsset;
 
         // If no Tactical link, try to find and link the agent by hostname
-        if (! $tacticalAsset && \App\Support\TacticalConfig::isConfigured() && $asset->hostname) {
+        if (! $tacticalAsset && \App\Support\TacticalConfig::isAvailable() && $asset->hostname) {
             try {
                 $tacticalClient = app(\App\Services\Tactical\TacticalClient::class);
                 $agents = $tacticalClient->getAgents();
@@ -782,7 +798,7 @@ class AssetController extends Controller
             }
         }
 
-        if ($tacticalAsset && \App\Support\TacticalConfig::isConfigured()) {
+        if ($tacticalAsset && \App\Support\TacticalConfig::isAvailable()) {
             try {
                 $tacticalClient = app(\App\Services\Tactical\TacticalClient::class);
                 $tacticalClient->setAgentCustomField(
@@ -824,7 +840,7 @@ class AssetController extends Controller
 
         // Auto-link Tactical agent by hostname if needed
         $tacticalAsset = $asset->tacticalAsset;
-        if (! $tacticalAsset && \App\Support\TacticalConfig::isConfigured() && $asset->hostname) {
+        if (! $tacticalAsset && \App\Support\TacticalConfig::isAvailable() && $asset->hostname) {
             try {
                 $tacticalClient = app(\App\Services\Tactical\TacticalClient::class);
                 $agents = $tacticalClient->getAgents();
@@ -843,6 +859,10 @@ class AssetController extends Controller
             } catch (\Exception $e) {
                 Log::warning('[Servosity] Failed to auto-link Tactical agent: '.$e->getMessage());
             }
+        }
+
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return redirect($redirectTo)->with('error', 'Servosity backup deploys through Tactical RMM, which is disabled.');
         }
 
         if (! $asset->tacticalAsset) {
@@ -950,6 +970,10 @@ class AssetController extends Controller
 
         $asset->load('tacticalAsset');
 
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         // Only the not-linked case is a hard pre-check. M4: do NOT gate on the
         // daily-stale snapshot status — let the bus attempt and report `offline`
         // as the source of truth (a device the snapshot calls offline may have
@@ -1019,6 +1043,10 @@ class AssetController extends Controller
 
         $asset->load('tacticalAsset');
 
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
         }
@@ -1078,6 +1106,10 @@ class AssetController extends Controller
     {
         $asset->load('tacticalAsset');
 
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
         }
@@ -1114,6 +1146,10 @@ class AssetController extends Controller
         ]);
 
         $asset->load('tacticalAsset');
+
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
 
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
@@ -1157,6 +1193,10 @@ class AssetController extends Controller
     public function refreshTactical(Asset $asset, \App\Services\Tactical\TacticalDeviceSyncService $sync)
     {
         $asset->load('tacticalAsset');
+
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
 
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
@@ -1202,6 +1242,11 @@ class AssetController extends Controller
         ]);
 
         $asset->load('tacticalAsset');
+
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         $agentId = $asset->tacticalAsset->agent_id ?? null;
 
         if (! $agentId) {
@@ -1284,6 +1329,10 @@ class AssetController extends Controller
 
         $asset->load('tacticalAsset');
 
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
         }
@@ -1341,6 +1390,10 @@ class AssetController extends Controller
         ]);
 
         $asset->load('tacticalAsset');
+
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
 
         if (! $asset->tacticalAsset || empty($asset->tacticalAsset->agent_id)) {
             return response()->json(['error' => 'This device is not linked to a Tactical agent.'], 422);
@@ -1531,7 +1584,7 @@ class AssetController extends Controller
         $asset->loadMissing('tacticalAsset');
         if ($request->query('source') === 'tactical'
             && $asset->tacticalAsset
-            && \App\Support\TacticalConfig::isConfigured()) {
+            && \App\Support\TacticalConfig::isAvailable()) {
             $panel = app(\App\Services\Tactical\TacticalPanelData::class);
 
             return response()->json($panel->section($asset->tacticalAsset, $section));
@@ -1550,7 +1603,7 @@ class AssetController extends Controller
         // card region, not the page-top Ninja/Level tabs. Each section is a bounded
         // live read that degrades to the {error:…} payload the JS already renders.
         // (Tactical-only assets reach here without needing the source param.)
-        if ($asset->tacticalAsset && \App\Support\TacticalConfig::isConfigured()) {
+        if ($asset->tacticalAsset && \App\Support\TacticalConfig::isAvailable()) {
             $panel = app(\App\Services\Tactical\TacticalPanelData::class);
 
             return response()->json($panel->section($asset->tacticalAsset, $section));

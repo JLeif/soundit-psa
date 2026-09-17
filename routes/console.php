@@ -114,10 +114,10 @@ Schedule::command('tactical:reconcile-alerts')
     ->hourly()
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => \App\Support\TacticalConfig::isConfigured());
+    ->when(fn () => \App\Support\TacticalConfig::isAvailable());
 
 // Tactical RMM device sync — every tactical_sync_interval_seconds (default 300),
-// only if configured + clients mapped. Registered everyMinute with a deferred
+// only if enabled + configured + clients mapped. Registered everyMinute with a deferred
 // throttle, the same shape as the offline-queue sweep below: the interval Setting
 // is read at run time, never at schedule registration, so `php artisan` boots stay
 // DB-free.
@@ -131,7 +131,7 @@ Schedule::command('tactical:sync-devices')
     ->everyMinute()
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => \App\Support\TacticalConfig::isConfigured()
+    ->when(fn () => \App\Support\TacticalConfig::isAvailable()
         && \App\Models\Client::whereNotNull('tactical_site_id')->exists()
         && \App\Support\TacticalConfig::deviceSyncDue());
 
@@ -140,7 +140,7 @@ Schedule::command('tactical:sync-scripts')
     ->dailyAt('05:35')
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => \App\Support\TacticalConfig::isConfigured());
+    ->when(fn () => \App\Support\TacticalConfig::isAvailable());
 
 // Offline-script queue fallback sweep (bd psa-xr84) — runs queued actions whose
 // device is back online and expires stale ones. The device-sync hook + webhook
@@ -152,7 +152,7 @@ Schedule::command('tactical:sweep-queued-actions')
     ->everyMinute()
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => \App\Support\TacticalConfig::isConfigured() && \App\Support\TacticalConfig::offlineQueueSweepDue());
+    ->when(fn () => \App\Support\TacticalConfig::isAvailable() && \App\Support\TacticalConfig::offlineQueueSweepDue());
 
 // NinjaRMM backup usage + license sync — daily
 Schedule::command('ninja:sync-backup')

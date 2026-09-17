@@ -21,8 +21,8 @@ class TacticalSweepQueuedActions extends Command
 
     public function handle(OfflineActionSweep $sweep): int
     {
-        if (! TacticalConfig::isConfigured()) {
-            $this->error('Tactical RMM is not configured.');
+        if (! TacticalConfig::isAvailable()) {
+            $this->error('Tactical RMM is disabled or not configured.');
 
             return self::FAILURE;
         }

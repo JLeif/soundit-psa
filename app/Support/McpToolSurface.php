@@ -140,7 +140,7 @@ class McpToolSurface
             // StaffCippAdminToolExecutor refuses on exactly isEnabled() &&
             // isConfigured() — publish and dispatch answering one question (psa-wzjzz).
             $cippRestLive ? McpToolRegistry::cippAdminTools() : [],
-            TacticalConfig::isConfigured() ? McpToolRegistry::tacticalActionTools() : [],
+            TacticalConfig::isAvailable() ? McpToolRegistry::tacticalActionTools() : [],
             // Huntress escalation actions: gated on exactly the predicate
             // StaffHuntressActionToolExecutor refuses on — integration on,
             // read pair configured, AND the separate user-based write key

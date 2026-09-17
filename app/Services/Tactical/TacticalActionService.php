@@ -9,6 +9,7 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Tactical\Actions\InvalidActionParams;
 use App\Services\Tactical\Actions\TacticalAction;
 use App\Services\Tactical\Actions\TacticalActionResult;
+use App\Support\TacticalConfig;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -16,6 +17,7 @@ use Illuminate\Support\Str;
  * The Tactical action bus (spec §5.1, §5.2) — the single chokepoint EVERY
  * endpoint-affecting action flows through. One pipeline for all of them:
  *
+ *   0. enabled   — TacticalConfig::isEnabled() (switched off ⇒ `error`)
  *   1. resolve   — Asset → linked tactical_assets.agent_id (else `error`)
  *   2. authorize — single-tier capability gate (else `denied`)
  *   3. validate  — action->validateParams (InvalidActionParams ⇒ `rejected`)
@@ -57,6 +59,16 @@ class TacticalActionService
         $correlationId = (string) Str::uuid();
         $agentId = $target->tacticalAsset?->agent_id;
         $label = $this->resolveActorLabel($actor, $actorLabel);
+
+        // 0. integration switch (OFF=OFF) — every action path (web, ticket, MCP,
+        //    triage, offline sweep) converges here, so a switched-off integration
+        //    refuses cleanly instead of reaching the client's transport guard.
+        if (! TacticalConfig::isEnabled()) {
+            return $this->audit(
+                $action, $target, $actor, $label, $agentId ?: null, $params, $ticketId, $correlationId,
+                TacticalActionResult::error('Tactical RMM integration is disabled'),
+            );
+        }
 
         // 1. resolve
         if (empty($agentId)) {

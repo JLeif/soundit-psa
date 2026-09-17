@@ -78,6 +78,7 @@ class IntegrationsController extends Controller
         'zorus' => 'AI triage',
         'unifi' => 'MCP',
         'powerdmarc' => 'MCP',
+        'tactical' => 'AI triage and MCP',
     ];
 
     public function index(NinjaClient $ninja, LevelClient $level)
