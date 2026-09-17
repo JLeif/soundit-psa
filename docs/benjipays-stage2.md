@@ -48,11 +48,14 @@ signed-in portal user's client and is in a portal-visible status, re-checks
 the predicate (a stale form after the toggle was turned off falls back to
 Stripe), mints or reuses the cached link and 302s to it. Any
 `BenjiPaysException` is logged with its reason and HTTP status only, then:
-a **partially paid** invoice (`qboPartialBalanceLog()`) goes back to the
-invoice with the full amount named — never a silent 302 to the full-amount
-Stripe page, which is the overpayment #1173 exists to prevent and which this
-surface no longer warns about; anything else falls back to `stripe_invoice_url`
-when present, else back to the invoice with a generic flash. No vendor string
+a **partially paid** invoice (`qboPartialBalanceLog()`) that has a
+`stripe_invoice_url` goes back to the invoice with the full amount named —
+never a silent 302 to the full-amount Stripe page, which is the overpayment
+#1173 exists to prevent and which this surface no longer warns about. An
+invoice with no Stripe page has no full-amount route to withhold, so it is not
+told one was withheld; it, and anything else, falls back to
+`stripe_invoice_url` when present, else back to the invoice with a generic
+flash. No vendor string
 reaches the client or the log.
 
 `BenjiPaysPayOnline::linkFor()` caches the minted link per invoice

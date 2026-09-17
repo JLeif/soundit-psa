@@ -195,6 +195,26 @@ class PortalBenjiPaysPayOnlineTest extends TestCase
             ->assertDontSee('VENDOR-SECRET-TEXT')->assertDontSee(self::KEY);
     }
 
+    public function test_mint_failure_on_a_partially_paid_qbo_only_invoice_flashes_the_generic_message(): void
+    {
+        // No Stripe page exists for this invoice, so the partial-balance branch
+        // must not claim a full-amount Stripe page was withheld.
+        Http::fake(['https://api.benjipays.com/*' => Http::response(['detail' => 'VENDOR-SECRET-TEXT '.self::KEY], 503)]);
+        $invoice = $this->invoice(['status' => InvoiceStatus::Paid, 'stripe_invoice_url' => null]);
+        $this->partiallyRevert($invoice, 120.50);
+
+        $this->pay($invoice)
+            ->assertRedirect(route('portal.invoices.show', $invoice))
+            ->assertSessionHas('error', 'Online payment is temporarily unavailable. Please try again later or contact us.');
+
+        $this->assertStringNotContainsString('would charge the full', json_encode(session()->all()));
+        $this->assertStringNotContainsString('VENDOR-SECRET-TEXT', json_encode(session()->all()));
+
+        $this->actingAs($this->person, 'portal')->get(route('portal.invoices.show', $invoice))
+            ->assertOk()->assertSee('Online payment is temporarily unavailable')
+            ->assertDontSee('would charge the full');
+    }
+
     public function test_two_clicks_mint_once(): void
     {
         $this->fakeMint();
