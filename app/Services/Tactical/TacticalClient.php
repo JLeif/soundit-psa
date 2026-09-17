@@ -61,6 +61,7 @@ class TacticalClient
         // every request, closing the DNS-rebinding TOCTOU the save-time
         // SafeUrlInspector check leaves open.
         $stack = HandlerStack::create();
+        $stack->push(self::enabledGateMiddleware(), 'tactical_enabled_gate');
         $stack->push(self::ssrfPinMiddleware($resolver ?? 'gethostbynamel'), 'tactical_ssrf_pin');
 
         $this->http = new Client([
@@ -74,6 +75,32 @@ class TacticalClient
                 'Accept' => 'application/json',
             ],
         ]);
+    }
+
+    /**
+     * Guzzle middleware that refuses every outbound request while the operator's
+     * Tactical "Integration enabled" switch is off (OFF=OFF).
+     *
+     * This is the choke point that makes "disabled" mean no traffic: every
+     * request method (get/post/put/patch/delete and the raw createClient POST)
+     * converges on this handler stack, so no current or future caller can reach
+     * the API with the switch off — callers gate on TacticalConfig::isAvailable()
+     * to stay quiet, this guarantees it. Evaluated per request, not at
+     * construction, because the client is a container singleton that outlives
+     * a settings change in long-running queue workers. Throws before connect;
+     * NOT a transport failure, so the action bus never reads it as "offline".
+     */
+    public static function enabledGateMiddleware(): callable
+    {
+        return static function (callable $handler): callable {
+            return static function (RequestInterface $request, array $options) use ($handler) {
+                if (! TacticalConfig::isEnabled()) {
+                    throw new TacticalClientException('Tactical RMM integration is disabled.');
+                }
+
+                return $handler($request, $options);
+            };
+        };
     }
 
     /**
@@ -543,7 +570,7 @@ class TacticalClient
      */
     public static function cachedPolicies(): array
     {
-        if (! TacticalConfig::isConfigured()) {
+        if (! TacticalConfig::isAvailable()) {
             return [];
         }
 

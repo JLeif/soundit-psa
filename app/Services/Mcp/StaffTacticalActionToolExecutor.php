@@ -187,8 +187,8 @@ class StaffTacticalActionToolExecutor
     /** @return array<string, mixed> */
     public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
     {
-        if (! TacticalConfig::isConfigured()) {
-            return ['error' => 'Tactical RMM is not configured'];
+        if (! TacticalConfig::isAvailable()) {
+            return ['error' => 'Tactical RMM is disabled or not configured'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
@@ -217,6 +217,12 @@ class StaffTacticalActionToolExecutor
 
     public function approveStagedRun(TechnicianRun $run, int $approverId): TechnicianApprovalResult
     {
+        // Switched off (OFF=OFF): decline before claiming, so the run stays pending
+        // and can still be approved once the integration is back on.
+        if (! TacticalConfig::isEnabled()) {
+            return new TechnicianApprovalResult('gate_declined', message: 'Tactical RMM integration is disabled.');
+        }
+
         if (! self::isStagedActionType($run->action_type) || ! $run->claimForExecution()) {
             return new TechnicianApprovalResult('already_handled');
         }

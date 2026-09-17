@@ -6,6 +6,7 @@ use App\Models\Alert;
 use App\Models\Asset;
 use App\Models\TacticalActionLog;
 use App\Models\TacticalAsset;
+use App\Support\TacticalConfig;
 use Closure;
 use Illuminate\Support\Facades\Log;
 
@@ -45,7 +46,10 @@ class TacticalInsightService
     {
         $ta = $asset->tacticalAsset;
 
-        if (! $ta) {
+        // Switched off (OFF=OFF): the synced snapshot stays in the DB but is
+        // ignored — the asset page, AI context, and resolution drafts all read
+        // through here, so they all see "not linked".
+        if (! $ta || ! TacticalConfig::isEnabled()) {
             return EndpointInsight::notLinked();
         }
 

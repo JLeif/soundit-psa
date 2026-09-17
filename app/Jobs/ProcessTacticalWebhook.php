@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\TacticalWebhook;
 use App\Services\Tactical\TacticalAlertService;
+use App\Support\TacticalConfig;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
@@ -26,6 +27,13 @@ class ProcessTacticalWebhook implements ShouldQueue
 
         // Idempotent: a retry (or a duplicate dispatch) of an already-handled row no-ops.
         if (! $webhook || ! $webhook->isPending()) {
+            return;
+        }
+
+        // Switched off after this row was queued (OFF=OFF): keep the row, act on nothing.
+        if (! TacticalConfig::isEnabled()) {
+            $webhook->markSkipped('Tactical RMM integration is disabled');
+
             return;
         }
 

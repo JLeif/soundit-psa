@@ -15,8 +15,8 @@ class TacticalSyncScripts extends Command
 
     public function handle(): int
     {
-        if (! TacticalConfig::isConfigured()) {
-            $this->warn('Tactical RMM is not configured.');
+        if (! TacticalConfig::isAvailable()) {
+            $this->warn('Tactical RMM is disabled or not configured.');
 
             return self::FAILURE;
         }

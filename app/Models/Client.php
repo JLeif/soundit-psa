@@ -270,7 +270,8 @@ class Client extends Model
         if (! empty($this->level_group_id)) {
             $rmms[] = 'level';
         }
-        if (! empty($this->tactical_site_id)) {
+        // A mapped Tactical site only counts while the integration is switched on (OFF=OFF).
+        if (! empty($this->tactical_site_id) && \App\Support\TacticalConfig::isEnabled()) {
             $rmms[] = 'tactical';
         }
 

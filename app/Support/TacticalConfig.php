@@ -48,9 +48,35 @@ class TacticalConfig
         return ! empty(self::get('api_url')) && ! empty(self::get('api_key'));
     }
 
+    /**
+     * The operator's "Integration enabled" switch (Settings > Integrations),
+     * default ON so installs that never touched it keep working.
+     */
     public static function isEnabled(): bool
     {
-        return self::isConfigured();
+        return Setting::getValue('tactical_enabled', '1') === '1';
+    }
+
+    /**
+     * Both the switch and the credentials (OFF=OFF, psa-wzjzz). Switched off,
+     * Tactical is ignored everywhere: no API calls, no schedules, no AI/MCP
+     * tools, no UI panels or actions, no webhook processing. Synced data stays
+     * in the database and reappears when the switch is turned back on.
+     *
+     * Consumers that need the API (syncs, schedules, tool publication, Settings
+     * actions) gate on this. Consumers that only read synced rows or already
+     * failed cleanly without credentials (asset/ticket panels and actions, the
+     * action bus, webhooks, the offline queue) gate on isEnabled(). Only the
+     * Settings card itself reads isConfigured(), so the operator can still see
+     * and edit the credentials. TacticalClient::enabledGateMiddleware() is the
+     * backstop: no request leaves the box with the switch off.
+     */
+    public static function isAvailable(): bool
+    {
+        // Credentials first: an unconfigured install short-circuits on the api_url
+        // read and never pays the switch read (tools/list consults this 8x per
+        // request under a fixed query budget — McpToolsListResilienceTest).
+        return self::isConfigured() && self::isEnabled();
     }
 
     /**

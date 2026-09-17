@@ -567,6 +567,10 @@ class TicketController extends Controller
 
     public function runTacticalScript(Request $request, Ticket $ticket)
     {
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         $request->validate([
             'asset_id' => ['required', 'exists:assets,id'],
             'script_id' => ['required', 'exists:tactical_scripts,id'],
@@ -673,6 +677,10 @@ class TicketController extends Controller
      */
     public function runTacticalCommand(Request $request, Ticket $ticket)
     {
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return response()->json(['error' => 'Tactical RMM integration is disabled.'], 422);
+        }
+
         $request->validate([
             'asset_id' => ['required', 'exists:assets,id'],
             'hostname' => ['required', 'string', 'max:255'],

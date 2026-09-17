@@ -599,7 +599,9 @@
                         </form>
                     @endif
                     @php
-                        $tacticalAssets = $ticket->assets->filter(fn ($a) => $a->tacticalAsset && $a->tacticalAsset->status === 'online');
+                        $tacticalAssets = \App\Support\TacticalConfig::isEnabled()
+                            ? $ticket->assets->filter(fn ($a) => $a->tacticalAsset && $a->tacticalAsset->status === 'online')
+                            : collect();
                     @endphp
                     @if($tacticalAssets->isNotEmpty())
                         <button type="button" class="btn btn-outline-info btn-sm" data-bs-toggle="modal" data-bs-target="#tacticalScriptModal">

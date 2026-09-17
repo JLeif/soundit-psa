@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessTacticalWebhook;
 use App\Models\TacticalWebhook;
+use App\Support\TacticalConfig;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Validation\ValidationException;
@@ -35,6 +36,12 @@ class TacticalWebhookController extends Controller
      */
     public function handle(Request $request): Response
     {
+        // Switched off (OFF=OFF): ack so Tactical doesn't log delivery errors, but
+        // store and process nothing — no alerts, no tickets, no queue sweeps.
+        if (! TacticalConfig::isEnabled()) {
+            return response()->noContent();
+        }
+
         // Bound the body size before doing anything else.
         if (strlen($request->getContent()) > self::MAX_BODY_BYTES) {
             throw ValidationException::withMessages([

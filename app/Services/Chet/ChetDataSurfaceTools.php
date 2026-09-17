@@ -27,7 +27,7 @@ class ChetDataSurfaceTools
             ? TeamsChatReadToolset::definitions()
             : [];
 
-        if (TacticalConfig::isConfigured()) {
+        if (TacticalConfig::isAvailable()) {
             $tools = array_merge($tools, TacticalReadOnlyToolset::generalDefinitions());
         }
 
@@ -48,7 +48,7 @@ class ChetDataSurfaceTools
     /** @return array<int, array<string, mixed>> */
     public static function clientTools(): array
     {
-        $tools = TacticalConfig::isConfigured()
+        $tools = TacticalConfig::isAvailable()
             ? TacticalReadOnlyToolset::clientDefinitions()
             : [];
 

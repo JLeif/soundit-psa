@@ -28,7 +28,9 @@ class OfflineActionSweep
      */
     public function sweepAgent(string $agentId): int
     {
-        if ($agentId === '' || ! TacticalConfig::offlineQueueEnabled()) {
+        // Integration switched off (OFF=OFF): queued rows wait; they expire, never
+        // auto-run stale, once the integration comes back.
+        if ($agentId === '' || ! TacticalConfig::isEnabled() || ! TacticalConfig::offlineQueueEnabled()) {
             return 0;
         }
 

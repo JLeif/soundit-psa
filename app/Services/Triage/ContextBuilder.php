@@ -680,8 +680,8 @@ class ContextBuilder
                 }
             }
 
-            // Tactical RMM enrichment
-            if ($asset->tactical_asset_id) {
+            // Tactical RMM enrichment (skipped entirely while the integration is switched off)
+            if ($asset->tactical_asset_id && TacticalConfig::isEnabled()) {
                 $tacticalAsset = $asset->tacticalAsset;
                 if ($tacticalAsset) {
                     $info .= " | Tactical: {$tacticalAsset->status}";
@@ -884,10 +884,9 @@ class ContextBuilder
         if ($client->zorus_customer_id && TriageToolDefinitions::isZorusAvailable()) {
             $available[] = '- Zorus (use zorus_* tools for DNS filtering issues)';
         }
-        // Routed through the predicates for the same anti-drift reason, even though these two
-        // are behaviourally identical today (TacticalConfig/CometConfig define isEnabled() AS
-        // isConfigured(), so there is no separate master switch to miss). If either ever gains
-        // a real switch, it lands here for free instead of becoming the next silent
+        // Routed through the predicates for the same anti-drift reason: Tactical's switch
+        // (`tactical_enabled`) is folded into isTacticalAvailable(), and if Comet ever gains a
+        // real switch it lands here for free instead of becoming the next silent
         // contradiction between the prompt and the tool surface.
         if ($asset = $client->assets()->whereNotNull('tactical_asset_id')->exists()) {
             if (TriageToolDefinitions::isTacticalAvailable()) {
