@@ -4,12 +4,11 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client;
-use App\Models\License;
 use App\Services\ControlD\ControlDClient;
 use App\Services\ControlD\ControlDClientException;
+use App\Services\ControlD\ControlDOrganizationMapping;
 use App\Support\ControlDConfig;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class ControlDOrganizationController extends Controller
 {
@@ -49,27 +48,8 @@ class ControlDOrganizationController extends Controller
 
     public function update(Request $request)
     {
-        $mappings = $request->input('mappings', []);
-
-        DB::transaction(function () use ($mappings) {
-            $previouslyMapped = Client::whereNotNull('controld_org_id')->pluck('id');
-
-            // Clear existing mappings
-            Client::whereNotNull('controld_org_id')->update(['controld_org_id' => null]);
-
-            // Apply new mappings — do NOT cast org ID to (int), Control D PKs are strings
-            foreach ($mappings as $orgPk => $clientId) {
-                if ($clientId) {
-                    Client::where('id', $clientId)->update(['controld_org_id' => $orgPk]);
-                }
-            }
-
-            $stillMapped = Client::whereNotNull('controld_org_id')->pluck('id');
-            $unmapped = $previouslyMapped->diff($stillMapped);
-            License::deactivateForClients($unmapped, 'controld');
-        });
-
-        $mapped = collect($mappings)->filter()->count();
+        $validated = $request->validate(['mappings' => ['sometimes', 'array']]);
+        $mapped = app(ControlDOrganizationMapping::class)->replace($validated['mappings'] ?? []);
 
         return redirect()->route('settings.controld-orgs.index')
             ->with('success', "Saved {$mapped} Control D organization mapping(s).");
@@ -113,14 +93,13 @@ class ControlDOrganizationController extends Controller
             }
 
             // Skip if this org is already mapped
-            if (Client::where('controld_org_id', $orgPk)->exists()) {
+            if (Client::withTrashed()->where('controld_org_id', $orgPk)->exists()) {
                 continue;
             }
 
             $client = $clientsByName->get(mb_strtolower($orgName));
 
-            if ($client) {
-                Client::where('id', $client->id)->update(['controld_org_id' => $orgPk]);
+            if ($client && app(ControlDOrganizationMapping::class)->autoMatch($client->id, (string) $orgPk)) {
                 $clientsByName->forget(mb_strtolower($orgName));
                 $matched++;
             }
