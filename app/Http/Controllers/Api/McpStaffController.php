@@ -2603,7 +2603,7 @@ class McpStaffController extends Controller
     }
 
     /**
-     * PUBLICATION predicate (tools/list, list_tool_surface, search_tools): toolAllowed()
+     * PUBLICATION predicate for the ADVERTISED surface (tools/list): toolAllowed()
      * AND "this token could actually succeed". Today that adds one conjunct: Control D
      * client onboarding is staged only by an ai_actor token (B4.1, #2043 — the executor
      * refuses any other with an audited reason), so a granted non-ai_actor token is not
@@ -2612,6 +2612,16 @@ class McpStaffController extends Controller
      * executor, which names ai_actor, points at the client-page button and writes the
      * `rejected` action-log row — the grant gate's generic "Tool not allowed" would lose
      * all three.
+     *
+     * NOT the predicate list_tool_surface / search_tools classify with (B4.2, #2056 diff:5).
+     * Those report a `grant_state` per catalog entry, and both publication answers are wrong
+     * for a granted non-ai_actor token: classifying by publication calls the verb
+     * `available_ungranted` ("not in this token's allowlist — an operator token grant enables
+     * it"), which sends the operator to re-grant a grant it already holds, and dropping the
+     * entry instead puts it under `absent_means` ("does not exist on this server — request_tool
+     * records it as a build request"). So the catalog keeps classifying by the GRANT, which is
+     * what `grant_state` names, and the caller learns about the lane where B4.1 says it: the
+     * executor's refusal, which names ai_actor and points at the client-page button.
      *
      * @param  array<string, true>|null  $liveLookup  see toolAllowed()
      */
@@ -2903,7 +2913,11 @@ class McpStaffController extends Controller
             return ['error' => 'Unknown category: '.$categoryFilter.'. Valid categories: '.implode(', ', array_keys($categories)).'.'];
         }
 
-        $entries = McpToolSurface::classify(fn (string $tool): bool => $this->toolPublished($request, $tool));
+        // The GRANT predicate, not toolPublished(): `grant_state` names the grant, so a
+        // publication verdict here would report a granted non-ai_actor token's
+        // controld_onboard_client as `available_ungranted` (B4.2, #2056 diff:5). tools/list
+        // still withholds the verb; the executor still refuses it, naming ai_actor.
+        $entries = McpToolSurface::classify(fn (string $tool): bool => $this->toolAllowed($request, $tool));
 
         $counts = array_fill_keys(array_keys($states), 0);
         foreach ($entries as $entry) {
@@ -2971,7 +2985,9 @@ class McpStaffController extends Controller
                 'grant_state' => $entry['state'],
                 'description' => $entry['description'],
             ],
-            McpToolSurface::search($query, fn (string $tool): bool => $this->toolPublished($request, $tool)),
+            // The same GRANT predicate list_tool_surface classifies with — state parity by
+            // construction, and no publication verdict inside `grant_state` (diff:5).
+            McpToolSurface::search($query, fn (string $tool): bool => $this->toolAllowed($request, $tool)),
         );
 
         $payload = [

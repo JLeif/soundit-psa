@@ -424,6 +424,16 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertNotContains('controld_onboard_client', array_column($this->listTools($token), 'name'));
         $this->assertContains('controld_onboard_client', array_column($this->listTools($this->token()), 'name'), 'the same grant on an ai_actor token is published');
 
+        // B4.2 (#2056, diff:5): the CATALOG tools still classify by the GRANT. This token IS
+        // granted the verb, so list_tool_surface / search_tools report `granted` — never
+        // `available_ungranted` ("an operator token grant enables it"), which would send the
+        // operator to re-grant what it already holds, and never absent, which `absent_means`
+        // reads as "does not exist on this server". The lane is named by the refusal below.
+        $surface = $this->decoded($this->callTool($token, 'list_tool_surface', []));
+        $this->assertSame('granted', collect($surface['tools'] ?? [])->firstWhere('name', 'controld_onboard_client')['state'] ?? null, json_encode($surface['counts'] ?? []));
+        $matches = $this->decoded($this->callTool($token, 'search_tools', ['query' => 'controld_onboard_client']))['matches'] ?? [];
+        $this->assertSame('granted', collect($matches)->firstWhere('name', 'controld_onboard_client')['grant_state'] ?? null, json_encode($matches));
+
         $response = $this->callTool($token, 'controld_onboard_client', ['client_id' => $fixture['client']->id, 'ticket_id' => $fixture['ticket']->id, 'reason' => 'new client', 'staged' => true]);
         $result = $this->decoded($response);
         $this->assertArrayHasKey('error', $result, json_encode($result));

@@ -1253,9 +1253,16 @@ shown the verb in `tools/list` at all (B4.2, #2056). Say it plainly: token-lane 
 requires an Admin-managed ai_actor token, and a single Admin who both controls that token
 and approves its proposals acts alone — that is the residual the operator accepts by
 granting the verb; the guarantee that a second person approves belongs to the button
-lane. Every MCP-token mutation (mint, rename, grant, trust flags, directive, activate,
-pause, resume, regenerate, revoke, destination link) is Admin-only (B4.2); the token list
-and token pages stay readable by any staff user. The staging token's id is
+lane. Every route under Settings → MCP Tokens that mutates a token (mint,
+rename, grant, trust flags, directive, activate, pause, resume, regenerate, revoke,
+signal-destination link/unlink) is Admin-only (B4.2); the token list and token pages stay
+readable by any staff user. That gate covers those routes and nothing else — it is not a
+claim that no non-Admin can touch a token's wiring. In particular the Alerts Hub
+destination form (Settings → Alerts → destinations) is reachable by any staff user and
+still writes a destination's `mcp_token_label`, so it can link, re-point or clear a
+destination against a live token; B4.2 does not change that and it is tracked separately.
+What the token lane's authority actually rests on — the ai_actor flag and the tool
+grants — is Admin-only. The staging token's id is
 sealed into the held proposal and re-checked at approval (a token whose ai_actor flag
 was cleared, or that was revoked, paused, deleted or had the grant removed after staging,
 is refused — the re-read applies the same liveness gate and the same normalised grant
