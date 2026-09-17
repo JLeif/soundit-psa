@@ -1141,11 +1141,15 @@ class McpStaffController extends Controller
                     $this->actorLabel($request),
                 );
             } elseif ($this->isControlDOnboardingTool((string) $name)) {
+                // B4.1 (#2043): the executor binds the staging token (id + ai_actor) into the
+                // held proposal; a non-ai_actor token is refused there. Legacy token → null → refused.
+                $staffToken = $request->attributes->get('mcp_staff_token');
                 $result = app(StaffControlDOnboardingToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $staffToken instanceof McpStaffToken ? $staffToken : null,
                 );
             } elseif ($this->isMeshAdminTool((string) $name)) {
                 $result = app(StaffMeshAdminToolExecutor::class)->execute(
