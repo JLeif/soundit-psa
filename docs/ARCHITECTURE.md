@@ -107,6 +107,7 @@ For deployments that want a different brand, swap the logo file, set `APP_NAME` 
 - **TicketSource::HelpdeskButton** — new source enum value for T2T-created tickets.
 - Contact resolution: email lookup on `people` table. Asset matching: hostname lookup on `assets` table, scoped to client.
 - All requests logged with `[CW Compat]` prefix. Full body at DEBUG level.
+- **HDB report-portal login** (`app/Services/Hdb/HdbAuthClient.php`, Settings → Integrations → "Test Connection") is a separate, outbound leg: it signs in to the vendor's report portal with a stored service subaccount. **Account-side prerequisite:** the portal enforces a per-account IP filter, so this PSA's *outbound* address must be on that account's whitelist — behind NAT or an egress proxy that is the gateway's address, not the server's own. Until it is, Test Connection reports `portal_ip_filtered` and no credential verdict is available. Reasons are a closed vocabulary ({@see `HdbAuthResult`}); no portal text, address or host ever reaches the operator message, the log or the audit row, because the integrations page renders the result through `innerHTML`.
 
 ## Huntress integration
 - **HuntressConfig** (`app/Support/HuntressConfig.php`) — static helper. Settings: `huntress_api_key` (encrypted), `huntress_api_secret` (encrypted), `huntress_cw_api_key` (encrypted), `huntress_system_user_id`.

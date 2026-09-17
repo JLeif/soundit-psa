@@ -141,7 +141,7 @@ final class HdbAuthClient
     private const REFUSAL_NOTICE_CLASS = 'notify--bad';
 
     /**
-     * The three refusal notices measured against the portal, each mapped to the
+     * The three refusal notices OBSERVED against the portal, each mapped to the
      * closed-vocabulary symbol it means. Matched case-insensitively as a
      * substring of a notice's visible text only. Any other notice text reports
      * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, and the text stays here.
@@ -151,12 +151,21 @@ final class HdbAuthClient
      * credentials, was judged — which is what to report if the guard's
      * expected value ever changes underneath us.
      *
-     * The IP-filter notice was OBSERVED 2026-09-17 against the real service
-     * subaccount: the portal answered the credential post with the login page
-     * plus a `notify--bad` block naming the account's IP Filter whitelist. Only
-     * the stable, structural part of that sentence is a needle here — the
-     * portal interpolates the caller's address into it, and a needle carrying
-     * an address would neither match nor belong in source.
+     * The IP-filter notice was OBSERVED once, 2026-09-17, against the real
+     * service subaccount: the portal answered the credential post with the
+     * login page plus a `notify--bad` block reading "Your IP address is not on
+     * the account IP Filter whitelist." Those exact bytes are pinned in
+     * {@see \Tests\Feature\Integrations\HdbAuthClientTest}, which is the only
+     * place they are reproduced.
+     *
+     * The needle is a FRAGMENT of that sentence, and the reason is a judgement,
+     * not a measurement: the observed sentence carried no address, but a portal
+     * that reports the caller's address in it is the likely shape, and an
+     * address could not be a needle in any case. One observation cannot prove
+     * the wording is stable, so this needle is a bet on its most structural
+     * part. If the portal rewords around it the branch degrades to
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, exactly where it sat
+     * before this entry existed, and silently. That is the known weakness here.
      *
      * ORDER IS PRECEDENCE, and it is deliberate: the loop below returns on the
      * first needle any notice matches, so the earliest entry wins on a page
@@ -166,13 +175,23 @@ final class HdbAuthClient
      *    this client posts — a change underneath us, and the only one of the
      *    three an operator cannot fix by editing a setting.
      * 2. IP FILTER second, ABOVE credentials, for the same reason the guard is
-     *    above them: it is a fact about WHERE the request came from, so a page
-     *    showing it has not judged the stored password. Reporting the
-     *    credentials sentence for a perimeter refusal would send an operator to
-     *    re-enter a password that is fine — and, worse, invite the retry that a
+     *    above them: a perimeter refusal is a fact about WHERE the request came
+     *    from. Reporting the credentials sentence for one would send an operator
+     *    to re-enter a password that is probably fine — and invite the retry a
      *    service subaccount's lockout policy punishes.
      * 3. CREDENTIALS last, the only one of the three that IS a verdict on the
      *    stored pair.
+     *
+     * THE COST OF (2), because it is a real one and a reviewer should not have
+     * to find it: on a page showing BOTH the IP-filter and the credentials
+     * notice, the credentials verdict is discarded. It has not been observed
+     * that the portal evaluates a password at all once the perimeter refuses,
+     * so "the password was never judged" is an inference — which is why
+     * REASON_PORTAL_IP_FILTERED's operator sentence does NOT exculpate the
+     * stored credential and sends the operator back to it if whitelisting does
+     * not resolve the sign-in. A page carrying several notices collapsing to one
+     * symbol is the general shape of issue #2085, which predates this entry and
+     * which this entry makes one needle wider.
      *
      * {@see \Tests\Feature\Integrations\HdbAuthClientTest} pins all three
      * boundaries of that order, not just the original guard-over-credentials

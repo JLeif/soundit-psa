@@ -38,11 +38,13 @@ class HdbConnectionTestActionTest extends TestCase
     private const BEACON = 'VENDOR-TEXT-<script>alert(1)</script>-BEACON';
 
     /**
-     * Planted in the IP-filter notice for the leak assertions.
-     * Documentation-range values (RFC 5737 / RFC 2606): no real infrastructure
-     * is named in this file.
+     * Planted in the IP-filter notice for the leak assertions. Documentation
+     * ranges only — RFC 5737 (v4), RFC 3849 (v6), RFC 2606 (names) — so no real
+     * infrastructure is named in this file.
      */
     private const LEAK_ADDRESS = '203.0.113.47';
+
+    private const LEAK_ADDRESS_V6 = '2001:db8::47';
 
     private const LEAK_HOST = 'psa.example.invalid';
 
@@ -250,11 +252,13 @@ class HdbConnectionTestActionTest extends TestCase
     }
 
     /**
-     * The IP-filter refusal, in the shape observed 2026-09-17 against the real
-     * service subaccount — a `notify--bad` block naming the account's IP Filter
-     * whitelist, here carrying a documentation-range address, a host and a
-     * contact so the leak assertions have something to catch. No live call: the
-     * HTTP layer is faked.
+     * The IP-filter refusal reaching this action. The BLOCK is the observed
+     * shape (a `notify--bad` notice on the re-served login page); the SENTENCE
+     * is deliberately a WIDER invention than the one observed — it carries two
+     * address shapes, a host and a contact — so the leak assertions have
+     * something to catch on every surface this action writes. The observed
+     * sentence itself is pinned byte-for-byte in HdbAuthClientTest and is not
+     * re-stated here. No live call: the HTTP layer is faked.
      */
     private function fakeIpFilteredLogin(): void
     {
@@ -262,8 +266,9 @@ class HdbConnectionTestActionTest extends TestCase
             self::LOGIN_URL => Http::sequence()
                 ->push($this->loginPage())
                 ->push('<html><body><!-- '.self::BEACON.' --><div class="notify notify--bad">'
-                    .'Your IP address '.self::LEAK_ADDRESS.' is not on the account IP Filter whitelist. '
-                    .'Contact '.self::LEAK_EMAIL.' or visit '.self::LEAK_HOST.' to add it.</div>'
+                    .'Your IP address '.self::LEAK_ADDRESS.' ('.self::LEAK_ADDRESS_V6.') is not on the '
+                    .'account IP Filter whitelist. Contact '.self::LEAK_EMAIL.' or visit '
+                    .self::LEAK_HOST.' to add it.</div>'
                     .'<form action="" method="post" id="theOnlyForm">'
                     .'<input type="email" name="email"><input type="password" name="password">'
                     .'<input type="hidden" name="g" value="g"><input type="submit" name="submit"></form></body></html>'),
@@ -309,33 +314,55 @@ class HdbConnectionTestActionTest extends TestCase
             $response->getContent(),
         );
 
-        $serializedRow = json_encode($row->toArray());
+        // The WHOLE row, minus the one column that legitimately holds an
+        // address: `source_ip` is the TESTER's own, written by the controller
+        // from the request and never read off the portal's page. Excluding it
+        // by name (and asserting what it holds) keeps every OTHER column —
+        // including any added later — inside the guard, rather than narrowing
+        // the guard to the columns known today.
+        $rowAttributes = $row->toArray();
+        $this->assertSame('127.0.0.1', $rowAttributes['source_ip']);
+        unset($rowAttributes['source_ip']);
+        $serializedRow = json_encode($rowAttributes);
 
-        foreach ([$response->getContent(), $serializedRow] as $emitted) {
+        foreach (['response' => $response->getContent(), 'audit row' => $serializedRow] as $what => $emitted) {
             $this->assertStringNotContainsString(self::BEACON, $emitted);
             $this->assertStringNotContainsString(self::LEAK_ADDRESS, $emitted);
+            $this->assertStringNotContainsString(self::LEAK_ADDRESS_V6, $emitted);
             $this->assertStringNotContainsString(self::LEAK_HOST, $emitted);
             $this->assertStringNotContainsString(self::LEAK_EMAIL, $emitted);
-            $this->assertStringNotContainsString('Your IP address', $emitted);
-            $this->assertStringNotContainsString('IP Filter whitelist', $emitted);
+
+            // The vendor sentence's distinctive parts, case-insensitively — not
+            // "IP Filter whitelist", which our own fixed prose contains.
+            $this->assertStringNotContainsStringIgnoringCase('Your IP address', $emitted);
+            $this->assertStringNotContainsStringIgnoringCase('is not on the account', $emitted);
+            $this->assertStringNotContainsStringIgnoringCase('to add it', $emitted);
+
+            // Both address families, plus a bracketed host:port and a CIDR: a
+            // guard that only knows IPv4 reports the contract as held for an
+            // IPv6 caller.
+            foreach ([
+                '~\b\d{1,3}(?:\.\d{1,3}){3}\b~',
+                '~\b\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}\b~',
+                '~(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}~i',
+            ] as $pattern) {
+                $this->assertDoesNotMatchRegularExpression($pattern, $emitted, "{$what} carries an address-shaped string.");
+            }
         }
 
-        // No address-SHAPED string on either vendor-derived surface. Scoped to
-        // those fields deliberately: the row's `source_ip` is an address, but it
-        // is the TESTER's own, written by the controller from the request and
-        // never read off the portal's page — so it is asserted for what it is
-        // rather than swept up by a whole-row regex that would have to be
-        // loosened later.
-        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', $response->getContent());
-        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', (string) $row->error_message);
-        $this->assertDoesNotMatchRegularExpression('~\b\d{1,3}(?:\.\d{1,3}){3}\b~', json_encode($row->arguments));
-        $this->assertSame('127.0.0.1', $row->source_ip);
+        // Nothing about this outcome is logged at ANY level, on the default
+        // channel or a named one — so there is no log line for the notice to
+        // leak into. Every level PSR-3 defines, plus the generic log() and the
+        // channel/stack entry points, because a later Log::debug() or
+        // Log::channel('integrations')->warning() on this path would otherwise
+        // carry the notice, the address, the host and the contact into a file
+        // while this test stayed green.
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log', 'write'] as $level) {
+            Log::shouldNotHaveReceived($level);
+        }
 
-        // Nothing about this outcome is logged at all — so there is no log line
-        // for the notice to leak into. Asserted rather than assumed.
-        Log::shouldNotHaveReceived('warning');
-        Log::shouldNotHaveReceived('error');
-        Log::shouldNotHaveReceived('info');
+        Log::shouldNotHaveReceived('channel');
+        Log::shouldNotHaveReceived('stack');
     }
 
     public function test_it_never_stores_the_password_or_seed_in_the_audit_row(): void
