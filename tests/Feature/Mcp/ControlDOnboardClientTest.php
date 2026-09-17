@@ -418,8 +418,11 @@ class ControlDOnboardClientTest extends TestCase
         $this->vendor([]);
         $token = $this->humanToken();
         $this->assertFalse(McpToken::where('label', 'human-bearer')->sole()->ai_actor);
-        // The grant is honoured (the verb is published to this token) — the refusal is the executor's, not the grant gate's.
-        $this->assertContains('controld_onboard_client', array_column($this->listTools($token), 'name'));
+        // B4.2 (#2056, diff:4/contract:4): publish/dispatch parity — the verb is NOT published to a
+        // granted non-ai_actor token, because such a token can never stage it. Before B4.2 this
+        // line asserted the opposite (published, then refused at dispatch).
+        $this->assertNotContains('controld_onboard_client', array_column($this->listTools($token), 'name'));
+        $this->assertContains('controld_onboard_client', array_column($this->listTools($this->token()), 'name'), 'the same grant on an ai_actor token is published');
 
         $response = $this->callTool($token, 'controld_onboard_client', ['client_id' => $fixture['client']->id, 'ticket_id' => $fixture['ticket']->id, 'reason' => 'new client', 'staged' => true]);
         $result = $this->decoded($response);
@@ -552,6 +555,74 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertCount(0, $this->history);
         $this->assertNull($ungranted['client']->fresh()->controld_org_id);
         $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->where('summary', 'like', '%no longer granted controld_onboard_client%')->count());
+    }
+
+    // ── B4.2 (#2056): grant parity, publication parity, honest copy ────────────────────────────
+
+    /**
+     * RED CONTROL (B4.2, c1:v1:1): the approval-time grant re-read sees the SAME normalised
+     * list authentication sees. A legacy comma-joined stored entry (the shape
+     * McpToken::importLegacyBlob() can store — trim only, no split) authenticates and stages
+     * because McpConfig splits it; before B4.2 the executor's re-read parsed the raw array and
+     * refused approval with the misleading reason "no longer granted". Both sides now read
+     * McpConfig::grantedTools(), so the run stages AND approves the same way.
+     */
+    public function test_a_legacy_comma_joined_grant_stages_and_approves_the_same_way(): void
+    {
+        $this->configure();
+        $this->aiActor();
+        $fixture = $this->fixture();
+        $plain = $this->token(label: 'legacy-blob');
+        // Overwrite the stored grant with ONE comma-joined element, exactly as importLegacyBlob() stores it.
+        $row = McpToken::where('label', 'legacy-blob')->sole();
+        $row->forceFill(['tools' => ['controld_onboard_client:staged,find_clients']])->save();
+        $this->assertSame(['controld_onboard_client:staged,find_clients'], $row->fresh()->tools);
+        $this->assertSame(['controld_onboard_client', 'find_clients'], McpConfig::grantedTools($row->fresh())['tools']);
+
+        $this->assertContains('controld_onboard_client', array_column($this->listTools($plain), 'name'), 'authentication splits the legacy entry');
+        $run = $this->stage($fixture, $plain);
+        $this->assertSame((int) $row->id, $this->payload($run)['staged_by_token_id'] ?? null);
+
+        $this->vendor([$this->ok(['organization' => $this->orgRow()]), $this->ok(['sub_organizations' => [$this->orgRow()]])]);
+        $approver = User::factory()->admin()->create(['is_active' => true]);
+        $this->approve($run, $approver);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'the approval re-read must split the legacy entry the way authentication does');
+        $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'blocked')->count());
+        $this->assertSame('syntheticOrg01', $fixture['client']->fresh()->controld_org_id);
+        $this->assertCount(2, $this->history);
+
+        // The withdrawal arm still holds through the same helper: replace the grant with a different tool.
+        $other = $this->fixture();
+        $run2 = $this->stage($other, $plain);
+        $row->fresh()->forceFill(['tools' => ['find_clients,find_staff']])->save();
+        $this->vendor([]);
+        $this->approve($run2, $approver);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run2->fresh()->state);
+        $this->assertCount(0, $this->history);
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run2->id)->where('result_status', 'blocked')->where('summary', 'like', '%no longer granted controld_onboard_client%')->count());
+    }
+
+    /**
+     * RED CONTROL (B4.2, diff:1/context:2/contract:2): the token-page help and INSTALL tell the
+     * truth about ai_actor — it is the token lane's staging authority for this verb, a single
+     * Admin who controls the token and approves is the residual the operator accepts by
+     * granting it, and the second-person guarantee belongs to the button lane.
+     */
+    public function test_token_page_help_and_install_tell_the_truth_about_ai_actor(): void
+    {
+        $this->token();
+        $row = McpToken::where('label', 'opsbot')->sole();
+        $page = $this->actingAs(User::factory()->admin()->create(['is_active' => true]))->get(route('settings.mcp-tokens.show', $row))->assertOk();
+        $page->assertDontSee('grants no permissions');
+        $page->assertSee('controld_onboard_client');
+        $page->assertSee('Admin-managed', false);
+        $page->assertSee('client page');
+
+        $install = file_get_contents(base_path('docs/INSTALL.md'));
+        $this->assertStringNotContainsString('no person can stage and approve alone through a bearer token', $install);
+        $this->assertStringContainsString('the residual the operator accepts by granting the verb', $install);
+        $this->assertStringContainsString('Deny and re-stage', $install, 'the pre-B4.1 drain step is documented');
+        $this->assertStringContainsString('staged before B4.1', $install);
     }
 
     /** RED CONTROL: non-admin stages (button) or approves → refused; nothing created. */
