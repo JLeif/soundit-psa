@@ -173,6 +173,28 @@ class PortalBenjiPaysPayOnlineTest extends TestCase
             ->assertDontSee('VENDOR-SECRET-TEXT')->assertDontSee(self::KEY);
     }
 
+    public function test_mint_failure_on_a_partially_paid_invoice_is_not_sent_to_the_full_amount_stripe_page(): void
+    {
+        // The named red-check: drop the partial-balance branch in payOnline() and
+        // this must fail — a 302 to the full-amount Stripe page with the caveat
+        // dropped from the balance note is the #1173 overpayment again.
+        Http::fake(['https://api.benjipays.com/*' => Http::response(['detail' => 'VENDOR-SECRET-TEXT '.self::KEY], 503)]);
+        $invoice = $this->invoice(['status' => InvoiceStatus::Paid]);
+        $this->partiallyRevert($invoice, 120.50);
+
+        $this->pay($invoice)
+            ->assertRedirect(route('portal.invoices.show', $invoice))
+            ->assertSessionHas('error');
+
+        $this->assertStringContainsString('$500.00', session('error'));
+        $this->assertStringNotContainsString('VENDOR-SECRET-TEXT', json_encode(session()->all()));
+        $this->assertStringNotContainsString(self::KEY, json_encode(session()->all()));
+
+        $this->actingAs($this->person, 'portal')->get(route('portal.invoices.show', $invoice))
+            ->assertOk()->assertSee('would charge the full $500.00')
+            ->assertDontSee('VENDOR-SECRET-TEXT')->assertDontSee(self::KEY);
+    }
+
     public function test_two_clicks_mint_once(): void
     {
         $this->fakeMint();

@@ -9,6 +9,7 @@ use App\Services\BenjiPays\BenjiPaysException;
 use App\Services\BenjiPays\BenjiPaysPayOnline;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 
 class PortalInvoiceController extends Controller
@@ -63,9 +64,14 @@ class PortalInvoiceController extends Controller
      * is re-checked here (toggle, QBO id, status) so a form submitted after
      * the toggle was turned off falls back to Stripe like the button would.
      *
-     * On any mint failure the client goes to the Stripe hosted page if the
-     * invoice has one, else back to the invoice with a generic flash — never
-     * a vendor message.
+     * A mint failure is logged (reason and status only, never a vendor
+     * string) and does NOT silently bounce a PARTIALLY PAID invoice to the
+     * Stripe hosted page: that page is priced at the full total and the
+     * balance note drops the full-amount caveat on this path, so the client
+     * would be one click from the overpayment #1173 exists to prevent. Those
+     * invoices go back to the invoice with the full amount named. Otherwise
+     * the client goes to the Stripe page if the invoice has one, else back to
+     * the invoice with a generic flash — never a vendor message.
      */
     public function payOnline(Request $request, Invoice $invoice, BenjiPaysPayOnline $payOnline): RedirectResponse
     {
@@ -81,7 +87,25 @@ class PortalInvoiceController extends Controller
 
         try {
             $link = $payOnline->linkFor($invoice);
-        } catch (BenjiPaysException) {
+        } catch (BenjiPaysException $e) {
+            // Status-only: reason and HTTP status, never a vendor string. Without
+            // this an operator has no record that Pay Online failed for a client.
+            Log::warning('[BenjiPays] Applied link mint failed for portal Pay Online', [
+                'invoice_id' => $invoice->getKey(),
+                'reason' => $e->reason,
+                'http_status' => $e->httpStatus,
+            ]);
+
+            // The Stripe page charges the FULL total and this surface no longer
+            // says so (the BenjiPays page is priced at the balance), so a
+            // partially paid invoice must not be sent there without the amount.
+            if ($invoice->qboPartialBalanceLog() !== null) {
+                return redirect()->route('portal.invoices.show', $invoice)
+                    ->with('error', 'Online payment for the remaining balance is temporarily unavailable. Paying online would charge the full $'
+                        .number_format((float) $invoice->total, 2)
+                        .', so we have not sent you there — please try again later, or contact us to settle just the balance.');
+            }
+
             return $this->stripeFallback($invoice);
         }
 
