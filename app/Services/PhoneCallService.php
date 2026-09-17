@@ -96,16 +96,27 @@ class PhoneCallService
                 // delivery (or handleCallAnswered, from DialBLegTo) had already
                 // resolved. Mass assignment was the original bug - 'answered_by'
                 // was missing from PhoneCall::$fillable and Laravel discarded it
-                // without a word - but making it fillable is exactly what would
-                // turn this slot into a destructive write.
+                // without a word. The key IS fillable now, so re-adding it to
+                // this array would NOT be inert: it would immediately restore
+                // that destructive write. Its absence from this array is the
+                // only thing preventing it.
                 'status' => CallStatus::Ringing,
                 'started_at' => now(),
             ]
         );
 
-        // Attribution only ever fills in, never clears: write it when this
-        // delivery resolved an endpoint, and otherwise leave what is already
-        // there. Keeps the column monotonic across webhook redelivery.
+        // Write the attribution when THIS delivery resolved an endpoint, and
+        // otherwise leave what is already there. So an unresolved redelivery
+        // never clears an established attribution - that is the defect this
+        // guard exists for.
+        //
+        // It is NOT monotonic, and the difference matters: a delivery that
+        // resolves a DIFFERENT non-null user replaces the stored one, so this is
+        // last-non-null-writer-wins. handleCallAnswered() below takes the
+        // opposite precedence ('if (! $call->answered_by)' - first writer wins),
+        // so the two writers disagree and which value survives depends on
+        // delivery order. Which should win is an open product question, tracked
+        // as issue #2166; do not read this comment as a decision.
         if ($endpoint?->user_id !== null && $call->answered_by !== $endpoint->user_id) {
             $call->answered_by = $endpoint->user_id;
             $call->save();

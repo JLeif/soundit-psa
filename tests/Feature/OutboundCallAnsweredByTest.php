@@ -65,7 +65,7 @@ class OutboundCallAnsweredByTest extends TestCase
         $this->assertSame(
             $user->id,
             $stored->answered_by,
-            'logOutboundCall() must persist answered_by; a non-fillable key is dropped silently by mass assignment.'
+            'logOutboundCall() must persist answered_by. The original defect was a non-fillable key dropped silently by mass assignment; at this tip the service assigns the property directly, so a failure here means that write is broken, not $fillable.'
         );
         $this->assertSame(CallDirection::Outbound, $stored->direction);
     }
@@ -85,7 +85,9 @@ class OutboundCallAnsweredByTest extends TestCase
 
         $service->logOutboundCall($payload);
         // Plivo re-delivers webhooks; updateOrCreate takes the update branch the
-        // second time, which is the other half of the mass-assignment surface.
+        // second time. answered_by is no longer in that values array, so this
+        // pins that the direct assignment below it is idempotent when the
+        // endpoint resolves to the same user on both deliveries.
         $service->logOutboundCall($payload);
 
         $stored = PhoneCall::where('call_uuid', 'outbound-answered-by-2')->firstOrFail();
