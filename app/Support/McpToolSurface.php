@@ -156,8 +156,10 @@ class McpToolSurface
             // Control D client onboarding (B4): gated on exactly the predicate
             // StaffControlDOnboardingToolExecutor refuses on — integration on, key
             // present, AND the explicit default-off onboarding switch with all six
-            // defaults (psa-wzjzz: publish and dispatch answer one question).
-            ControlDConfig::isEnabled() && ControlDConfig::isConfigured() && ControlDConfig::isOnboardingActive()
+            // defaults (psa-wzjzz: publish and dispatch answer one question). The
+            // default-OFF switch is read first so the common case short-circuits after
+            // one settings read (McpToolsListResilienceTest's constant query budget).
+            ControlDConfig::isOnboardingEnabled() && ControlDConfig::isEnabled() && ControlDConfig::isConfigured() && ControlDConfig::isOnboardingConfigured()
                 ? McpToolRegistry::controldOnboardingTools()
                 : [],
         );
