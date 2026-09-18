@@ -129,7 +129,7 @@ exit('.$exit.');
     public static function unknownDialects(): array
     {
         return [
-            // Review finding diff:1. The original parser had a catch-all third
+            // An earlier draft of this parser had a catch-all third
             // branch that declared warnings=0 for ANY count-bearing line, so a
             // renamed warning token silently restored the exact floor this
             // change exists to close. These are the realistic shapes; the old
@@ -159,8 +159,8 @@ exit('.$exit.');
     }
 
     /**
-     * Review finding diff:2, verified at source: a fully clean PHPUnit TextUI
-     * run prints "OK (n tests, m assertions)" INSTEAD of a `Tests:` line. That
+     * Verified against PHPUnit at source: a fully clean TextUI run prints
+     * "OK (n tests, m assertions)" INSTEAD of a `Tests:` line. That
      * legitimate zero-warning shape must PASS, not hit the fail-closed branch.
      */
     public function test_clean_textui_ok_footer_passes(): void
