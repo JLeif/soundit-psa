@@ -30,8 +30,15 @@ class AutoElevateReadException extends \RuntimeException
         return self::hintFor($this->reason);
     }
 
-    /** @see operatorHint() — the same text, for a surface that only carries the label string. */
-    public static function hintFor(string $reason): ?string
+    /**
+     * @see operatorHint() — the same text, for a surface that only carries the label string.
+     *
+     * Accepts null because the surfaces that call it treat the reason as nullable (the panel
+     * partial guards its own wrapper with `@if($reason)`). A degraded read must SCREAM, and a
+     * TypeError from the hint lookup would make it CRASH instead — the panel would 500 and the
+     * operator would see no explanation at all, inverting C-56 exactly.
+     */
+    public static function hintFor(?string $reason): ?string
     {
         return match ($reason) {
             // The threshold is DERIVED, never typed as a literal: a change to either constant

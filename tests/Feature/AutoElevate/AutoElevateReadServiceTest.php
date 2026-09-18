@@ -587,11 +587,31 @@ class AutoElevateReadServiceTest extends TestCase
      */
     public function test_only_reasons_that_add_information_carry_a_hint(): void
     {
-        foreach (['paging_over_cap', 'paging_count_mismatch', 'timestamp_implausible'] as $explained) {
+        // Each hint must carry the SPECIFIC operator fact the label cannot: what was refused
+        // and why nothing was listed. Asserting the fact is the only assertion that can fail
+        // — an earlier version compared the prose against the snake_case label itself, which no
+        // English sentence would ever contain, so a pure restatement passed it.
+        $mustSay = [
+            // the derived threshold, and that nothing was listed rather than a partial list
+            'paging_over_cap' => ['over 10,000', 'partial list would look complete'],
+            // BOTH directions, because reconciled() raises this for both
+            'paging_count_mismatch' => ['missing from what it sent', 'does not admit to holding'],
+            // that a date was withheld, not merely that it was odd
+            'timestamp_implausible' => ['no machine was shown', 'wrong date'],
+        ];
+        foreach ($mustSay as $explained => $facts) {
             $hint = AutoElevateReadException::hintFor($explained);
             $this->assertIsString($hint);
-            $this->assertStringNotContainsString($explained, $hint, 'a hint must not restate its own label');
-            $this->assertGreaterThan(40, strlen($hint), 'a hint that adds nothing should be null instead');
+            foreach ($facts as $fact) {
+                $this->assertStringContainsString($fact, $hint, "{$explained} must tell the operator: {$fact}");
+            }
+            // A restatement of the label in prose adds nothing: reject the label's own words.
+            $words = array_filter(explode('_', $explained), fn ($w) => strlen($w) > 3);
+            $this->assertNotSame(
+                $words,
+                array_values(array_filter($words, fn ($w) => stripos($hint, $w) !== false)),
+                "{$explained}: a hint built only from the label's own words is a restatement"
+            );
         }
 
         // Self-evident or already-explained labels get no hint at all — not a restatement.
@@ -599,6 +619,10 @@ class AutoElevateReadServiceTest extends TestCase
             'configuration', 'transport', 'invalid_company_id', 'http_429'] as $bare) {
             $this->assertNull(AutoElevateReadException::hintFor($bare), "{$bare} must not gain noise");
         }
+
+        // A null reason must not crash the lookup: the panel treats $reason as nullable, and
+        // a degraded read that 500s has stopped screaming and started crashing (C-56).
+        $this->assertNull(AutoElevateReadException::hintFor(null));
 
         // operatorHint() is the instance door onto the same table and must not drift from it.
         $this->assertSame(
@@ -661,5 +685,36 @@ class AutoElevateReadServiceTest extends TestCase
         $this->expectException(AutoElevateReadException::class);
         $this->expectExceptionMessage('row_drift');
         $this->service()->normalizeComputer(self::computer(['companyId' => self::COMPANY_B]), self::COMPANY_A);
+    }
+
+    /**
+     * The page window is OURS, not the caller's. PHP's `+` keeps the left operand's keys, so
+     * a caller passing take/skip could have driven the request while every bound in the walk
+     * (over-cap threshold, short-page test) went on reasoning about MAX_TAKE — a healthy
+     * tenant would then be reported as a paging-inconsistent vendor. Refused outright.
+     */
+    public function test_a_caller_cannot_override_the_page_window(): void
+    {
+        Http::fake();
+        foreach ([['take' => 50], ['skip' => 400], ['take' => 50, 'skip' => 400]] as $override) {
+            try {
+                (new \ReflectionMethod(AutoElevateReadService::class, 'allItems'))
+                    ->invokeArgs($this->service(), ['/api/v1/computers', $override]);
+                $this->fail('a caller-supplied page window must be refused: '.json_encode($override));
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('paging_contract', $e->reason);
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    /** The other half of the same contract: the walk still sends OUR window, merged after the query. */
+    public function test_the_walk_sends_its_own_page_window_with_the_callers_filter(): void
+    {
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope([self::computer()]), 200)]);
+        $this->service()->computersForCompany(self::COMPANY_A);
+        Http::assertSent(fn (Request $r) => self::query($r) === [
+            'take' => '200', 'skip' => '0', 'companyId' => self::COMPANY_A,
+        ]);
     }
 }

@@ -254,8 +254,16 @@ class AutoElevateReadService
         $take = AutoElevateClient::MAX_TAKE;
         $total = 0;
 
+        // `$take`/`$skip` are OURS to set: PHP's `+` keeps the LEFT operand's keys, so a
+        // caller passing either in $query would silently win the request while every bound
+        // below (the over-cap threshold, the short-page test) kept computing on MAX_TAKE.
+        // Refuse that rather than page against one number and reason about another.
+        if (array_key_exists('take', $query) || array_key_exists('skip', $query)) {
+            throw new AutoElevateReadException('paging_contract');
+        }
+
         for ($page = 0; $page < self::MAX_PAGES; $page++) {
-            $result = $this->client->getPage($path, $query + ['take' => $take, 'skip' => $skip]);
+            $result = $this->client->getPage($path, ['take' => $take, 'skip' => $skip] + $query);
             $received = count($result['items']);
             $total = $result['totalCount'];
 
