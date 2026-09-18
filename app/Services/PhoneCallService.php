@@ -105,24 +105,34 @@ class PhoneCallService
             ]
         );
 
-        // Write the attribution when THIS delivery resolved an endpoint, and
-        // otherwise leave what is already there. So an unresolved redelivery
-        // never clears an established attribution - that is the defect this
-        // guard exists for.
+        // Write the attribution when THIS delivery resolved an endpoint THAT
+        // CARRIES A user_id, and otherwise leave what is already there. Note the
+        // condition is on user_id, not on the endpoint: sip_endpoints.user_id is
+        // nullable, so a resolved-but-unassigned endpoint is an expected state
+        // and is treated the same as no endpoint at all. A delivery that cannot
+        // produce a user therefore never clears an established attribution -
+        // that is the defect this guard exists for.
         //
-        // It is NOT monotonic, and the difference matters: a delivery that
-        // resolves a DIFFERENT non-null user replaces the stored one, so this is
-        // last-non-null-writer-wins among outbound deliveries.
+        // It is NOT monotonic: a delivery that produces a DIFFERENT non-null
+        // user replaces the stored one, so among outbound deliveries this is
+        // last-non-null-writer-wins.
         //
-        // Against handleCallAnswered() the outcome is NOT order-dependent, it is
-        // a fixed precedence: that writer guards 'if (! $call->answered_by)' and
-        // declines when a value exists, while this one overwrites a differing
-        // one, so whenever this delivery resolves an endpoint ITS user wins
-        // regardless of which ran first. The column therefore prefers the
-        // PLACING user over the ANSWERING one, which is the opposite of what the
-        // column's name says. Whether that is right is an open product question,
-        // tracked as issue #2166 - it is a precedence decision, not a race to be
-        // fixed with sequencing or a lock. Do not read this comment as a ruling.
+        // Against handleCallAnswered(): that writer guards 'if (!
+        // $call->answered_by)' and declines when a value exists, while this one
+        // overwrites a differing one. So WHEN THE TWO RUN SERIALLY the outcome
+        // is a fixed precedence rather than an ordering effect - whenever this
+        // delivery produces a user, ITS user is what remains, whichever ran
+        // first - and the column therefore prefers the PLACING user over the
+        // ANSWERING one, the opposite of what the column's name says.
+        //
+        // Concurrently it is ALSO a race, and the two problems are separate.
+        // handleCallAnswered() runs inside updateCallSafely()'s transaction with
+        // lockForUpdate(); this write does not, and it is an unlocked
+        // read-compare-save over a model hydrated before the comparison. So a
+        // lost update is possible here regardless of the precedence question.
+        // The locking gap is issue #2168. WHICH WRITER SHOULD WIN is the
+        // separate open product question, issue #2166 - do not close that one by
+        // adding a lock, and do not read this comment as a ruling on either.
         if ($endpoint?->user_id !== null && $call->answered_by !== $endpoint->user_id) {
             $call->answered_by = $endpoint->user_id;
             $call->save();

@@ -102,10 +102,15 @@ class OutboundCallAnsweredByTest extends TestCase
      * longer resolves on the later delivery, the attribution already resolved must
      * survive.
      *
-     * That is all this pins: an UNRESOLVED delivery never clears. It is NOT "fills in,
-     * never clears" - a delivery that resolves a DIFFERENT non-null user does replace the
-     * stored one (see the service comment; the precedence question is issue #2166). No
-     * test covers that case yet.
+     * That is all this pins: a delivery that produces NO user never clears. It is NOT
+     * "fills in, never clears" - a delivery that produces a DIFFERENT non-null user does
+     * replace the stored one (see the service comment; the precedence question is issue
+     * #2166). No test covers that case yet.
+     *
+     * "Produces no user", not "unresolved": the service guards on $endpoint?->user_id,
+     * and sip_endpoints.user_id is nullable, so an endpoint that resolves without a user
+     * takes the same branch. This test drives the is_active=false form of that branch
+     * only; the null-user_id form is unexercised.
      */
     public function test_a_repeat_webhook_with_an_unresolved_endpoint_keeps_the_resolved_answered_by(): void
     {
