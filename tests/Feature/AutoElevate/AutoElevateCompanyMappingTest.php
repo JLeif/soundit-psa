@@ -437,6 +437,37 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertSame(self::COMPANY_B, $zeta->fresh()->autoelevate_company_id);
     }
 
+    public function test_two_clients_sharing_a_company_id_are_both_offered_in_the_dropdown(): void
+    {
+        // update() stores strtolower($companyId) while autoMatch() writes the vendor id verbatim,
+        // so two clients can hold the same company id in different case. index() keys the lookup
+        // collection with strtolower(), which collapses them to one row. The dropdown must still
+        // offer BOTH, or the collapsed client has no <option>, posts nothing, and the next
+        // clear-then-apply save destroys its mapping with a success flash.
+        $this->fakeCompanies([self::company(self::COMPANY_A, 'Delta Freight')]);
+        $held = Client::factory()->create(['name' => 'Held Co', 'is_active' => false, 'autoelevate_company_id' => strtoupper(self::COMPANY_A)]);
+        $kept = Client::factory()->create(['name' => 'Kept Co', 'autoelevate_company_id' => strtolower(self::COMPANY_A)]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $offered = $this->get(route('settings.autoelevate-companies.index'))->assertOk()
+            ->viewData('allClients')->pluck('id')->all();
+
+        $this->assertContains($kept->id, $offered);
+        $this->assertContains($held->id, $offered, 'a client collapsed by keyBy() must still be selectable');
+    }
+
+    public function test_empty_state_warning_fails_loudly_rather_than_under_reporting(): void
+    {
+        // The count must come from the controller. A render path that omits it should error,
+        // not silently fall back to the collapsed collection's size -- the under-count this
+        // whole change removes.
+        $this->assertStringNotContainsString(
+            'mappedClients->count()',
+            file_get_contents(resource_path('views/settings/autoelevate-companies.blade.php')),
+            'the empty-state warning must not fall back to the collapsed count'
+        );
+    }
+
     public function test_integrations_settings_links_to_map_companies_for_admins_only(): void
     {
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));

@@ -48,8 +48,13 @@ class AutoElevateCompanyController extends Controller
         // The dropdown must also offer every client that already HOLDS a mapping: a mapped
         // client that has since left the operational set would have no <option>, so the select
         // would post "" and the clear-then-apply save below would silently destroy its mapping.
+        //
+        // Concat the UNKEYED rows, not $mappedClients: keyBy() keeps one client per company id,
+        // so two clients holding the same id (update() lowercases, autoMatch() does not) would
+        // leave the collapsed one with no <option> anywhere on the page -- exactly the mapping
+        // this concat exists to protect.
         $allClients = Client::operational()->orderBy('name')->get(['id', 'name'])
-            ->concat($mappedClients->values())
+            ->concat($mappedClientRows)
             ->unique('id')
             ->sortBy(fn ($c) => mb_strtolower($c->name))
             ->values();
