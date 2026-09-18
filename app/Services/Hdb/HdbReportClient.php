@@ -200,12 +200,26 @@ final class HdbReportClient
      */
     private ?HdbAuthResult $session = null;
 
+    /**
+     * There is deliberately NO injection seam for the auth client.
+     *
+     * The whole point of {@see HdbAuthClient}'s jar parameter is that the
+     * handshake and every {@see get()} hold the SAME jar. An auth client handed
+     * in from outside carries its own jar, so `authenticate()` would succeed,
+     * `$session->ok()` would be true, and every gatekeeper request would still
+     * go out cookieless — the portal would answer the login page and every
+     * press would come back Malformed, which is the signature this class
+     * attributes to a LAPSED SESSION. A seam whose two branches disagree about
+     * where the session lives sends the investigation at the vendor instead of
+     * at the wiring, so the jar is built here and passed to the one handshake
+     * this instance performs. Container resolution of this class therefore has
+     * exactly one shape, and it is the correct one.
+     */
     public function __construct(
         private readonly HdbReportFetchAuthorizer $authorizer = new HdbReportFetchAuthorizer,
-        ?HdbAuthClient $auth = null,
     ) {
         $this->cookies = new CookieJar;
-        $this->auth = $auth ?? new HdbAuthClient($this->cookies);
+        $this->auth = new HdbAuthClient($this->cookies);
     }
 
     /**
