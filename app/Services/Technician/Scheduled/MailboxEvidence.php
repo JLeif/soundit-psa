@@ -19,7 +19,8 @@ final class MailboxEvidence implements ScheduledEvidence
 {
     public function __construct(private StaffCippWriteToolExecutor $executor, private CippRestWriteClient $client) {}
 
-    public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
+    /** $approver is null on the token-approved immediate lane; nothing here reads it. */
+    public function approve(TechnicianRun $run, ?User $approver, array $humanInputs): array
     {
         $this->enabled();
         $plan = $this->executor->scheduledMailboxPlan($run, $humanInputs);
@@ -62,7 +63,7 @@ final class MailboxEvidence implements ScheduledEvidence
             'object_id' => strtolower($plan['people']['owner']['id'])], 'integration' => $namespace, 'human_inputs' => $humanInputs];
     }
 
-    public function revalidate(TechnicianRun $run, User $approver, array $approved): array
+    public function revalidate(TechnicianRun $run, ?User $approver, array $approved): array
     {
         return $this->approve($run, $approver, $approved['human_inputs']);
     }

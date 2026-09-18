@@ -16,20 +16,20 @@ class ScheduledHumanInputsTest extends ScheduledApprovalTest
         {
             public function __construct(private \App\Services\Technician\Scheduled\ScheduledEvidence $base) {}
 
-            public function approve(\App\Models\TechnicianRun $run, \App\Models\User $user, array $inputs): array
+            public function approve(\App\Models\TechnicianRun $run, ?\App\Models\User $user, array $inputs): array
             {
                 // Preserve the original #1780 deliberately lossy-provider control:
                 // different confirmations produce exactly the same binding.
                 return $this->base->approve($run, $user, []);
             }
 
-            public function revalidate(\App\Models\TechnicianRun $run, \App\Models\User $user, array $approved): array
+            public function revalidate(\App\Models\TechnicianRun $run, ?\App\Models\User $user, array $approved): array
             {
                 return $approved;
             }
         };
 
-        return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+        return app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, null,
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', $inputs, $lossy);
     }
 
@@ -98,12 +98,12 @@ class ScheduledHumanInputsTest extends ScheduledApprovalTest
         {
             public function __construct(private int $id) {}
 
-            public function approve(\App\Models\TechnicianRun $run, \App\Models\User $user, array $inputs): array
+            public function approve(\App\Models\TechnicianRun $run, ?\App\Models\User $user, array $inputs): array
             {
                 throw new \LogicException('Not an admission fixture');
             }
 
-            public function revalidate(\App\Models\TechnicianRun $run, \App\Models\User $user, array $approved): array
+            public function revalidate(\App\Models\TechnicianRun $run, ?\App\Models\User $user, array $approved): array
             {
                 $row = DB::table('scheduled_authorizations')->find($this->id);
                 $values = ApprovalEnvelope::open($row->ciphertext, $row->digest);

@@ -35,9 +35,15 @@ final class TacticalDispatch
                 throw new \RuntimeException('dispatch_target_changed');
             }
             $action = new TacticalScheduledAction($plan['type'], $id, $nonce);
-            $user = User::findOrFail($row->approver_user_id);
+            // A token-approved row (immediate lane) has NO approver: approver_user_id is
+            // NULL and findOrFail would throw, silently settling every such row 'failed'.
+            // The bus already accepts a null actor carrying the 'scheduled:<id>' label
+            // below, and the confirm token already accepts a null actor id, so the absence
+            // is passed through rather than filled with a stand-in user — which would put a
+            // real technician's id on an action they never authorised.
+            $user = $row->approver_user_id === null ? null : User::findOrFail($row->approver_user_id);
             $confirm = $action->isDestructive() ? TacticalActionConfirmToken::issue(
-                $action->key(), $plan['agent_id'], $user->id, $action->payloadHash($plan['params']),
+                $action->key(), $plan['agent_id'], $user?->id, $action->payloadHash($plan['params']),
             ) : null;
             if (! $this->coordinator->beforeSend($id, $nonce)) {
                 return;

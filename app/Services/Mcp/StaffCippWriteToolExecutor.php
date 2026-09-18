@@ -748,10 +748,65 @@ class StaffCippWriteToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+
+            return $this->admitDirectlyIfRequested($staged, $scheduledTokenId, $executeAt);
         }
 
         return $this->executeDirect($name, $arguments, $clientId, $actorLabel);
+    }
+
+    /**
+     * The immediate lane (ruled design point 3). See the identical guard in
+     * StaffTacticalActionToolExecutor for why the branch sits after staging.
+     *
+     * @param  array<string, mixed>  $staged
+     * @return array<string, mixed>
+     */
+    private function admitDirectlyIfRequested(array $staged, ?int $scheduledTokenId, ?ExecuteAt $executeAt): array
+    {
+        if ($executeAt === null || ! $executeAt->direct || $scheduledTokenId === null
+            || ! ($staged['success'] ?? false) || isset($staged['error'])) {
+            return $staged;
+        }
+
+        // An idempotent stage result names a run this call did NOT create: either a Done run
+        // for identical content, or a proposal still live in the cockpit that may have been
+        // staged natively by a technician or by another token. Admitting it would put this
+        // token's authority on someone else's row, and a refused admission would WITHDRAW
+        // their live decision. Refuse by name and touch nothing — UNLESS the run is this
+        // token's OWN live proposal for this same instant, which is what a retry looks like
+        // after the first call died between stageAction()'s commit and admission. Refusing
+        // that one forever strands the caller's own destructive proposal AwaitingApproval in
+        // the cockpit: the converted lane this class must never produce.
+        if (($staged['idempotent'] ?? false) && ! $this->ownsLiveDirectProposal($staged['run_id'] ?? null, $scheduledTokenId, $executeAt)) {
+            return ['error' => 'execute_at_conflicts_with_existing_run'];
+        }
+
+        return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
+            ->admit($staged, $scheduledTokenId, $executeAt);
+    }
+
+    /**
+     * Whether the run an idempotent stage result names is THIS caller's own live direct-lane
+     * proposal for THIS instant — the provenance the direct admission would itself demand.
+     * A Done run, a technician's proposal, another token's proposal AND the caller's own
+     * cockpit-lane proposal (staged=true, which an `:immediate` grant also permits) all
+     * fail it and are refused by name, untouched; only the caller's own DIRECT-lane orphan,
+     * marked as such in its provenance at staging time, is allowed through to be finished.
+     */
+    private function ownsLiveDirectProposal(mixed $runId, int $scheduledTokenId, ExecuteAt $executeAt): bool
+    {
+        $run = is_int($runId) ? TechnicianRun::find($runId) : null;
+        if ($run === null || $run->state !== TechnicianRunState::AwaitingApproval) {
+            return false;
+        }
+        $provenance = is_array($run->proposed_meta) ? ($run->proposed_meta['scheduled_provenance'] ?? null) : null;
+
+        return is_array($provenance) && ($provenance['kind'] ?? null) === 'mcp'
+            && ($provenance['token_id'] ?? null) === $scheduledTokenId
+            && ($provenance['execute_at_direct'] ?? null) === true
+            && ($provenance['execute_at'] ?? null) === $executeAt->utc;
     }
 
     /** Read-only scheduled mailbox preparation. Never claims, dispatches, or releases a run. */
@@ -1339,6 +1394,18 @@ class StaffCippWriteToolExecutor
         $params = $this->hashParams($directTool, $license, $state, $mailbox);
         $contentHash = $this->contentHash($tool, $client->id, $person->person->id, $ticket->id, $params);
 
+        // Some verbs are released only after an approver RE-TYPES the value the cockpit card
+        // prompts for — the external SMTP address, the out-of-office bodies. The immediate
+        // lane has no cockpit card and no approver, so that confirmation cannot be collected
+        // at all and the run would fire with sensitive_inputs nobody ever typed. Refused here,
+        // before anything is staged: no run, no audit row, and the cooldown is not burned.
+        if ($executeAt !== null && $executeAt->direct) {
+            $sensitive = $this->sensitiveInputsForStagedAction($directTool, $params);
+            if ($sensitive !== []) {
+                return ['error' => 'execute_at_direct_requires_approver_inputs:'.implode(',', $sensitive)];
+            }
+        }
+
         // RECREATABLE_TARGET_STAGED_TOOLS skip the executed-content rail below, so
         // nothing else stops a same-content re-stage from landing on the run that
         // ALREADY removed a rule under this name: firstOrCreate would return that
@@ -1432,6 +1499,16 @@ class StaffCippWriteToolExecutor
                 // a staged mailbox proposal never stores them.
                 $meta['scheduled_provenance']['execute_at'] = $executeAt->utc;
                 $meta['scheduled_provenance']['execute_at_offset'] = $executeAt->offset;
+                // The LANE is recorded, not just the instant. An `:immediate` grant also
+                // permits an explicit staged=true, and THAT proposal is a cockpit card a
+                // human must approve; with no marker its provenance is identical to a
+                // direct-lane orphan's, so a later staged=false call for the same instant
+                // would admit the card under the token's own authority with approver_user_id
+                // NULL — resolving a human-approval decision the caller had asked for. Only
+                // the direct lane is marked; the cockpit lane's provenance is unchanged.
+                if ($executeAt->direct) {
+                    $meta['scheduled_provenance']['execute_at_direct'] = true;
+                }
             }
         }
         $proposedContent = $this->stagedDisplay($directTool, $person, $license, $state, $mailbox)."\nReason: ".$reason;

@@ -12,8 +12,16 @@ final class ScheduledAdmission
 {
     public function __construct(private ScheduledClock $clock, private ScheduledPolicy $policy) {}
 
-    /** Transactional admission; per-action evidence binds independently captured confirmations. */
-    public function admit(int $runId, int $approverId, string $expectedHash, ?int $tokenId, string $start, string $end, string $zone, array $humanInputs, ScheduledEvidence $evidence): int
+    /**
+     * Transactional admission; per-action evidence binds independently captured confirmations.
+     *
+     * $approver is the TYPED authority for this row: a human approver (the cockpit Approve)
+     * or the MCP token itself (the immediate lane, ruled design point 3). It is never an
+     * integer with a magic value — a token-approved row writes approver_user_id NULL into
+     * both the row and the sealed envelope, so nothing downstream can mistake it for a
+     * human approval.
+     */
+    public function admit(int $runId, ScheduledApprover $approver, string $expectedHash, ?int $tokenId, string $start, string $end, string $zone, array $humanInputs, ScheduledEvidence $evidence): int
     {
         if (app(ScheduledQuiescence::class)->at() !== null) {
             throw new InvalidArgumentException('scheduling_quiesced');
@@ -23,13 +31,19 @@ final class ScheduledAdmission
         if (TechnicianConfig::killSwitchEngaged() || ! $this->clock->healthy()) {
             throw new InvalidArgumentException('kill_switch_or_clock_unhealthy');
         }
-        $user = $this->policy->approver($approverId);
+        // A token-approved admission has NO approver to validate and no User to hand the
+        // evidence provider. It gets null, not a stand-in: neither installed provider reads
+        // the approver (both bind on the run's own payload and live vendor identity), and
+        // manufacturing the system user or the AI actor here would put a human's id where
+        // the record says a human decided, which is exactly the provenance this lane must
+        // not forge.
+        $user = $approver->isToken() ? null : $this->policy->approver((int) $approver->userId);
         $run = TechnicianRun::findOrFail($runId);
         if ($refusal = ActionRegistry::admissionRefusal($run->action_type)) {
             throw new InvalidArgumentException($refusal);
         }
         $this->policy->ticket($run);
-        $this->policy->lineage($run, $tokenId);
+        $this->policy->lineage($run, $tokenId, $approver);
         $direct = ActionRegistry::directTool($run->action_type);
         if ($direct === null || ! hash_equals($run->content_hash, $expectedHash)) {
             throw new InvalidArgumentException('unsupported_or_changed');
@@ -43,14 +57,18 @@ final class ScheduledAdmission
         }
         $meta = ApprovalEnvelope::canonical($run->proposed_meta ?? []);
 
-        return DB::transaction(function () use ($run, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta, $humanInputs): int {
+        $approverId = $approver->userId;
+
+        return DB::transaction(function () use ($run, $approver, $approverId, $expectedHash, $tokenId, $start, $end, $zone, $direct, $binding, $meta, $humanInputs): int {
             if (app(ScheduledQuiescence::class)->atForUpdate() !== null) {
                 throw new InvalidArgumentException('scheduling_quiesced');
             }
             $locked = TechnicianRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
-            $this->policy->approver($approverId);
+            if (! $approver->isToken()) {
+                $this->policy->approver((int) $approverId);
+            }
             $this->policy->ticket($locked);
-            $this->policy->lineage($locked, $tokenId);
+            $this->policy->lineage($locked, $tokenId, $approver);
             if ($locked->content_hash !== $expectedHash || $locked->action_type !== $run->action_type
                 || $locked->ticket_id !== $run->ticket_id || $locked->client_id !== $run->client_id
                 || ApprovalEnvelope::canonical($locked->proposed_meta ?? []) !== $meta) {
@@ -63,7 +81,15 @@ final class ScheduledAdmission
                 // A repeat admission is idempotent only if EVERY sealed field matches this
                 // confirmation; a changed content revision/action/binding must refuse here,
                 // not be returned as a success sealed against the old proposal.
-                if ($row->approver_user_id != $approverId || $row->local_start !== $start || $row->local_end !== $end || $row->display_timezone !== $zone
+                //
+                // The approver comparison is NULL-EXACT, not loose: `!=` would call
+                // NULL == 0 and NULL == null both true, so a token row arriving later with
+                // a human approver (or the reverse) would be returned as an idempotent
+                // success sealed against the other party's authority. Compare the typed
+                // identity instead — a mode change is a conflict, always.
+                $rowApprover = $row->approver_user_id === null ? null : (int) $row->approver_user_id;
+                if ($rowApprover !== ($approverId === null ? null : (int) $approverId)
+                    || $row->local_start !== $start || $row->local_end !== $end || $row->display_timezone !== $zone
                     || ! hash_equals((string) $row->content_hash, $expectedHash)
                     || $row->action_type !== $locked->action_type || $row->direct_tool !== $direct
                     || $row->client_id != $locked->client_id || $row->ticket_id != $locked->ticket_id

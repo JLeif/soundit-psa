@@ -51,12 +51,12 @@ class ScheduledApprovalTest extends TestCase
         ]);
         $this->evidence = new class implements ScheduledEvidence
         {
-            public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
+            public function approve(TechnicianRun $run, ?User $approver, array $humanInputs): array
             {
                 return ['human_inputs' => $humanInputs, 'payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
             }
 
-            public function revalidate(TechnicianRun $run, User $approver, array $approved): array
+            public function revalidate(TechnicianRun $run, ?User $approver, array $approved): array
             {
                 return $approved;
             }
@@ -65,7 +65,7 @@ class ScheduledApprovalTest extends TestCase
 
     protected function admit(): int
     {
-        return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+        return app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, null,
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $this->evidence);
     }
 
@@ -93,7 +93,7 @@ class ScheduledApprovalTest extends TestCase
         \App\Models\Setting::setValue('technician_kill_switch', '1');
         $this->run->update(['content_hash' => str_repeat('b', 64)]);
         try {
-            app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+            app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, null,
                 '2026-09-15 03:00:00', '2026-09-15 04:00:00', 'UTC', [], $this->evidence);
             $this->fail('kill switch did not gate admission');
         } catch (\InvalidArgumentException $e) {
@@ -241,7 +241,7 @@ class ScheduledApprovalTest extends TestCase
         $token = \App\Models\McpToken::create(['label' => 'synthetic', 'token_hash' => hash('sha256', 'synthetic-only'),
             'token_prefix' => 'test', 'tools' => ['cipp_set_mailbox_forwarding:staged'], 'activated_at' => now()]);
         $this->run->update(['proposed_meta' => ['scheduled_provenance' => ['version' => 1, 'kind' => 'mcp', 'token_id' => $token->id]]]);
-        $id = app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, $token->id,
+        $id = app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, $token->id,
             '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $this->evidence);
         $this->time = $this->time->setTime(1, 0);
         $c = app(ScheduledCoordinator::class);
@@ -299,12 +299,12 @@ class ScheduledApprovalTest extends TestCase
         }
         $this->evidence = new class implements ScheduledEvidence
         {
-            public function approve(TechnicianRun $run, User $user, array $inputs): array
+            public function approve(TechnicianRun $run, ?User $user, array $inputs): array
             {
                 return ['payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'different-tenant', 'object_id' => 'synthetic-object']];
             }
 
-            public function revalidate(TechnicianRun $run, User $user, array $approved): array
+            public function revalidate(TechnicianRun $run, ?User $user, array $approved): array
             {
                 return $approved;
             }

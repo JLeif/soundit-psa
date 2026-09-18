@@ -18,7 +18,8 @@ final class TacticalEvidence implements ScheduledEvidence
 {
     public function __construct(private TacticalClient $client, private StaffTacticalActionToolExecutor $executor) {}
 
-    public function approve(TechnicianRun $run, User $approver, array $humanInputs): array
+    /** $approver is null on the token-approved immediate lane; nothing here reads it. */
+    public function approve(TechnicianRun $run, ?User $approver, array $humanInputs): array
     {
         if (TechnicianConfig::killSwitchEngaged()) {
             throw new ScheduledUnavailable('kill_switch');
@@ -89,7 +90,7 @@ final class TacticalEvidence implements ScheduledEvidence
             'hostname' => $live['hostname'], 'integration' => $namespace, 'human_inputs' => $humanInputs];
     }
 
-    public function revalidate(TechnicianRun $run, User $approver, array $approved): array
+    public function revalidate(TechnicianRun $run, ?User $approver, array $approved): array
     {
         return $this->approve($run, $approver, $approved['human_inputs']);
     }

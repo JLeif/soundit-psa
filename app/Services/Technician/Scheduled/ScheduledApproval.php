@@ -59,7 +59,7 @@ final class ScheduledApproval
         $evidence = TacticalPlan::supports($run->action_type) ? app(TacticalEvidence::class) : app(MailboxEvidence::class);
         [$start, $end] = $executeAt->window('UTC');
         try {
-            $id = $this->admission->admit($run->id, $approverId, (string) $run->content_hash, is_int($tokenId) ? $tokenId : null,
+            $id = $this->admission->admit($run->id, ScheduledApprover::human($approverId), (string) $run->content_hash, is_int($tokenId) ? $tokenId : null,
                 $start, $end, 'UTC', $human, $evidence);
         } catch (InvalidArgumentException|ScheduledUnavailable $e) {
             return new TechnicianApprovalResult('gate_declined', message: 'Scheduling was refused ('.$e->getMessage().'). Nothing was sent; the proposal is still awaiting approval unless it was already handled.');

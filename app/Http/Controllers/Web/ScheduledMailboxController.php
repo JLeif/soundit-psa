@@ -28,7 +28,12 @@ class ScheduledMailboxController extends Controller
             abort(403);
         }
         $row = DB::table('scheduled_authorizations')->where('run_id', $run->id)->orderByDesc('revision')->first();
-        abort_unless($row && (int) $row->approver_user_id === (int) auth()->id(), 403);
+        // A HUMAN-approved row stays approver-only. A TOKEN-approved row (ruled design
+        // point 3: an `<tool>:immediate` grant queued it with approver_user_id NULL) has no
+        // approver at all, so this comparison could never pass for it and the row would be
+        // uncancellable by anyone. Any active Admin/Tech — already validated immediately
+        // above — may stop one (ruled design point 4).
+        abort_unless($row && ($row->approver_user_id === null || (int) $row->approver_user_id === (int) auth()->id()), 403);
         $ok = $coordinator->cancel($row->id, (int) auth()->id());
 
         return redirect()->route('cockpit.index')->with($ok ? 'success' : 'error', $ok

@@ -11,10 +11,13 @@
                     @if($ticketMoved)<p class="text-danger mb-0">Ticket no longer belongs to the approved client. Shown for reconciliation; dispatch is refused at fire time, and a pending schedule can still be cancelled here by its approver.</p>@endif</td>
                 <td>{{ \Carbon\CarbonImmutable::parse($scheduled->not_before, 'UTC')->setTimezone($scheduled->display_timezone)->format('Y-m-d H:i T') }}<br>to {{ \Carbon\CarbonImmutable::parse($scheduled->expires_at, 'UTC')->setTimezone($scheduled->display_timezone)->format('Y-m-d H:i T') }}<br><small>{{ $scheduled->display_timezone }}</small></td>
                 <td><strong>{{ ucfirst(str_replace('_', ' ', $scheduled->state)) }}</strong>
+                    @if($scheduled->approver_user_id === null)<p class="text-muted mb-0">Queued by an MCP token under its own standing permission. No human approved it; any active technician can cancel it.</p>@endif
                     @if($scheduled->state === 'uncertain')<p class="text-danger mb-0">Effect unknown. Never retry automatically.</p>@endif
                     @if($scheduled->state === 'failed')<p class="text-danger mb-0">Vendor reported failure. No automatic retry.</p>@endif
                 </td>
-                <td>@if(in_array($scheduled->state, ['waiting', 'claimed'], true) && (int) $scheduled->approver_user_id === (int) auth()->id())
+                @php($cancellable = in_array($scheduled->state, ['waiting', 'claimed'], true)
+                    && ($scheduled->approver_user_id === null || (int) $scheduled->approver_user_id === (int) auth()->id()))
+                <td>@if($cancellable)
                     <form method="POST" action="{{ route('cockpit.schedule.cancel', $scheduled->run_id) }}">@csrf<button class="btn btn-sm btn-outline-danger" type="submit">Cancel schedule</button></form>
                 @else<span class="text-muted">Not cancellable by you</span>@endif</td>
             </tr>
