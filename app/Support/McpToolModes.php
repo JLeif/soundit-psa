@@ -54,6 +54,9 @@ class McpToolModes
         'stage_close_ticket' => 'close_ticket',
         'stage_resolve_email_item' => 'resolve_email_item',
         'stage_resolve_phone_call' => 'resolve_phone_call',
+        'stage_set_call_billable' => 'set_call_billable',
+        'stage_block_caller' => 'block_caller',
+        'stage_allow_caller' => 'allow_caller',
         'propose_merge' => 'merge_ticket',
         'propose_asset_merge' => 'merge_asset',
     ];
@@ -91,6 +94,15 @@ class McpToolModes
     /** Capabilities whose bare grant holds; explicit :immediate is still supported. */
     private const BARE_GRANT_DEFAULTS_STAGED = [
         'resolve_phone_call',
+        // The call-log writes whose effect is money or a real phone line
+        // (card 6aac3226dfebbc36fd7ff4f9). set_call_billable re-runs the prepay
+        // debit; block_caller makes the IVR hang up on a real number and
+        // allow_caller rings one through. A bare grant — including the grant
+        // catalog's bulk "Grant shown" click on the intake tier — holds for
+        // approval; immediate execution takes the explicit `:immediate` grant.
+        'set_call_billable',
+        'block_caller',
+        'allow_caller',
     ];
 
     /**
@@ -112,6 +124,12 @@ class McpToolModes
     private const IMMEDIATE_REQUIRES_EXPLICIT_GRANT = [
         'resolve_email_item',
         'resolve_phone_call',
+        // Same three call-log capabilities: a legacy full-surface token (which
+        // resolves every unlisted tool to immediate) must not acquire an
+        // approval-free prepay move or caller block just because this landed.
+        'set_call_billable',
+        'block_caller',
+        'allow_caller',
         'merge_ticket',
         'merge_asset',
         // tactical_remove_agent has no immediate implementation at all

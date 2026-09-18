@@ -1576,6 +1576,126 @@ class McpToolRegistry
             self::resolvePhoneCallTool(),
             self::resolvePhoneCallTool(true),
             self::createTicketFromCallTool(),
+            self::setCallBillableTool(),
+            self::setCallBillableTool(true),
+            self::blockCallerTool(),
+            self::blockCallerTool(true),
+            self::allowCallerTool(),
+            self::allowCallerTool(true),
+            self::markCallFollowedUpTool(),
+            self::retryCallTranscriptionTool(),
+        ];
+    }
+
+    /**
+     * set_call_billable MOVES MONEY: it runs the same
+     * PhoneCallService::setBillable the staff page runs, which re-runs
+     * PrepayService::debitFromPhoneCall and creates, adjusts or reverses a prepay
+     * debit against the client's contract. So it copies resolve_phone_call's
+     * grant contract exactly rather than shipping as a plain immediate action.
+     *
+     * @return array<string, mixed>
+     */
+    public static function setCallBillableTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_set_call_billable' : 'set_call_billable',
+            'description' => 'Set whether one phone call is billable, reusing the native billability path. THIS MOVES PREPAY MONEY: the same call re-runs the prepay debit for this call, so it creates, adjusts or reverses hours against the client contract. billable is the DESIRED STATE, never a toggle. Refuses a call with no ticket link (the prepay contract is resolved through the ticket). Default-ungranted including legacy tokens. Bare or :staged grants hold for cockpit approval; only explicit :immediate permits immediate execution. Staged proposals revalidate the call, its ticket link, that ticket\'s client and contract (the prepay debit resolves through them), its duration and its current billability at approval. Audited by ids, desired state and reason only — the transcript is never logged. Read the result back with get_phone_call.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'billable' => ['type' => 'boolean', 'description' => 'The desired billability state. Not a toggle.'],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'billable', 'reason'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /**
+     * block_caller is CLIENT-VISIBLE IN EFFECT: the IVR reads the phone directory
+     * and hangs up on a blocked number, so one agent write silences a real phone
+     * line. Same grant contract as set_call_billable.
+     *
+     * @return array<string, mixed>
+     */
+    public static function blockCallerTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_block_caller' : 'block_caller',
+            'description' => "Block the caller of one phone call by adding their number to the phone directory Blocked list, reusing the native path. CLIENT-VISIBLE: future calls from that number are hung up by the IVR — this silences a real phone line. INBOUND CALLS ONLY: an outbound call is refused, because its stored caller number is the number this PSA dialled. Refuses an unparseable caller number, and refuses (reporting the existing list) a number already in the directory rather than moving it between lists. Default-ungranted including legacy tokens. Bare or :staged grants hold for cockpit approval; only explicit :immediate permits immediate execution. Staged proposals revalidate the call, its caller number and the directory at approval. Audited by ids and reason only — the caller's number is never written to the action log.",
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'reason'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /**
+     * allow_caller is block_caller's inverse. It CANNOT un-block: an existing
+     * directory entry is reported, never rewritten, so an agent can never
+     * silently lift a block it did not place.
+     *
+     * @return array<string, mixed>
+     */
+    public static function allowCallerTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_allow_caller' : 'allow_caller',
+            'description' => 'Add the caller of one phone call to the phone directory Allowed list, reusing the native path — future calls from that number ring through. THIS DOES NOT UN-BLOCK: a number already in the directory (on either list) is REPORTED with its current list and left untouched, so a block placed by someone else can never be silently lifted; removing an entry is a phone-directory action, not this tool. INBOUND CALLS ONLY: an outbound call is refused, because its stored caller number is the number this PSA dialled. Refuses an unparseable caller number. Default-ungranted including legacy tokens. Bare or :staged grants hold for cockpit approval; only explicit :immediate permits immediate execution. Staged proposals revalidate the call, its caller number and the directory at approval.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'label' => ['type' => 'string', 'maxLength' => 120, 'description' => 'Optional caller label shown to whoever answers.'],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'reason'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function markCallFollowedUpTool(): array
+    {
+        return [
+            'name' => 'mark_call_followed_up',
+            'description' => 'Mark one phone call as followed up immediately, reusing the native follow-up path (sets followed_up_at and the follow-up actor). SET-ONLY: a call already followed up is reported as unchanged with its existing actor and timestamp preserved, never re-stamped, and this tool cannot clear the marker. Note that followed_up_at is the resolution marker link_call_to_ticket and create_ticket_from_call refuse to override, so marking a call followed up closes those two paths for it. Requires an explicit token grant; never inherited by the legacy full-surface token. Audited by id and reason only — the transcript is never logged.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'reason'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function retryCallTranscriptionTool(): array
+    {
+        return [
+            'name' => 'retry_call_transcription',
+            'description' => 'Re-run transcription for one phone call immediately, reusing the native re-transcribe path (sets the status to Pending and re-queues the transcription command). Refuses a call with no recording, an instance with transcription unconfigured, and a call whose transcription is already Processing. Idempotent in effect but not free: it re-sends the recording to the transcription provider. Requires an explicit token grant; never inherited by the legacy full-surface token. Read the result back with get_phone_call.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'phone_call_id' => ['type' => 'integer', 'minimum' => 1],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['phone_call_id', 'reason'],
+                'additionalProperties' => false,
+            ],
         ];
     }
 

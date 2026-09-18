@@ -355,6 +355,38 @@ class McpStaffController extends Controller
         'dismiss_email_item',
         'link_call_to_ticket',
         'create_ticket_from_call',
+        // Call-log writes (card 6aac3226dfebbc36fd7ff4f9). ROUTING ONLY, exactly
+        // as the note above says: membership sends them to
+        // StaffPsaActionToolExecutor and keeps the legacy full-surface token out
+        // (the intake-manage branch in toolAllowed() requires allowedTools !==
+        // null AND an explicit grant). For the three money/phone-line verbs the
+        // mode gate then holds a bare or :staged grant for cockpit approval.
+        'set_call_billable',
+        'stage_set_call_billable',
+        'block_caller',
+        'stage_block_caller',
+        'allow_caller',
+        'stage_allow_caller',
+        'mark_call_followed_up',
+        'retry_call_transcription',
+    ];
+
+    /**
+     * Call-log write tools whose audited arguments are reduced to ids plus a
+     * reason LENGTH. A `reason` is operator prose and a caller `label` is very
+     * often a person's name, so neither belongs in the MCP audit log; the
+     * caller's phone number is never in the arguments at all (the call id
+     * carries it).
+     */
+    private const CALL_ACTION_ID_ONLY_AUDIT_TOOLS = [
+        'set_call_billable',
+        'stage_set_call_billable',
+        'block_caller',
+        'stage_block_caller',
+        'allow_caller',
+        'stage_allow_caller',
+        'mark_call_followed_up',
+        'retry_call_transcription',
     ];
 
     private const BODY_LENGTH_AUDIT_TOOLS = [
@@ -1475,6 +1507,22 @@ class McpStaffController extends Controller
                 if (is_int($args[$key] ?? null)) {
                     $safe[$key] = $args[$key];
                 }
+            }
+            $safe['reason_length'] = is_string($args['reason'] ?? null) ? mb_strlen($args['reason']) : 0;
+
+            return $safe;
+        }
+
+        if (in_array((string) $tool, self::CALL_ACTION_ID_ONLY_AUDIT_TOOLS, true)) {
+            $safe = [];
+            if (is_int($args['phone_call_id'] ?? null)) {
+                $safe['phone_call_id'] = $args['phone_call_id'];
+            }
+            if (is_bool($args['billable'] ?? null)) {
+                $safe['billable'] = $args['billable'];
+            }
+            if (array_key_exists('staged', $args)) {
+                $safe['staged'] = (bool) $args['staged'];
             }
             $safe['reason_length'] = is_string($args['reason'] ?? null) ? mb_strlen($args['reason']) : 0;
 

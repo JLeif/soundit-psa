@@ -536,25 +536,67 @@ class CippStagedPasswordResetTest extends TestCase
      * match). Guard all of them structurally rather than fixing this one entry, so the
      * next staged action cannot be mislabelled the same way.
      */
+    /**
+     * Staged types that are NOT ticket TechnicianRuns and therefore never enter
+     * the ticket run badge map: each has its own included cockpit card and its
+     * own routed approval. Same rigor as the badge-map arm, different evidence —
+     * the card must be included from the cockpit AND must render the label from
+     * the single StagedActionLabels source, so a mislabel is still impossible.
+     *
+     * The call-log action types (card 6aac3226dfebbc36fd7ff4f9) share ONE card,
+     * which renders the label for whichever action the proposal carries, so the
+     * evidence required of them is the label lookup that covers all three.
+     *
+     * @var array<string, array{partial: string, label_evidence: string}>
+     */
+    private const OWN_CARD_STAGED_TYPES = [
+        'stage_resolve_email_item' => [
+            'partial' => 'email-resolutions',
+            'label_evidence' => "StagedActionLabels::humanLabel('stage_resolve_email_item')",
+        ],
+        'stage_resolve_phone_call' => [
+            'partial' => 'phone-call-resolutions',
+            'label_evidence' => "StagedActionLabels::humanLabel('stage_resolve_phone_call')",
+        ],
+        'stage_set_call_billable' => [
+            'partial' => 'phone-call-actions',
+            'label_evidence' => 'StagedActionLabels::humanLabel($type)',
+        ],
+        'stage_block_caller' => [
+            'partial' => 'phone-call-actions',
+            'label_evidence' => 'StagedActionLabels::humanLabel($type)',
+        ],
+        'stage_allow_caller' => [
+            'partial' => 'phone-call-actions',
+            'label_evidence' => 'StagedActionLabels::humanLabel($type)',
+        ],
+    ];
+
+    /**
+     * The routed approval each own-card staged type reaches instead of the
+     * cockpit run approve match.
+     *
+     * @var array<string, array{route: string, action: string}>
+     */
+    private const OWN_CARD_APPROVAL_ROUTES = [
+        'stage_resolve_email_item' => ['route' => 'email-resolutions.approve', 'action' => \App\Http\Controllers\Web\EmailResolutionController::class.'@approve'],
+        'stage_resolve_phone_call' => ['route' => 'phone-call-resolutions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallResolutionController::class.'@approve'],
+        'stage_set_call_billable' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
+        'stage_block_caller' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
+        'stage_allow_caller' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
+    ];
+
     public function test_every_staged_action_type_has_its_own_cockpit_badge(): void
     {
         $blade = (string) file_get_contents(resource_path('views/cockpit/index.blade.php'));
 
         $missing = [];
         foreach (array_keys(McpToolModes::stagedToCanonical()) as $stagedType) {
-            if ($stagedType === 'stage_resolve_email_item') {
-                // Email-native proposals deliberately never enter the ticket run
-                // badge map. Assert the separate included card instead.
-                $this->assertStringContainsString("@include('cockpit.partials.email-resolutions')", $blade);
-                $card = (string) file_get_contents(resource_path('views/cockpit/partials/email-resolutions.blade.php'));
-                $this->assertStringContainsString("StagedActionLabels::humanLabel('stage_resolve_email_item')", $card);
-
-                continue;
-            }
-            if ($stagedType === 'stage_resolve_phone_call') {
-                $this->assertStringContainsString("@include('cockpit.partials.phone-call-resolutions')", $blade);
-                $card = (string) file_get_contents(resource_path('views/cockpit/partials/phone-call-resolutions.blade.php'));
-                $this->assertStringContainsString("StagedActionLabels::humanLabel('stage_resolve_phone_call')", $card);
+            if (isset(self::OWN_CARD_STAGED_TYPES[$stagedType])) {
+                ['partial' => $partial, 'label_evidence' => $evidence] = self::OWN_CARD_STAGED_TYPES[$stagedType];
+                $this->assertStringContainsString("@include('cockpit.partials.{$partial}')", $blade, $stagedType);
+                $card = (string) file_get_contents(resource_path("views/cockpit/partials/{$partial}.blade.php"));
+                $this->assertStringContainsString($evidence, $card, $stagedType);
 
                 continue;
             }
@@ -580,22 +622,16 @@ class CippStagedPasswordResetTest extends TestCase
 
         $missing = [];
         foreach (array_keys(McpToolModes::stagedToCanonical()) as $stagedType) {
-            if ($stagedType === 'stage_resolve_email_item') {
-                // No TechnicianRun FK for this pre-ticket operation. Exercise its
-                // real routed approval in EmailResolutionTest; require the route
-                // and dedicated controller here, not a fake run approve arm.
-                $route = app('router')->getRoutes()->getByName('email-resolutions.approve');
-                $this->assertNotNull($route);
-                $this->assertSame(\App\Http\Controllers\Web\EmailResolutionController::class.'@approve', $route->getActionName());
-
-                continue;
-            }
-            if ($stagedType === 'stage_resolve_phone_call') {
-                // Single-call proposals have their own routed approval, exercised
-                // through HTTP in PhoneCallResolutionTest, not a ticket run arm.
-                $route = app('router')->getRoutes()->getByName('phone-call-resolutions.approve');
-                $this->assertNotNull($route);
-                $this->assertSame(\App\Http\Controllers\Web\PhoneCallResolutionController::class.'@approve', $route->getActionName());
+            if (isset(self::OWN_CARD_APPROVAL_ROUTES[$stagedType])) {
+                // No ticket TechnicianRun FK for these pre-ticket / single-call
+                // operations. Each has its own routed approval, exercised through
+                // HTTP in its own test (EmailResolutionTest,
+                // PhoneCallResolutionTest, PhoneCallAgentActionTest); require the
+                // route and its dedicated controller here, not a fake run arm.
+                ['route' => $name, 'action' => $action] = self::OWN_CARD_APPROVAL_ROUTES[$stagedType];
+                $route = app('router')->getRoutes()->getByName($name);
+                $this->assertNotNull($route, $stagedType);
+                $this->assertSame($action, $route->getActionName(), $stagedType);
 
                 continue;
             }

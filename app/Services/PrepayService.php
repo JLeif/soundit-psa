@@ -504,9 +504,18 @@ class PrepayService
     }
 
     /**
-     * Create or update a prepay debit from a phone call's billable duration.
+     * THE money target for a phone call's prepay debit: the one contract
+     * debitFromPhoneCall() would actually move hours on, or null if there is
+     * none. This is deliberately the single producer of that answer — the
+     * ticket's own contract is only PART of it, because when ticket.contract_id
+     * is null (the common intake case) the target is whichever active hours
+     * prepay contract of the ticket's client the fallback query returns, and
+     * that identity is not derivable from the ticket's columns.
+     *
+     * Callers that must pin the target across a time gap (a staged agent action
+     * approved minutes later) snapshot THIS id, not ticket.contract_id.
      */
-    public function debitFromPhoneCall(PhoneCall $call): ?PrepayTransaction
+    public function resolveContractForPhoneCall(PhoneCall $call): ?Contract
     {
         $ticket = $call->ticket;
 
@@ -526,6 +535,26 @@ class PrepayService
         }
 
         if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
+            return null;
+        }
+
+        return $contract;
+    }
+
+    /**
+     * Create or update a prepay debit from a phone call's billable duration.
+     */
+    public function debitFromPhoneCall(PhoneCall $call): ?PrepayTransaction
+    {
+        $ticket = $call->ticket;
+
+        if (! $ticket) {
+            return null;
+        }
+
+        $contract = $this->resolveContractForPhoneCall($call);
+
+        if (! $contract) {
             return null;
         }
 
