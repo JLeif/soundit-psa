@@ -1,0 +1,55 @@
+# Cases for assert_no_warnings() in scripts/gc-verify.sh
+# Format: <expected>|<summary line>
+#   expected = PASS (function returns 0) or FAIL (returns non-zero)
+#
+# Each line is fed to the SHIPPED function extracted from the gate script, not to
+# a re-implementation. The point of the file is that the parenthetical is parsed
+# by the same allow-list as the rest of the line: a count the gate cannot read
+# must fail closed WHEREVER it appears, and a warnings count must be counted
+# WHEREVER it appears.
+
+# --- real shapes this repo has actually emitted (must keep passing) ---
+PASS|Tests:    157 skipped, 7636 passed (48675 assertions)
+PASS|Tests:    156 skipped, 7339 passed (46963 assertions)
+PASS|Tests:    7619 passed (48511 assertions)
+
+# --- the floor this gate was built to kill (outside the parens) ---
+FAIL|Tests:    7286 warnings, 467 passed (48511 assertions)
+FAIL|Tests:    1 warning, 7619 passed (48511 assertions)
+
+# --- #2532: the same count INSIDE the parenthetical ---
+# Before the fix these silently PASS because the parenthetical is deleted.
+FAIL|Tests:    467 passed (7286 warnings, 48511 assertions)
+FAIL|Tests:    7619 passed (48511 assertions, 1 warning)
+FAIL|Tests:    467 passed (48511 assertions, Warnings: 3)
+
+# --- an unreadable token inside the parenthetical must also fail closed ---
+# This is the invariant the card is really about: a parser that shrugs at what it
+# cannot read is how a 7286-warning floor passed as PASS.
+FAIL|Tests:    467 passed (48511 assertions, 12 frobnications)
+FAIL|Tests:    467 passed (7286 warned)
+
+# --- known-good tokens inside the parenthetical stay passing ---
+PASS|Tests:    467 passed (48511 assertions, 3 skipped)
+PASS|Tests:    467 passed (48511 assertions, 2 deprecations)
+PASS|Tests:    467 passed (48511 assertions, 5 risky)
+
+# --- PHPUnit TextUI dialects (unchanged behaviour) ---
+FAIL|Tests: 21, Assertions: 30, Warnings: 1.
+PASS|Tests: 21, Assertions: 30.
+
+# --- empty / malformed parenthetical must not crash or silently pass ---
+PASS|Tests:    467 passed ()
+FAIL|Tests:    467 passed (nonsense)
+
+# --- unwrapping must not manufacture an absence of its own ---
+# Unwrapping turns `()` into `,,` and `(` into `,`, neither of which is empty, so
+# the "carries no counts" guard cannot fire and every field is then skipped as
+# blank. Without the balance and recognised-count guards these all return 0: the
+# gate proving zero warnings off a line it read zero counts from, which is #2532
+# wearing a different hat. A clipped `tee` is enough to produce one. Note the
+# PASS case above does NOT pin this — it carries a real token either way.
+FAIL|Tests:    (
+FAIL|Tests: ()
+FAIL|Tests: ( )
+FAIL|Tests:    467 passed (
