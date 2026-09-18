@@ -138,7 +138,77 @@ exit('.$exit.');
             'decorated warning token' => ['  Tests:    7286 warnings(!), 467 passed (48511 assertions)'],
             'textui renamed token' => ['Tests: 21, Assertions: 77, Warned: 3.'],
             'wholly unknown count' => ['  Tests:    5 gremlins, 467 passed (48511 assertions)'],
+            // GitHub #2612: the non-count metric branch skips `Duration:`/`Time:`/
+            // `Memory:`. Its unit list is CLOSED precisely so that it cannot be
+            // used to smuggle a warning count past the gate. An earlier draft
+            // ended the value pattern with a bare `[A-Za-z]*`, which matched the
+            // word `warnings` and accepted this line while printing warnings=0.
+            'metric label carrying a warning count' => ['Tests: 21 passed (33 assertions), Duration: 5 warnings'],
+            'metric label carrying an unknown count' => ['Tests: 21 passed (33 assertions), Duration: 5 gremlins'],
+            // A near-miss label must not inherit the metric exemption.
+            'near-miss metric label' => ['Tests: 21 passed (33 assertions), Timeouts: 3'],
+            'pluralised metric label' => ['Tests: 21 passed (33 assertions), Durations: 3'],
+            // A metric must not stand in as proof that a real count was read:
+            // with no countable token this line is still unreadable.
+            'metric only, no real count' => ['Tests: Duration: 0.66s'],
+            // The metric exemption must not suppress a real warnings count that
+            // shares the line with it.
+            'metric beside a real warning floor' => ['Tests: 467 passed (7286 warnings, 48511 assertions), Duration: 1.2s'],
         ];
+    }
+
+    /**
+     * GitHub #2612. Pest prints `Duration: 0.66s` and PHPUnit TextUI prints
+     * `Time:` / `Memory:`. When such a metric shares the `Tests:` line it was
+     * refused, in two different ways depending on the value: a decimal matched
+     * no token pattern at all, while an integer parsed as the `Label: count`
+     * dialect and then died on the label allow-list. Both were correct
+     * fail-closed behaviour on an unreadable token, but they are measurements
+     * rather than outcome counts and carry no warning information.
+     *
+     * These are the shapes that must now PASS. Note `Duration: 1`: the metric
+     * branch has to be tested BEFORE the generic `Label: count` branch, or the
+     * integer form is claimed by that branch and still fails -- so this case is
+     * what keeps the two halves of the defect from drifting apart.
+     */
+    public static function nonCountMetrics(): array
+    {
+        return [
+            'pest duration seconds' => ['Tests: 21 passed (33 assertions), Duration: 0.66s'],
+            'pest duration integer' => ['Tests: 21 passed (33 assertions), Duration: 1'],
+            'pest duration milliseconds' => ['Tests: 21 passed (33 assertions), Duration: 1.2 ms'],
+            'textui time' => ['Tests: 21 passed (33 assertions), Time: 0.66'],
+            'textui clock-formatted time' => ['Tests: 21 passed (33 assertions), Time: 00:02.729'],
+            'textui memory' => ['Tests: 21 passed (33 assertions), Memory: 24.00 MB'],
+        ];
+    }
+
+    #[DataProvider('nonCountMetrics')]
+    public function test_non_count_metric_on_the_tests_line_passes(string $summary): void
+    {
+        $this->stubArtisan($summary, 0);
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(0, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: PASS', $output);
+        self::assertStringContainsString('warnings=0', $output);
+    }
+
+    /**
+     * A `Duration:` on its OWN line was never read by the summary parser and was
+     * always harmless -- which is why the common Pest layout never tripped this.
+     * Pinned so a future parser change that starts consuming following lines has
+     * to confront this case deliberately.
+     */
+    public function test_metric_on_its_own_line_is_not_read(): void
+    {
+        $this->stubArtisan("  Tests:    21 passed (33 assertions)\n  Duration: 0.66s", 0);
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(0, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: PASS', $output);
     }
 
     /**
