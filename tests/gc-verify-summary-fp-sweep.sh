@@ -42,6 +42,18 @@
 #   * EXTRACT-FAILED was an ordinary verdict and the exit was gated only on
 #     regressions, so a WHOLLY BLIND run exited 0. It is now fatal (exit 2),
 #     matching the sibling harness.
+#
+# WHAT A ROUND-3 REVIEW CORRECTED, and the correction was to the fix above. The
+# fatal guards were real but they lived inside verdict(), which is only ever
+# called as `o="$(verdict ...)"`. `exit 2` in a command substitution kills the
+# SUBSHELL, not this script; with `set -uo pipefail` and no `-e`, and with the
+# assignment's status never inspected, the loop ran on with EMPTY verdicts, every
+# line compared equal, and a wholly blind run still printed changed=0 and exited
+# 0. The documented contract was false as implemented -- the same shape of defect
+# this whole round is about: an instrument that could not fail. The extraction
+# and its guards now run in this script's own shell, the loop refuses a verdict
+# that is neither ACCEPT nor REFUSE, and --selftest has a second arm that pins
+# exit 2 on a script whose parser cannot be extracted.
 #   * The exit ignored the loosening direction (REFUSE -> ACCEPT), which is the
 #     only direction a skip branch can move. Loosenings are now counted and
 #     reported, and unexpected ones are fatal.
@@ -58,7 +70,7 @@ NEW="$HERE/../scripts/gc-verify.sh"
 # loosening and must exit nonzero. Run BEFORE trusting any green sweep.
 if [ "${1:-}" = "--selftest" ]; then
     [ -r "$NEW" ] || { echo "no script at $NEW" >&2; exit 2; }
-    mutant="$(mktemp)"; trap 'rm -f "$mutant"' EXIT
+    mutant="$(mktemp)"; blind="$(mktemp)"; trap 'rm -f "$mutant" "$blind"' EXIT
     # Faithful disabling of exactly the branch under review: make its label test
     # unmatchable. The mutation must LAND -- a harness that silently fails to
     # mutate reports a cheerful pass while measuring nothing.
@@ -72,7 +84,25 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "SELFTEST FAILED: sweep exited 0 against a mutant that disables the branch under review" >&2
         exit 1
     fi
-    echo "selftest PASSED: the sweep goes red when the branch under review is disabled"
+    echo "selftest: the sweep goes red when the branch under review is disabled"
+
+    # ARM 2. A script whose parser cannot be extracted must be FATAL, not a clean
+    # sweep over empty verdicts -- the defect round 3 found in arm 1's own
+    # neighbour. Rename the function so the sed range matches nothing, and require
+    # EXACTLY 2: 0 is the blind green this harness exists to make impossible, and
+    # 1 would mean the sweep stopped for some unrelated reason.
+    sed 's/^assert_no_warnings()/assert_no_warnings_renamed()/' "$NEW" > "$blind"
+    if cmp -s "$NEW" "$blind"; then
+        echo "SELFTEST FATAL: blind mutation did not land; the harness is not testing what it claims" >&2
+        exit 2
+    fi
+    "$0" "$blind" "${2:-$HERE/gc-verify-summary-corpus.txt}" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        echo "SELFTEST FAILED: sweep exited $rc (want 2) against a script it cannot extract the parser from" >&2
+        exit 1
+    fi
+    echo "selftest PASSED: red when the branch under review is disabled, fatal when the parser cannot be extracted"
     exit 0
 fi
 
@@ -83,16 +113,26 @@ CORPUS="${2:-$HERE/gc-verify-summary-corpus.txt}"
 [ -r "$BASE" ]   || { echo "no baseline at $BASE" >&2; exit 2; }
 [ -r "$CORPUS" ] || { echo "no corpus at $CORPUS" >&2; exit 2; }
 
-# Extract assert_no_warnings() from a script and call it with one summary line.
-# Executing the REAL function, never a re-implementation: a sweep that
-# re-implements the parser measures the re-implementation.
-verdict() {
-    local script="$1" summary="$2" fn
-    # Bound the range at a column-0 '}' so a file without one cannot run the sed
-    # range to EOF and eval the rest of the script.
-    fn="$(sed -n '/^assert_no_warnings()/,/^}$/p' "$script")"
-    # A failed extraction is FATAL, never a verdict: the whole point is to execute
-    # the real function, and a sweep that cannot find it is blind, not clean.
+# Extract assert_no_warnings() from a script. The range is bounded at a column-0
+# '}' so a file without one cannot run the sed range to EOF and eval the rest of
+# the script.
+extract_fn() {
+    sed -n '/^assert_no_warnings()/,/^}$/p' "$1"
+}
+
+# A failed extraction is FATAL, never a verdict: the whole point is to execute the
+# real function, and a sweep that cannot find it is blind, not clean.
+#
+# THE PLACEMENT IS THE FIX. These guards previously sat inside verdict(), which is
+# only ever called as `o="$(verdict ...)"` -- so `exit 2` ended the
+# command-substitution subshell and nothing else, and the loop carried on with
+# empty verdicts that compared equal. A blind run therefore reported changed=0 and
+# exited 0, which is precisely what the guards were added to prevent. Called from
+# the script's own shell, as below, the exit is what the header claims it is.
+# Never place an `exit` that must stop this sweep inside a function run in `$( )`.
+require_extractable() {
+    local script="$1" fn
+    fn="$(extract_fn "$script")"
     [ "$(printf '%s' "$fn" | wc -l)" -ge 20 ] || {
         echo "FATAL: could not extract assert_no_warnings() from $script" >&2
         exit 2
@@ -101,6 +141,19 @@ verdict() {
         echo "FATAL: extracted body from $script is not brace-terminated" >&2
         exit 2
     }
+}
+
+require_extractable "$BASE"
+require_extractable "$NEW"
+BASE_FN="$(extract_fn "$BASE")"
+NEW_FN="$(extract_fn "$NEW")"
+
+# Call one already-validated parser body with one summary line. Executing the REAL
+# function, never a re-implementation: a sweep that re-implements the parser
+# measures the re-implementation. This function has no failure of its own left to
+# report, which is why nothing here needs to escape the subshell.
+verdict() {
+    local fn="$1" summary="$2"
     (
         eval "$fn"
         if printf '%s\n' "$summary" | assert_no_warnings /dev/stdin >/dev/null 2>&1; then
@@ -124,8 +177,19 @@ while IFS= read -r line; do
     # zero the sweep is blind to the change however green it looks, so it is an
     # assertion below, not a footnote.
     printf '%s' "$line" | grep -qiE '(Duration|Time|Memory)[[:space:]]*:' && metric_lines=$((metric_lines + 1))
-    o="$(verdict "$BASE" "$line")"
-    n="$(verdict "$NEW" "$line")"
+    o="$(verdict "$BASE_FN" "$line")"
+    n="$(verdict "$NEW_FN" "$line")"
+    # Belt and braces on the failure mode this sweep actually had: anything that
+    # is not ACCEPT or REFUSE means the verdict subshell died, and two EMPTY
+    # verdicts compare EQUAL -- indistinguishable from "nothing changed". Silence
+    # does not get counted as agreement. The loop reads from a redirect, not a
+    # pipe, so this exit really is this script's exit.
+    case "$o:$n" in
+        ACCEPT:ACCEPT|ACCEPT:REFUSE|REFUSE:ACCEPT|REFUSE:REFUSE) ;;
+        *)
+            echo "FATAL: unreadable verdict (old='$o' new='$n') on line: $line" >&2
+            exit 2 ;;
+    esac
     [ "$o" = REFUSE ] && old_ref=$((old_ref + 1))
     [ "$n" = REFUSE ] && new_ref=$((new_ref + 1))
     if [ "$o" != "$n" ]; then
