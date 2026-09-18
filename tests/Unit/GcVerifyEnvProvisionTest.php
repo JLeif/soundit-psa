@@ -120,4 +120,59 @@ exit(0);
         self::assertSame($original, file_get_contents($this->fixture.'/.env'));
         self::assertStringNotContainsString('provisioning from .env.example', $output);
     }
+
+    /**
+     * RED: key:generate exits 0 even when it writes nothing — handle() returns
+     * void on every path, including the "APP_KEY is already present in the
+     * environment" and "no APP_KEY variable was found" errors. The old
+     * `if ! php artisan key:generate` guard therefore could not fire: the gate
+     * kept the unkeyed .env it had just created, refused it while blaming a
+     * file it made itself, and took that same refusal on every later run.
+     */
+    public function test_silent_key_generate_failure_removes_the_env_it_provisioned(): void
+    {
+        file_put_contents($this->fixture.'/.env.example', "APP_NAME=\"PSA\"\nAPP_KEY=\n");
+        // A key:generate that reports success while writing nothing, exactly as
+        // Laravel's does when APP_KEY is already set in the ambient environment.
+        file_put_contents($this->fixture.'/artisan', '<?php
+if ($argv[1] === "config:clear") { exit(0); }
+if ($argv[1] === "key:generate") { exit(0); }
+if ($argv[1] !== "test") { exit(99); }
+fwrite(STDOUT, "  Tests:    15 passed (17 assertions)\n");
+exit(0);
+');
+
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(1, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: FAIL', $output);
+        self::assertStringNotContainsString('gc-verify: PASS', $output);
+        // The diagnostic names the real cause, not the file the gate just made.
+        self::assertStringContainsString('key:generate wrote no APP_KEY', $output);
+        self::assertStringNotContainsString('refusing to modify it', $output);
+        // Left as found, so there is no half-provisioned .env to brick the next run.
+        self::assertFileDoesNotExist($this->fixture.'/.env');
+
+        // And the next run is not permanently refused: a key:generate that does
+        // write provisions cleanly, which the old behaviour made impossible.
+        file_put_contents($this->fixture.'/artisan', '<?php
+if ($argv[1] === "config:clear") { exit(0); }
+if ($argv[1] === "key:generate") {
+    $env = getcwd()."/.env";
+    file_put_contents($env, preg_replace("/^APP_KEY=.*$/m", "APP_KEY=base64:GENERATED", file_get_contents($env)));
+    exit(0);
+}
+if ($argv[1] !== "test") { exit(99); }
+fwrite(STDOUT, "  Tests:    15 passed (17 assertions)\n");
+exit(0);
+');
+
+        $retry = $this->runGate();
+        $retryOutput = $retry->getOutput().$retry->getErrorOutput();
+
+        self::assertSame(0, $retry->getExitCode(), $retryOutput);
+        self::assertStringContainsString('gc-verify: PASS', $retryOutput);
+        self::assertStringContainsString('APP_KEY=base64:', file_get_contents($this->fixture.'/.env'));
+    }
 }

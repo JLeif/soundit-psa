@@ -57,7 +57,23 @@ if [ ! -f .env ]; then
         echo "==> gc-verify: FAIL (could not provision .env)" >&2
         exit 1
     fi
-    if ! php artisan key:generate; then
+    # key:generate's exit status proves nothing: handle() returns void on every
+    # path, so the command exits 0 even when it wrote no key. That happens when
+    # APP_KEY is already set in the ambient environment (the replacement pattern
+    # is then /^APP_KEY=<the ambient value>/m, which cannot match the empty
+    # APP_KEY= line we just copied in), and when .env.example carries no APP_KEY=
+    # line at all. So verify the file itself, and on failure remove the .env WE
+    # created: leaving an unkeyed one behind would trip the refusal branch below
+    # on this and every later run, bricking the gate for this worktree until
+    # someone deleted the file by hand.
+    php artisan key:generate || true
+    if ! grep -qE '^APP_KEY=.+' .env; then
+        rm -f .env
+        echo "ERROR: provisioned .env from .env.example, but key:generate wrote no APP_KEY." >&2
+        echo "       Usual causes: APP_KEY is already set in this shell/container" >&2
+        echo "       environment (unset it and re-run), or .env.example carries no" >&2
+        echo "       APP_KEY= line. The provisioned .env has been removed, so the" >&2
+        echo "       worktree is as it was and a re-run can provision cleanly." >&2
         echo "==> gc-verify: FAIL (could not generate APP_KEY)" >&2
         exit 1
     fi
