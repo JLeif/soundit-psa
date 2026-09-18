@@ -67,7 +67,7 @@ exit('.$exit.');
     public static function warningFloors(): array
     {
         return [
-            // The measured a453 r3 / no-.env floor, verbatim in shape.
+            // The measured no-.env floor, verbatim in shape.
             'laravel no-env floor' => ['  Tests:    7286 warnings, 467 passed (48511 assertions)'],
             'laravel single warning' => ['  Tests:    1 warnings, 466 passed (100 assertions)'],
             // PHPUnit TextUI dialect, in case artisan is bypassed.

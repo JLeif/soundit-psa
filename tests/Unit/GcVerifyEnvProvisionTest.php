@@ -12,7 +12,7 @@ use Symfony\Component\Process\Process;
  *
  * @-suppressed read at Store/File/Reader.php:73 is surfaced per test process,
  * PHPUnit relabels passes as `warnings`, and the gate still exits 0. Depending
- * on someone remembering wt/README.md:35 ("Copy .env from psa-work") is not a
+ * on someone remembering a documented "copy the .env in by hand" step is not a
  * safeguard, so the gate provisions it itself.
  *
  * Provisioning source is .env.example (tracked in the repo, what CI uses), NOT
