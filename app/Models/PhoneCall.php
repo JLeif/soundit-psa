@@ -20,6 +20,23 @@ class PhoneCall extends Model
         'sip_endpoint',
         'status',
         'started_at',
+        // No writer of THIS column in app/ uses mass assignment. The two that
+        // write it assign the property directly: handleCallAnswered() always
+        // did, and logOutboundCall() was moved out of its updateOrCreate()
+        // values array because that array is applied on the UPDATE branch too,
+        // so a redelivered webhook with an unresolved endpoint would null an
+        // attribution already established. (Other columns of this model ARE
+        // mass-assigned in app/ — CallController and TranscriptionService both
+        // call ->update([...]) — so this is a claim about answered_by, not
+        // about the model's fill() surface.)
+        //
+        // The entry stays because DevDataSeeder and the test fixtures
+        // mass-assign it. Measured at this tip, not assumed: no controller,
+        // form request, job, command or importer writes this column from
+        // request input — every PhoneCall write array in app/ is a literal key
+        // list, never a splatted validated()/all(). That is a measurement with
+        // no executable guard behind it; issue #2165 owes the negative test.
+        'answered_by',
         'ticket_id',
         'notes',
         'transcription',
