@@ -101,6 +101,58 @@ class ClientAutoElevatePanelTest extends TestCase
         $this->panel($client)->assertSee('data-reason="row_drift"', false)->assertDontSee('<table', false);
     }
 
+    /**
+     * The three reasons added for #2111/#2115/#2124 are operator-visible surfaces, not just
+     * internal labels: each reaches this panel and must say what it means in words, while a
+     * reason that needs no elaboration adds nothing.
+     */
+    public function test_the_new_read_failures_reach_the_panel_with_an_honest_operator_sentence(): void
+    {
+        $client = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $page = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $page[] = self::computer(['id' => self::uuid($i)]);
+        }
+
+        // One counter-driven stub, because Http::fake() MERGES stubs rather than replacing
+        // them: a second Http::fake() in this method would never be reached.
+        $call = 0;
+        Http::fake(function () use (&$call, $page) {
+            return Http::response(match ($call++) {
+                0 => self::envelope($page, 10001),                        // over the collectible cap
+                1 => self::envelope(array_slice($page, 0, 5), 3),         // 5 distinct rows, vendor claims 3
+                2 => self::envelope([self::computer(['lastCheckedInAt' => intdiv(self::EXAMPLE_MS, 1000)])]),
+                default => self::envelope([self::computer()], 999),       // short page before totalCount
+            }, 200);
+        });
+
+        // paging_over_cap — a tenant bigger than one walk can collect, known from page one.
+        $this->panel($client)->assertOk()
+            ->assertSee('data-reason="paging_over_cap"', false)
+            ->assertSee('more machines than one read can collect')
+            ->assertDontSee('<table', false);
+        Http::assertSentCount(1);
+
+        // paging_count_mismatch — distinct rows do not account for the vendor's own total.
+        Cache::flush();
+        $this->panel($client)->assertOk()
+            ->assertSee('data-reason="paging_count_mismatch"', false)
+            ->assertSee('different number of distinct machines than it said it held');
+
+        // timestamp_implausible — the vendor's example value handed over in SECONDS.
+        Cache::flush();
+        $this->panel($client)->assertOk()
+            ->assertSee('data-reason="timestamp_implausible"', false)
+            ->assertSee('outside any believable range')
+            ->assertDontSee('1970');
+
+        // A reason with no useful elaboration stands alone rather than restating itself.
+        Cache::flush();
+        $this->panel($client)->assertOk()
+            ->assertSee('data-reason="paging_incomplete"', false)
+            ->assertDontSee('more machines than one read can collect');
+    }
+
     public function test_mapped_client_with_key_removed_is_a_failed_read_not_an_empty_one(): void
     {
         Setting::setEncrypted('autoelevate_api_key', '');

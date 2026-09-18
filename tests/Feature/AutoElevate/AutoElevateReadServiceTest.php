@@ -3,6 +3,7 @@
 namespace Tests\Feature\AutoElevate;
 
 use App\Models\Setting;
+use App\Services\AutoElevate\AutoElevateClient;
 use App\Services\AutoElevate\AutoElevateReadException;
 use App\Services\AutoElevate\AutoElevateReadService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -183,14 +184,69 @@ class AutoElevateReadServiceTest extends TestCase
         $this->service()->computersForCompany(self::COMPANY_A);
     }
 
-    public function test_runaway_paging_is_bounded(): void
+    /**
+     * #2124. An over-cap tenant is knowable from the FIRST page's `totalCount`, so it must
+     * cost one request, not fifty against a 100/hour bucket — and it must not wear the
+     * `paging_bound` label, which means something else (see the next test).
+     */
+    public function test_a_tenant_larger_than_the_walk_is_named_from_the_first_page(): void
     {
-        // A vendor that always claims more rows than it returns cannot spin the walk forever.
         $page = [];
         for ($i = 1; $i <= 200; $i++) {
             $page[] = self::computer(['id' => self::uuid($i)]);
         }
-        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, PHP_INT_MAX), 200)]);
+        $overCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE + 1;   // 10,001
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, $overCap), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('an over-cap tenant must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_over_cap', $e->reason);
+        }
+        Http::assertSentCount(1);
+    }
+
+    /** Exactly at the cap is collectible, so it is NOT over-cap: the walk proceeds and fails on its merits. */
+    public function test_a_tenant_exactly_at_the_cap_is_not_over_cap(): void
+    {
+        $page = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $page[] = self::computer(['id' => self::uuid($i)]);
+        }
+        $atCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE;   // 10,000
+        Http::fake([self::BASE.'/*' => Http::sequence()
+            ->push(self::envelope($page, $atCap), 200)
+            ->push(self::envelope([self::computer(['id' => self::uuid(9001)])], $atCap), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_incomplete', $e->reason, 'at the cap the walk is attempted, not refused');
+        }
+        Http::assertSentCount(2);
+    }
+
+    /**
+     * `paging_bound` survives #2124 and is still reachable: `totalCount` can GROW after the
+     * first page, so a walk that began inside the cap can still run out of pages. The
+     * first-page check cannot see that; the page bound can.
+     */
+    public function test_runaway_paging_is_bounded_when_the_total_grows_mid_walk(): void
+    {
+        $under = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE - 1000;
+        $call = 0;
+        Http::fake(function (Request $r) use (&$call, $under) {
+            parse_str((string) parse_url($r->url(), PHP_URL_QUERY), $q);
+            $page = [];
+            for ($i = 1; $i <= 200; $i++) {
+                $page[] = self::computer(['id' => self::uuid((int) $q['skip'] + $i)]);
+            }
+
+            return Http::response(self::envelope($page, $call++ === 0 ? $under : PHP_INT_MAX), 200);
+        });
+
         try {
             $this->service()->computersForCompany(self::COMPANY_A);
             $this->fail('unbounded walk must throw');
@@ -198,6 +254,89 @@ class AutoElevateReadServiceTest extends TestCase
             $this->assertSame('paging_bound', $e->reason);
         }
         Http::assertSentCount(AutoElevateReadService::MAX_PAGES);
+    }
+
+    /**
+     * #2115, and the distinction a careless de-dup gets wrong. The vendor repeats one row
+     * across a page boundary (an unstable sort does exactly this). The rows must be
+     * de-duplicated by id, and `skip` must keep advancing by rows RECEIVED — the vendor's
+     * own cursor — not by the unique rows kept. Advancing by unique rows kept re-requests
+     * ground already walked, which is visible here as a skip of 399 instead of 400.
+     */
+    public function test_repeated_rows_are_deduplicated_while_skip_follows_the_vendor_cursor(): void
+    {
+        // 451 served entries for 450 distinct machines: entry 201 repeats machine 200.
+        $served = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i), 'machineName' => sprintf('WS-%04d', $i)]);
+        }
+        $served[] = self::computer(['id' => self::uuid(200), 'machineName' => 'WS-0200']);   // the repeat
+        for ($i = 201; $i <= 450; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i), 'machineName' => sprintf('WS-%04d', $i)]);
+        }
+        $this->assertCount(451, $served);
+
+        $skips = [];
+        Http::fake(function (Request $r) use ($served, &$skips) {
+            $q = self::query($r);
+            $skips[] = (int) $q['skip'];
+
+            return Http::response(self::envelope(array_slice($served, (int) $q['skip'], 200), 450), 200);
+        });
+
+        $rows = $this->service()->computersForCompany(self::COMPANY_A);
+
+        $this->assertCount(450, $rows, 'the repeat is dropped, every distinct machine is kept');
+        $this->assertSame(450, count(array_unique(array_column($rows, 'id'))));
+        $this->assertSame('WS-0450', $rows[449]['machine_name']);
+        // The cursor is the vendor's: 0, 200, 400. Advancing by unique rows KEPT would ask
+        // for skip=399 on the third request and re-walk a row it already holds.
+        $this->assertSame([0, 200, 400], $skips);
+        Http::assertSentCount(3);
+    }
+
+    /**
+     * #2115, the other half. When repetition means rows were DROPPED, the unique count no
+     * longer accounts for the vendor's `totalCount` — a silently short list. De-duplicating
+     * without reconciling would hand the panel 399 of 400 machines and look healthy.
+     */
+    public function test_a_short_unique_count_against_total_count_is_a_failed_read(): void
+    {
+        $served = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i)]);
+        }
+        $served[] = self::computer(['id' => self::uuid(200)]);   // repeat; machine 400 is never served
+        for ($i = 201; $i <= 399; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i)]);
+        }
+        Http::fake(fn (Request $r) => Http::response(
+            self::envelope(array_slice($served, (int) self::query($r)['skip'], 200), 400), 200
+        ));
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('a short unique count must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_count_mismatch', $e->reason);
+        }
+    }
+
+    /** More rows than the vendor admits to holding is drift in the other direction. */
+    public function test_more_unique_rows_than_total_count_is_also_a_failed_read(): void
+    {
+        $page = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $page[] = self::computer(['id' => self::uuid($i)]);
+        }
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, 3), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('an over-long page must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_count_mismatch', $e->reason);
+        }
     }
 
     public function test_computer_rows_are_normalized_from_the_documented_shape(): void
@@ -260,7 +399,7 @@ class AutoElevateReadServiceTest extends TestCase
     {
         $row = $this->service()->normalizeComputer(self::computer([
             'operatingSystem' => null, 'elevationMode' => null, 'lastCheckedInAt' => null, 'machineName' => null,
-        ]));
+        ]), self::COMPANY_A);
         $this->assertNull($row['os_name']);
         $this->assertNull($row['os_version']);
         $this->assertNull($row['elevation_mode']);
@@ -271,7 +410,7 @@ class AutoElevateReadServiceTest extends TestCase
 
     public function test_unrecognised_elevation_mode_is_surfaced_and_flagged_not_hidden(): void
     {
-        $row = $this->service()->normalizeComputer(self::computer(['elevationMode' => 'someFutureMode']));
+        $row = $this->service()->normalizeComputer(self::computer(['elevationMode' => 'someFutureMode']), self::COMPANY_A);
         $this->assertSame('someFutureMode', $row['elevation_mode']);
         $this->assertFalse($row['elevation_mode_known']);
     }
@@ -305,7 +444,7 @@ class AutoElevateReadServiceTest extends TestCase
         unset($row['lastCheckedInAt']);
         $this->expectException(AutoElevateReadException::class);
         $this->expectExceptionMessage('row_drift');
-        $this->service()->normalizeComputer($row);
+        $this->service()->normalizeComputer($row, self::COMPANY_A);
     }
 
     public function test_invalid_company_id_never_reaches_the_vendor(): void
@@ -324,5 +463,103 @@ class AutoElevateReadServiceTest extends TestCase
     {
         $this->assertSame('acmemanufacturingllc', AutoElevateReadService::normalizeName('  Acme Manufacturing, LLC. '));
         $this->assertSame('', AutoElevateReadService::normalizeName(' - '));
+    }
+
+    // --- #2111: the timestamp plausibility window ---------------------------------
+
+    /**
+     * The unit slip that will actually happen: the vendor's own example value in SECONDS.
+     * Carbon accepts it without complaint and renders 1970-01-20 — a date plausible enough
+     * to sit unnoticed in a "last check-in" column, which is why magnitude alone is not the
+     * guard. Measured 2026-09-18 on Carbon 3.11.1.
+     */
+    public function test_a_seconds_unit_timestamp_is_refused_instead_of_rendering_as_1970(): void
+    {
+        $seconds = intdiv(self::EXAMPLE_MS, 1000);   // 1716900000
+        $this->assertSame(
+            '1970-01-20T20:55:00+00:00',
+            \Carbon\CarbonImmutable::createFromTimestampMsUTC($seconds)->toIso8601String(),
+            'control: Carbon renders the seconds value silently, so only our window catches it'
+        );
+
+        try {
+            AutoElevateReadService::fromEpochMs($seconds);
+            $this->fail('a seconds-unit timestamp must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+    }
+
+    /**
+     * The other end. Carbon throws for NO integer magnitude — PHP_INT_MAX renders as year
+     * 292278994 — so an absurd future value is a rendered absurdity, never a 500.
+     */
+    public function test_an_absurd_future_timestamp_is_refused_and_carbon_would_not_have_thrown(): void
+    {
+        $this->assertSame(
+            '292278994-08-17T07:12:56+00:00',
+            \Carbon\CarbonImmutable::createFromTimestampMsUTC(PHP_INT_MAX)->toIso8601String(),
+            'control: Carbon accepts PHP_INT_MAX — the defect is the rendered date, not an exception'
+        );
+
+        foreach ([PHP_INT_MAX, 99999999999999999] as $absurd) {
+            try {
+                AutoElevateReadService::fromEpochMs($absurd);
+                $this->fail("must refuse {$absurd}");
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('timestamp_implausible', $e->reason);
+            }
+        }
+    }
+
+    public function test_the_plausibility_window_admits_its_own_edges_and_refuses_just_outside(): void
+    {
+        $floor = AutoElevateReadService::PLAUSIBLE_FLOOR_MS;
+        $this->assertSame(946684800000, $floor, '2000-01-01T00:00:00Z in epoch ms');
+        $this->assertSame('2000-01-01T00:00:00+00:00', AutoElevateReadService::fromEpochMs($floor)->toIso8601String());
+
+        try {
+            AutoElevateReadService::fromEpochMs($floor - 1);
+            $this->fail('one millisecond below the floor must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+
+        // Ceiling: now + 1 year, so clock skew at either end is absorbed but nonsense is not.
+        $this->travelTo(\Carbon\CarbonImmutable::parse('2026-09-18T00:00:00Z'));
+        $this->assertSame(2027, AutoElevateReadService::fromEpochMs(
+            \Carbon\CarbonImmutable::parse('2027-09-17T00:00:00Z')->getTimestampMs()
+        )->year);
+        try {
+            AutoElevateReadService::fromEpochMs(\Carbon\CarbonImmutable::parse('2027-09-19T00:00:00Z')->getTimestampMs());
+            $this->fail('beyond now + 1 year must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+        $this->travelBack();
+    }
+
+    // --- #2126: the scope proof is not opt-in -------------------------------------
+
+    /**
+     * The defect was the DEFAULT, not the check: `?string $expectedCompanyId = null` let any
+     * caller — and three tests did — exercise the public method with the scope proof disabled.
+     * Assert the signature itself, because that is what the caller can opt out of.
+     */
+    public function test_the_company_scope_argument_cannot_be_omitted_or_nulled(): void
+    {
+        $param = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))->getParameters()[1];
+
+        $this->assertSame('expectedCompanyId', $param->getName());
+        $this->assertFalse($param->isOptional(), 'the scope proof must not be skippable');
+        $this->assertFalse($param->allowsNull(), 'null must not disable the scope proof');
+        $this->assertSame('string', (string) $param->getType());
+    }
+
+    public function test_a_foreign_row_is_drift_even_when_normalize_is_called_directly(): void
+    {
+        $this->expectException(AutoElevateReadException::class);
+        $this->expectExceptionMessage('row_drift');
+        $this->service()->normalizeComputer(self::computer(['companyId' => self::COMPANY_B]), self::COMPANY_A);
     }
 }
