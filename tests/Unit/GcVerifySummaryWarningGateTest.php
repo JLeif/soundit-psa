@@ -98,7 +98,11 @@ exit('.$exit.');
         return [
             'laravel green' => ['  Tests:    157 skipped, 7596 passed (48511 assertions)'],
             'laravel passed only' => ['  Tests:    15 passed (17 assertions)'],
-            'phpunit ok' => ['OK (1 test, 1 assertion)'."\n".'Tests: 1, Assertions: 1.'],
+            // A fully clean TextUI run prints ONLY this line — no `Tests:` line.
+            'phpunit ok' => ['OK (1 test, 1 assertion)'],
+            'phpunit ok plural' => ['OK (7611 tests, 48564 assertions)'],
+            // The "OK, but ..." variants do still carry a `Tests:` counts line.
+            'phpunit ok but skipped' => ['OK, but some tests were skipped!'."\n".'Tests: 2, Assertions: 1, Skipped: 1.'],
             // Policies this change deliberately does NOT tighten.
             'risky still passes' => ['Tests: 1, Assertions: 0, Risky: 1.'],
             'deprecation still passes' => ['Tests: 1, Assertions: 1, Deprecations: 1.'],

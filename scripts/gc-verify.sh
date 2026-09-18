@@ -93,11 +93,21 @@ fi
 # zero warnings. --fail-on-warning is known not to cover every warning class
 # (see the header), so a green exit code is not accepted on its own.
 assert_no_warnings() {
-    local log="$1" summary warnings=""
+    local log="$1" plain summary warnings=""
     # Strip ANSI colour before matching; take the LAST summary line.
-    summary="$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log" \
+    plain="$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log")"
+    summary="$(printf '%s\n' "$plain" \
         | grep -E '^[[:space:]]*Tests:[[:space:]]' | tail -n 1)"
     if [ -z "$summary" ]; then
+        # A fully clean PHPUnit TextUI run prints "OK (n tests, m assertions)"
+        # INSTEAD of a `Tests:` counts line (SummaryPrinter returns early), so
+        # that line is itself proof of zero warnings. The "OK, but ..." variants
+        # do print a `Tests:` line and are handled by the dialects below.
+        if printf '%s\n' "$plain" \
+            | grep -qE '^[[:space:]]*OK \([0-9]+ tests?, [0-9]+ assertions?\)[[:space:]]*$'; then
+            echo "    summary parsed: warnings=0 (clean TextUI run)"
+            return 0
+        fi
         echo "ERROR: no PHPUnit summary line found; cannot prove warnings == 0." >&2
         return 1
     fi
