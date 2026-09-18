@@ -130,8 +130,24 @@ exit('.$exit.');
      * Each row pairs a summary with the STDERR discriminator the gate must emit
      * for it. Asserting only "it failed" lets a row keep passing for the wrong
      * reason after a refactor -- a review panel's finding on this file, and a
-     * fair one: the gate has four distinct refusals, and rows added to pin
-     * different ones were indistinguishable to the old assertions.
+     * fair one: rows added to pin different refusals were indistinguishable to
+     * the old assertions.
+     *
+     * COUNT CORRECTED. An earlier version of this docblock said "four distinct
+     * refusals". A round-2 review counted them and the real number is SEVEN,
+     * measured in scripts/gc-verify.sh's assert_no_warnings():
+     *   1. no PHPUnit summary line found
+     *   2. unbalanced parentheses in PHPUnit summary        (added by #2532)
+     *   3. PHPUnit summary line carries no counts           (added by #2532)
+     *   4. unrecognised token in PHPUnit summary
+     *   5. unknown count '<label>'
+     *   6. PHPUnit summary line carries no readable counts
+     *   7. reported N warning(s); gate 1 requires zero
+     * Rows below pin 4, 5 and 7. Refusals 1, 2, 3 and 6 have NO discriminator
+     * control -- including both guards #2532 added to carry its fail-closed
+     * behaviour. That gap is filed as residual debt rather than papered over:
+     * a docblock that undercounts the thing it documents is how a guard quietly
+     * loses its coverage.
      */
     public static function unknownDialects(): array
     {

@@ -3,9 +3,22 @@
 # was this change's strongest evidence and a review correctly objected that it
 # could not be re-derived from the diff.
 #
-# These are OBSERVED outputs, not hand-written fixtures. Some of them legitimately
-# REFUSE (a real warnings floor must refuse) -- the sweep asserts that no line
-# CHANGES verdict, not that every line passes.
+# PROVENANCE, corrected after a round-2 review measured it and found the original
+# claim false. This file is NOT uniformly observed runner output:
+#   * Most lines ARE real summary lines harvested from gate logs on the build box.
+#   * 27 lines are this repo's OWN sibling harness's report lines ("ok ...",
+#     "FAIL want=..."). They are log decoration, not runner output. They never
+#     match the parser's ^[[:space:]]*Tests:[[:space:]] selector, hit the
+#     no-summary-line early return, and so account for a large share of the
+#     refusal count. They are retained deliberately -- a parser must refuse log
+#     decoration -- but they must not be counted as evidence about summary lines.
+#   * The METRIC-BEARING lines below are constructed from php-timer's
+#     Duration::asString() and PHPUnit's ResourceUsageFormatter, i.e. derived from
+#     the PRODUCER'S CODE rather than observed. They are marked as such. They exist
+#     because the original corpus carried ZERO metric lines, which made this
+#     change's headline "changed=0" true by construction and worth nothing.
+# Some lines legitimately REFUSE (a real warnings floor must refuse) -- the sweep
+# asserts that no line regresses, not that every line passes.
 #
 # 129 lines.
 FAIL want=FAIL got=PASS  Tests:    1 warning, 7619 passed (48511 assertions)
@@ -137,3 +150,21 @@ ok   PASS Tests:    467 passed (48511 assertions, 3 skipped)
 ok   PASS Tests:    467 passed (48511 assertions, 5 risky)
 ok   PASS Tests:    7619 passed (48511 assertions)
 ok   PASS Tests: 21, Assertions: 30.
+
+# --- Metric-bearing lines. DERIVED FROM THE PRODUCER'S CODE, not observed. ---
+# php-timer Duration::asString() formats every field with sprintf('%02d') and
+# prepends an hours field only when hours > 0; milliseconds are appended only when
+# nonzero. The hours form is the shape this round's must-fix was about: the first
+# enumeration admitted exactly one colon group and REFUSED a legitimate run that
+# happened to last over an hour.
+Tests: 467 passed (48511 assertions), Time: 00:02.729
+Tests: 467 passed (48511 assertions), Time: 01:02:03.456
+Tests: 467 passed (48511 assertions), Time: 01:02:03
+Tests: 467 passed (48511 assertions), Duration: 12.34s
+Tests: 467 passed (48511 assertions), Memory: 78.50 MB
+Tests: 467 passed (48511 assertions), Memory: 512 bytes
+# Metric-shaped tokens that must STILL REFUSE. A widened skip branch must not
+# swallow the very word the gate exists to catch, nor a malformed clock value.
+Tests: 467 passed (48511 assertions), Duration: 5 warnings
+Tests: 467 passed (48511 assertions), Duration: 1:2:3:4:5
+Tests: 467 passed (48511 assertions), Duration: 5 gremlins
