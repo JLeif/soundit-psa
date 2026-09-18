@@ -317,7 +317,23 @@ final class HdbReportClient
         $redaction = HdbReportRedaction::fromTicket($ticket);
 
         if ($redaction === null) {
-            return HdbReportResult::incomplete($press, $ticket, HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE);
+            // THE PAYLOAD IS WITHHELD HERE, and only here, which is the one
+            // place this class does not preserve what arrived.
+            //
+            // Everywhere else a refusal still carries its payload, because the
+            // payload is the evidence (docs/ARCHITECTURE.md § Vendor response
+            // shapes). This case is the exception because the thing that could
+            // not be read is the END USER'S OWN INSTRUCTION about what may be
+            // shown, and `ticket.json` itself carries endpoint identity —
+            // hostname, username, MAC, local address, and the user's own words
+            // in `msg` (vault §6a). Handing that to a caller while unable to
+            // say whether the user asked for it to be limited would be the
+            // redaction gate leaking through its own refusal.
+            //
+            // The symbol still names the failure exactly, so nothing is
+            // silent: an operator learns the metadata was unreadable, and the
+            // raw bytes stay in this method.
+            return HdbReportResult::incomplete($press, [], HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE);
         }
 
         $reportBody = $this->get($press, self::FILE_REPORT);
@@ -433,12 +449,19 @@ final class HdbReportClient
      * - every hop must be https, so the session cookie never rides cleartext;
      * - the hop count is bounded ({@see MAX_REDIRECTS}).
      *
-     * The residual is stated rather than hidden: an off-origin hop carries
-     * whatever Guzzle's cookie jar considers in scope for that host, and a
-     * portal that redirected somewhere hostile could see a request arrive.
-     * A CookieJar is domain-scoped, so the portal's own session cookie does not
-     * travel to S3 — but that is the jar's behaviour, not a check this method
-     * makes, and a reader should know which of the two is holding the line.
+     * The residual is stated rather than hidden, and the thing holding the
+     * line is NAMED because it is not this method. An off-origin hop carries
+     * whatever Guzzle's cookie jar considers in scope for that host, so a
+     * portal that redirected somewhere hostile would see a request arrive. The
+     * portal's session cookie does NOT go with it: `CookieJar::withCookieHeader`
+     * (vendor/guzzlehttp/guzzle/src/Cookie/CookieJar.php:301, read at this tip)
+     * emits a cookie only when `matchesDomain($host)` holds for the request's
+     * own host, and only over https when the cookie is Secure.
+     *
+     * That is the JAR's behaviour, not a check this method makes. A reader
+     * should know the difference: if the redirect policy here were ever loosened
+     * to allow http, or the jar swapped for one that does not scope by domain,
+     * this method would not notice.
      *
      * @return string|false|null body; false = the portal answered unusably;
      *                           null = transport failed, nothing was learned

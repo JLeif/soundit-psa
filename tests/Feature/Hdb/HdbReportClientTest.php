@@ -1285,4 +1285,50 @@ class HdbReportClientTest extends TestCase
             ]],
         ];
     }
+
+    /**
+     * The one case where a refusal WITHHOLDS its payload, and why.
+     *
+     * Everywhere else in this client a refusal carries what arrived, because
+     * the payload is the evidence. When the REDACTION FLAGS themselves cannot
+     * be read, the metadata is withheld: `ticket.json` carries endpoint
+     * identity and the end user's own words, and handing those to a caller
+     * while unable to say whether the user asked for them to be limited would
+     * be the redaction gate leaking through its own refusal.
+     *
+     * Mutation that kills it: passing $ticket through on this branch, as every
+     * other refusal in this class does.
+     */
+    public function test_an_unreadable_redaction_refusal_withholds_the_metadata_it_could_not_judge(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['redactScreenshots' => 'maybe'])),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE, $result->reason);
+        $this->assertSame([], $result->ticket, 'Unjudgeable metadata must not be handed to a caller.');
+        $this->assertNull($result->report);
+        $this->assertNull($result->screenshot);
+
+        // The failure is still NAMED rather than silent - that is what keeps
+        // this from being a fail-closed-into-nothing.
+        $this->assertNotSame('', $result->message());
+        $this->assertStringContainsString('redaction', strtolower($result->message()));
+
+        // Contrast, so the withholding is specific rather than a client that
+        // drops payloads generally: an INCOMPLETE upload still carries its
+        // metadata, because there the flags WERE readable.
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['uploadComplete' => false])),
+        ]);
+
+        $incomplete = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame('22814', $incomplete->ticket['ticketNumber'] ?? null);
+    }
 }
