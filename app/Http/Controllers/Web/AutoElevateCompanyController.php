@@ -34,15 +34,39 @@ class AutoElevateCompanyController extends Controller
                 ->with('error', "Could not read AutoElevate companies ({$e->reason}). Nothing was changed.");
         }
 
-        $mappedClients = Client::whereNotNull('autoelevate_company_id')
-            ->get(['id', 'name', 'autoelevate_company_id'])
+        $mappedClientRows = Client::whereNotNull('autoelevate_company_id')
+            ->get(['id', 'name', 'autoelevate_company_id']);
+
+        // keyBy() collapses clients that share a company id, so the keyed collection is the
+        // right shape for the per-company lookup below but the WRONG thing to count: the
+        // empty-state warning speaks of "client(s) still hold a mapping" and must count rows,
+        // not distinct companies, or it under-reports what an empty-screen save would risk.
+        $mappedClients = $mappedClientRows
             ->keyBy(fn ($c) => strtolower($c->autoelevate_company_id));
+        $mappedClientCount = $mappedClientRows->count();
 
         // The dropdown must also offer every client that already HOLDS a mapping: a mapped
         // client that has since left the operational set would have no <option>, so the select
         // would post "" and the clear-then-apply save below would silently destroy its mapping.
+        //
+        // Concat the UNKEYED rows, not $mappedClients: keyBy() keeps one client per company id,
+        // so if two clients ever held the same id the collapsed one would have no <option>
+        // anywhere on the page. My r3 comment here claimed that state was "not reachable through
+        // either writer"; r4 context:2 refuted it and is correct. Client uses SoftDeletes, and the
+        // clear step (Client::whereNotNull(...)->update(...)) carries the global scope, so it skips
+        // TRASHED rows: a trashed client keeps its company id while a live client is mapped to the
+        // same company, and restoring it leaves two live rows sharing one id. keyBy(strtolower())
+        // then collapses them. So this concat addresses a reachable state, not a hypothetical one.
+        //
+        // It is still only a PARTIAL remedy (r4 context:1): it guarantees the collapsed client an
+        // <option>, but the select's data-selected comes from the keyed collection, so the
+        // collapsed row is not pre-selected and an unmodified save can still drop it. The full fix
+        // needs the clear-then-apply shape, which is out of scope for this leg.
+        //
+        // It does NOT protect a mapping whose company the vendor stopped listing: that row is
+        // cleared by the next save regardless (see the INSTALL caveat).
         $allClients = Client::operational()->orderBy('name')->get(['id', 'name'])
-            ->concat($mappedClients->values())
+            ->concat($mappedClientRows)
             ->unique('id')
             ->sortBy(fn ($c) => mb_strtolower($c->name))
             ->values();
@@ -50,15 +74,85 @@ class AutoElevateCompanyController extends Controller
         return view('settings.autoelevate-companies', [
             'companies' => $companies,
             'mappedClients' => $mappedClients,
+            'mappedClientCount' => $mappedClientCount,
             'allClients' => $allClients,
         ]);
     }
 
     public function update(Request $request)
     {
+        // r4 context:8: index() and autoMatch() both redirect away when the integration is not
+        // configured, but the WRITE path had no such gate -- so a direct or replayed POST could
+        // clear-then-apply mappings on an installation whose AutoElevate key had been removed,
+        // a state from which the screen itself is unreachable. Gate the destructive path the same
+        // way the read paths are gated.
+        if (! AutoElevateConfig::isConfigured()) {
+            return redirect()->route('settings.integrations')
+                ->withErrors(['mappings' => 'AutoElevate is not configured, so no mappings were changed.']);
+        }
+
         $mappings = $request->input('mappings', []);
+        // r3 diff:6: a non-array `mappings` is malformed input, not an empty form. Collapsing it
+        // into [] made both report "No AutoElevate companies were submitted", so a client
+        // sending the wrong type was told its payload was simply empty. Refuse it distinctly;
+        // nothing is cleared on either path.
+        // r4 diff:8 + diff:9: the earlier shape tested $request->has('mappings') and then kept an
+        // `if (! is_array(...)) $mappings = []` coercion that no path could reach. It was also the
+        // wrong predicate: has() reads all() (which includes uploaded files) while input() reads
+        // only the input source, so a multipart POST with a FILE field named `mappings` made has()
+        // true and input() return the [] default -- malformed input reported as an empty form.
+        // Test the VALUE across BOTH sources. Measured: for a multipart POST with a file named
+        // `mappings`, has() is true, input() is NULL and hasFile() is true -- so an input()-only
+        // predicate misses it just as the has()-based one misreported it. The guard test proved
+        // this by failing on my first attempt at the fix.
+        // r5 diff:1/contract:6: hasFile() is not enough. It requires isValidFile(), so an
+        // ERRORED upload (UPLOAD_ERR_INI_SIZE and friends) named `mappings` has an empty path,
+        // returns hasFile() false and input() null, and fell through to the empty-form refusal --
+        // the exact misdiagnosis diff:9 set out to close, for the one upload shape most likely to
+        // occur in practice. Measured on this tree: for an errored upload has()=true,
+        // input()=NULL, hasFile()=FALSE, but file() is non-null. Test file() instead, which sees
+        // valid and errored uploads alike.
+        $submitted = $request->input('mappings');
+        if (($submitted !== null && ! is_array($submitted)) || $request->file('mappings') !== null) {
+            return back()->withErrors(['mappings' => 'The AutoElevate mapping form was submitted in an unexpected format, so nothing was changed. Existing mappings were kept. Reload the Map companies screen and try again.']);
+        }
+        // r5 contract:7: this coercion is NOT dead, and the guard above does not subsume it.
+        // The only way to reach it is a body with a PRESENT null `mappings` (e.g. the JSON
+        // `{"mappings": null}`): input() returns that null rather than substituting the []
+        // default, so $submitted === null and the malformed-payload guard lets it through.
+        // Measured against this tree: input('mappings', []) returns NULL for a present null and
+        // [] only when the key is absent. Without this line such a request would miss the
+        // `=== []` refusal below and reach foreach(null) in the clear-then-apply write.
         if (! is_array($mappings)) {
             $mappings = [];
+        }
+
+        // A submission carrying NO company keys is refused before the clear-then-apply write.
+        //
+        // Clear-then-apply derives the new state from the rendered form, so "no keys" and
+        // "unmap everything" are the same request on the wire — but they are not the same
+        // intent. The screen USED TO render its Save button even when the vendor returned zero
+        // companies, so an admin who pressed Save on a visibly empty table silently nulled every
+        // existing mapping and was told "Saved 0 mapping(s)" -- a success flash for a destructive
+        // write. The Blade now withholds Save on an empty list, so that click is no longer
+        // reachable through the UI; this guard is the server-side half, covering a direct or
+        // replayed POST. index() reaches the empty screen only when the vendor genuinely lists
+        // no companies: an unconfigured key and an AutoElevateReadException both redirect away
+        // before the view renders.
+        //
+        // Refusing the empty post is the conservative direction: the only intent it can block
+        // is "unmap every company at once", which is still reachable one dropdown at a time on
+        // a form that actually lists them. Nothing is cleared on this path.
+        if ($mappings === []) {
+            // r4 contract:5: the old wording told the admin to unmap "on a form that lists the
+            // company", which is impossible in the only state that produces a keyless POST -- the
+            // vendor lists nothing, so no form lists the company. Say what is actually true.
+            // r5 diff:2/context:3: the old wording asserted ONE cause ("AutoElevate returns no
+            // companies at all") that this handler never observes -- update() performs no vendor
+            // read -- and promised the mappings are "held until it lists them again", which the
+            // partial-list save does not honour (see the INSTALL caveat: a save that omits a
+            // company still clears it). State only what this path actually knows.
+            return back()->withErrors(['mappings' => 'No AutoElevate companies were submitted, so nothing was changed and existing mappings were kept. This usually means the company list was empty when the form was submitted. If that is unexpected, reload the Map companies screen and check the AutoElevate connection in Settings > Integrations.']);
         }
 
         // Every key must be a company UUID; every non-empty value a client id. A client holds
