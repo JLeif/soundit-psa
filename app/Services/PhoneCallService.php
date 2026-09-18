@@ -205,11 +205,18 @@ class PhoneCallService
             // Plivo sends the answering endpoint as DialBLegTo (e.g. sip:user@phone.plivo.com)
             //
             // This runs BEFORE the status/answered_at decision below, which needs
-            // to know whether this payload identified a connected B leg. Moving it
-            // up changes no behaviour of its own: it reads only $data and
-            // $call->answered_by, and its guard (decline when a value already
-            // exists) is untouched. The precedence question it belongs to is issue
-            // #2166 and the locking gap is #2168; neither is answered here.
+            // to know whether this payload identified a connected B leg. Stated
+            // accurately, because an earlier version of this comment overstated
+            // it: the move is BEHAVIOURALLY INERT. answerIsObserved() reads the
+            // payload only, so it does not depend on anything this block
+            // produces, and both orders write the same columns in the same
+            // single save(). It sits here because attribution is logically prior
+            // to the answer question, not because the code below needs its
+            // output. Note it WRITES $call->sip_endpoint as well as reading
+            // $data and $call->answered_by. Its guard (decline when a value
+            // already exists) is untouched. The precedence question it belongs
+            // to is issue #2166 and the locking gap is #2168; neither is
+            // answered here.
             if (! $call->answered_by) {
                 $sipUri = $data['DialBLegTo'] ?? $data['SipEndpoint'] ?? $data['To'] ?? null;
                 if ($sipUri) {
@@ -235,7 +242,7 @@ class PhoneCallService
                 if ($call->status !== CallStatus::Voicemail) {
                     $call->status = CallStatus::Completed;
                 }
-            } elseif ($this->answerIsObserved($call, $data)) {
+            } elseif ($this->answerIsObserved($data)) {
                 // Late answer with NO usable duration. Before this branch existed
                 // both arms above were skipped, answered_at was never stamped, and
                 // handleCallEnded's answered_at-only status decision had already
@@ -252,7 +259,9 @@ class PhoneCallService
                 // replaces it with the honest value the moment a real duration
                 // lands. A visibly-wrong status was the defect; a ceiling timestamp
                 // on a row whose only other reader is the detail view is the
-                // smaller wrong, and it is transient.
+                // smaller wrong. It is USUALLY transient - see
+                // answeredAtIsCeiling() for the two measured cases where it is
+                // not, and why neither can corrupt a status.
                 $call->answered_at = $call->ended_at->copy();
                 if ($call->status !== CallStatus::Voicemail) {
                     $call->status = CallStatus::Completed;
@@ -281,10 +290,13 @@ class PhoneCallService
      * primary signal here.
      *
      * Note what is deliberately NOT accepted as evidence:
-     *  - $call->answered_by. On OUTBOUND calls logOutboundCall() sets it from
-     *    the PLACING user's SIP endpoint before any answer event exists, so it
-     *    is present on outbound calls that were never picked up. Reading it as
-     *    an answer would stamp answered_at on a dead outbound dial.
+     *  - The CALL ROW itself, and answered_by in particular. On OUTBOUND calls
+     *    logOutboundCall() sets answered_by from the PLACING user's SIP endpoint
+     *    before any answer event exists, so it is present on outbound calls that
+     *    were never picked up; reading it as an answer would stamp answered_at
+     *    on a dead outbound dial. This method therefore takes ONLY the payload
+     *    and holds no PhoneCall at all - the row is deliberately out of reach
+     *    rather than merely unread, so the mistake cannot be made here later.
      *  - DialBLegTo on its own. It names the destination that was ATTEMPTED and
      *    is present on a dial nobody picked up, which is precisely a missed
      *    inbound call ringing a tech's SIP endpoint. Accepting it would convert
@@ -306,7 +318,7 @@ class PhoneCallService
      * case-insensitive lookup is done, because a key we cannot name exactly is a
      * key we have not read.
      */
-    private function answerIsObserved(PhoneCall $call, array $data): bool
+    private function answerIsObserved(array $data): bool
     {
         // "Empty if nobody answers" — the vendor's own words.
         if (! empty($data['DialBLegUUID'])) {
@@ -337,10 +349,29 @@ class PhoneCallService
      * branch of handleCallAnswered() - answered_at === ended_at, "answered at
      * hangup" - rather than a real answer moment?
      *
-     * Equality identifies it unambiguously: the duration-derived value is
-     * strictly earlier than ended_at whenever duration > 0, and the live-answer
-     * value is stamped while ended_at is still null and so is also strictly
-     * earlier. Only the ceiling can be exactly equal.
+     * Equality is the fingerprint: the duration-derived value is strictly
+     * earlier than ended_at whenever duration > 0, and the live-answer value is
+     * stamped while ended_at is still null and so is normally earlier too.
+     *
+     * TWO WAYS THAT ARGUMENT IS WEAKER THAN IT LOOKS, both measured, both
+     * recorded as bounded limits rather than papered over. Neither can corrupt a
+     * STATUS - both cost only the accuracy of a display-only timestamp - which
+     * is why they are documented and filed rather than fixed by a redesign here.
+     *
+     *  1. THE CEILING IS NOT RELIABLY TRANSIENT. handleCallEnded() re-stamps
+     *     ended_at on EVERY delivery, and the controller routes two distinct
+     *     callbacks to it (DialAction=hangup and CallStatus=completed). On a
+     *     call that receives both, ended_at moves after the ceiling was written,
+     *     equality no longer holds, and the second look never replaces it. The
+     *     row is still Completed and still correct in status; its answered_at
+     *     just stays at the ceiling. A durable marker column is the right
+     *     long-term shape.
+     *  2. SECOND-RESOLUTION STORAGE. answered_at and ended_at are timestamp
+     *     columns with second precision, so a call answered and hung up inside
+     *     the SAME second stores a live answered_at exactly equal to ended_at
+     *     and is indistinguishable from the ceiling. The second look then
+     *     rewrites a row that was already correct, moving answered_at earlier by
+     *     the recording length. Bounded to sub-second calls.
      */
     private function answeredAtIsCeiling(PhoneCall $call): bool
     {

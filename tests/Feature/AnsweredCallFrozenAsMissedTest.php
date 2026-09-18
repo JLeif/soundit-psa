@@ -432,6 +432,38 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
             'a voicemail has no answer moment; a long recording is not an answer');
     }
 
+    /**
+     * The test above is VACUOUS for the guard it names, and this one exists
+     * because of that. Found by mutation: deleting reconcile's Voicemail early
+     * return leaves the test above still passing, because on a row with a null
+     * answered_at and a non-Missed status the rest of the method is a no-op
+     * anyway. It was pinning the outcome through the wrong mechanism.
+     *
+     * The case that actually needs the guard: handleCallAnswered's ceiling arm
+     * guards only the STATUS write against voicemail and stamps answered_at
+     * regardless, so a Voicemail row CAN carry a ceiling answered_at. On exactly
+     * that row the early return is the only thing stopping the second look
+     * rewriting a genuine voicemail's timestamp. Removing the guard fails this.
+     */
+    public function test_the_second_look_does_not_rewrite_a_voicemails_answered_at(): void
+    {
+        Queue::fake();
+        $call = $this->endedCallWithNoDuration('voicemail-ceiling', CallStatus::Voicemail);
+        $call->answered_at = $call->ended_at->copy();
+        $call->save();
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'voicemail-ceiling',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-vm-ceiling.mp3',
+            120,
+        );
+
+        $stored = $call->fresh();
+        $this->assertSame(CallStatus::Voicemail, $stored->status);
+        $this->assertTrue($stored->answered_at->equalTo($stored->ended_at),
+            'a voicemail row is not the second look\'s business at all');
+    }
+
     // ── (2) handleRecordingReady() takes the second look ───────────────────
 
     /**
@@ -512,8 +544,15 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
     {
         Queue::fake();
         $call = $this->endedCallWithNoDuration('second-look-idempotent');
-        $call->duration = 300;
-        $call->answered_at = $call->ended_at->copy()->subSeconds(300);
+        // The stored answer moment is deliberately derived from a DIFFERENT
+        // number (900s) than the one the recording will deliver (300s). An
+        // earlier version of this test seeded both from 300, so an unconditional
+        // rewrite produced a byte-identical value and the ceiling guard was not
+        // pinned at all - the assertion below could not fail. With the two
+        // numbers separated, dropping the guard moves answered_at by 600
+        // seconds and this test fails, which is the whole point of it.
+        $call->duration = 900;
+        $call->answered_at = $call->ended_at->copy()->subSeconds(900);
         $call->status = CallStatus::Completed;
         $call->save();
 
@@ -527,6 +566,8 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
         $stored = $call->fresh();
         $this->assertTrue($before->equalTo($stored->answered_at),
             'a row that already holds a true answer moment must not be rewritten');
+        $this->assertSame(900, (int) $stored->ended_at->diffInSeconds($stored->answered_at, true),
+            'the honest 900s answer moment must survive a 300s recording landing on top of it');
         $this->assertSame(CallStatus::Completed, $stored->status);
     }
 
