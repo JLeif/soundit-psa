@@ -221,6 +221,13 @@ class TacticalDeviceSyncService
      * and Carbon::parse(' ') return NOW, so a near-empty string would otherwise
      * fabricate a boot time of this instant and — being newer than anything stored —
      * would always win the never-backwards guard (review 01a0b1a7 contract:4).
+     *
+     * That hazard is a property of Carbon::parse(), not of the blank string: 'now',
+     * 'today', 'midnight' and '+0 seconds' all resolve to THIS INSTANT too, so the
+     * date-string branch accepts only strings whose SHAPE is an absolute date. The
+     * plausibility floor likewise belongs to the parsed INSTANT and not to the numeric
+     * input shape — '1970-01-01' is the same garbled read as epoch 0 — so both branches
+     * enforce it.
      */
     private function parseBootTime(mixed $bootTime): ?Carbon
     {
@@ -248,13 +255,26 @@ class TacticalDeviceSyncService
             }
         }
 
-        // A genuine date string is still accepted, but never a blank/whitespace one.
-        if (is_string($bootTime) && trim($bootTime) !== '') {
+        // A genuine date string is still accepted, but only one that LOOKS like an
+        // absolute date (leading YYYY-MM-DD, optionally with a time part). Carbon
+        // resolves 'now'/'today'/'midnight'/'+0 seconds' to this instant just as it
+        // does a blank string, and such a fabricated observation is newer than
+        // anything stored and so always wins the never-backwards guard.
+        if (is_string($bootTime) && preg_match('/^\d{4}-\d{2}-\d{2}([ T]|$)/', trim($bootTime)) === 1) {
             try {
-                return Carbon::parse(trim($bootTime));
+                $parsed = Carbon::parse(trim($bootTime));
             } catch (\Throwable) {
                 return null;
             }
+
+            // Same floor as the numeric branch: it is a claim about the instant, not
+            // about how the vendor spelled it, so a 1970 date string is refused rather
+            // than written onto an empty column as a 56-year uptime.
+            if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
+                return null;
+            }
+
+            return $parsed;
         }
 
         return null;

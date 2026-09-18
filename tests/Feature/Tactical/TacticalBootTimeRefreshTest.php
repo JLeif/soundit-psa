@@ -348,6 +348,97 @@ class TacticalBootTimeRefreshTest extends TestCase
     }
 
     /**
+     * The same fabrication, reached through the date-string branch: Carbon::parse()
+     * resolves 'now'/'today'/'midnight'/'+0 seconds' to this instant exactly as it
+     * does a blank string.
+     *
+     * Asserted on an EMPTY column on purpose — with a value already stored the
+     * never-backwards guard refuses a backdated fabrication for the wrong reason,
+     * while a fabricated NOW would still win it.
+     *
+     * @dataProvider fabricatingDateStrings
+     */
+    public function test_a_relative_date_string_never_fabricates_an_observation(mixed $bootTime): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue($result->ok);
+        $this->assertNull(
+            $asset->refresh()->last_boot_at,
+            'a relative keyword is not an observation and must not stamp the current instant',
+        );
+    }
+
+    /** @return array<string, array{mixed}> */
+    public static function fabricatingDateStrings(): array
+    {
+        return [
+            'now' => ['now'],
+            'today' => ['today'],
+            'midnight' => ['midnight'],
+            'zero offset' => ['+0 seconds'],
+            'unparseable word' => ['unknown'],
+        ];
+    }
+
+    /**
+     * The plausibility floor is a property of the parsed INSTANT, not of the numeric
+     * input shape: a 1970 DATE STRING is the same garbled read as epoch 0, and on an
+     * empty column there is no stored value to block it.
+     *
+     * @dataProvider implausibleDateStrings
+     */
+    public function test_an_implausible_date_string_is_refused_on_an_empty_column(mixed $bootTime): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue($result->ok);
+        $this->assertNull(
+            $asset->refresh()->last_boot_at,
+            'a pre-floor date string must not be written as a decades-long uptime',
+        );
+    }
+
+    /** @return array<string, array{mixed}> */
+    public static function implausibleDateStrings(): array
+    {
+        return [
+            'epoch start' => ['1970-01-01 00:00:01'],
+            'pre-epoch' => ['1969-12-31 23:59:59'],
+            'just below the floor' => ['2001-09-08 00:00:00'],
+        ];
+    }
+
+    /** A genuine absolute date string is still a real observation. */
+    public function test_an_absolute_date_string_is_a_real_observation(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => '2026-09-16 08:30:00'])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertSame(
+            '2026-09-16 08:30:00',
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+        );
+    }
+
+    /**
      * A plausibility floor, not just a 0 sentinel: a small or negative epoch is a
      * garbled read, never a machine that has been up since 1970.
      *
