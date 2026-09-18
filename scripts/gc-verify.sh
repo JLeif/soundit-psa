@@ -170,8 +170,11 @@ assert_no_warnings() {
         IFS="$old_ifs"
         token="$(printf '%s' "$token" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
         [ -z "$token" ] && { IFS=','; continue; }
-        # Any token still here is either recognised below or fails closed below,
-        # so counting them here is the "at least one count was read" proof.
+        # Any token still here is recognised below, fails closed below, or is a
+        # NON-COUNT METRIC -- and that third outcome gives this increment back
+        # (see the metric branch's `seen=$((seen - 1))`), because a measurement
+        # is not evidence that a count was read. For every other token, counting
+        # here is the "at least one count was read" proof.
         seen=$((seen + 1))
         if printf '%s' "$token" | grep -qE '^[0-9]+$'; then
             # Bare count: PHPUnit TextUI's leading test total ("Tests: 21, ...").
@@ -180,7 +183,7 @@ assert_no_warnings() {
             # Laravel dialect: "7286 warnings".
             count="$(printf '%s' "$token" | sed -E 's/^([0-9]+).*/\1/')"
             label="$(printf '%s' "$token" | sed -E 's/^[0-9]+[[:space:]]+//')"
-        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*[0-9][0-9.:]*[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|b|kb|mb|gb)?$'; then
+        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*([0-9]+|[0-9]+\.[0-9]+|[0-9]+:[0-9]{2}(\.[0-9]+)?)[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|byte|bytes|b|kb|mb|gb)?$'; then
             # NON-COUNT METRIC (GitHub #2612), deliberately its own branch.
             #
             # ORDER IS LOAD-BEARING: this must be tested BEFORE the generic
@@ -218,6 +221,17 @@ assert_no_warnings() {
             # printed `warnings=0` over a line that reported five. Caught by an
             # adversarial case before this shipped, not by the happy path: a
             # permissive tail on a SKIP branch is a warning-smuggling route.
+            #
+            # `byte`/`bytes` are in the list because PHPUnit's OWN formatter
+            # emits them: php-timer's ResourceUsageFormatter::bytesToString()
+            # only knows GB/MB/KB and falls through to `N byte(s)` for a peak
+            # under 1024. Omitting them made this fix incomplete on its own
+            # premise -- verified against the installed vendor source, not
+            # assumed. The VALUE is also enumerated rather than loose: the
+            # earlier `[0-9][0-9.:]*` accepted `1...`, `1.` and `1:2:3:4:5`,
+            # which is the same permissiveness this comment warns about, one
+            # field to the left. An instrument that refuses what it cannot read
+            # must not quietly accept a measurement it cannot parse either.
             seen=$((seen - 1))   # a metric is not the "at least one count was read" proof
             IFS=','; continue
         elif printf '%s' "$token" | grep -qE '^[A-Za-z][A-Za-z[:space:]]*:[[:space:]]*[0-9]+$'; then

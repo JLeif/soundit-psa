@@ -126,6 +126,13 @@ exit('.$exit.');
         self::assertStringNotContainsString('gc-verify: FAIL', $output);
     }
 
+    /**
+     * Each row pairs a summary with the STDERR discriminator the gate must emit
+     * for it. Asserting only "it failed" lets a row keep passing for the wrong
+     * reason after a refactor -- a review panel's finding on this file, and a
+     * fair one: the gate has four distinct refusals, and rows added to pin
+     * different ones were indistinguishable to the old assertions.
+     */
     public static function unknownDialects(): array
     {
         return [
@@ -134,26 +141,43 @@ exit('.$exit.');
             // renamed warning token silently restored the exact floor this
             // change exists to close. These are the realistic shapes; the old
             // digit-free fixture below only ever exercised the degenerate one.
-            'renamed warning token' => ['  Tests:    7286 warned, 467 passed (48511 assertions)'],
-            'decorated warning token' => ['  Tests:    7286 warnings(!), 467 passed (48511 assertions)'],
-            'textui renamed token' => ['Tests: 21, Assertions: 77, Warned: 3.'],
-            'wholly unknown count' => ['  Tests:    5 gremlins, 467 passed (48511 assertions)'],
+            'renamed warning token' => ['  Tests:    7286 warned, 467 passed (48511 assertions)', "unknown count 'warned'"],
+            'decorated warning token' => ['  Tests:    7286 warnings(!), 467 passed (48511 assertions)', 'unrecognised token'],
+            'textui renamed token' => ['Tests: 21, Assertions: 77, Warned: 3.', "unknown count 'warned'"],
+            'wholly unknown count' => ['  Tests:    5 gremlins, 467 passed (48511 assertions)', "unknown count 'gremlins'"],
             // GitHub #2612: the non-count metric branch skips `Duration:`/`Time:`/
             // `Memory:`. Its unit list is CLOSED precisely so that it cannot be
             // used to smuggle a warning count past the gate. An earlier draft
             // ended the value pattern with a bare `[A-Za-z]*`, which matched the
             // word `warnings` and accepted this line while printing warnings=0.
-            'metric label carrying a warning count' => ['Tests: 21 passed (33 assertions), Duration: 5 warnings'],
-            'metric label carrying an unknown count' => ['Tests: 21 passed (33 assertions), Duration: 5 gremlins'],
+            'metric label carrying a warning count' => ['Tests: 21 passed (33 assertions), Duration: 5 warnings', 'unrecognised token'],
+            'metric label carrying an unknown count' => ['Tests: 21 passed (33 assertions), Duration: 5 gremlins', 'unrecognised token'],
             // A near-miss label must not inherit the metric exemption.
-            'near-miss metric label' => ['Tests: 21 passed (33 assertions), Timeouts: 3'],
-            'pluralised metric label' => ['Tests: 21 passed (33 assertions), Durations: 3'],
+            'near-miss metric label' => ['Tests: 21 passed (33 assertions), Timeouts: 3', "unknown count 'timeouts'"],
+            'pluralised metric label' => ['Tests: 21 passed (33 assertions), Durations: 3', "unknown count 'durations'"],
             // A metric must not stand in as proof that a real count was read:
-            // with no countable token this line is still unreadable.
-            'metric only, no real count' => ['Tests: Duration: 0.66s'],
+            // with no countable token this line is still unreadable. This is the
+            // `seen` decrement's control, and it pins the SEEN==0 refusal
+            // specifically -- not merely "some failure happened".
+            'metric only, no real count' => ['Tests: Duration: 0.66s', 'carries no readable counts'],
+            // Integer-valued twin of the row above. Without it, deleting the
+            // metric branch's ordering AND its `seen` decrement could leave this
+            // line passing with no count ever read: a two-edit hole the panel
+            // spotted in the first round of review on this change.
+            'metric only, integer value' => ['Tests: Duration: 1', 'carries no readable counts'],
             // The metric exemption must not suppress a real warnings count that
             // shares the line with it.
-            'metric beside a real warning floor' => ['Tests: 467 passed (7286 warnings, 48511 assertions), Duration: 1.2s'],
+            'metric beside a real warning floor' => ['Tests: 467 passed (7286 warnings, 48511 assertions), Duration: 1.2s', 'reported 7286 warning'],
+            // The value pattern is ENUMERATED, not a loose `[0-9][0-9.:]*`.
+            // A measurement this gate cannot parse is refused like any other
+            // unreadable token: an instrument that fails closed on what it
+            // cannot read must not quietly accept a malformed number either.
+            // (Terminal malformed values such as `1...` are normalised away by
+            // the pre-existing end-of-line strip on the `body=` line, so these
+            // are placed mid-line where that strip does not reach them.)
+            'malformed metric value, colons' => ['Tests: 21 passed (33 assertions), Duration: 1:2:3:4:5', 'unrecognised token'],
+            'malformed metric value, multiple dots' => ['Tests: 21 passed (33 assertions), Duration: 1.2.3, 7 passed', 'unrecognised token'],
+            'malformed metric value, leading dots' => ['Tests: 21 passed (33 assertions), Duration: ..5, 7 passed', 'unrecognised token'],
         ];
     }
 
@@ -180,6 +204,27 @@ exit('.$exit.');
             'textui time' => ['Tests: 21 passed (33 assertions), Time: 0.66'],
             'textui clock-formatted time' => ['Tests: 21 passed (33 assertions), Time: 00:02.729'],
             'textui memory' => ['Tests: 21 passed (33 assertions), Memory: 24.00 MB'],
+            // PHPUnit's OWN formatter emits these: php-timer's
+            // ResourceUsageFormatter::bytesToString() knows only GB/MB/KB and
+            // falls through to `N byte(s)` for a peak under 1024. Omitting them
+            // left the fix incomplete on its own premise -- found by review,
+            // confirmed against the installed vendor source rather than assumed.
+            'textui memory in bytes' => ['Tests: 21 passed (33 assertions), Memory: 512 bytes'],
+            'textui memory singular byte' => ['Tests: 21 passed (33 assertions), Memory: 1 byte'],
+            // Every remaining unit in the closed list, so that deleting one is a
+            // red suite rather than a silent narrowing. The list is the branch's
+            // only safety boundary; an unexercised boundary is not a boundary.
+            'unit us' => ['Tests: 21 passed (33 assertions), Duration: 900 us'],
+            'unit sec' => ['Tests: 21 passed (33 assertions), Duration: 3 sec'],
+            'unit secs' => ['Tests: 21 passed (33 assertions), Duration: 3 secs'],
+            'unit seconds' => ['Tests: 21 passed (33 assertions), Duration: 3 seconds'],
+            'unit m' => ['Tests: 21 passed (33 assertions), Duration: 2 m'],
+            'unit min' => ['Tests: 21 passed (33 assertions), Duration: 2 min'],
+            'unit b' => ['Tests: 21 passed (33 assertions), Memory: 900 b'],
+            'unit kb' => ['Tests: 21 passed (33 assertions), Memory: 64 kb'],
+            'unit gb' => ['Tests: 21 passed (33 assertions), Memory: 2 gb'],
+            // Case-insensitivity applies to the label AND the unit.
+            'uppercase label and unit' => ['Tests: 21 passed (33 assertions), DURATION: 1 S'],
         ];
     }
 
@@ -216,7 +261,7 @@ exit('.$exit.');
      * token it cannot read meant zero warnings.
      */
     #[DataProvider('unknownDialects')]
-    public function test_unknown_summary_token_fails_closed(string $summary): void
+    public function test_unknown_summary_token_fails_closed(string $summary, string $becauseStderrSays): void
     {
         $this->stubArtisan($summary, 0);
         $run = $this->runGate();
@@ -226,6 +271,9 @@ exit('.$exit.');
         self::assertStringContainsString('gc-verify: FAIL', $output);
         self::assertStringNotContainsString('gc-verify: PASS', $output);
         self::assertStringNotContainsString('warnings=0', $output);
+        // WHY it failed, not merely that it failed. Without this a row can drift
+        // onto a different refusal path and still look green.
+        self::assertStringContainsString($becauseStderrSays, $output);
     }
 
     /**
