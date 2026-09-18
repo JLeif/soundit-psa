@@ -132,4 +132,9 @@ run M12-memoise-every-outcome "$C" \
   '        return $this->fetchAuthorized($press);' \
   '        return $this->fetched[$press] = $this->fetchAuthorized($press);'
 
+# M13 — the redaction refusal hands back the metadata it could not judge.
+run M13-redaction-refusal-leaks-metadata "$C" \
+  'return HdbReportResult::incomplete($press, [], HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE);' \
+  'return HdbReportResult::incomplete($press, $ticket, HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE);'
+
 echo "restored tip: $(git rev-parse HEAD); dirty: $(git status --porcelain | wc -l)"
