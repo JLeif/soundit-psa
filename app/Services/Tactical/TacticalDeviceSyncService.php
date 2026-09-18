@@ -220,34 +220,43 @@ class TacticalDeviceSyncService
             return;
         }
 
-        $asset = Asset::find($ta->asset_id);
-
-        if (! $asset) {
-            return;
-        }
-
-        // Never drag the column backwards. NOTE this is deliberately one-directional
-        // and therefore cannot repair a wrong stored value written by another
-        // integration — the arbitration question ("strictly newer wins" vs "most
-        // recent observation wins") is on the card for a product ruling.
-        if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
-            return;
-        }
-
-        // This write is OPPORTUNISTIC: the detail sync has already succeeded by the
-        // time we get here. A DB failure on it must not fail the sync, and must not
-        // escape — refreshTactical() has no try/catch, and syncDeviceDetail()'s catch
-        // takes TacticalClientException only, so a QueryException from this line would
-        // propagate to a user-facing surface carrying the statement with its bindings
-        // INTERPOLATED (measured: "SQL: update `assets` set `last_boot_at` = ... where
-        // `id` = 42"). That is the psa #359 leak class this class already routes around
-        // via safeFailure(); this one line was the path that bypassed it.
+        // The ENTIRE read-modify-write is OPPORTUNISTIC: the detail sync has already
+        // succeeded by the time we get here, so nothing below may fail the sync or
+        // escape. refreshTactical() has no try/catch and syncDeviceDetail()'s catch
+        // takes TacticalClientException only, so anything thrown here reaches a
+        // user-facing surface carrying the statement with its bindings INTERPOLATED
+        // (measured: "SQL: update `assets` set `last_boot_at` = ... where `id` = 42").
+        // That is the psa #359 leak class this class already routes around via
+        // safeFailure().
+        //
+        // The boundary deliberately starts at the SELECT, not at the UPDATE. An
+        // earlier revision wrapped only the UPDATE, which left TWO escapes that the
+        // r3 panel caught and that are measured in the guard tests: the Asset::find()
+        // query itself, and — reached without any DB fault at all — Laravel's datetime
+        // CAST of an existing corrupt/legacy last_boot_at in the never-backwards
+        // comparison, which throws Carbon InvalidFormatException. A containment
+        // boundary has to cover every statement that can throw, not just the one whose
+        // failure was first imagined.
         try {
+            $asset = Asset::find($ta->asset_id);
+
+            if (! $asset) {
+                return;
+            }
+
+            // Never drag the column backwards. NOTE this is deliberately
+            // one-directional and therefore cannot repair a wrong stored value written
+            // by another integration — the arbitration question ("strictly newer wins"
+            // vs "most recent observation wins") is on the card for a product ruling.
+            if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
+                return;
+            }
+
             Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
         } catch (\Throwable $e) {
-            Log::warning('Tactical boot_time write failed; sync result unaffected.', [
+            Log::warning('Tactical boot_time refresh failed; sync result unaffected.', [
                 'agent_id' => $ta->agent_id,
-                'asset_id' => $asset->id,
+                'asset_id' => $ta->asset_id,
                 'reason' => $this->safeFailure($e, 'boot time refresh'),
             ]);
         }

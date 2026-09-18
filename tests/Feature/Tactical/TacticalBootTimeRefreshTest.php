@@ -18,6 +18,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -723,5 +724,73 @@ class TacticalBootTimeRefreshTest extends TestCase
             $result->ok,
             'an opportunistic column refresh must not turn a completed sync into a failure',
         );
+    }
+
+    /**
+     * The containment boundary must cover the READ, not just the write.
+     *
+     * This is the r3 panel's escalated finding (contract:6), and it is the sharper
+     * half of it: it needs NO database fault at all. A corrupt or legacy value already
+     * sitting in last_boot_at — a MySQL zero-date, or any unparseable string — is
+     * turned into a Carbon by Laravel's datetime cast the moment the never-backwards
+     * comparison reads it. That cast throws InvalidFormatException OUTSIDE the old
+     * try, escapes refreshAssetBootTime, sails past syncDeviceDetail's
+     * TacticalClientException-only catch and refreshTactical's absent one, and fails
+     * the ENTIRE device sync — over an opportunistic column refresh, on an asset whose
+     * only sin is a bad row written by something else.
+     *
+     * Measured before the fix: "Carbon\Exceptions\InvalidFormatException: Could not
+     * parse 'not-a-date'", escaping syncDeviceDetail.
+     *
+     * Two seats voted to discard this as a duplicate of the write-path finding. It is
+     * not: that fix covered the UPDATE line only. The value of the assertion is that
+     * it distinguishes them — it fails with the write-only containment in place.
+     */
+    public function test_a_corrupt_stored_boot_time_neither_fails_the_sync_nor_escapes(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        // Write raw, bypassing the cast on the way in, so the row holds exactly what a
+        // legacy/corrupt row holds.
+        DB::table('assets')->where('id', $asset->id)->update(['last_boot_at' => 'not-a-date']);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => 1757000000])),
+        ]);
+
+        // Asserted through the public result: an escaping exception surfaces here as a
+        // test ERROR, which is precisely the production symptom.
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue(
+            $result->ok,
+            'a corrupt stored last_boot_at must not fail the device sync',
+        );
+    }
+
+    /**
+     * The other half of contract:6: the SELECT itself is a query and can throw.
+     *
+     * Dropping the table is a blunt instrument — it also breaks the detail write
+     * earlier in the sync — so this asserts the property that actually matters and
+     * that the blunt instrument cannot obscure: whatever happens to the database
+     * underneath an opportunistic refresh, nothing escapes to the caller.
+     */
+    public function test_a_database_failure_under_the_refresh_does_not_escape(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => 1757000000])),
+        ]);
+
+        Schema::drop('assets');
+
+        // No assertion on ok: with the table gone the earlier detail write legitimately
+        // fails too. The contract under test is that the call RETURNS rather than
+        // throwing — an escape is an ERROR here, and the leak rides on the escape.
+        $service->syncDeviceDetail($asset);
+
+        $this->assertTrue(true, 'syncDeviceDetail returned instead of throwing');
     }
 }
