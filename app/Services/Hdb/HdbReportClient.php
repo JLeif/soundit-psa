@@ -167,6 +167,39 @@ final class HdbReportClient
      */
     private array $fetched = [];
 
+    /**
+     * The one handshake this instance performs, memoised whatever it returned.
+     *
+     * MEASURED 2026-09-18 while building this slice, and it is the reason this
+     * field exists rather than a nicety: {@see HdbAuthClient} counts its
+     * requests per INSTANCE against {@see HdbAuthClient::MAX_REQUESTS} = 3 and
+     * never resets the counter, so a second `authenticate()` on the same
+     * instance spends the budget and returns
+     * `request_budget_exhausted` — a healthy portal reported as a redirect
+     * loop. A fetch client that signed in per press would have hit that on the
+     * SECOND press of any process, and the symptom would have looked like a
+     * portal fault rather than a client one.
+     *
+     * Memoising the FAILURE too is deliberate. A refused credential re-tried is
+     * a lockout risk on a service subaccount — the auth client's own stated
+     * reason for having no retry — and a fetch loop over several presses must
+     * not turn one bad password into N login attempts. A new instance is how a
+     * caller asks for a new handshake; that is a per-job decision, not a
+     * per-press one.
+     *
+     * 🔴 WHAT THIS DOES NOT DO: re-establish a session that LAPSES mid-life.
+     * The vault note's §4c sketches a re-login-and-retry-once on an auth
+     * failure, and this slice does not implement it, because what a lapsed
+     * session actually looks like on `gatekeeper_auth.php` — a redirect to
+     * /login, a JSON error, a 403 — is item 5 on that note's own
+     * confirm-on-build list and has never been observed. Guessing the signature
+     * would mean guessing when to spend a credential. Today a lapse surfaces as
+     * Malformed or as an unexpected response, both of which refuse the import
+     * loudly and neither of which writes anything. Naming it here beats a
+     * re-login triggered by a signature nobody has measured.
+     */
+    private ?HdbAuthResult $session = null;
+
     public function __construct(
         private readonly HdbReportFetchAuthorizer $authorizer = new HdbReportFetchAuthorizer,
         ?HdbAuthClient $auth = null,
@@ -209,7 +242,7 @@ final class HdbReportClient
             return $this->fetched[$press];
         }
 
-        $session = $this->auth->authenticate();
+        $session = $this->session ??= $this->auth->authenticate();
 
         if (! $session->ok()) {
             // The auth REASON rides along so an operator is told which leg

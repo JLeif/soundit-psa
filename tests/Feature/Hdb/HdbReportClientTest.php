@@ -7,7 +7,7 @@ use App\Models\Client;
 use App\Models\Setting;
 use App\Models\Ticket;
 use App\Models\TicketNote;
-use App\Services\Hdb\HdbAuthClient;
+use App\Services\Hdb\HdbAuthResult;
 use App\Services\Hdb\HdbReportClient;
 use App\Services\Hdb\HdbReportFetchAuthorizer;
 use App\Services\Hdb\HdbReportFetchRefusal;
@@ -16,6 +16,8 @@ use App\Services\Hdb\HdbReportResult;
 use App\Services\Hdb\HdbReportStatus;
 use App\Support\HdbPortalConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -191,6 +193,14 @@ class HdbReportClientTest extends TestCase
      */
     private function fakePortal(array $files): void
     {
+        // A FRESH factory per call, and the reason is a trap this suite fell
+        // into: Http::fake() MERGES its stubs onto whatever is already
+        // registered, and the earliest matching stub wins. So a second
+        // fakePortal() in one test silently kept serving the FIRST call's
+        // bodies, and the retry case read as "still uploading" forever. Every
+        // multi-stage test here depends on this line.
+        Http::swap(new Factory($this->app['events']));
+
         $fakes = [
             self::BASE.'/login' => Http::response($this->signedInPage()),
         ];
@@ -843,5 +853,307 @@ class HdbReportClientTest extends TestCase
         $this->assertSame(HdbReportResult::REASON_UNEXPECTED_RESPONSE, $result->reason);
         $this->assertFalse($result->importable());
         $this->assertNull($result->report);
+    }
+    // --------------------------------------------------------------- failsoft
+
+    /**
+     * FAIL-SOFT, as the brief states it: on any failure the original HDB link
+     * note stays intact and the ticket is never blocked.
+     *
+     * Asserted as a property of the whole failure space rather than of one
+     * case: every failing shape this suite knows how to produce is run, and
+     * after each one the note's body, its press key and the ticket's own row
+     * are identical to what they were before. Nothing in this client writes, so
+     * the promise is structural - and this is the control that keeps it
+     * structural when someone later adds a convenience write.
+     *
+     * Mutation that kills it: any write to a ticket or note from this client,
+     * including a well-meant "import failed" note.
+     */
+    public function test_no_failure_path_touches_the_ticket_or_its_link_note(): void
+    {
+        $ticket = $this->keyedTicket();
+        $note = TicketNote::where('ticket_id', $ticket->id)->firstOrFail();
+
+        $before = [
+            'body' => $note->body,
+            'press' => $note->hdb_press_id,
+            'ticket' => $ticket->fresh()?->toArray(),
+            'notes' => TicketNote::withTrashed()->count(),
+        ];
+
+        $failures = [
+            'incomplete upload' => ['uploadComplete' => false],
+            'unreadable gate' => ['uploadComplete' => 'yes'],
+            'unreadable redaction' => ['redactScreenshots' => 'no'],
+        ];
+
+        foreach ($failures as $label => $mutation) {
+            $this->fakePortal([
+                HdbReportClient::FILE_TICKET => json_encode($this->ticketJson($mutation)),
+                HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            ]);
+
+            $this->assertFalse($this->client()->fetch($ticket->id, self::PRESS)->importable(), $label);
+        }
+
+        // Malformed and degraded too.
+        $this->fakePortal([HdbReportClient::FILE_TICKET => 'not json at all']);
+        $this->client()->fetch($ticket->id, self::PRESS);
+
+        $degraded = $this->reportJson();
+        unset($degraded['eventLog']);
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($degraded),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+        $this->client()->fetch($ticket->id, self::PRESS);
+
+        $after = $note->fresh();
+
+        $this->assertNotNull($after, 'The link note was deleted by a failing fetch.');
+        $this->assertSame($before['body'], $after->body);
+        $this->assertSame($before['press'], $after->hdb_press_id);
+        $this->assertNull($after->deleted_at);
+        $this->assertSame($before['ticket'], $ticket->fresh()?->toArray());
+        $this->assertSame($before['notes'], TicketNote::withTrashed()->count(), 'A failing fetch wrote a note.');
+    }
+
+    /**
+     * A transport failure is a status, never an exception. The import path must
+     * be able to call this inside a job without wrapping it, or a vendor outage
+     * becomes a failed job rather than a retryable one.
+     *
+     * Mutation that kills it: removing the catch in the request path - the test
+     * then errors with the ConnectionException instead of failing an assertion.
+     */
+    public function test_a_transport_failure_is_a_status_rather_than_an_exception(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        Http::fake([
+            self::BASE.'/login' => Http::response($this->signedInPage()),
+            '*gatekeeper_auth.php*' => fn () => throw new ConnectionException('cURL error 28: timeout'),
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Unreachable, $result->status);
+        $this->assertSame(HdbReportResult::REASON_TRANSPORT_ERROR, $result->reason);
+        $this->assertFalse($result->importable());
+
+        // The exception message never escapes. A Guzzle message quotes the URL,
+        // and a followed URL here is a PRESIGNED S3 link carrying a signature
+        // and a security token.
+        $this->assertStringNotContainsString('cURL', $result->message());
+        $this->assertStringNotContainsString('timeout', $result->message());
+    }
+
+    /**
+     * A failed sign-in stops the fetch and REPORTS WHICH LEG failed, using the
+     * auth client's own closed-vocabulary symbol.
+     *
+     * Mutation that kills it: proceeding to the gatekeeper on a failed
+     * handshake (the requested-files assertion catches that), or flattening the
+     * auth reason so an operator cannot tell a refused password from an
+     * unreachable portal.
+     */
+    public function test_a_failed_sign_in_stops_the_fetch_and_names_the_auth_reason(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        // The portal's measured refusal shape: the login page re-served with a
+        // notify--bad block. Its bytes are pinned in HdbAuthClientTest; this is
+        // the minimum that reaches the same branch.
+        Http::fake([
+            self::BASE.'/login' => Http::response(
+                '<html><body><div class="notify--bad">Invalid email or password</div>'
+                .'<form id="theOnlyForm"><input type="password" name="password"></form></body></html>'
+            ),
+            '*' => Http::response('MUST NOT BE REACHED', 200),
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Unauthenticated, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_CREDENTIALS_REJECTED, $result->authReason);
+        $this->assertFalse($result->importable());
+        $this->assertSame([], $this->requestedFiles(), 'No report may be requested without a session.');
+    }
+
+    /**
+     * Configuration is checked before anything is sent: with no credentials
+     * stored, an authorized press still fetches nothing at all.
+     */
+    public function test_an_unconfigured_portal_fetches_nothing(): void
+    {
+        Setting::setValue('hdb_email', '');
+        Setting::setEncrypted('hdb_password', '');
+
+        $ticket = $this->keyedTicket();
+        $this->fakePortal([HdbReportClient::FILE_TICKET => json_encode($this->ticketJson())]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Unauthenticated, $result->status);
+        $this->assertCount(0, Http::recorded());
+    }
+
+    // ------------------------------------------------- idempotency and leaks
+
+    /**
+     * Reports are immutable once uploaded (vault section 7), so a press already
+     * fetched by this instance is served from memory rather than re-fetched.
+     *
+     * The assertion is on REQUEST COUNT, not on the returned value: a client
+     * that re-fetched and returned an equal result would pass an equality check
+     * and fail this one, which is the point.
+     *
+     * Mutation that kills it: deleting the memo, or memoising before the gate
+     * so a second caller on another ticket gets a cached hit (the second half
+     * below catches that one).
+     */
+    public function test_a_press_already_fetched_is_not_fetched_again(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $client = $this->client();
+        $first = $client->fetch($ticket->id, self::PRESS);
+        $issued = count($this->requestedFiles());
+        $second = $client->fetch($ticket->id, self::PRESS);
+
+        $this->assertTrue($first->importable());
+        $this->assertTrue($second->importable());
+        $this->assertSame($issued, count($this->requestedFiles()), 'The second fetch went to the portal again.');
+        $this->assertSame($first->report, $second->report);
+    }
+
+    /**
+     * The memo NEVER outranks the gate. A press fetched for its own ticket is
+     * still refused when a DIFFERENT ticket asks for it - otherwise the cache
+     * would become the cross-client hole #1359 closes, one layer up.
+     *
+     * Mutation that kills it: moving the memo lookup above the authorize call.
+     */
+    public function test_the_memo_does_not_serve_a_press_to_a_ticket_that_may_not_have_it(): void
+    {
+        $mine = $this->keyedTicket(self::PRESS);
+        $other = $this->keyedTicket(self::OTHER_PRESS);
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $client = $this->client();
+
+        $this->assertTrue($client->fetch($mine->id, self::PRESS)->importable());
+
+        $crossed = $client->fetch($other->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Refused, $crossed->status);
+        $this->assertNull($crossed->report, 'The memo served another ticket a cached payload.');
+    }
+
+    /**
+     * An incomplete upload is NOT memoised: it is precisely the case a later
+     * attempt is expected to fix.
+     *
+     * Mutation that kills it: memoising every outcome rather than only a whole
+     * fetch - which would pin a press at "still uploading" for the life of the
+     * process and make the retry path dead code.
+     */
+    public function test_an_incomplete_upload_is_not_memoised_so_a_retry_can_succeed(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['uploadComplete' => false])),
+        ]);
+
+        $client = $this->client();
+        $this->assertSame(HdbReportStatus::Incomplete, $client->fetch($ticket->id, self::PRESS)->status);
+
+        // The endpoint finishes uploading; the same client instance retries.
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $retried = $client->fetch($ticket->id, self::PRESS);
+
+        $this->assertTrue($retried->importable(), 'An incomplete upload was memoised, so the retry could never succeed.');
+    }
+
+    /**
+     * No vendor text reaches an operator-facing sentence, on any path.
+     *
+     * Every fixture in this suite carries a script-tag beacon in the field a
+     * real press carries the end user's own words in. The ticket view renders
+     * a fetch result, so vendor bytes in message() would be a write primitive
+     * on a technician's DOM - the same property HdbAuthClientTest asserts for
+     * the login handshake, which this client now shares a session with.
+     *
+     * The payload itself is exempt and must be: it IS the vendor's data, and
+     * the import path escapes it. What must not carry it is the sentence.
+     */
+    public function test_no_vendor_text_reaches_an_operator_facing_sentence(): void
+    {
+        $ticket = $this->keyedTicket();
+        $messages = [];
+
+        $shapes = [
+            'complete' => $this->ticketJson(),
+            'incomplete' => $this->ticketJson(['uploadComplete' => false]),
+            'unreadable gate' => $this->ticketJson(['uploadComplete' => 'yes']),
+            'unreadable redaction' => $this->ticketJson(['redactDiagnostic' => 'no']),
+        ];
+
+        foreach ($shapes as $metadata) {
+            $this->fakePortal([
+                HdbReportClient::FILE_TICKET => json_encode($metadata),
+                HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+                HdbReportClient::FILE_SCREENSHOT => 'PNG',
+            ]);
+
+            $messages[] = $this->client()->fetch($ticket->id, self::PRESS)->message();
+        }
+
+        // A degraded read and a malformed one, whose bodies are pure vendor text.
+        $this->fakePortal([HdbReportClient::FILE_TICKET => '<html>'.self::BEACON.'</html>']);
+        $messages[] = $this->client()->fetch($ticket->id, self::PRESS)->message();
+
+        $this->assertCount(5, $messages);
+
+        foreach ($messages as $message) {
+            $this->assertNotSame('', $message);
+            $this->assertStringNotContainsString('BEACON', $message);
+            $this->assertStringNotContainsString('<script', $message);
+            $this->assertStringNotContainsString('WS-INVENTED-01', $message);
+            $this->assertStringNotContainsString('avery', strtolower($message));
+        }
+    }
+
+    /**
+     * The endpoint whitelist is closed, and it is closed around the four
+     * filenames the viewer serves (vault section 5). This is what stops a
+     * future caller reaching a state-changing endpoint through the one method
+     * that builds a getFile parameter.
+     */
+    public function test_the_fetchable_file_list_is_exactly_the_four_served_filenames(): void
+    {
+        $this->assertSame(
+            ['ticket.json', 'report.json', 'screen.png', 'sprite.png'],
+            HdbReportClient::FETCHABLE_FILES,
+        );
     }
 }
