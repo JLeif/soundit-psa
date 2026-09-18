@@ -793,4 +793,130 @@ class TacticalBootTimeRefreshTest extends TestCase
 
         $this->assertTrue(true, 'syncDeviceDetail returned instead of throwing');
     }
+
+    /**
+     * r3 diff:1 — the headline defect of this round, and the one with the widest
+     * production blast radius.
+     *
+     * psutil's boot_time is a FLOAT. The column is second-precision. So the stored
+     * value comes back as ...:00.000000 while the next sync's parsed value still
+     * carries .726743, `$observed->gt($stored)` is TRUE, and the "opportunistic,
+     * only-when-newer" write fires on EVERY detail sync, for EVERY Tactical device,
+     * forever — bumping assets.updated_at each time on machines that never rebooted.
+     * The docblock claimed the opposite: "left alone".
+     *
+     * The assertion is on updated_at, because that is the observable the defect
+     * actually damages and it can distinguish the two behaviours: last_boot_at holds
+     * the same second either way, so asserting on it would pass with the bug present.
+     */
+    public function test_an_unchanged_fractional_boot_time_is_not_rewritten_on_every_sync(): void
+    {
+        $epoch = 1789617600.7267435;
+
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $first = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $epoch])),
+        ]);
+        $first->syncDeviceDetail($asset);
+
+        $stored = $asset->refresh()->last_boot_at;
+        $this->assertNotNull($stored, 'precondition: the first sync stores the observation');
+
+        // Move the clock on so a second write would be visibly distinguishable.
+        DB::table('assets')->where('id', $asset->id)
+            ->update(['updated_at' => '2020-01-01 00:00:00']);
+
+        $second = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $epoch])),
+        ]);
+        $second->syncDeviceDetail($asset);
+
+        $this->assertSame(
+            '2020-01-01 00:00:00',
+            DB::table('assets')->where('id', $asset->id)->value('updated_at'),
+            'a device reporting the SAME fractional boot time must not be rewritten on every sync',
+        );
+    }
+
+    /**
+     * r3 context:2 — a 1970 fabrication the plausibility floor cannot even rank.
+     *
+     * INF and NAN are not orderable, so `$epoch < FLOOR` is FALSE for both and they
+     * pass the floor untouched. Measured: Carbon::createFromTimestamp(INF) and (NAN)
+     * both return 1970-01-01, which is not future, so on an empty column the
+     * never-backwards guard does not fire and a ~56-year uptime is WRITTEN — exactly
+     * the fabrication the floor was added to prevent, arriving through the one door
+     * the floor cannot close. json_decode('1e999') yields INF, so this is reachable
+     * from a vendor/proxy payload without anything exotic.
+     *
+     * @dataProvider nonFiniteEpochs
+     */
+    public function test_a_non_finite_epoch_is_refused(mixed $epoch): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $epoch])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertNull(
+            $asset->refresh()->last_boot_at,
+            'a non-finite epoch is not an observation and must not be written',
+        );
+    }
+
+    public static function nonFiniteEpochs(): array
+    {
+        // NOTE: only the STRING spellings appear here, and deliberately so. A raw
+        // INF/NAN php float cannot survive the fixture at all — json_encode() refuses
+        // it ("Inf and NaN cannot be JSON encoded") and emits a payload with NO
+        // boot_time key, so such a data set would exercise the absent-field path and
+        // pass no matter what parseBootTime does. It would be a control that cannot
+        // disagree with the defect. The string spelling is also the REALISTIC one,
+        // since json_decode('1e999') yields INF on the way in.
+        return [
+            'overflowing numeric string' => ['1e999'],
+            'negative overflow string' => ['-1e999'],
+        ];
+    }
+
+    /**
+     * r3 diff:5 — an impossible offset must REFUSE the value, not fall through to the
+     * laxer formats later in the enumeration.
+     *
+     * With `continue`, the same string is re-offered to the remaining formats. Nothing
+     * leaks today only because the one remaining prefix-matching format always leaves
+     * trailing data and is killed by the getLastErrors() check — a coincidence of list
+     * ORDER, not a stated property. This pins the intended behaviour so that adding or
+     * reordering a format cannot silently reintroduce the dropped-offset error class.
+     */
+    /**
+     * MEASURED CAVEAT, stated rather than glossed: with the current enumeration this
+     * test passes both WITH and WITHOUT the fix, so it is a regression pin, NOT a
+     * kill, and is not counted as one. '2026-09-17T04:00:00+2400' is matched only by
+     * 'Y-m-d\\TH:i:sP' (offset 86400, refused by the bound); every other format in the
+     * list throws or returns false on it, so `continue` and `return null` are
+     * indistinguishable TODAY. That is precisely the finding's point — the safety is a
+     * coincidence of list order, not a stated property — and this pins it so that
+     * adding or reordering a format cannot silently reintroduce the dropped-offset
+     * error class without turning this test red.
+     */
+    public function test_an_impossible_offset_refuses_the_value_outright(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => '2026-09-17T04:00:00+2400'])),
+        ]);
+
+        $service->syncDeviceDetail($asset);
+
+        $this->assertNull(
+            $asset->refresh()->last_boot_at,
+            'an out-of-range offset must refuse the reading, not fall through to a zone-less format',
+        );
+    }
 }

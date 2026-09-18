@@ -293,6 +293,17 @@ class TacticalDeviceSyncService
             || (is_string($bootTime) && is_numeric(trim($bootTime)))) {
             $epoch = (float) (is_string($bootTime) ? trim($bootTime) : $bootTime);
 
+            // INF and NAN are not orderable, so EVERY comparison below is false and
+            // they would sail through the floor. Measured (r3 context:2): the string
+            // '1e999' casts to INF, `INF < FLOOR` and `NAN < FLOOR` are both false, and
+            // Carbon::createFromTimestamp(INF) returns 1970-01-01 — which is not future,
+            // so on an empty column it is WRITTEN. That is the same 1970 fabrication the
+            // floor exists to stop, arriving through a value the floor cannot rank.
+            // Reject non-finite input before any ordering is attempted.
+            if (! is_finite($epoch)) {
+                return null;
+            }
+
             // A plausibility floor, not just a 0 sentinel: 0, 1, -1 and other small
             // or negative values are "no reading", not a machine that booted in 1970
             // (review 01a0b1a7 contract:5).
@@ -301,7 +312,16 @@ class TacticalDeviceSyncService
             }
 
             try {
-                return Carbon::createFromTimestamp($epoch);
+                // Truncate to whole seconds. The column is second-precision, so a
+                // FRACTIONAL epoch is written as ...:00 and re-read as ...:00.000000,
+                // while the next sync's in-memory value still carries .726743 — making
+                // `$observed->gt($stored)` TRUE on every single sync for a machine that
+                // never rebooted (r3 diff:1, measured). psutil's boot_time is a float,
+                // so that is the NORMAL case, not an edge one: the "only when newer"
+                // write was in fact an unconditional write of the whole Tactical fleet,
+                // bumping assets.updated_at forever. Comparing at the precision the
+                // column actually stores is what makes the guard's promise true.
+                return Carbon::createFromTimestamp((int) $epoch);
             } catch (\Throwable) {
                 return null;
             }
@@ -320,51 +340,74 @@ class TacticalDeviceSyncService
             $trimmed = trim($bootTime);
 
             foreach (self::BOOT_TIME_STRING_FORMATS as $format) {
+                // The try must span EVERY call made on $parsed, not just its
+                // construction (r3 diff:4). The whole bug class being guarded against
+                // here is a Carbon that constructs cleanly and then throws on the next
+                // timezone-sensitive call, so wrapping only createFromFormat() leaves
+                // the guard's own getOffset()/utc()/getTimestamp() calls exposed to the
+                // very thing they are checking for. Measured: getOffset() and utc()
+                // happen to survive the '+9999' object — "happen to" is not a contract,
+                // and parseBootTime has no outer catch to fall back on.
                 try {
                     $parsed = Carbon::createFromFormat('!'.$format, $trimmed);
+
+                    // createFromFormat does not throw on trailing junk; it records it.
+                    // Without this check '2026-09-17 +56 years' parses as the date and
+                    // silently discards the suffix, which is the same laundering hazard
+                    // arriving by a different door.
+                    $errors = Carbon::getLastErrors();
+
+                    if ($parsed === false
+                    || ($errors && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))) {
+                        continue;
+                    }
+
+                    // The offset-bearing formats accept an offset PHP itself cannot hold.
+                    // Measured at the previous tip: '+9999' parsed with no warning or error,
+                    // produced a 362340-second offset and a Carbon whose timezone name
+                    // contains a NUL byte, so the very next call — isFuture() — threw a
+                    // ValueError out of refreshAssetBootTime, past syncDeviceDetail's
+                    // TacticalClientException-only catch, and killed the whole sync.
+                    // Real offsets are within +/- 14:00 (RFC 9557 / IANA); anything beyond
+                    // it is not a timezone, it is a malformed reading.
+                    // REFUSE the value outright rather than `continue`. A recognised shape
+                    // carrying an impossible offset is a malformed reading, not a reason to
+                    // re-offer the same string to the laxer formats later in the list (r3
+                    // diff:5). Today nothing leaks through that path only because the one
+                    // remaining prefix-matching format always leaves trailing data and is
+                    // killed by the getLastErrors() check — a coincidence of list order, not
+                    // a property this code states. A zone-less format matching a full
+                    // datetime prefix would silently DISCARD the offset and write the wall
+                    // clock as if UTC, reintroducing the seven-hour-error class that the
+                    // ->utc() normalisation was added to fix.
+                    if (abs($parsed->getOffset()) > self::BOOT_TIME_MAX_OFFSET_SECONDS) {
+                        return null;
+                    }
+
+                    // Truncate to whole seconds here too, for the same reason as the
+                    // numeric branch: the microseconds spelling can otherwise re-trigger
+                    // the never-backwards comparison on every sync.
+                    $parsed = $parsed->startOfSecond();
+
+                    // Normalise to UTC before the floor and the write. The numeric branch
+                    // yields UTC, the column is cast to app timezone UTC, and the stored
+                    // value is compared against other integrations' writes — so an offset
+                    // string must be converted, not have its offset silently dropped.
+                    // Measured: '2026-09-16T10:00:00-07:00' stored 10:00 instead of 17:00,
+                    // a seven-hour error in the uptime the health score reads.
+                    $parsed = $parsed->utc();
+
+                    // Same floor as the numeric branch: a claim about the instant, not
+                    // about how the vendor spelled it, so a 1970 date string is refused
+                    // rather than written onto an empty column as a 56-year uptime.
+                    if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
+                        return null;
+                    }
+
+                    return $parsed;
                 } catch (\Throwable) {
                     continue;
                 }
-
-                // createFromFormat does not throw on trailing junk; it records it.
-                // Without this check '2026-09-17 +56 years' parses as the date and
-                // silently discards the suffix, which is the same laundering hazard
-                // arriving by a different door.
-                $errors = Carbon::getLastErrors();
-
-                if ($parsed === false
-                    || ($errors && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))) {
-                    continue;
-                }
-
-                // The offset-bearing formats accept an offset PHP itself cannot hold.
-                // Measured at the previous tip: '+9999' parsed with no warning or error,
-                // produced a 362340-second offset and a Carbon whose timezone name
-                // contains a NUL byte, so the very next call — isFuture() — threw a
-                // ValueError out of refreshAssetBootTime, past syncDeviceDetail's
-                // TacticalClientException-only catch, and killed the whole sync.
-                // Real offsets are within +/- 14:00 (RFC 9557 / IANA); anything beyond
-                // it is not a timezone, it is a malformed reading.
-                if (abs($parsed->getOffset()) > self::BOOT_TIME_MAX_OFFSET_SECONDS) {
-                    continue;
-                }
-
-                // Normalise to UTC before the floor and the write. The numeric branch
-                // yields UTC, the column is cast to app timezone UTC, and the stored
-                // value is compared against other integrations' writes — so an offset
-                // string must be converted, not have its offset silently dropped.
-                // Measured: '2026-09-16T10:00:00-07:00' stored 10:00 instead of 17:00,
-                // a seven-hour error in the uptime the health score reads.
-                $parsed = $parsed->utc();
-
-                // Same floor as the numeric branch: a claim about the instant, not
-                // about how the vendor spelled it, so a 1970 date string is refused
-                // rather than written onto an empty column as a 56-year uptime.
-                if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
-                    return null;
-                }
-
-                return $parsed;
             }
 
             return null;
