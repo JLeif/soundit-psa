@@ -34,7 +34,14 @@ use Illuminate\Support\Facades\Http;
  * - **A refusal is a `notify--bad` block.** With a non-empty submit the portal
  *   answers a wrong pair with the login page plus a notice whose class carries
  *   `notify--bad` and whose text is `Invalid email or password`; a post whose
- *   `g` is the HTML's ASCII value gets `Invalid Captcha` in the same block.
+ *   `g` is the HTML's ASCII value gets `Invalid Captcha` in the same block. A
+ *   third notice in that block — the account's IP-filter refusal, observed
+ *   2026-09-17 against the real service subaccount — says the sign-in was
+ *   refused on the caller's address, before the password was judged; it maps to
+ *   REASON_PORTAL_IP_FILTERED ({@see REFUSAL_NOTICES}, whose order is its
+ *   precedence). The portal interpolates the caller's address into that
+ *   sentence, so neither the sentence nor the address is repeated outside the
+ *   needle list, and neither leaves this class.
  *   Everything this client reads off a page — the notice text, the login-form
  *   and landing-redirect markers, the second-factor markers, the challenge
  *   form's action and field names and hidden values — is read only to pick a
@@ -127,14 +134,14 @@ final class HdbAuthClient
     /**
      * The class token the portal puts on its refusal notice. Structural: the
      * element is found by this whole-class token on its `class` attribute,
-     * and only its own visible text is then compared against the two known
+     * and only its own visible text is then compared against the known
      * notices below. An element carrying the token but no text is a
      * placeholder, not a notice.
      */
     private const REFUSAL_NOTICE_CLASS = 'notify--bad';
 
     /**
-     * The two refusal notices measured 2026-09-17, each mapped to the
+     * The three refusal notices OBSERVED against the portal, each mapped to the
      * closed-vocabulary symbol it means. Matched case-insensitively as a
      * substring of a notice's visible text only. Any other notice text reports
      * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, and the text stays here.
@@ -143,9 +150,56 @@ final class HdbAuthClient
      * JS guard value: it is the portal's word that the guard, not the
      * credentials, was judged — which is what to report if the guard's
      * expected value ever changes underneath us.
+     *
+     * The IP-filter notice was OBSERVED once, 2026-09-17, against the real
+     * service subaccount: the portal answered the credential post with the
+     * login page plus a `notify--bad` block reading "Your IP address is not on
+     * the account IP Filter whitelist." Those exact bytes are pinned in
+     * {@see \Tests\Feature\Integrations\HdbAuthClientTest}, which is the only
+     * place they are reproduced.
+     *
+     * The needle is a FRAGMENT of that sentence, and the reason is a judgement,
+     * not a measurement: the observed sentence carried no address, but a portal
+     * that reports the caller's address in it is the likely shape, and an
+     * address could not be a needle in any case. One observation cannot prove
+     * the wording is stable, so this needle is a bet on its most structural
+     * part. If the portal rewords around it the branch degrades to
+     * REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, exactly where it sat
+     * before this entry existed, and silently. That is the known weakness here.
+     *
+     * ORDER IS PRECEDENCE, and it is deliberate: the loop below returns on the
+     * first needle any notice matches, so the earliest entry wins on a page
+     * showing several.
+     *
+     * 1. GUARD first, unchanged. It means the portal judged the hidden field
+     *    this client posts — a change underneath us, and the only one of the
+     *    three an operator cannot fix by editing a setting.
+     * 2. IP FILTER second, ABOVE credentials, for the same reason the guard is
+     *    above them: a perimeter refusal is a fact about WHERE the request came
+     *    from. Reporting the credentials sentence for one would send an operator
+     *    to re-enter a password that is probably fine — and invite the retry a
+     *    service subaccount's lockout policy punishes.
+     * 3. CREDENTIALS last, the only one of the three that IS a verdict on the
+     *    stored pair.
+     *
+     * THE COST OF (2), because it is a real one and a reviewer should not have
+     * to find it: on a page showing BOTH the IP-filter and the credentials
+     * notice, the credentials verdict is discarded. It has not been observed
+     * that the portal evaluates a password at all once the perimeter refuses,
+     * so "the password was never judged" is an inference — which is why
+     * REASON_PORTAL_IP_FILTERED's operator sentence does NOT exculpate the
+     * stored credential and sends the operator back to it if whitelisting does
+     * not resolve the sign-in. A page carrying several notices collapsing to one
+     * symbol is the general shape of issue #2085, which predates this entry and
+     * which this entry makes one needle wider.
+     *
+     * {@see \Tests\Feature\Integrations\HdbAuthClientTest} pins all three
+     * boundaries of that order, not just the original guard-over-credentials
+     * one.
      */
     private const REFUSAL_NOTICES = [
         'invalid captcha' => HdbAuthResult::REASON_FORM_GUARD_REFUSED,
+        'ip filter whitelist' => HdbAuthResult::REASON_PORTAL_IP_FILTERED,
         'invalid email or password' => HdbAuthResult::REASON_CREDENTIALS_REJECTED,
     ];
 
@@ -451,14 +505,16 @@ final class HdbAuthClient
      * rendered element whose `class` attribute carries
      * {@see REFUSAL_NOTICE_CLASS} as a whole class name is a notice, and its
      * own visible text — script and style content dropped, whitespace
-     * collapsed — is compared against the two measured notices. Words in a
+     * collapsed — is compared against the measured notices. Words in a
      * comment, a script, another attribute, an attribute merely NAMED like
      * `class`, or a template/noscript block are not a notice. An empty notice
      * is a placeholder and reports nothing on its own.
      *
-     * Every notice on the page is read. The guard sentence outranks the
-     * credentials sentence, because a page carrying both has judged the guard
-     * and that is the fact the operator needs. A page whose notices are all
+     * Every notice on the page is read, and {@see REFUSAL_NOTICES}'s order is
+     * the precedence: the guard sentence outranks the IP-filter one, which
+     * outranks the credentials one, because a page carrying more than one has
+     * judged the earlier thing and that is the fact the operator needs — and
+     * neither the guard nor the IP filter is a verdict on the stored password. A page whose notices are all
      * unfamiliar reports REASON_LOGIN_REFUSED_UNRECOGNISED — fail-closed, the
      * text discarded here. So does a page libxml could not parse, or a notice
      * whose text is not valid UTF-8: the portal said something this client
@@ -511,7 +567,8 @@ final class HdbAuthClient
             return null;
         }
 
-        // Guard first, then credentials: REFUSAL_NOTICES is ordered that way.
+        // Guard, then IP filter, then credentials: REFUSAL_NOTICES is ordered
+        // that way and its docblock says why. First needle matched wins.
         foreach (self::REFUSAL_NOTICES as $needle => $reason) {
             foreach ($texts as $text) {
                 if (mb_stripos($text, $needle) !== false) {
