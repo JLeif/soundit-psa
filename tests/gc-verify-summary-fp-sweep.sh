@@ -42,23 +42,31 @@
 #   * EXTRACT-FAILED was an ordinary verdict and the exit was gated only on
 #     regressions, so a WHOLLY BLIND run exited 0. It is now fatal (exit 2),
 #     matching the sibling harness.
-#
-# WHAT A ROUND-3 REVIEW CORRECTED, and the correction was to the fix above. The
-# fatal guards were real but they lived inside verdict(), which is only ever
-# called as `o="$(verdict ...)"`. `exit 2` in a command substitution kills the
-# SUBSHELL, not this script; with `set -uo pipefail` and no `-e`, and with the
-# assignment's status never inspected, the loop ran on with EMPTY verdicts, every
-# line compared equal, and a wholly blind run still printed changed=0 and exited
-# 0. The documented contract was false as implemented -- the same shape of defect
-# this whole round is about: an instrument that could not fail. The extraction
-# and its guards now run in this script's own shell, the loop refuses a verdict
-# that is neither ACCEPT nor REFUSE, and --selftest has a second arm that pins
-# exit 2 on a script whose parser cannot be extracted.
 #   * The exit ignored the loosening direction (REFUSE -> ACCEPT), which is the
 #     only direction a skip branch can move. Loosenings are now counted and
 #     reported, and unexpected ones are fatal.
 #   * The corpus header claimed every line was an OBSERVED runner output. 27 of
 #     them are this repo's sibling harness's own report lines. Header corrected.
+#
+# WHAT A ROUND-3 REVIEW CORRECTED, and the correction was to the round-2 fix
+# immediately above. The fatal guards were real but they lived inside verdict(),
+# which is only ever called as `o="$(verdict ...)"`. `exit 2` in a command
+# substitution kills the SUBSHELL, not this script; with `set -uo pipefail` and
+# no `-e`, and with the assignment's status never inspected, the loop ran on with
+# EMPTY verdicts, every line compared equal, and a wholly blind run still printed
+# changed=0 and exited 0. The documented contract was false as implemented -- the
+# same shape of defect this whole round is about: an instrument that could not
+# fail. The extraction and its guards now run in this script's own shell, and the
+# loop refuses a verdict that is neither ACCEPT nor REFUSE.
+#
+# WHAT A ROUND-4 REVIEW CORRECTED, and it was again the fix above. Round 3 added
+# a --selftest arm asserting the blind run exits 2 -- but 2 is ALSO this script's
+# code for a missing baseline or corpus, so the arm passed without ever reaching
+# the extraction guard: `--selftest /nonexistent-corpus` printed "selftest
+# PASSED" and exited 0. Three review seats found it independently. The arm now
+# pins the REASON (the extraction diagnostic on stderr) and runs a positive
+# control proving the inputs were readable first. Asserting an exit CODE that
+# several distinct failures share is not an assertion about which one happened.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,22 +95,44 @@ if [ "${1:-}" = "--selftest" ]; then
     echo "selftest: the sweep goes red when the branch under review is disabled"
 
     # ARM 2. A script whose parser cannot be extracted must be FATAL, not a clean
-    # sweep over empty verdicts -- the defect round 3 found in arm 1's own
-    # neighbour. Rename the function so the sed range matches nothing, and require
-    # EXACTLY 2: 0 is the blind green this harness exists to make impossible, and
-    # 1 would mean the sweep stopped for some unrelated reason.
+    # sweep over empty verdicts.
+    #
+    # ROUND 4 CORRECTED THIS ARM. It previously asserted only `rc -eq 2`, but 2 is
+    # ALSO this script's exit code for a missing baseline and a missing corpus.
+    # Measured: `--selftest /nonexistent-corpus` printed "selftest PASSED ... fatal
+    # when the parser cannot be extracted" and exited 0, having never reached the
+    # extraction guard at all. An arm that passes for the wrong reason certifies
+    # nothing -- the very defect class this file exists to refuse, one layer up.
+    # So the arm now pins the REASON as well as the code: the run must fail with
+    # the extraction diagnostic, and a positive control proves the corpus that
+    # produced it was readable.
     sed 's/^assert_no_warnings()/assert_no_warnings_renamed()/' "$NEW" > "$blind"
     if cmp -s "$NEW" "$blind"; then
         echo "SELFTEST FATAL: blind mutation did not land; the harness is not testing what it claims" >&2
         exit 2
     fi
-    "$0" "$blind" "${2:-$HERE/gc-verify-summary-corpus.txt}" >/dev/null 2>&1
+    selftest_corpus="${2:-$HERE/gc-verify-summary-corpus.txt}"
+    # Positive control: the corpus and baseline must be usable, so that a later
+    # exit 2 can only be the extraction guard and never a missing input.
+    if ! "$0" "$NEW" "$selftest_corpus" >/dev/null 2>&1; then
+        echo "SELFTEST FATAL: the unmutated script does not sweep cleanly over $selftest_corpus;" >&2
+        echo "  arm 2 cannot distinguish an extraction failure from a broken input." >&2
+        exit 2
+    fi
+    blind_err="$(mktemp)"; trap 'rm -f "$mutant" "$blind" "$blind_err"' EXIT
+    "$0" "$blind" "$selftest_corpus" >/dev/null 2>"$blind_err"
     rc=$?
     if [ "$rc" -ne 2 ]; then
         echo "SELFTEST FAILED: sweep exited $rc (want 2) against a script it cannot extract the parser from" >&2
         exit 1
     fi
-    echo "selftest PASSED: red when the branch under review is disabled, fatal when the parser cannot be extracted"
+    # The code alone is not the assertion: require the extraction diagnostic.
+    if ! grep -q 'could not extract assert_no_warnings()' "$blind_err"; then
+        echo "SELFTEST FAILED: sweep exited 2 but not for the extraction guard; stderr was:" >&2
+        sed 's/^/    /' "$blind_err" >&2
+        exit 1
+    fi
+    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted"
     exit 0
 fi
 
