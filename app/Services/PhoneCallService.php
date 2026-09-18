@@ -41,10 +41,38 @@ class PhoneCallService
                 'from_number' => $fromNumber,
                 'to_number' => $data['To'] ?? null,
                 'sip_endpoint' => $data['SipEndpoint'] ?? $data['To'] ?? null,
-                'status' => CallStatus::Ringing,
-                'started_at' => now(),
+                // 'status' and 'started_at' are held out of this array for the
+                // same reason as in logOutboundCall(): updateOrCreate applies
+                // these values on the UPDATE branch too, so a second delivery
+                // for an existing CallUUID would regress a finished call to
+                // Ringing and re-date its start (and with it the prepay debit).
+                // Card 6aac6ee770e3c3433477d91f.
+                //
+                // LATENT rather than live on this path, and the mechanism
+                // matters, so state it exactly. The sole caller
+                // (PlivoWebhookController) guards this with `if (! $existing)`,
+                // so the update branch is normally unreachable from a webhook.
+                // It is not unreachable in general, and the reachable
+                // interleaving is NOT "both deliveries create" - call_uuid is
+                // unique, so a genuine simultaneous INSERT pair ends in a
+                // QueryException, not a silent regression. The path that does
+                // reach the update branch is this one: two deliveries both pass
+                // the caller's existence check, the first completes its INSERT
+                // and COMMITS, and the second then runs updateOrCreate, whose
+                // OWN lookup now finds the row and takes the update branch.
+                // The method is also public and nothing binds future callers to
+                // that existence check. Fixed here because the hazard is
+                // identical to the outbound one and a guard that lives in a
+                // caller's check-then-act is not a guard.
             ]
         );
+
+        // Create branch only — see logOutboundCall() for the full reasoning.
+        if ($call->wasRecentlyCreated) {
+            $call->status = CallStatus::Ringing;
+            $call->started_at = now();
+            $call->save();
+        }
 
         // Async: resolve caller from people table without blocking the webhook response
         if ($call->wasRecentlyCreated && $fromNumber) {
@@ -88,6 +116,15 @@ class PhoneCallService
                 'from_number' => $toNumber,
                 'to_number' => \App\Support\PlivoConfig::get('did_number'),
                 'sip_endpoint' => $fromSip,
+                // 'status' and 'started_at' are deliberately NOT in this array
+                // either, and for exactly the reason the paragraph below gives
+                // for 'answered_by': updateOrCreate applies these values on the
+                // UPDATE branch too. Plivo re-delivers webhooks, so leaving them
+                // here regressed a COMPLETED call back to Ringing and re-dated
+                // started_at to the redelivery instant - which also re-dates the
+                // prepay debit derived from it. They are applied on the create
+                // branch only, below. Card 6aac6ee770e3c3433477d91f.
+                //
                 // 'answered_by' is deliberately NOT in this array. It is stored
                 // below instead, because updateOrCreate applies these values on
                 // the UPDATE branch as well as the create branch: Plivo
@@ -100,10 +137,28 @@ class PhoneCallService
                 // this array would NOT be inert: it would immediately restore
                 // that destructive write. Its absence from this array is the
                 // only thing preventing it.
-                'status' => CallStatus::Ringing,
-                'started_at' => now(),
             ]
         );
+
+        // Create branch only. A first delivery establishes the ringing state and
+        // the call's start; every later delivery for the same CallUUID leaves
+        // both alone, so a redelivered webhook can no longer regress THESE TWO
+        // columns. Stated that narrowly on purpose: direction, from_number,
+        // to_number and sip_endpoint are still in the values array above and are
+        // still rewritten on every redelivery, so this is not a claim that a
+        // redelivery cannot touch a finished call at all. sip_endpoint in
+        // particular is also written by handleCallAnswered() from a different
+        // payload field. Those four are pre-existing and out of scope here;
+        // tracked as their own issue.
+        //
+        // On the column defaults: status has a DB default of 'ringing', so that
+        // assignment is belt-and-braces; started_at is nullable with no default,
+        // so THAT write is the one actually doing the work on create.
+        if ($call->wasRecentlyCreated) {
+            $call->status = CallStatus::Ringing;
+            $call->started_at = now();
+            $call->save();
+        }
 
         // Write the attribution when THIS delivery resolved an endpoint THAT
         // CARRIES A user_id, and otherwise leave what is already there. Note the
@@ -160,24 +215,24 @@ class PhoneCallService
         return $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($data) {
             $callEnded = $call->ended_at !== null;
 
-            // For active calls, mark as in-progress and stamp answered_at.
-            // For already-ended calls, this is a late "answer" webhook (Plivo's
-            // DialAction=answer fires at end-of-dial, not at answer). Derive
-            // answered_at from duration so it reflects the real moment the
-            // call was picked up, not when this late webhook arrived.
-            if (! $callEnded) {
-                $call->status = CallStatus::InProgress;
-                $call->answered_at = now();
-            } elseif ($call->duration && $call->duration > 0) {
-                $call->answered_at = $call->ended_at->copy()->subSeconds($call->duration);
-                if ($call->status !== CallStatus::Voicemail) {
-                    $call->status = CallStatus::Completed;
-                }
-            }
-
             // Resolve which user answered via SIP endpoint (inbound calls only).
             // Outbound calls already have answered_by set from logOutboundCall().
             // Plivo sends the answering endpoint as DialBLegTo (e.g. sip:user@phone.plivo.com)
+            //
+            // This block runs before the status/answered_at decision below, and
+            // the ordering is BEHAVIOURALLY INERT - say that first, because two
+            // earlier versions of this comment led with a load-bearing-sounding
+            // justification and then walked it back. answerIsObserved() reads
+            // the payload only, so nothing below consumes what this produces,
+            // and either order writes the same columns in the same single
+            // save(). It sits here because attribution reads as logically prior
+            // to the answer question, which is a readability preference and
+            // nothing more.
+            //
+            // Note it WRITES $call->sip_endpoint as well as reading $data and
+            // $call->answered_by. Its guard (decline when a value already
+            // exists) is untouched. The precedence question it belongs to is
+            // issue #2166 and the locking gap is #2168; neither is answered here.
             if (! $call->answered_by) {
                 $sipUri = $data['DialBLegTo'] ?? $data['SipEndpoint'] ?? $data['To'] ?? null;
                 if ($sipUri) {
@@ -189,10 +244,182 @@ class PhoneCallService
                 }
             }
 
+            // For active calls, mark as in-progress and stamp answered_at.
+            // For already-ended calls, this is a late "answer" webhook (Plivo's
+            // DialAction=answer fires at end-of-dial, not at answer, so it
+            // routinely arrives AFTER the hangup webhook). Derive answered_at
+            // from duration so it reflects the real moment the call was picked
+            // up, not when this late webhook arrived.
+            if (! $callEnded) {
+                $call->status = CallStatus::InProgress;
+                $call->answered_at = now();
+            } elseif ($call->duration && $call->duration > 0) {
+                $call->answered_at = $call->ended_at->copy()->subSeconds($call->duration);
+                if ($call->status !== CallStatus::Voicemail) {
+                    $call->status = CallStatus::Completed;
+                }
+            } elseif ($this->answerIsObserved($data)) {
+                // Late answer with NO usable duration. Before this branch existed
+                // both arms above were skipped, answered_at was never stamped, and
+                // handleCallEnded's answered_at-only status decision had already
+                // frozen a real conversation as Missed - with answered_by sitting
+                // right there on the row contradicting it. Card 6aac6037.
+                //
+                // ended_at is a CEILING, not the true answer moment: it says the
+                // call was picked up at hangup, which is wrong by the length of the
+                // conversation. It is used because nothing in this repo computes
+                // talk time or billing from answered_at (measured at 4474fa88 -
+                // duration/billing all run through effectiveDurationSeconds(),
+                // which reads duration and recording_duration, never this column),
+                // so the ceiling cannot skew a report; and handleRecordingReady()
+                // replaces it with the honest value the moment a real duration
+                // lands. A visibly-wrong status was the defect; an approximate
+                // answer moment is the smaller wrong. It is USUALLY transient -
+                // see answeredAtIsCeiling() for the measured cases where it is
+                // not.
+                //
+                // Be precise about what answered_at IS, because an earlier
+                // version of this comment called it display-only and that is
+                // false: besides the detail view, handleCallEnded() decides
+                // status from it and the controller's voicemail auto-detect keys
+                // on it being null. What is true is narrower - no reader
+                // computes talk time or billing from it (that is
+                // effectiveDurationSeconds(), which never reads this column), so
+                // its VALUE cannot skew a report. Its NULLNESS, by contrast, is
+                // load-bearing for both of those readers, which is exactly why
+                // stamping it at all has to be right.
+                $call->answered_at = $call->ended_at->copy();
+                if ($call->status !== CallStatus::Voicemail) {
+                    $call->status = CallStatus::Completed;
+                }
+            }
+
             $call->save();
 
             return $call;
         });
+    }
+
+    /**
+     * Did THIS payload observe a genuine answer — a B leg that actually
+     * connected — independently of whether a duration is known yet?
+     *
+     * Vendor shape read at source, not guessed (STANDARDS C-56). Plivo's Dial
+     * element posts these to its callbackUrl (plivo.com/docs/voice/xml/dial):
+     * DialAction (answer|connected|hangup|digits), DialBLegStatus, DialALegUUID,
+     * DialBLegUUID, DialBLegDuration and DialBLegBillDuration ("on hangup"),
+     * DialBLegFrom, DialBLegTo, DialBLegHangupCauseName/Code/Source. The
+     * action URL carries a different set - DialStatus, DialRingStatus,
+     * DialHangupCause, DialALegUUID, DialBLegUUID - and of DialBLegUUID the
+     * dial-status-reporting page says exactly: "CallUUID of the B leg. Empty if
+     * nobody answers." That sentence is why a non-empty B-leg UUID is the
+     * primary signal here.
+     *
+     * Note what is deliberately NOT accepted as evidence:
+     *  - The CALL ROW itself, and answered_by in particular. On OUTBOUND calls
+     *    logOutboundCall() sets answered_by from the PLACING user's SIP endpoint
+     *    before any answer event exists, so it is present on outbound calls that
+     *    were never picked up; reading it as an answer would stamp answered_at
+     *    on a dead outbound dial. This method therefore takes ONLY the payload
+     *    and holds no PhoneCall at all - the row is deliberately out of reach
+     *    rather than merely unread, so the mistake cannot be made here later.
+     *  - DialBLegTo on its own. It names the destination that was ATTEMPTED and
+     *    is present on a dial nobody picked up, which is precisely a missed
+     *    inbound call ringing a tech's SIP endpoint. Accepting it would convert
+     *    every genuinely missed call into a completed one.
+     *  - The top-level CallStatus. It describes the A LEG, and every arm here is
+     *    deliberately B-leg scoped. On an inbound call Plivo has ALREADY answered
+     *    the A leg - that is how this Dial/Record XML is executing at all - so
+     *    CallStatus is 'in-progress' for the entire time a tech's endpoint is
+     *    merely ringing, and stays so on a call that then rings out to voicemail.
+     *    Plivo retries callbacks and PlivoWebhookController routes
+     *    CallStatus=in-progress straight to handleCallAnswered, so such a
+     *    delivery lands on an already-ended, duration-less row; reading it as
+     *    answer evidence would flip a genuinely missed call to Completed and
+     *    suppress the voicemail auto-detect. A live answer does not need it: that
+     *    path is the (! $callEnded) arm above, which never consults this
+     *    predicate.
+     *
+     * Casing is taken from the vendor verbatim (Plivo is PascalCase here); no
+     * case-insensitive lookup is done, because a key we cannot name exactly is a
+     * key we have not read.
+     */
+    private function answerIsObserved(array $data): bool
+    {
+        // "Empty if nobody answers" — the vendor's own words.
+        if (! empty($data['DialBLegUUID'])) {
+            return true;
+        }
+
+        // A B leg that ran for a positive number of seconds was connected.
+        if (isset($data['DialBLegDuration']) && (int) $data['DialBLegDuration'] > 0) {
+            return true;
+        }
+
+        // B-leg status, when Plivo states it. The docs enumerate no value list
+        // for DialBLegStatus, so this matches only the affirmative words and
+        // treats every other value - including one we have never seen - as NOT
+        // an answer. Failing closed here costs a status correction; failing open
+        // would mislabel a missed call as answered.
+        $blegStatus = is_string($data['DialBLegStatus'] ?? null) ? strtolower($data['DialBLegStatus']) : null;
+        if (in_array($blegStatus, ['answer', 'answered', 'in-progress', 'connected'], true)) {
+            return true;
+        }
+
+        // DialAction=connected is an explicit bridge event.
+        return ($data['DialAction'] ?? null) === 'connected';
+    }
+
+    /**
+     * Is this row's answered_at the CEILING value written by the late-answer
+     * branch of handleCallAnswered() - answered_at === ended_at, "answered at
+     * hangup" - rather than a real answer moment?
+     *
+     * Equality is the fingerprint: the duration-derived value is strictly
+     * earlier than ended_at whenever duration > 0, and the live-answer value is
+     * stamped while ended_at is still null and so is normally earlier too.
+     *
+     * WAYS THAT ARGUMENT IS WEAKER THAN IT LOOKS, all measured, recorded as
+     * bounded limits rather than papered over. What they cost is the ACCURACY of
+     * answered_at once it is non-null, not a status: every status path keys on
+     * whether the column is null, and none of these cases returns it to null.
+     * (Do not read that as "display-only" - handleCallEnded() and the voicemail
+     * auto-detect both read this column. The value is what is approximate; the
+     * nullness is what is load-bearing.) That is why these are documented and
+     * filed rather than fixed by a redesign on this branch.
+     *
+     *  0. THE SIMPLEST CASE, and the most common one: NO RECORDING EVER
+     *     ARRIVES. The second look runs from handleRecordingReady(), so on a
+     *     call with no recording callback nothing ever replaces the ceiling -
+     *     no re-stamp or truncation required. The repo already documents that
+     *     inbound recording callbacks "often don't reach our webhook", and the
+     *     compensating API path (resolveRecordingFromPlivo) writes
+     *     recording_duration WITHOUT invoking the second look, and is itself
+     *     gated behind duration >= 1 - which is exactly the duration-null
+     *     population this branch is about. So for a meaningful share of the very
+     *     rows this fix targets, the ceiling is the permanent value. The status
+     *     is still corrected, which is the defect being fixed; the answer moment
+     *     stays approximate.
+     *  1. THE CEILING IS NOT RELIABLY TRANSIENT. handleCallEnded() re-stamps
+     *     ended_at on EVERY delivery, and the controller routes two distinct
+     *     callbacks to it (DialAction=hangup and CallStatus=completed). On a
+     *     call that receives both, ended_at moves after the ceiling was written,
+     *     equality no longer holds, and the second look never replaces it. The
+     *     row is still Completed and still correct in status; its answered_at
+     *     just stays at the ceiling. A durable marker column is the right
+     *     long-term shape.
+     *  2. SECOND-RESOLUTION STORAGE. answered_at and ended_at are timestamp
+     *     columns with second precision, so a call answered and hung up inside
+     *     the SAME second stores a live answered_at exactly equal to ended_at
+     *     and is indistinguishable from the ceiling. The second look then
+     *     rewrites a row that was already correct, moving answered_at earlier by
+     *     the recording length. Bounded to sub-second calls.
+     */
+    private function answeredAtIsCeiling(PhoneCall $call): bool
+    {
+        return $call->answered_at !== null
+            && $call->ended_at !== null
+            && $call->answered_at->equalTo($call->ended_at);
     }
 
     /**
@@ -260,6 +487,8 @@ class PhoneCallService
                 $call->duration = $duration;
             }
 
+            $this->reconcileAnsweredStateWithDuration($call);
+
             $call->save();
 
             return $call;
@@ -279,6 +508,71 @@ class PhoneCallService
         }
 
         return $call;
+    }
+
+    /**
+     * The SECOND LOOK. A duration has just landed from the recording; re-derive
+     * answered_at (and, where it follows, status) from it instead of leaving the
+     * row frozen at whatever the webhooks could conclude without it.
+     *
+     * The defect class this closes is a late-arriving fact that nothing
+     * re-evaluates: handleCallEnded() decides status from answered_at ALONE
+     * (deliberately - Plivo's Duration includes voicemail recording time), so a
+     * call whose duration was unknown at hangup was stamped Missed and never
+     * looked at again, even when the recording later proved a 55-minute
+     * conversation. Mutates the model only; the caller saves.
+     *
+     * Three things it must not do, each guarded:
+     *  1. It must not resurrect a voicemail. A genuine voicemail carries status
+     *     Voicemail, and that status is never touched here - the recording that
+     *     triggers this call is, for a voicemail, the voicemail itself.
+     *  2. It must not invent an answer. A row with no answered_at at all is left
+     *     alone: a duration proves audio existed, not that a human picked up,
+     *     which is the exact inference handleCallEnded refuses to make.
+     *  3. It must not disturb a row already correct. A real answered_at (live or
+     *     duration-derived) is strictly earlier than ended_at and is left
+     *     untouched; only the ceiling value is replaced. Running it twice is a
+     *     no-op, because after the first run answered_at is no longer equal to
+     *     ended_at.
+     */
+    private function reconcileAnsweredStateWithDuration(PhoneCall $call): void
+    {
+        if ($call->status === CallStatus::Voicemail) {
+            return;
+        }
+
+        $seconds = $call->effectiveDurationSeconds();
+        if (! $seconds || $seconds <= 0 || $call->ended_at === null) {
+            return;
+        }
+
+        // Replace the ceiling with the honest answer moment. This is the primary
+        // path for an accurate answered_at: handleCallAnswered's ceiling exists
+        // only to carry the row until this runs.
+        if ($this->answeredAtIsCeiling($call)) {
+            $call->answered_at = $call->ended_at->copy()->subSeconds($seconds);
+        }
+
+        // Correct a status frozen as Missed on a row that DOES carry an answer
+        // fingerprint. answered_at is the fingerprint, exactly as handleCallEnded
+        // defines it - a row with none stays Missed, because a recording alone
+        // does not distinguish a conversation from an unanswered call with audio.
+        if ($call->answered_at !== null && $call->status === CallStatus::Missed) {
+            $call->status = CallStatus::Completed;
+
+            // Logged inside the caller's transaction and before its save(), so
+            // this line records an INTENT, not a committed fact: a rollback
+            // afterwards would leave the log claiming a correction that never
+            // persisted. Accepted deliberately rather than moved - the caller
+            // (handleRecordingReady) is where the save and the commit live, and
+            // threading a post-commit hook through it for one info line would
+            // cost more than the ambiguity is worth. Read it as "decided to
+            // correct", and trust the row over the log.
+            Log::info('[PhoneCall] Status correction decided on late duration', [
+                'call_id' => $call->id,
+                'duration_seconds' => $seconds,
+            ]);
+        }
     }
 
     /**
