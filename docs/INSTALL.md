@@ -1198,8 +1198,11 @@ migrate is skipped; the read-only computers panel on the client page degrades qu
 - **Caveat, a mapping can become unremovable through the UI.** While the vendor lists zero
   companies the screen withholds Save (above) and a submission carrying no company keys is
   refused, so an existing mapping cannot be removed from this screen in that state. It is
-  held, not lost; it becomes removable again as soon as the vendor lists the company. To
-  clear one while the list is empty, unmap it from the client record instead.
+  held, not lost; it becomes removable again as soon as the vendor lists the company. No
+  other screen clears it: the client record shows the mapping only as a read-only badge and
+  its AutoElevate panel is read-only, so while the list is empty there is no in-app way to
+  clear a mapping. Wait for the vendor to list the company again, or clear
+  `clients.autoelevate_company_id` directly in the database.
 - **Caveat, the save depends on the page's JavaScript.** The client dropdowns are populated
   by script on the mapping screen. If that script does not run, the form still submits, but
   every company posts an empty value — which is a non-empty submission, so the empty-list
