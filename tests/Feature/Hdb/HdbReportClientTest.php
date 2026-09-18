@@ -449,4 +449,253 @@ class HdbReportClientTest extends TestCase
             'null' => [null],
         ];
     }
+
+    // --------------------------------------------------------- redaction gate
+
+    /**
+     * `redactScreenshots: true` — the image is NEVER REQUESTED. Not fetched and
+     * discarded: a screenshot that reached this process would already be the
+     * thing the end user asked to withhold, sitting in memory and in whatever
+     * logged the response.
+     *
+     * Mutation that kills it: fetching the screenshot unconditionally and
+     * nulling it afterwards — which the status assertion alone would NOT catch,
+     * which is why the requested-files list is asserted.
+     */
+    public function test_a_redacted_screenshot_is_never_requested_from_the_portal(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['redactScreenshots' => true])),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG-THAT-MUST-NOT-BE-FETCHED',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Fetched, $result->status, $result->reason);
+        $this->assertNull($result->screenshot);
+        $this->assertSame(
+            [HdbReportClient::FILE_TICKET, HdbReportClient::FILE_REPORT],
+            $this->requestedFiles(),
+            'A press whose screenshots are redacted must never have screen.png requested.',
+        );
+        $this->assertTrue($result->redaction?->screenshots);
+    }
+
+    /**
+     * The POSITIVE direction of the same gate: with redaction off the
+     * screenshot IS requested. Without this, a client that never fetched a
+     * screenshot at all would pass the refusal case above.
+     */
+    public function test_an_unredacted_screenshot_is_requested(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['redactScreenshots' => false])),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG-INVENTED',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertContains(HdbReportClient::FILE_SCREENSHOT, $this->requestedFiles());
+        $this->assertSame('PNG-INVENTED', $result->screenshot);
+        $this->assertFalse($result->redaction?->screenshots);
+    }
+
+    /**
+     * `redactDiagnostic` is carried to the caller rather than silently dropped.
+     * What a redacted import WRITES is the import path's decision and is not in
+     * this slice; what this slice must not do is lose the flag on the way.
+     *
+     * Mutation that kills it: reading only redactScreenshots and hard-coding
+     * diagnostic false.
+     */
+    public function test_the_diagnostic_redaction_flag_reaches_the_caller(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson(['redactDiagnostic' => true])),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertTrue($result->redaction?->diagnostic, 'The diagnostic redaction flag was lost.');
+    }
+
+    /**
+     * AN UNREADABLE REDACTION FLAG IS A REFUSAL, never "not redacted".
+     *
+     * This is the single most dangerous default on this surface: the natural
+     * shape, `(bool) ($ticket['redactScreenshots'] ?? false)`, publishes a
+     * desktop screenshot the end user asked to withhold, the first time the
+     * vendor renames a key, and does it silently. Mutation that kills it:
+     * exactly that coalesce.
+     *
+     * @dataProvider unreadableRedactionFlags
+     *
+     * @param  array<string, mixed>  $mutation
+     */
+    public function test_an_unreadable_redaction_flag_refuses_rather_than_assuming_no_redaction(array $mutation): void
+    {
+        $ticket = $this->keyedTicket();
+        $metadata = $this->ticketJson();
+
+        foreach ($mutation as $key => $value) {
+            if ($value === '__absent__') {
+                unset($metadata[$key]);
+            } else {
+                $metadata[$key] = $value;
+            }
+        }
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($metadata),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG-THAT-MUST-NOT-BE-FETCHED',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportResult::REASON_REDACTION_FLAG_UNREADABLE, $result->reason);
+        $this->assertFalse($result->importable());
+        $this->assertSame(
+            [HdbReportClient::FILE_TICKET],
+            $this->requestedFiles(),
+            'Neither the report nor the screenshot may be fetched when redaction cannot be read.',
+        );
+    }
+
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function unreadableRedactionFlags(): array
+    {
+        return [
+            'screenshots absent' => [['redactScreenshots' => '__absent__']],
+            'diagnostic absent' => [['redactDiagnostic' => '__absent__']],
+            'screenshots as string' => [['redactScreenshots' => 'false']],
+            'screenshots as int' => [['redactScreenshots' => 0]],
+            'both null' => [['redactScreenshots' => null, 'redactDiagnostic' => null]],
+        ];
+    }
+
+    /**
+     * The redaction reader in isolation, both directions, so the refusal above
+     * cannot be satisfied by a reader that returns null for everything.
+     */
+    public function test_the_redaction_reader_accepts_booleans_and_refuses_everything_else(): void
+    {
+        $ok = HdbReportRedaction::fromTicket(['redactDiagnostic' => true, 'redactScreenshots' => false]);
+
+        $this->assertNotNull($ok);
+        $this->assertTrue($ok->diagnostic);
+        $this->assertFalse($ok->screenshots);
+        $this->assertTrue($ok->allowsScreenshots());
+
+        $blocked = HdbReportRedaction::fromTicket(['redactDiagnostic' => false, 'redactScreenshots' => true]);
+
+        $this->assertNotNull($blocked);
+        $this->assertFalse($blocked->allowsScreenshots());
+
+        $this->assertNull(HdbReportRedaction::fromTicket([]));
+        $this->assertNull(HdbReportRedaction::fromTicket(['redactDiagnostic' => 'true', 'redactScreenshots' => true]));
+    }
+
+    // ---------------------------------------------------- authorization gate
+
+    /**
+     * THE #1359 PROPERTY: a press keyed on ANOTHER client's ticket is refused,
+     * and — the half that matters — NO REQUEST IS ISSUED AT ALL.
+     *
+     * Zero round trips is what stops this client being an existence oracle: a
+     * caller cannot distinguish "that press is not yours" from "that press does
+     * not exist" by timing or by the portal's answer, because the portal is
+     * never asked. Mutation that kills it: authenticating or fetching first and
+     * checking the gate on the result.
+     */
+    public function test_a_press_belonging_to_another_client_is_refused_before_any_request(): void
+    {
+        $mine = $this->keyedTicket(self::PRESS);
+        $theirs = $this->keyedTicket(self::OTHER_PRESS);
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+        ]);
+
+        // Viewing MY ticket, asking for THEIR press.
+        $result = $this->client()->fetch($mine->id, self::OTHER_PRESS);
+
+        $this->assertSame(HdbReportStatus::Refused, $result->status);
+        $this->assertSame(HdbReportFetchRefusal::NoKeyedNote, $result->refusal);
+        $this->assertFalse($result->importable());
+        $this->assertNull($result->ticket);
+        $this->assertNull($result->report);
+        $this->assertCount(0, Http::recorded(), 'A refused fetch must not touch the network.');
+
+        // The other ticket really does own that press — so the refusal above is
+        // the binding refusing, not a press that simply does not exist.
+        $this->assertSame(
+            HdbReportStatus::Fetched,
+            $this->client()->fetch($theirs->id, self::OTHER_PRESS)->status,
+        );
+    }
+
+    /**
+     * A press id that no note ever carried — the pasted-link case — is refused
+     * with the SAME symbol as the cross-client case. The refusal must not be an
+     * oracle for "this press exists, but not for you".
+     */
+    public function test_a_pasted_press_id_nobody_captured_is_refused_with_the_same_symbol(): void
+    {
+        $ticket = $this->keyedTicket(self::PRESS);
+
+        $this->fakePortal([HdbReportClient::FILE_TICKET => json_encode($this->ticketJson())]);
+
+        // A WELL-FORMED press id that no note carries. The shape matters: the
+        // first draft of this case used a 5-character group and got
+        // MalformedPressId, which would have proved the parser rather than the
+        // binding and left the pasted-link case untested.
+        $uncaptured = $this->client()->fetch($ticket->id, 'c0ffee00-dead-4bee-8000-000000000001');
+        $malformed = $this->client()->fetch($ticket->id, 'not-a-press-id');
+
+        $this->assertSame(HdbReportStatus::Refused, $uncaptured->status);
+        $this->assertSame(HdbReportFetchRefusal::NoKeyedNote, $uncaptured->refusal);
+        $this->assertSame(HdbReportFetchRefusal::MalformedPressId, $malformed->refusal);
+        $this->assertCount(0, Http::recorded());
+    }
+
+    /**
+     * The note-scoped entry point inherits the gate: a note id from ANOTHER
+     * ticket does not self-authorize, even though the note itself is live and
+     * keyed.
+     */
+    public function test_a_note_from_another_ticket_does_not_authorize_its_own_fetch(): void
+    {
+        $mine = $this->keyedTicket(self::PRESS);
+        $theirs = $this->keyedTicket(self::OTHER_PRESS);
+        $theirNote = TicketNote::where('ticket_id', $theirs->id)->firstOrFail();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+        ]);
+
+        $crossed = $this->client()->fetchForNote($mine->id, $theirNote->id);
+
+        $this->assertSame(HdbReportStatus::Refused, $crossed->status);
+        $this->assertSame(HdbReportFetchRefusal::NoKeyedNote, $crossed->refusal);
+        $this->assertCount(0, Http::recorded());
+
+        // Positive direction: on its OWN ticket the same note fetches.
+        $this->assertSame(
+            HdbReportStatus::Fetched,
+            $this->client()->fetchForNote($theirs->id, $theirNote->id)->status,
+        );
+    }
 }
