@@ -17,6 +17,10 @@ class GcVerifyWarningGateTest extends TestCase
         mkdir($this->fixture, 0700);
         $git = new Process(['git', 'init', '--quiet', $this->fixture]);
         $git->mustRun();
+        // gc-verify.sh now refuses to start without a keyed .env (gate 0), so the
+        // fixture provides one. These cases are about PHPUnit's exit policy, not
+        // about environment provisioning, which GcVerifyEnvProvisionTest covers.
+        file_put_contents($this->fixture.'/.env', 'APP_KEY=base64:'.base64_encode(random_bytes(32))."\n");
     }
 
     protected function tearDown(): void
