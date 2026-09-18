@@ -52,11 +52,13 @@ final class ScheduledDirectAdmission
         if (! $run) {
             return ['error' => 'scheduled_direct_admission_failed'];
         }
-        // An idempotent repeat of a call that already queued directly: the run is already
-        // Scheduled, so re-admitting would refuse on not_awaiting_approval. Report the
-        // existing authorization instead of manufacturing a second one.
-        if ($run->state === TechnicianRunState::Scheduled) {
-            return $this->success($staged, $executeAt, $this->authorizationIdFor($runId), idempotent: true);
+        // Only a live proposal is admissible. A run already Scheduled has an authorization
+        // (stageAction() refuses to revive one, and the staging cooldown refuses the repeat
+        // before that), so reaching here with one would mean a second authorization for the
+        // same run. Refuse rather than write it; the run fence would reject it anyway, and
+        // this names the reason instead of surfacing a constraint violation.
+        if ($run->state !== TechnicianRunState::AwaitingApproval) {
+            return ['error' => 'scheduled_direct_admission_failed'];
         }
         $provenance = is_array($run->proposed_meta) ? ($run->proposed_meta['scheduled_provenance'] ?? null) : null;
         // The instant admitted must be the instant the proposal carries. A staged
@@ -102,16 +104,8 @@ final class ScheduledDirectAdmission
             ->update(['state' => TechnicianRunState::Withdrawn->value]);
     }
 
-    private function authorizationIdFor(int $runId): ?int
-    {
-        $id = \Illuminate\Support\Facades\DB::table('scheduled_authorizations')->where('run_id', $runId)
-            ->orderByDesc('revision')->value('id');
-
-        return $id === null ? null : (int) $id;
-    }
-
     /** @param array<string, mixed> $staged */
-    private function success(array $staged, ExecuteAt $executeAt, ?int $id, bool $idempotent = false): array
+    private function success(array $staged, ExecuteAt $executeAt, int $id): array
     {
         $result = [
             'success' => true,
@@ -119,14 +113,11 @@ final class ScheduledDirectAdmission
             'authorization_id' => $id,
             'run_id' => $staged['run_id'] ?? null,
             'execute_at' => $executeAt->utc,
-            'message' => ($idempotent ? 'Already queued' : 'Queued').' to run at '.$executeAt->display()
+            'message' => 'Queued to run at '.$executeAt->display()
                 .' under this token\'s immediate grant; no cockpit approval is required and nothing has executed yet. '
                 .'Permissions, target identity and ticket binding are rechecked in the window; withdrawing the '
                 .'immediate grant before then cancels it.',
         ];
-        if ($idempotent) {
-            $result['idempotent'] = true;
-        }
         foreach (['ticket_id', 'ticket_display_id'] as $key) {
             if (array_key_exists($key, $staged)) {
                 $result[$key] = $staged[$key];
