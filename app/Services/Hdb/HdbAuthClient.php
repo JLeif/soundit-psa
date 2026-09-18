@@ -71,10 +71,20 @@ use Illuminate\Support\Facades\Http;
  *   been measured — the one control stopped at fetching the page. If it is
  *   enforced, automated second-factor sign-in is blocked outright and no code
  *   this client generates can pass; that is a design question for the portal
- *   owner, not a defect to work around here. Nothing in this class posts,
- *   fills, skips or reasons about that field, and `totpskip` is likewise left
- *   alone: {@see findChallengeForm} forwards hidden fields at their served
- *   values and invents nothing. Do not "fix" this by inventing a value.
+ *   owner, not a defect to work around here. Said precisely, because the loose
+ *   version of this sentence was wrong: {@see findChallengeForm} forwards every
+ *   hidden field at the value the portal SERVED, so the captcha field IS posted
+ *   back — empty, exactly as served — and so is `totpskip`. What this class does
+ *   not do is INVENT a value for either. Do not "fix" the empty captcha by
+ *   supplying a token.
+ *
+ *   🔴 `totpskip` is forwarded, and forwarding is not a neutral act: its NAME
+ *   says it controls whether the second factor is skipped. Served `0`, this
+ *   client posts `0`. If the portal ever serves it enabled, this client would
+ *   forward that too and a bypassed second factor would classify as a clean
+ *   sign-in — tracked as a ticket-class residual on this leg rather than
+ *   guessed at here, because the alternative (dropping a field the portal
+ *   served) is its own guess and neither has been measured.
  *
  * 🔴 TWO HONEST LIMITS, because a reviewer should not have to find them:
  *

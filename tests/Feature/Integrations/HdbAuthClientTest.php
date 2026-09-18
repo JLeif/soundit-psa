@@ -174,10 +174,20 @@ class HdbAuthClientTest extends TestCase
      * `g-recaptcha-response` and `totpskip`. Two session cookies were issued.
      *
      * HONEST about what is measured (C-56 rule 2): the TITLE and the three FIELD
-     * NAMES are measured and are the only things asserted off this fixture. The
-     * markup around them — element types, the empty captcha value, the form
-     * action, the prose — is WRITTEN, not captured, because the captured page
-     * carries live session tokens and was never saved.
+     * NAMES are measured. Everything else — element types, the empty captcha
+     * value, `totpskip`'s `0`, the form action, the prose — is WRITTEN, not
+     * captured, because the captured page carried live session tokens and was
+     * never saved.
+     *
+     * And the tests below DO assert off some of those written parts — an earlier
+     * draft of this docblock claimed they did not, which was false and is the
+     * kind of claim this class exists to stamp out. Specifically: that the
+     * captcha key is present at all (true only for the `<input>` shape), that it
+     * is empty, that `totpskip` round-trips as `0`, and that the leg completes
+     * in three requests (which needs the written `action=""`). Each of those
+     * pins the client's FORWARD-AS-SERVED rule against the fixture it is handed;
+     * none is evidence about the live page's markup, and none should be read as
+     * such.
      *
      * ONE ASSUMPTION IS CALLED OUT RATHER THAN BURIED: the ELEMENT TYPE of
      * `g-recaptcha-response` was not recorded, only its name. This fixture makes
@@ -1138,11 +1148,20 @@ class HdbAuthClientTest extends TestCase
 
     public function test_the_redirect_policy_follows_browser_semantics_rather_than_re_posting(): void
     {
-        // The flag itself, pinned as a value: `strict => true` is what re-issued
-        // the credential POST at every hop and crashed the vendor's second-factor
-        // page with a 500. A browser turns a 302/303 into a GET, and so must we.
-        // The BEHAVIOUR this produces is measured one test below; this one exists
-        // so the reason the flag is false cannot be lost to a tidy-up.
+        // The EFFECTIVE policy, and the honest limit of this assertion.
+        //
+        // Deleting `'strict' => false` from the client is an EQUIVALENT mutant,
+        // not an escape: measured here, Laravel merges Guzzle's own defaults
+        // into the options before they are sent, and Guzzle's default for
+        // `strict` is already false — the captured array carries
+        // `'strict' => false` and `'track_redirects' => false` either way. So
+        // this seam cannot distinguish "stated false" from "defaulted false",
+        // and asserting the key's PRESENCE would be theatre: it passes on the
+        // mutant too. What it CAN settle is the one that matters, the regression
+        // back to `strict => true`, which fails here and in the behavioural
+        // guard below. The line stays in the client to make the decision legible
+        // in source, and that is a readability argument, not a tested one — said
+        // plainly rather than dressed up as coverage.
         $this->assertFalse($this->capturedRedirectOptions()['strict'] ?? null);
     }
 
@@ -1209,13 +1228,60 @@ class HdbAuthClientTest extends TestCase
             'GET /2fa_auth',    // the page that used to be POSTed and 500
         ], $shape);
 
+        // Assert the credential-specific property FIRST and the stronger
+        // emptiness property second. PHPUnit aborts a method on its first
+        // failure, so ordering these the other way round — as this guard first
+        // did — left the password checks running only against a string already
+        // proven empty, where they can never fail. This way, a hop that ever
+        // carries a legitimate non-credential body fails on emptiness while the
+        // password check stays live rather than being deleted alongside it.
         foreach (array_slice($issued, 1) as $hop) {
             $body = (string) $hop->getBody();
 
+            $this->assertStringNotContainsString('service-account-password', $body, 'A redirect hop carried the stored password.');
+            $this->assertStringNotContainsString('password', $body, 'A redirect hop carried a password field.');
             $this->assertSame('', $body, 'A redirect hop re-sent a request body.');
-            $this->assertStringNotContainsString('service-account-password', $body);
-            $this->assertStringNotContainsString('password', $body);
         }
+    }
+
+    public function test_a_307_answering_the_credential_post_still_carries_the_body_and_is_bounded_only_by_the_origin_pin(): void
+    {
+        // THE LIMIT OF THIS FIX, pinned as behaviour so it cannot be forgotten.
+        // `strict => false` converts a 301/302/303 into a GET — it does NOT and
+        // cannot stop a 307/308, which preserve method and body by definition of
+        // those status codes. The measured chain happens to open with a 302, so
+        // every later hop is already a GET; a portal that answered the credential
+        // POST with a 307 instead would re-POST the password onward exactly as
+        // before. The ONLY thing bounding that is the origin pin, and the pin
+        // bounds the HOST, not the path.
+        //
+        // This is not a defect introduced here and it is not something this
+        // client can fix by a flag — it is the residual the docblocks claim, and
+        // this test is what makes the claim checkable.
+        $stack = HandlerStack::create(new MockHandler([
+            new GuzzleResponse(307, ['Location' => self::BASE.'/2fa_auth']),
+            new GuzzleResponse(200, [], $this->measuredTwoFactorPage()),
+        ]));
+
+        $issued = [];
+        $stack->push(Middleware::history($issued));
+
+        (new GuzzleClient(['handler' => $stack, 'http_errors' => false]))
+            ->post(self::BASE.'/login', [
+                'allow_redirects' => $this->capturedRedirectOptions(),
+                'form_params' => ['email' => 'reports@example.test', 'password' => 'service-account-password'],
+            ]);
+
+        $hop = $issued[1]['request'];
+
+        $this->assertSame('POST', $hop->getMethod(), 'A 307 no longer preserves the method; re-read this test rather than deleting it.');
+        $this->assertStringContainsString('service-account-password', (string) $hop->getBody());
+
+        // And the guard that DOES bound it: same body, off-origin destination,
+        // refused before it is followed.
+        $this->expectException(HdbRedirectRefusedException::class);
+
+        $this->capturedRedirectOptions()['on_redirect'](null, null, new Uri('https://attacker.example/2fa_auth'));
     }
 
     public function test_the_redirect_cap_clears_the_portals_measured_sign_in_chain(): void
@@ -1406,7 +1472,19 @@ class HdbAuthClientTest extends TestCase
         // empty" — a MockHandler artefact reported as if Guzzle had stopped
         // enforcing the cap. Deriving the count means the next cap change cannot
         // silently turn this measurement into noise.
-        $overCap = $this->capturedRedirectOptions()['max'] + 2;
+        //
+        // The COST of deriving it, and the reason for the two guards below: a
+        // self-sizing queue would keep passing for max => 50 or max => 1000, so
+        // on its own it can no longer notice an over-permissive cap. So the cap
+        // is bounded here explicitly, and an absent `max` — which would evaluate
+        // to null + 2 = 2 and silently re-create the very artefact this repair
+        // removed — is refused rather than tolerated.
+        $max = $this->capturedRedirectOptions()['max'] ?? null;
+
+        $this->assertIsInt($max, 'The redirect policy states no `max`; this test would silently size its queue to 2.');
+        $this->assertLessThanOrEqual(12, $max, 'The redirect cap has grown past anything this portal\'s measured 4-hop chain justifies.');
+
+        $overCap = $max + 2;
 
         $client = new GuzzleClient([
             'handler' => HandlerStack::create(new MockHandler(array_map(
