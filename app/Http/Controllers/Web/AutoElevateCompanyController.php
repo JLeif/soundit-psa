@@ -78,12 +78,14 @@ class AutoElevateCompanyController extends Controller
         //
         // Clear-then-apply derives the new state from the rendered form, so "no keys" and
         // "unmap everything" are the same request on the wire — but they are not the same
-        // intent. The screen renders the Save button even when the vendor returned zero
-        // companies -- which index() reaches only when the vendor genuinely lists none, since
-        // an unconfigured key and an AutoElevateReadException both redirect away before the
-        // view renders -- so an admin who presses
-        // Save on a visibly empty table silently nulls every existing mapping and is told
-        // "Saved 0 mapping(s)" — the flash reports success for a destructive write.
+        // intent. The screen USED TO render its Save button even when the vendor returned zero
+        // companies, so an admin who pressed Save on a visibly empty table silently nulled every
+        // existing mapping and was told "Saved 0 mapping(s)" -- a success flash for a destructive
+        // write. The Blade now withholds Save on an empty list, so that click is no longer
+        // reachable through the UI; this guard is the server-side half, covering a direct or
+        // replayed POST. index() reaches the empty screen only when the vendor genuinely lists
+        // no companies: an unconfigured key and an AutoElevateReadException both redirect away
+        // before the view renders.
         //
         // Refusing the empty post is the conservative direction: the only intent it can block
         // is "unmap every company at once", which is still reachable one dropdown at a time on

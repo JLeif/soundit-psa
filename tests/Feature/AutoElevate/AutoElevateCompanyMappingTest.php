@@ -135,8 +135,11 @@ class AutoElevateCompanyMappingTest extends TestCase
      * #2108: the vendor returning zero companies must never become "unmap everything".
      *
      * Clear-then-apply reads the new state off the rendered form, so an empty post and a
-     * deliberate unmap-all are the same bytes. The screen kept its Save button on the empty
-     * branch, so one click on a degraded read nulled every mapping and flashed success.
+     * deliberate unmap-all are the same bytes. The screen used to keep its Save button on the
+     * empty branch, so one click nulled every mapping and flashed success. That empty screen is
+     * reached when the vendor genuinely lists no companies -- NOT on a degraded read or a bad
+     * key, both of which redirect away before the view renders. The Blade now withholds Save;
+     * this test covers the server-side refusal, which still answers a direct or replayed POST.
      */
     public function test_save_with_no_companies_submitted_keeps_every_mapping(): void
     {
@@ -214,6 +217,50 @@ class AutoElevateCompanyMappingTest extends TestCase
             ->assertSee('AutoElevate returned zero companies for this key.')
             ->assertSee('1 client(s) still hold a mapping')
             ->assertDontSee('Save Mappings');
+    }
+
+    /**
+     * contract:8 from the r2 held review, verified at source before being believed.
+     *
+     * MEASURED, and it is worse than the finding described. I first assumed the bucket unset()
+     * made the SECOND company fall through uncounted; the test failed and showed the opposite,
+     * so this pins what actually happens rather than what I expected.
+     *
+     * Two vendor companies whose names normalize to the same key ("Acme Manufacturing" and
+     * "ACME  manufacturing" both normalize to "acmemanufacturing") each match the single client
+     * in that bucket. The first write maps the client to company A; the second company's
+     * already-mapped check looks for ITS OWN id, does not find it, and matches the same client
+     * again -- overwriting the mapping so the client ends up on company B. The bucket unset()
+     * then makes the update() a no-op row-count of 0 for one of them, so the counter reports
+     * "Auto-matched 1 company(ies)" while TWO companies were matched against one client and the
+     * first company's mapping was silently destroyed. Nothing is reported as ambiguous, even
+     * though this is exactly the ambiguity the docblock promises never to guess at: the
+     * operator sees a plausible one-match message and no sign that a collision occurred.
+     *
+     * This test PINS the current behaviour rather than asserting a fix: autoMatch() is outside
+     * this leg's scope (the empty-submission guard), so the correction belongs to the parent
+     * card as a product decision, not slipped into a residual leg.
+     */
+    public function test_automatch_silently_skips_a_second_company_sharing_a_normalized_name(): void
+    {
+        $client = Client::factory()->create(['name' => 'Acme Manufacturing', 'autoelevate_company_id' => null]);
+        $this->fakeCompanies([
+            self::company(self::COMPANY_A, 'Acme Manufacturing'),
+            self::company(self::COMPANY_B, 'ACME  manufacturing'),
+        ]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $response = $this->post(route('settings.autoelevate-companies.auto-match'));
+
+        // The SECOND company overwrote the first: one client, one mapping, last writer wins.
+        $this->assertSame(strtolower(self::COMPANY_B), $client->fresh()->autoelevate_company_id);
+        $this->assertSame(0, Client::where('autoelevate_company_id', strtolower(self::COMPANY_A))->count());
+
+        // The operator is told ONE company matched -- a plausible, unalarming message -- with
+        // no indication that two companies collided on one client or that A's mapping was lost.
+        $response->assertRedirect(route('settings.autoelevate-companies.index'));
+        $this->assertStringContainsString('Auto-matched 1 company(ies) by name.', (string) session('success'));
+        $this->assertStringNotContainsString('left unmapped', (string) session('success'));
     }
 
     /**
