@@ -183,7 +183,7 @@ assert_no_warnings() {
             # Laravel dialect: "7286 warnings".
             count="$(printf '%s' "$token" | sed -E 's/^([0-9]+).*/\1/')"
             label="$(printf '%s' "$token" | sed -E 's/^[0-9]+[[:space:]]+//')"
-        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*([0-9]+|[0-9]+\.[0-9]+|[0-9]+:[0-9]{2}(\.[0-9]+)?)[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|byte|bytes|b|kb|mb|gb)?$'; then
+        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*([0-9]+|[0-9]+\.[0-9]+|[0-9]+:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?)[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|byte|bytes|b|kb|mb|gb)?$'; then
             # NON-COUNT METRIC (GitHub #2612), deliberately its own branch.
             #
             # ORDER IS LOAD-BEARING: this must be tested BEFORE the generic
@@ -232,6 +232,16 @@ assert_no_warnings() {
             # which is the same permissiveness this comment warns about, one
             # field to the left. An instrument that refuses what it cannot read
             # must not quietly accept a measurement it cannot parse either.
+            #
+            # The clock form's hours field is OPTIONAL because the SIBLING file
+            # of that same package emits one: Duration::asString() prepends
+            # `HH:` whenever hours > 0, so a run at or over an hour prints
+            # `Time: 01:02:03.456`. Enumerating only M:SS(.fff) refused that
+            # legitimate zero-warning line as an unrecognised token -- the exact
+            # false-positive class this branch exists to close, found by review
+            # because the byte/bytes check stopped at ResourceUsageFormatter and
+            # did not read asString() beside it. Three fields is the ceiling:
+            # php-timer emits no fourth, and `1:2:3:4:5` stays refused.
             seen=$((seen - 1))   # a metric is not the "at least one count was read" proof
             IFS=','; continue
         elif printf '%s' "$token" | grep -qE '^[A-Za-z][A-Za-z[:space:]]*:[[:space:]]*[0-9]+$'; then

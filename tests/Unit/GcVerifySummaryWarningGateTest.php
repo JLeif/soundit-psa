@@ -176,6 +176,11 @@ exit('.$exit.');
             // the pre-existing end-of-line strip on the `body=` line, so these
             // are placed mid-line where that strip does not reach them.)
             'malformed metric value, colons' => ['Tests: 21 passed (33 assertions), Duration: 1:2:3:4:5', 'unrecognised token'],
+            // The clock form stops at HH:MM:SS(.fff), which is php-timer's
+            // widest output. A fourth field is a shape no runner emits and must
+            // stay refused, so admitting the hours field cannot later drift into
+            // a loose colon-separated value.
+            'malformed metric value, four clock fields' => ['Tests: 21 passed (33 assertions), Duration: 01:02:03:04', 'unrecognised token'],
             'malformed metric value, multiple dots' => ['Tests: 21 passed (33 assertions), Duration: 1.2.3, 7 passed', 'unrecognised token'],
             'malformed metric value, leading dots' => ['Tests: 21 passed (33 assertions), Duration: ..5, 7 passed', 'unrecognised token'],
         ];
@@ -203,6 +208,14 @@ exit('.$exit.');
             'pest duration milliseconds' => ['Tests: 21 passed (33 assertions), Duration: 1.2 ms'],
             'textui time' => ['Tests: 21 passed (33 assertions), Time: 0.66'],
             'textui clock-formatted time' => ['Tests: 21 passed (33 assertions), Time: 00:02.729'],
+            // php-timer's Duration::asString() prepends an `HH:` field once
+            // hours > 0, so any run at or over an hour prints this shape -- and
+            // this suite is 7714 tests. The value enumeration admitted only one
+            // colon group, so it refused a legitimate zero-warning line as an
+            // unrecognised token: the same false FAIL this change exists to
+            // close, in the same vendor package the unit list was verified in.
+            'textui clock-formatted time with hours' => ['Tests: 21 passed (33 assertions), Time: 01:02:03.456'],
+            'textui clock-formatted time with hours, whole second' => ['Tests: 21 passed (33 assertions), Time: 01:02:03'],
             'textui memory' => ['Tests: 21 passed (33 assertions), Memory: 24.00 MB'],
             // PHPUnit's OWN formatter emits these: php-timer's
             // ResourceUsageFormatter::bytesToString() knows only GB/MB/KB and
