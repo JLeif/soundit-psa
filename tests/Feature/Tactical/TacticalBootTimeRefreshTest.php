@@ -14,9 +14,11 @@ use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 /**
@@ -384,6 +386,62 @@ class TacticalBootTimeRefreshTest extends TestCase
             'midnight' => ['midnight'],
             'zero offset' => ['+0 seconds'],
             'unparseable word' => ['unknown'],
+
+            // Regression for the laundering hole the r2 rework's own replacement
+            // left open. An anchored YYYY-MM-DD prefix check accepts these, and the
+            // plausibility floor cannot catch them because the floor tests the
+            // RESOLVED instant: '1970-01-01 +56 years' resolves to 2026-01-01, which
+            // is both past and above the floor, so it was WRITTEN. Relative
+            // arithmetic behind a valid date prefix is still a fabrication.
+            'date prefix with relative suffix' => ['1970-01-01 +56 years'],
+            'date prefix with forward suffix' => ['2026-09-17 +1 year'],
+            'date prefix with weekday suffix' => ['2026-09-17 next friday'],
+        ];
+    }
+
+    /**
+     * The accepted grammar is a closed enumeration, and every spelling in it must
+     * actually round-trip. A strict parser that quietly refuses the vendor's real
+     * format would turn this column off altogether while every negative control
+     * still passed — the failure mode a refusal-only suite cannot see.
+     *
+     * @dataProvider acceptedDateStringSpellings
+     */
+    public function test_each_accepted_date_string_spelling_is_a_real_observation(
+        string $bootTime,
+        string $expected,
+    ): void {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue($result->ok);
+        $this->assertSame(
+            $expected,
+            $asset->refresh()->last_boot_at?->toDateTimeString(),
+            "the vendor spelling {$bootTime} must be accepted as a real observation",
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function acceptedDateStringSpellings(): array
+    {
+        return [
+            'space separated' => ['2026-09-17 04:00:00', '2026-09-17 04:00:00'],
+            'iso basic' => ['2026-09-17T04:00:00', '2026-09-17 04:00:00'],
+            'iso zulu' => ['2026-09-17T04:00:00Z', '2026-09-17 04:00:00'],
+            'iso offset' => ['2026-09-17T04:00:00+00:00', '2026-09-17 04:00:00'],
+            'iso microseconds' => ['2026-09-17T04:00:00.123456+00:00', '2026-09-17 04:00:00'],
+
+            // Date-only must reset the time to midnight, not adopt the current
+            // instant. Without the '!' reset in the format this returns 12:00:00
+            // (the frozen test clock) and fabricates the time half of a reading
+            // that the vendor never sent.
+            'date only resets to midnight' => ['2026-09-17', '2026-09-17 00:00:00'],
         ];
     }
 
@@ -566,5 +624,43 @@ class TacticalBootTimeRefreshTest extends TestCase
 
         $this->assertTrue($result->ok);
         Bus::assertDispatched(SweepQueuedActionsForAgent::class);
+    }
+
+    /**
+     * The boot-time write is OPPORTUNISTIC: the detail sync has already succeeded
+     * when it runs. A database failure on it must not escape the service.
+     *
+     * This matters beyond tidiness. refreshTactical() has no try/catch and
+     * syncDeviceDetail()'s catch takes TacticalClientException only, so an escaping
+     * QueryException reaches a user-facing surface carrying the statement with its
+     * bindings INTERPOLATED — measured on this Laravel version as
+     * "SQL: update `assets` set `last_boot_at` = 2026-09-17 04:00:00 where `id` = 42".
+     * That is the psa #359 leak class the rest of this class routes around via
+     * safeFailure(); this write was the one path that bypassed it.
+     *
+     * Asserted through the PUBLIC result rather than on the log text: the verdict
+     * is that the sync still succeeds and nothing propagates.
+     */
+    public function test_a_failing_boot_time_write_neither_fails_the_sync_nor_escapes(): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        // Force a genuine QueryException out of the column write by removing the
+        // column the write targets, rather than by mocking the failure — a real
+        // driver error, with real errorInfo for safeFailure() to read.
+        Schema::table('assets', function (Blueprint $table) {
+            $table->dropColumn('last_boot_at');
+        });
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => 1789617600])),
+        ]);
+
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue(
+            $result->ok,
+            'an opportunistic column refresh must not turn a completed sync into a failure',
+        );
     }
 }

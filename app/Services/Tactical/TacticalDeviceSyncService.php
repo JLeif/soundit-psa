@@ -29,6 +29,26 @@ class TacticalDeviceSyncService
      */
     private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
 
+    /**
+     * The ONLY date-string spellings accepted for boot_time, tried in order.
+     *
+     * The vendor's documented type is a float epoch; this list exists because the
+     * payload is JSON and a deployment has been seen to stringify it. It is a
+     * closed enumeration on purpose: anything outside it is refused rather than
+     * handed to Carbon's relative-expression parser. Each is parsed with a leading
+     * '!' so unspecified fields reset to zero instead of defaulting to NOW —
+     * without it, a format that omits a time component silently adopts the current
+     * time and fabricates part of the observation.
+     */
+    private const BOOT_TIME_STRING_FORMATS = [
+        'Y-m-d H:i:s',
+        'Y-m-d\TH:i:s',
+        'Y-m-d\TH:i:sP',
+        'Y-m-d\TH:i:s.uP',
+        'Y-m-d\TH:i:s\Z',
+        'Y-m-d',
+    ];
+
     public function __construct(
         private readonly TacticalClient $client,
     ) {}
@@ -207,7 +227,23 @@ class TacticalDeviceSyncService
             return;
         }
 
-        Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
+        // This write is OPPORTUNISTIC: the detail sync has already succeeded by the
+        // time we get here. A DB failure on it must not fail the sync, and must not
+        // escape — refreshTactical() has no try/catch, and syncDeviceDetail()'s catch
+        // takes TacticalClientException only, so a QueryException from this line would
+        // propagate to a user-facing surface carrying the statement with its bindings
+        // INTERPOLATED (measured: "SQL: update `assets` set `last_boot_at` = ... where
+        // `id` = 42"). That is the psa #359 leak class this class already routes around
+        // via safeFailure(); this one line was the path that bypassed it.
+        try {
+            Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
+        } catch (\Throwable $e) {
+            Log::warning('Tactical boot_time write failed; sync result unaffected.', [
+                'agent_id' => $ta->agent_id,
+                'asset_id' => $asset->id,
+                'reason' => $this->safeFailure($e, 'boot time refresh'),
+            ]);
+        }
     }
 
     /**
@@ -255,26 +291,47 @@ class TacticalDeviceSyncService
             }
         }
 
-        // A genuine date string is still accepted, but only one that LOOKS like an
-        // absolute date (leading YYYY-MM-DD, optionally with a time part). Carbon
-        // resolves 'now'/'today'/'midnight'/'+0 seconds' to this instant just as it
-        // does a blank string, and such a fabricated observation is newer than
-        // anything stored and so always wins the never-backwards guard.
-        if (is_string($bootTime) && preg_match('/^\d{4}-\d{2}-\d{2}([ T]|$)/', trim($bootTime)) === 1) {
-            try {
-                $parsed = Carbon::parse(trim($bootTime));
-            } catch (\Throwable) {
-                return null;
+        // A genuine date string is still accepted, but the accepted grammar is
+        // ENUMERATED, not guessed at by a shape pattern. An earlier version anchored
+        // a leading YYYY-MM-DD, which blocks 'now'/'today' but NOT a date prefix
+        // carrying relative arithmetic: measured at this tip, '1970-01-01 +56 years'
+        // matched that anchor, resolved to 2026-01-01, and so cleared the plausibility
+        // floor that the literal 1970 date is refused by. The floor tests the RESOLVED
+        // instant, so any relative suffix launders an implausible value into a
+        // plausible one. A prefix pattern cannot express "contains no relative
+        // arithmetic"; only a strict parse of the WHOLE string can.
+        if (is_string($bootTime)) {
+            $trimmed = trim($bootTime);
+
+            foreach (self::BOOT_TIME_STRING_FORMATS as $format) {
+                try {
+                    $parsed = Carbon::createFromFormat('!'.$format, $trimmed);
+                } catch (\Throwable) {
+                    continue;
+                }
+
+                // createFromFormat does not throw on trailing junk; it records it.
+                // Without this check '2026-09-17 +56 years' parses as the date and
+                // silently discards the suffix, which is the same laundering hazard
+                // arriving by a different door.
+                $errors = Carbon::getLastErrors();
+
+                if ($parsed === false
+                    || ($errors && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))) {
+                    continue;
+                }
+
+                // Same floor as the numeric branch: a claim about the instant, not
+                // about how the vendor spelled it, so a 1970 date string is refused
+                // rather than written onto an empty column as a 56-year uptime.
+                if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
+                    return null;
+                }
+
+                return $parsed;
             }
 
-            // Same floor as the numeric branch: it is a claim about the instant, not
-            // about how the vendor spelled it, so a 1970 date string is refused rather
-            // than written onto an empty column as a 56-year uptime.
-            if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
-                return null;
-            }
-
-            return $parsed;
+            return null;
         }
 
         return null;
