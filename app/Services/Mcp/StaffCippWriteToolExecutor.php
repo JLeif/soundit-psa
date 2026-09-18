@@ -774,13 +774,37 @@ class StaffCippWriteToolExecutor
         // for identical content, or a proposal still live in the cockpit that may have been
         // staged natively by a technician or by another token. Admitting it would put this
         // token's authority on someone else's row, and a refused admission would WITHDRAW
-        // their live decision. Refuse by name and touch nothing.
-        if ($staged['idempotent'] ?? false) {
+        // their live decision. Refuse by name and touch nothing — UNLESS the run is this
+        // token's OWN live proposal for this same instant, which is what a retry looks like
+        // after the first call died between stageAction()'s commit and admission. Refusing
+        // that one forever strands the caller's own destructive proposal AwaitingApproval in
+        // the cockpit: the converted lane this class must never produce.
+        if (($staged['idempotent'] ?? false) && ! $this->ownsLiveDirectProposal($staged['run_id'] ?? null, $scheduledTokenId, $executeAt)) {
             return ['error' => 'execute_at_conflicts_with_existing_run'];
         }
 
         return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
             ->admit($staged, $scheduledTokenId, $executeAt);
+    }
+
+    /**
+     * Whether the run an idempotent stage result names is THIS caller's own live direct-lane
+     * proposal for THIS instant — the provenance the direct admission would itself demand.
+     * A Done run, a technician's proposal and another token's proposal all fail it and are
+     * refused by name, untouched; only the caller's own orphan is allowed through to be
+     * finished.
+     */
+    private function ownsLiveDirectProposal(mixed $runId, int $scheduledTokenId, ExecuteAt $executeAt): bool
+    {
+        $run = is_int($runId) ? TechnicianRun::find($runId) : null;
+        if ($run === null || $run->state !== TechnicianRunState::AwaitingApproval) {
+            return false;
+        }
+        $provenance = is_array($run->proposed_meta) ? ($run->proposed_meta['scheduled_provenance'] ?? null) : null;
+
+        return is_array($provenance) && ($provenance['kind'] ?? null) === 'mcp'
+            && ($provenance['token_id'] ?? null) === $scheduledTokenId
+            && ($provenance['execute_at'] ?? null) === $executeAt->utc;
     }
 
     /** Read-only scheduled mailbox preparation. Never claims, dispatches, or releases a run. */

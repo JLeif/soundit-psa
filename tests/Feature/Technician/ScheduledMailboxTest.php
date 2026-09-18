@@ -486,4 +486,85 @@ class ScheduledMailboxTest extends TestCase
         $this->assertSame('uncertain', DB::table('scheduled_authorizations')->value('state'));
         $this->assertCount(1, $this->wire);
     }
+
+    /**
+     * The immediate lane (ruled design point 3) on the CIPP surface, which is where the
+     * approver-typed inputs live. A mailbox verb that needs no re-typed value is queued
+     * directly with no cockpit proposal and no human approver, and it really fires in its
+     * window under the unchanged fire-time checks.
+     */
+    public function test_the_immediate_lane_admits_a_mailbox_verb_that_needs_no_approver_typed_input(): void
+    {
+        $result = $this->mailboxLaneCall('cipp_convert_mailbox', ['mailbox_type' => 'Shared'], 'immediate');
+        $this->assertTrue($result['scheduled'] ?? false, json_encode($result));
+        $row = DB::table('scheduled_authorizations')->sole();
+        $this->assertSame('waiting', $row->state);
+        $this->assertNull($row->approver_user_id, 'a token-queued mailbox row recorded a human approver');
+        $this->assertSame(McpToken::where('label', 'synthetic-immediate')->sole()->id, (int) $row->originating_mcp_token_id);
+        $sealed = ApprovalEnvelope::open($row->ciphertext, $row->digest);
+        $this->assertNull($sealed['approver_user_id'], 'the envelope forged a human approver');
+        $this->assertSame([], $sealed['human_inputs'], 'no human typed anything on this lane');
+        $this->assertSame(TechnicianRunState::Scheduled, TechnicianRun::findOrFail($result['run_id'])->state);
+        $this->assertSame(0, TechnicianRun::where('state', TechnicianRunState::AwaitingApproval->value)->count());
+        $this->assertCount(0, $this->wire, 'the direct lane executed now');
+        $this->time = $this->time->setTime(3, 30);
+        $this->result = ['Results' => 'Successfully converted owner@synthetic.test to a Shared mailbox'];
+        app(MailboxDispatch::class)->run((int) $row->id);
+        $this->assertCount(1, $this->wire);
+        $this->assertSame('completed', DB::table('scheduled_authorizations')->value('state'));
+    }
+
+    public static function approverTypedMailboxCalls(): array
+    {
+        return [
+            'out of office' => ['cipp_set_mailbox_out_of_office',
+                ['state' => 'Enabled', 'internal_message' => 'synthetic internal body', 'external_message' => 'synthetic external body'],
+                ['internal_message', 'external_message']],
+            'external forwarding' => ['cipp_set_mailbox_forwarding',
+                ['mode' => 'external', 'keep_copy' => true, 'external_smtp' => 'approved@example.test'],
+                ['external_smtp']],
+        ];
+    }
+
+    /**
+     * The other half of point 3 here: these verbs are released only after an APPROVER
+     * re-types the value the cockpit card prompts for, and the immediate lane has no card
+     * and no approver. They are refused BY NAME before anything is staged — never admitted
+     * with sensitive_inputs nobody typed, never left as a withdrawn proposal, and the
+     * cooldown is not burned. The same call on the cockpit lane still stages, and the card
+     * still collects exactly those inputs.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('approverTypedMailboxCalls')]
+    public function test_the_immediate_lane_refuses_a_mailbox_verb_whose_inputs_only_an_approver_can_type(string $tool, array $extra, array $inputs): void
+    {
+        $result = $this->mailboxLaneCall($tool, $extra, 'immediate');
+        $this->assertSame('execute_at_direct_requires_approver_inputs:'.implode(',', $inputs), $result['error'] ?? null, json_encode($result));
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertDatabaseCount('technician_runs', 0, 'the refusal staged a proposal');
+        $this->assertDatabaseCount('technician_action_logs', 0, 'the refusal burned the cooldown');
+        $this->assertCount(0, $this->wire);
+
+        $staged = $this->mailboxLaneCall($tool, $extra, 'staged');
+        $this->assertTrue($staged['success'] ?? false, json_encode($staged));
+        $run = TechnicianRun::findOrFail($staged['run_id']);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertSame($inputs, $run->proposed_meta['sensitive_inputs']);
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertCount(0, $this->wire);
+    }
+
+    /** One MCP tools/call on the named lane: a `<tool>:<mode>` grant carrying execute_at. */
+    private function mailboxLaneCall(string $tool, array $extra, string $mode): array
+    {
+        $bearer = \App\Support\McpConfig::rotateStaffToken(allowedTools: [$tool.':'.$mode], label: 'synthetic-'.$mode);
+        $reply = $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->postJson('/api/mcp/staff', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => $tool,
+                'arguments' => array_merge(['client_id' => $this->client->id, 'person_id' => $this->owner->id,
+                    'ticket_id' => $this->ticket->id, 'confirm_upn' => $this->owner->cipp_upn, 'reason' => 'Synthetic control',
+                    'execute_at' => '2026-09-16T03:30:00+00:00', 'staged' => $mode === 'staged'], $extra)],
+        ])->assertOk();
+        $decoded = json_decode((string) $reply->json('result.content.0.text'), true);
+
+        return is_array($decoded) ? $decoded : ['error' => (string) $reply->json('result.content.0.text')];
+    }
 }

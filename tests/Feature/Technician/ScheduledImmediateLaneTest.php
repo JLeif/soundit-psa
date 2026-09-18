@@ -362,4 +362,57 @@ class ScheduledImmediateLaneTest extends \Tests\TestCase
         $this->assertArrayNotHasKey('scheduled', $downgraded);
         $this->assertArrayNotHasKey('authorization_id', $downgraded);
     }
+
+    // ── the idempotent guard must not strand the caller's OWN proposal ───────
+
+    public function test_a_retry_after_a_death_between_staging_and_admission_admits_the_callers_own_proposal(): void
+    {
+        // The crash window the guard has to survive: stageAction() COMMITS the proposal and
+        // the request dies before admission. The run is left AwaitingApproval with no
+        // authorization, so the retry's stage result comes back idempotent naming it. A guard
+        // that refuses EVERY idempotent result refuses that retry forever, and the caller's
+        // own destructive proposal sits in the cockpit waiting for a technician — the lane
+        // the caller never chose.
+        $bearer = $this->bearer(['tactical_set_maintenance:immediate']);
+        $arguments = $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => false]);
+        $this->app->bind(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class,
+            fn () => throw new \RuntimeException('synthetic death between staging and admission'));
+        $died = $this->mcp($bearer, 'tactical_set_maintenance', $arguments);
+        $this->assertStringContainsString('synthetic death', (string) ($died['error'] ?? ''), json_encode($died));
+        $orphan = TechnicianRun::sole();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $orphan->state);
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+
+        $this->app->bind(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class,
+            fn ($app) => new \App\Services\Technician\Scheduled\ScheduledDirectAdmission(
+                $app->make(\App\Services\Technician\Scheduled\ScheduledAdmission::class)));
+        $retry = $this->mcp($bearer, 'tactical_set_maintenance', $arguments);
+        $this->assertTrue($retry['scheduled'] ?? false, json_encode($retry));
+        $this->assertSame($orphan->id, (int) $retry['run_id'], 'the retry admitted some other run');
+        $row = DB::table('scheduled_authorizations')->sole();
+        $this->assertSame($orphan->id, (int) $row->run_id);
+        $this->assertNull($row->approver_user_id, 'the recovered row recorded a human approver');
+        $this->assertSame($this->token()->id, (int) $row->originating_mcp_token_id);
+        $this->assertSame(TechnicianRunState::Scheduled, $orphan->fresh()->state);
+        $this->assertSame(0, TechnicianRun::where('state', TechnicianRunState::AwaitingApproval->value)->count(),
+            'the caller\'s own proposal was left stranded in the cockpit');
+        $this->assertCount(0, $this->wire);
+    }
+
+    public function test_a_live_proposal_from_another_token_is_still_refused_by_name_and_left_untouched(): void
+    {
+        // The case the guard exists for, and the one the provenance check must not weaken:
+        // an identical proposal already live in the cockpit under ANOTHER token's lineage.
+        // Admitting it would put this token's authority on someone else's row, and a refused
+        // admission would WITHDRAW their live decision.
+        $foreign = $this->mcp($this->bearer(['tactical_set_maintenance:staged'], 'synthetic-other-token'),
+            'tactical_set_maintenance', $this->maintenanceArgs(['execute_at' => self::AT]));
+        $this->assertTrue($foreign['success'] ?? false, json_encode($foreign));
+        $result = $this->immediateCall();
+        $this->assertSame('execute_at_conflicts_with_existing_run', $result['error'] ?? null, json_encode($result));
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, TechnicianRun::findOrFail($foreign['run_id'])->state,
+            'a refusal that should have touched nothing withdrew the other token\'s proposal');
+        $this->assertCount(0, $this->wire);
+    }
 }
