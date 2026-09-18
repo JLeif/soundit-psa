@@ -698,4 +698,150 @@ class HdbReportClientTest extends TestCase
             $this->client()->fetchForNote($theirs->id, $theirNote->id)->status,
         );
     }
+
+    // -------------------------------------------- degraded reads must SCREAM
+
+    /**
+     * A `report.json` missing a required section is a BUG, not "that machine
+     * had no event log" - docs/ARCHITECTURE.md Vendor response shapes, rule 3.
+     *
+     * Three properties at once, each load-bearing: the status is NOT Fetched,
+     * `importable()` is false so no caller can write a false all-clear, and the
+     * missing section is NAMED so an operator learns which part of the vendor's
+     * shape moved.
+     *
+     * Mutation that kills it: a `?? []` coalesce on any required section, which
+     * is the natural shape and the exact failure CIPP shipped.
+     *
+     * @dataProvider requiredSections
+     */
+    public function test_a_report_missing_a_required_section_screams_rather_than_importing(string $section): void
+    {
+        $ticket = $this->keyedTicket();
+        $report = $this->reportJson();
+        unset($report[$section]);
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($report),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Degraded, $result->status);
+        $this->assertSame(HdbReportResult::REASON_REPORT_SECTIONS_MISSING, $result->reason);
+        $this->assertFalse($result->importable(), 'A degraded report must never be importable.');
+        $this->assertSame([$section], $result->missingSections);
+
+        // The payload is PRESERVED, not emptied: discarding what did arrive
+        // would be its own data loss, and the evidence an operator needs.
+        $this->assertIsArray($result->report);
+        $this->assertNotSame([], $result->report);
+
+        // The operator sentence has to say the import did not happen. A
+        // degraded read reported in the language of success is the failure this
+        // whole rule exists to prevent.
+        $this->assertStringContainsString('NOT imported', $result->message());
+    }
+
+    /** @return array<string, array{string}> */
+    public static function requiredSections(): array
+    {
+        return array_combine(
+            HdbReportClient::REQUIRED_REPORT_SECTIONS,
+            array_map(fn (string $s) => [$s], HdbReportClient::REQUIRED_REPORT_SECTIONS),
+        );
+    }
+
+    /**
+     * The distinction docs/ARCHITECTURE.md draws explicitly: a key PRESENT
+     * holding an empty value is a genuine no-value and imports cleanly; a key
+     * ABSENT is drift and does not.
+     *
+     * Without this case the section check could be satisfied by one that alarms
+     * on empty sections too - which would alarm on nearly every real press
+     * (`mapNet` is "often empty" per the vault note) and would be switched off
+     * within a week.
+     */
+    public function test_a_present_but_empty_section_is_a_real_answer_and_imports(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson([
+                'eventLog' => ['application' => [], 'system' => []],
+                'software' => ['bsodList' => []],
+            ])),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Fetched, $result->status, $result->reason);
+        $this->assertTrue($result->importable());
+        $this->assertSame([], $result->missingSections);
+    }
+
+    /**
+     * A body that is not a readable JSON object is Malformed - never an empty
+     * payload. The login-page case is the one that matters in production: a
+     * lapsed session makes the portal answer HTML where JSON was expected, and
+     * reading that as "the report is empty" is the false all-clear.
+     *
+     * @dataProvider unreadableBodies
+     */
+    public function test_an_unreadable_body_is_malformed_rather_than_empty(string $body): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => $body,
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Malformed, $result->status);
+        $this->assertSame(HdbReportResult::REASON_UNREADABLE_PAYLOAD, $result->reason);
+        $this->assertFalse($result->importable());
+        $this->assertNull($result->ticket, 'A malformed body must not produce a payload at all.');
+    }
+
+    /** @return array<string, array{string}> */
+    public static function unreadableBodies(): array
+    {
+        return [
+            'the login page' => ['<html><body><form id="theOnlyForm"></form></body></html>'],
+            'truncated json' => ['{"uploadComplete": tr'],
+            'a json list' => ['[{"uploadComplete": true}]'],
+            'a bare scalar' => ['"ok"'],
+            'json null' => ['null'],
+            'an empty object' => ['{}'],
+            'empty body' => [''],
+        ];
+    }
+
+    /**
+     * A non-2xx from the gatekeeper, after redirects, is Malformed with its own
+     * reason - the portal ANSWERED, and what it answered is unusable. Never an
+     * empty report.
+     */
+    public function test_a_portal_error_response_does_not_become_an_empty_report(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => Http::response('Fatal error.', 500),
+        ]);
+
+        $result = $this->client()->fetch($ticket->id, self::PRESS);
+
+        $this->assertSame(HdbReportStatus::Malformed, $result->status);
+        $this->assertSame(HdbReportResult::REASON_UNEXPECTED_RESPONSE, $result->reason);
+        $this->assertFalse($result->importable());
+        $this->assertNull($result->report);
+    }
 }
