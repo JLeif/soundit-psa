@@ -3,6 +3,7 @@
 namespace Tests\Feature\AutoElevate;
 
 use App\Models\Setting;
+use App\Services\AutoElevate\AutoElevateClient;
 use App\Services\AutoElevate\AutoElevateReadException;
 use App\Services\AutoElevate\AutoElevateReadService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -183,14 +184,102 @@ class AutoElevateReadServiceTest extends TestCase
         $this->service()->computersForCompany(self::COMPANY_A);
     }
 
-    public function test_runaway_paging_is_bounded(): void
+    /**
+     * #2124. An over-cap tenant is knowable from the FIRST page's `totalCount`, so it must
+     * cost one request, not fifty against a 100/hour bucket — and it must not wear the
+     * `paging_bound` label, which means something else (see the next test).
+     */
+    public function test_a_tenant_larger_than_the_walk_is_named_from_the_first_page(): void
     {
-        // A vendor that always claims more rows than it returns cannot spin the walk forever.
         $page = [];
         for ($i = 1; $i <= 200; $i++) {
             $page[] = self::computer(['id' => self::uuid($i)]);
         }
-        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, PHP_INT_MAX), 200)]);
+        $overCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE + 1;   // 10,001
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, $overCap), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('an over-cap tenant must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_over_cap', $e->reason);
+        }
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * The at-cap boundary walked to COMPLETION, not merely asserted to skip the over-cap
+     * branch: exactly MAX_PAGES × MAX_TAKE rows must be collectible, which means the 50th
+     * request returns the last full page, `$skip` reaches `$total` inside the final iteration
+     * and reconciliation passes on 10,000 unique rows. Without this, moving the loop bound or
+     * flipping the over-cap comparison to `>=` would silently start failing a tenant the
+     * design deliberately admits, and the negative test below would not notice.
+     *
+     * Deliberately uses bare row arrays rather than the full computer fixture: this asserts
+     * the PAGING boundary, and 10,000 normalized rows would make it a slow normalization test.
+     */
+    public function test_a_tenant_exactly_at_the_cap_walks_to_completion(): void
+    {
+        $atCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE;   // 10,000
+        $requests = 0;
+        Http::fake(function (Request $r) use ($atCap, &$requests) {
+            $requests++;
+            $skip = (int) self::query($r)['skip'];
+            $items = [];
+            for ($i = $skip + 1; $i <= min($skip + AutoElevateClient::MAX_TAKE, $atCap); $i++) {
+                $items[] = self::company(self::uuid($i), sprintf('Co %05d', $i));
+            }
+
+            return Http::response(self::envelope($items, $atCap), 200);
+        });
+
+        $rows = $this->service()->companies();
+
+        $this->assertCount($atCap, $rows, 'a tenant exactly at the cap must be collectible');
+        $this->assertSame($atCap, count(array_unique(array_column($rows, 'id'))));
+        $this->assertSame(AutoElevateReadService::MAX_PAGES, $requests, 'exactly 50 full pages, no 51st request');
+    }
+
+    /** Exactly at the cap is collectible, so it is NOT over-cap: the walk proceeds and fails on its merits. */
+    public function test_a_tenant_exactly_at_the_cap_is_not_over_cap(): void
+    {
+        $page = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $page[] = self::computer(['id' => self::uuid($i)]);
+        }
+        $atCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE;   // 10,000
+        Http::fake([self::BASE.'/*' => Http::sequence()
+            ->push(self::envelope($page, $atCap), 200)
+            ->push(self::envelope([self::computer(['id' => self::uuid(9001)])], $atCap), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_incomplete', $e->reason, 'at the cap the walk is attempted, not refused');
+        }
+        Http::assertSentCount(2);
+    }
+
+    /**
+     * `paging_bound` survives #2124 and is still reachable: `totalCount` can GROW after the
+     * first page, so a walk that began inside the cap can still run out of pages. The
+     * first-page check cannot see that; the page bound can.
+     */
+    public function test_runaway_paging_is_bounded_when_the_total_grows_mid_walk(): void
+    {
+        $under = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE - 1000;
+        $call = 0;
+        Http::fake(function (Request $r) use (&$call, $under) {
+            parse_str((string) parse_url($r->url(), PHP_URL_QUERY), $q);
+            $page = [];
+            for ($i = 1; $i <= 200; $i++) {
+                $page[] = self::computer(['id' => self::uuid((int) $q['skip'] + $i)]);
+            }
+
+            return Http::response(self::envelope($page, $call++ === 0 ? $under : PHP_INT_MAX), 200);
+        });
+
         try {
             $this->service()->computersForCompany(self::COMPANY_A);
             $this->fail('unbounded walk must throw');
@@ -198,6 +287,89 @@ class AutoElevateReadServiceTest extends TestCase
             $this->assertSame('paging_bound', $e->reason);
         }
         Http::assertSentCount(AutoElevateReadService::MAX_PAGES);
+    }
+
+    /**
+     * #2115, and the distinction a careless de-dup gets wrong. The vendor repeats one row
+     * across a page boundary (an unstable sort does exactly this). The rows must be
+     * de-duplicated by id, and `skip` must keep advancing by rows RECEIVED — the vendor's
+     * own cursor — not by the unique rows kept. Advancing by unique rows kept re-requests
+     * ground already walked, which is visible here as a skip of 399 instead of 400.
+     */
+    public function test_repeated_rows_are_deduplicated_while_skip_follows_the_vendor_cursor(): void
+    {
+        // 451 served entries for 450 distinct machines: entry 201 repeats machine 200.
+        $served = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i), 'machineName' => sprintf('WS-%04d', $i)]);
+        }
+        $served[] = self::computer(['id' => self::uuid(200), 'machineName' => 'WS-0200']);   // the repeat
+        for ($i = 201; $i <= 450; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i), 'machineName' => sprintf('WS-%04d', $i)]);
+        }
+        $this->assertCount(451, $served);
+
+        $skips = [];
+        Http::fake(function (Request $r) use ($served, &$skips) {
+            $q = self::query($r);
+            $skips[] = (int) $q['skip'];
+
+            return Http::response(self::envelope(array_slice($served, (int) $q['skip'], 200), 450), 200);
+        });
+
+        $rows = $this->service()->computersForCompany(self::COMPANY_A);
+
+        $this->assertCount(450, $rows, 'the repeat is dropped, every distinct machine is kept');
+        $this->assertSame(450, count(array_unique(array_column($rows, 'id'))));
+        $this->assertSame('WS-0450', $rows[449]['machine_name']);
+        // The cursor is the vendor's: 0, 200, 400. Advancing by unique rows KEPT would ask
+        // for skip=399 on the third request and re-walk a row it already holds.
+        $this->assertSame([0, 200, 400], $skips);
+        Http::assertSentCount(3);
+    }
+
+    /**
+     * #2115, the other half. When repetition means rows were DROPPED, the unique count no
+     * longer accounts for the vendor's `totalCount` — a silently short list. De-duplicating
+     * without reconciling would hand the panel 399 of 400 machines and look healthy.
+     */
+    public function test_a_short_unique_count_against_total_count_is_a_failed_read(): void
+    {
+        $served = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i)]);
+        }
+        $served[] = self::computer(['id' => self::uuid(200)]);   // repeat; machine 400 is never served
+        for ($i = 201; $i <= 399; $i++) {
+            $served[] = self::computer(['id' => self::uuid($i)]);
+        }
+        Http::fake(fn (Request $r) => Http::response(
+            self::envelope(array_slice($served, (int) self::query($r)['skip'], 200), 400), 200
+        ));
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('a short unique count must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_count_mismatch', $e->reason);
+        }
+    }
+
+    /** More rows than the vendor admits to holding is drift in the other direction. */
+    public function test_more_unique_rows_than_total_count_is_also_a_failed_read(): void
+    {
+        $page = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $page[] = self::computer(['id' => self::uuid($i)]);
+        }
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope($page, 3), 200)]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('an over-long page must throw');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('paging_count_mismatch', $e->reason);
+        }
     }
 
     public function test_computer_rows_are_normalized_from_the_documented_shape(): void
@@ -260,7 +432,7 @@ class AutoElevateReadServiceTest extends TestCase
     {
         $row = $this->service()->normalizeComputer(self::computer([
             'operatingSystem' => null, 'elevationMode' => null, 'lastCheckedInAt' => null, 'machineName' => null,
-        ]));
+        ]), self::COMPANY_A);
         $this->assertNull($row['os_name']);
         $this->assertNull($row['os_version']);
         $this->assertNull($row['elevation_mode']);
@@ -271,7 +443,7 @@ class AutoElevateReadServiceTest extends TestCase
 
     public function test_unrecognised_elevation_mode_is_surfaced_and_flagged_not_hidden(): void
     {
-        $row = $this->service()->normalizeComputer(self::computer(['elevationMode' => 'someFutureMode']));
+        $row = $this->service()->normalizeComputer(self::computer(['elevationMode' => 'someFutureMode']), self::COMPANY_A);
         $this->assertSame('someFutureMode', $row['elevation_mode']);
         $this->assertFalse($row['elevation_mode_known']);
     }
@@ -305,7 +477,7 @@ class AutoElevateReadServiceTest extends TestCase
         unset($row['lastCheckedInAt']);
         $this->expectException(AutoElevateReadException::class);
         $this->expectExceptionMessage('row_drift');
-        $this->service()->normalizeComputer($row);
+        $this->service()->normalizeComputer($row, self::COMPANY_A);
     }
 
     public function test_invalid_company_id_never_reaches_the_vendor(): void
@@ -324,5 +496,225 @@ class AutoElevateReadServiceTest extends TestCase
     {
         $this->assertSame('acmemanufacturingllc', AutoElevateReadService::normalizeName('  Acme Manufacturing, LLC. '));
         $this->assertSame('', AutoElevateReadService::normalizeName(' - '));
+    }
+
+    // --- #2111: the timestamp plausibility window ---------------------------------
+
+    /**
+     * The unit slip that will actually happen: the vendor's own example value in SECONDS.
+     * Carbon accepts it without complaint and renders 1970-01-20 — a date plausible enough
+     * to sit unnoticed in a "last check-in" column, which is why magnitude alone is not the
+     * guard. Measured 2026-09-18 on Carbon 3.11.1.
+     */
+    public function test_a_seconds_unit_timestamp_is_refused_instead_of_rendering_as_1970(): void
+    {
+        $seconds = intdiv(self::EXAMPLE_MS, 1000);   // 1716900000
+        $this->assertSame(
+            '1970-01-20T20:55:00+00:00',
+            \Carbon\CarbonImmutable::createFromTimestampMsUTC($seconds)->toIso8601String(),
+            'control: Carbon renders the seconds value silently, so only our window catches it'
+        );
+
+        try {
+            AutoElevateReadService::fromEpochMs($seconds);
+            $this->fail('a seconds-unit timestamp must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+    }
+
+    /**
+     * The other end. Carbon throws for NO integer magnitude — PHP_INT_MAX renders as year
+     * 292278994 — so an absurd future value is a rendered absurdity, never a 500.
+     */
+    public function test_an_absurd_future_timestamp_is_refused_and_carbon_would_not_have_thrown(): void
+    {
+        $this->assertSame(
+            '292278994-08-17T07:12:56+00:00',
+            \Carbon\CarbonImmutable::createFromTimestampMsUTC(PHP_INT_MAX)->toIso8601String(),
+            'control: Carbon accepts PHP_INT_MAX — the defect is the rendered date, not an exception'
+        );
+
+        foreach ([PHP_INT_MAX, 99999999999999999] as $absurd) {
+            try {
+                AutoElevateReadService::fromEpochMs($absurd);
+                $this->fail("must refuse {$absurd}");
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('timestamp_implausible', $e->reason);
+            }
+        }
+    }
+
+    public function test_the_plausibility_window_admits_its_own_edges_and_refuses_just_outside(): void
+    {
+        $floor = AutoElevateReadService::PLAUSIBLE_FLOOR_MS;
+        $this->assertSame(946684800000, $floor, '2000-01-01T00:00:00Z in epoch ms');
+        $this->assertSame('2000-01-01T00:00:00+00:00', AutoElevateReadService::fromEpochMs($floor)->toIso8601String());
+
+        try {
+            AutoElevateReadService::fromEpochMs($floor - 1);
+            $this->fail('one millisecond below the floor must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+
+        // Ceiling: now + 1 year, so clock skew at either end is absorbed but nonsense is not.
+        $this->travelTo(\Carbon\CarbonImmutable::parse('2026-09-18T00:00:00Z'));
+        $this->assertSame(2027, AutoElevateReadService::fromEpochMs(
+            \Carbon\CarbonImmutable::parse('2027-09-17T00:00:00Z')->getTimestampMs()
+        )->year);
+        try {
+            AutoElevateReadService::fromEpochMs(\Carbon\CarbonImmutable::parse('2027-09-19T00:00:00Z')->getTimestampMs());
+            $this->fail('beyond now + 1 year must be refused');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('timestamp_implausible', $e->reason);
+        }
+        $this->travelBack();
+    }
+
+    // --- #2126: the scope proof is not opt-in -------------------------------------
+
+    /**
+     * The defect was the DEFAULT, not the check: `?string $expectedCompanyId = null` let any
+     * caller — and three tests did — exercise the public method with the scope proof disabled.
+     * Assert the signature itself, because that is what the caller can opt out of.
+     */
+    /**
+     * The null-hint contract asserted directly on the table, because the panel test can only
+     * observe the ABSENCE of some particular sentence — which a label-restating hint would
+     * satisfy. Every reason the service can raise must either carry a sentence that adds
+     * information or carry none at all.
+     */
+    public function test_only_reasons_that_add_information_carry_a_hint(): void
+    {
+        // Each hint must carry the SPECIFIC operator fact the label cannot: what was refused
+        // and why nothing was listed. Asserting the fact is the only assertion that can fail
+        // — an earlier version compared the prose against the snake_case label itself, which no
+        // English sentence would ever contain, so a pure restatement passed it.
+        $mustSay = [
+            // the derived threshold, and that nothing was listed rather than a partial list
+            'paging_over_cap' => ['over 10,000', 'partial list would look complete'],
+            // BOTH directions, because reconciled() raises this for both
+            'paging_count_mismatch' => ['missing from what it sent', 'does not admit to holding'],
+            // that a date was withheld, not merely that it was odd
+            'timestamp_implausible' => ['no machine was shown', 'wrong date'],
+        ];
+        foreach ($mustSay as $explained => $facts) {
+            $hint = AutoElevateReadException::hintFor($explained);
+            $this->assertIsString($hint);
+            foreach ($facts as $fact) {
+                $this->assertStringContainsString($fact, $hint, "{$explained} must tell the operator: {$fact}");
+            }
+            // A restatement of the label in prose adds nothing: reject the label's own words.
+            $words = array_filter(explode('_', $explained), fn ($w) => strlen($w) > 3);
+            $this->assertNotSame(
+                $words,
+                array_values(array_filter($words, fn ($w) => stripos($hint, $w) !== false)),
+                "{$explained}: a hint built only from the label's own words is a restatement"
+            );
+        }
+
+        // Self-evident or already-explained labels get no hint at all — not a restatement.
+        foreach (['paging_incomplete', 'paging_bound', 'row_drift', 'envelope_drift', 'timestamp_drift',
+            'configuration', 'transport', 'invalid_company_id', 'http_429'] as $bare) {
+            $this->assertNull(AutoElevateReadException::hintFor($bare), "{$bare} must not gain noise");
+        }
+
+        // A null reason must not crash the lookup: the panel treats $reason as nullable, and
+        // a degraded read that 500s has stopped screaming and started crashing (C-56).
+        $this->assertNull(AutoElevateReadException::hintFor(null));
+
+        // operatorHint() is the instance door onto the same table and must not drift from it.
+        $this->assertSame(
+            AutoElevateReadException::hintFor('paging_over_cap'),
+            (new AutoElevateReadException('paging_over_cap'))->operatorHint()
+        );
+        $this->assertNull((new AutoElevateReadException('paging_incomplete'))->operatorHint());
+    }
+
+    public function test_the_company_scope_argument_cannot_be_omitted_or_nulled(): void
+    {
+        $param = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))->getParameters()[1];
+
+        $this->assertSame('expectedCompanyId', $param->getName());
+        $this->assertFalse($param->isOptional(), 'the scope proof must not be skippable');
+        $this->assertFalse($param->allowsNull(), 'null must not disable the scope proof');
+        $this->assertSame('string', (string) $param->getType());
+    }
+
+    /**
+     * The behavioural half of the same fix. An earlier version of this test asserted only
+     * that an argument-less call raises ArgumentCountError — which is PHP's arity check
+     * firing before the method body runs, and would pass for ANY two-parameter method whether
+     * or not the scope proof existed. That is a control that restates a declaration instead
+     * of executing code, so it is replaced here.
+     *
+     * This one drives the SCOPE PROOF ITSELF over every value the old signature permitted:
+     * the removed default (null) and the empty string a nullable parameter invites. Each must
+     * refuse a foreign row with row_drift rather than normalize it, and a matching row must
+     * still pass — so the test fails if the check is dropped AND if it is made unconditional.
+     */
+    public function test_no_company_argument_can_disable_the_scope_proof(): void
+    {
+        $foreign = self::computer(['companyId' => self::COMPANY_B]);
+
+        foreach ([null, ''] as $weak) {
+            try {
+                $row = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))
+                    ->invokeArgs($this->service(), [$foreign, $weak]);
+                $this->fail('a foreign row must not normalize under '.var_export($weak, true)
+                    .'; it returned '.json_encode($row));
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('row_drift', $e->reason);
+            } catch (\TypeError $e) {
+                // null is now refused by the signature itself, before the body runs.
+                $this->assertStringContainsString('normalizeComputer', $e->getMessage());
+            }
+        }
+
+        // The same proof must still ADMIT the row that genuinely belongs to the company,
+        // so this cannot be satisfied by a check that refuses everything.
+        $this->assertSame(
+            self::uuid(1),
+            $this->service()->normalizeComputer(self::computer(['id' => self::uuid(1)]), self::COMPANY_A)['id']
+        );
+    }
+
+    public function test_a_foreign_row_is_drift_even_when_normalize_is_called_directly(): void
+    {
+        $this->expectException(AutoElevateReadException::class);
+        $this->expectExceptionMessage('row_drift');
+        $this->service()->normalizeComputer(self::computer(['companyId' => self::COMPANY_B]), self::COMPANY_A);
+    }
+
+    /**
+     * The page window is OURS, not the caller's. PHP's `+` keeps the left operand's keys, so
+     * a caller passing take/skip could have driven the request while every bound in the walk
+     * (over-cap threshold, short-page test) went on reasoning about MAX_TAKE — a healthy
+     * tenant would then be reported as a paging-inconsistent vendor. Refused outright.
+     */
+    public function test_a_caller_cannot_override_the_page_window(): void
+    {
+        Http::fake();
+        foreach ([['take' => 50], ['skip' => 400], ['take' => 50, 'skip' => 400]] as $override) {
+            try {
+                (new \ReflectionMethod(AutoElevateReadService::class, 'allItems'))
+                    ->invokeArgs($this->service(), ['/api/v1/computers', $override]);
+                $this->fail('a caller-supplied page window must be refused: '.json_encode($override));
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('paging_contract', $e->reason);
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    /** The other half of the same contract: the walk still sends OUR window, merged after the query. */
+    public function test_the_walk_sends_its_own_page_window_with_the_callers_filter(): void
+    {
+        Http::fake([self::BASE.'/*' => Http::response(self::envelope([self::computer()]), 200)]);
+        $this->service()->computersForCompany(self::COMPANY_A);
+        Http::assertSent(fn (Request $r) => self::query($r) === [
+            'take' => '200', 'skip' => '0', 'companyId' => self::COMPANY_A,
+        ]);
     }
 }

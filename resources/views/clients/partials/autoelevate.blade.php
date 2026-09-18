@@ -15,6 +15,10 @@
     <div class="alert alert-danger small mb-0" role="alert">
         <i class="bi bi-exclamation-triangle me-1"></i>
         <strong>AutoElevate read failed</strong> ({{ $reason }}). The computer list could not be verified — this is not evidence that the client has no machines.
+        @php($hint = \App\Services\AutoElevate\AutoElevateReadException::hintFor($reason))
+        @if($hint)
+            <div class="mt-1">{{ $hint }}</div>
+        @endif
     </div>
 @elseif($state === 'empty')
     <div class="alert alert-info small mb-0" role="status">
