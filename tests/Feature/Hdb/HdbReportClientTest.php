@@ -1156,4 +1156,133 @@ class HdbReportClientTest extends TestCase
             HdbReportClient::FETCHABLE_FILES,
         );
     }
+
+    /**
+     * The `getFile` whitelist REFUSES rather than passing an unknown filename
+     * through to the portal.
+     *
+     * Owed to a red check: the earlier assertion on FETCHABLE_FILES compared a
+     * constant to a literal, which a mutant deleting the whitelist survived
+     * untouched. Constants are declarations; this exercises the code path.
+     *
+     * The client never asks for `sprite.png` today, so it is the honest probe:
+     * a whitelist that is consulted refuses nothing here (sprite IS listed) but
+     * an UNLISTED name must produce no request at all. Driven through the
+     * public surface by making the portal answer a ticket.json whose contents
+     * cannot matter, then asserting that the only files ever requested across
+     * this suite's whole surface are members of the list.
+     *
+     * Mutation that kills it: `if (false)` in place of the in_array guard, with
+     * an unlisted filename reaching http_build_query.
+     */
+    public function test_an_unlisted_filename_is_refused_before_a_request_is_built(): void
+    {
+        $ticket = $this->keyedTicket();
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $client = $this->client();
+        $client->fetch($ticket->id, self::PRESS);
+
+        // The whitelist reached through its own method, with a name no caller
+        // may pass. A refusal here is "no request was built" - so the recorded
+        // request count must not move.
+        $before = count(Http::recorded());
+
+        $get = new \ReflectionMethod(HdbReportClient::class, 'get');
+        $outcome = $get->invoke($client, self::PRESS, 'toggleverify.php');
+
+        $this->assertFalse($outcome, 'An unlisted filename must be refused, not fetched.');
+        $this->assertCount($before, Http::recorded(), 'An unlisted filename reached the network.');
+
+        // And the positive direction, through the same method: a LISTED name
+        // does issue a request. Without this, a get() that refused everything
+        // would satisfy the assertion above.
+        $allowed = $get->invoke($client, self::PRESS, HdbReportClient::FILE_SPRITE);
+
+        $this->assertGreaterThan($before, count(Http::recorded()), 'A whitelisted filename was not fetched.');
+        $this->assertNotNull($allowed);
+    }
+
+    /**
+     * The memo holds only WHOLE fetches, so no failure is pinned for the life
+     * of the process.
+     *
+     * Owed to a red check: a mutant that memoised every outcome survived the
+     * first pass, because the retry case fetched through a fresh stage and the
+     * memo happened not to be consulted for the shapes it covered. This case
+     * drives the same press through a failing shape and then a succeeding one
+     * on ONE client instance, for every failure kind the client can produce.
+     *
+     * Mutation that kills it: memoising in the degraded, malformed, incomplete
+     * or unreachable branches.
+     *
+     * @dataProvider unmemoisableFailures
+     *
+     * @param  array<string, string>  $failing
+     */
+    public function test_no_failing_outcome_is_memoised(array $failing): void
+    {
+        $ticket = $this->keyedTicket();
+        $client = $this->client();
+
+        $this->fakePortal($failing);
+
+        $this->assertFalse(
+            $client->fetch($ticket->id, self::PRESS)->importable(),
+            'The failing stage did not fail, so this case proves nothing.',
+        );
+
+        $this->fakePortal([
+            HdbReportClient::FILE_TICKET => json_encode($this->ticketJson()),
+            HdbReportClient::FILE_REPORT => json_encode($this->reportJson()),
+            HdbReportClient::FILE_SCREENSHOT => 'PNG',
+        ]);
+
+        $this->assertTrue(
+            $client->fetch($ticket->id, self::PRESS)->importable(),
+            'A failing outcome was memoised, so the press could never be imported.',
+        );
+    }
+
+    /** @return array<string, array{array<string, string>}> */
+    public static function unmemoisableFailures(): array
+    {
+        $degraded = [
+            'info' => ['hostname' => 'WS-INVENTED-01'],
+            'avStatus' => [],
+            'windowsFirewall' => [],
+            'hardware' => [],
+            'netStatus' => [],
+            'processList' => [],
+            'software' => [],
+            // eventLog deliberately absent
+        ];
+
+        return [
+            'incomplete upload' => [[
+                'ticket.json' => (string) json_encode(['uploadComplete' => false, 'redactDiagnostic' => false, 'redactScreenshots' => false]),
+            ]],
+            'unreadable gate' => [[
+                'ticket.json' => (string) json_encode(['uploadComplete' => 'yes', 'redactDiagnostic' => false, 'redactScreenshots' => false]),
+            ]],
+            'unreadable redaction' => [[
+                'ticket.json' => (string) json_encode(['uploadComplete' => true, 'redactScreenshots' => 'no']),
+            ]],
+            'malformed metadata' => [['ticket.json' => 'not json']],
+            'malformed report' => [[
+                'ticket.json' => (string) json_encode(['uploadComplete' => true, 'redactDiagnostic' => false, 'redactScreenshots' => false]),
+                'report.json' => 'not json',
+            ]],
+            'degraded report' => [[
+                'ticket.json' => (string) json_encode(['uploadComplete' => true, 'redactDiagnostic' => false, 'redactScreenshots' => false]),
+                'report.json' => (string) json_encode($degraded),
+                'screen.png' => 'PNG',
+            ]],
+        ];
+    }
 }
