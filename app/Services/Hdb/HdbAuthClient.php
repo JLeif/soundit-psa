@@ -291,9 +291,24 @@ final class HdbAuthClient
 
     private CookieJar $cookies;
 
-    public function __construct()
+    /**
+     * @param  CookieJar|null  $cookies  the jar the handshake's session lands in
+     *
+     * The parameter is the ONLY change this slice makes to a class proven live
+     * on 2026-09-18, and it is deliberately additive: every existing caller
+     * constructs with no arguments and gets the private jar it always got.
+     *
+     * {@see HdbReportClient} passes its OWN jar so the report fetches ride the
+     * session this handshake established, rather than logging in a second time
+     * or — far worse — growing a second login path. Sharing a jar is sharing a
+     * session: a caller that passes one is asking for exactly that, and it is
+     * the caller's job not to hand the same jar to two different identities.
+     * Nothing else about the handshake changes, and this class still writes
+     * nothing outside the jar it was given.
+     */
+    public function __construct(?CookieJar $cookies = null)
     {
-        $this->cookies = new CookieJar;
+        $this->cookies = $cookies ?? new CookieJar;
     }
 
     /**
