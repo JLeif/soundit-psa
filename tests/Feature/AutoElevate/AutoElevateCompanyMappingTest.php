@@ -184,6 +184,15 @@ class AutoElevateCompanyMappingTest extends TestCase
             ->assertSessionHasErrors('mappings');
 
         $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
+
+        // r3 diff:6: malformed input must not be reported as an empty form. Without this the
+        // two causes were indistinguishable to the admin and to this test.
+        $this->assertStringContainsString(
+            'unexpected format',
+            (string) session('errors')->first('mappings'),
+            'a non-array payload must be diagnosed as malformed, not as "nothing submitted"'
+        );
+        $this->assertStringNotContainsString('No AutoElevate companies were submitted', (string) session('errors')->first('mappings'));
     }
 
     /**
@@ -222,20 +231,25 @@ class AutoElevateCompanyMappingTest extends TestCase
     /**
      * contract:8 from the r2 held review, verified at source before being believed.
      *
-     * MEASURED, and it is worse than the finding described. I first assumed the bucket unset()
-     * made the SECOND company fall through uncounted; the test failed and showed the opposite,
-     * so this pins what actually happens rather than what I expected.
+     * MEASURED. My first two descriptions of this mechanism were WRONG and the r3 review caught
+     * the second one; this docblock states what the code actually executes.
      *
      * Two vendor companies whose names normalize to the same key ("Acme Manufacturing" and
-     * "ACME  manufacturing" both normalize to "acmemanufacturing") each match the single client
-     * in that bucket. The first write maps the client to company A; the second company's
-     * already-mapped check looks for ITS OWN id, does not find it, and matches the same client
-     * again -- overwriting the mapping so the client ends up on company B. The bucket unset()
-     * then makes the update() a no-op row-count of 0 for one of them, so the counter reports
-     * "Auto-matched 1 company(ies)" while TWO companies were matched against one client and the
-     * first company's mapping was silently destroyed. Nothing is reported as ambiguous, even
-     * though this is exactly the ambiguity the docblock promises never to guess at: the
-     * operator sees a plausible one-match message and no sign that a collision occurred.
+     * "ACME  manufacturing" both normalize to "acmemanufacturing") compete for the single
+     * unmapped client in that bucket. companies() sorts by name (strcasecmp), so "ACME
+     * manufacturing" is visited FIRST, claims the client, and unset()s the bucket. The second
+     * company then finds an EMPTY bucket: count($candidates) === 0, which is neither the >1
+     * ambiguous branch nor the ===1 match branch.
+     *
+     * So exactly ONE write happens and there is NO overwrite -- the loser is simply dropped.
+     * The operator is told "Auto-matched 1 company(ies) by name." and NOTHING is reported as
+     * ambiguous, even though this is precisely the ambiguity the class docblock promises never
+     * to guess at. Which of the two colliding companies wins is decided by name sort order,
+     * not by anything the operator can see or control.
+     *
+     * (For the record: I first predicted the second company fell through uncounted -- right
+     * outcome, wrong reason; then that it overwrote the first -- wrong. Only instrumenting the
+     * loop and checking the usort in companies() settled it.)
      *
      * This test PINS the current behaviour rather than asserting a fix: autoMatch() is outside
      * this leg's scope (the empty-submission guard), so the correction belongs to the parent
@@ -252,7 +266,7 @@ class AutoElevateCompanyMappingTest extends TestCase
 
         $response = $this->post(route('settings.autoelevate-companies.auto-match'));
 
-        // The SECOND company overwrote the first: one client, one mapping, last writer wins.
+        // Name sort order decided the winner; the loser was dropped, never overwritten.
         $this->assertSame(strtolower(self::COMPANY_B), $client->fresh()->autoelevate_company_id);
         $this->assertSame(0, Client::where('autoelevate_company_id', strtolower(self::COMPANY_A))->count());
 
@@ -273,7 +287,11 @@ class AutoElevateCompanyMappingTest extends TestCase
     {
         $listed = Client::factory()->create(['autoelevate_company_id' => null]);
         $unlisted = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_B]);
-        $this->fakeCompanies([self::company(self::COMPANY_A, 'Acme Manufacturing')]);
+        // r3 diff:7: no fakeCompanies() here. update() derives state solely from the submitted
+        // form and never reads the vendor, so a fake would be inert scenery implying a vendor
+        // dependency that does not exist. What this proves is exactly: a company key absent
+        // from the POST body has its mapping cleared -- which is the unlisted-company case,
+        // because an unlisted company has no row on the form to submit.
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
         $this->post(route('settings.autoelevate-companies.update'), [
@@ -505,14 +523,20 @@ class AutoElevateCompanyMappingTest extends TestCase
 
     public function test_empty_state_warning_fails_loudly_rather_than_under_reporting(): void
     {
-        // The count must come from the controller. A render path that omits it should error,
-        // not silently fall back to the collapsed collection's size -- the under-count this
-        // whole change removes.
-        $this->assertStringNotContainsString(
-            'mappedClients->count()',
-            file_get_contents(resource_path('views/settings/autoelevate-companies.blade.php')),
-            'the empty-state warning must not fall back to the collapsed count'
-        );
+        // r3 diff:2 was right: this used to grep the Blade SOURCE for one exact spelling of an
+        // expression, rendering nothing and executing no request. It could not detect the
+        // regression it names, and would have passed against any reworded fallback. Replaced
+        // with a behavioural assertion: render the real empty-state screen with TWO clients
+        // mapped to the SAME company id -- the case keyBy() collapses to one -- and require the
+        // warning to say 2, which a collapsed count cannot produce.
+        Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $this->fakeCompanies([]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->get(route('settings.autoelevate-companies.index'))
+            ->assertOk()
+            ->assertSee('2 client(s) still hold a mapping');
     }
 
     public function test_integrations_settings_links_to_map_companies_for_admins_only(): void

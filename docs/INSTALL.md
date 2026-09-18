@@ -1158,9 +1158,9 @@ Shows a client's AutoElevate computers on its client page. Read-only against the
 the PSA never writes to AutoElevate, and nothing here is billed or licensed.
 
 **Schema:** the stage-2 migration adds one nullable, indexed column,
-`clients.autoelevate_company_id` (the AutoElevate company UUID). Values arrive from the
-vendor and are stored as received; nothing normalises or enforces case, so do not rely on
-them being lowercase. It is nullable with no backfill, so existing rows are untouched and no
+`clients.autoelevate_company_id` (the AutoElevate company UUID). Ids are lowercased when the
+vendor list is read, so stored values are lowercase in practice -- but nothing in the schema
+enforces that, so compare case-insensitively rather than relying on it. It is nullable with no backfill, so existing rows are untouched and no
 client is mapped until an admin maps it. Run `php artisan migrate --force` on deploy as
 usual. The mapping screens require the column and will fail with a column-not-found error if
 migrate is skipped; the read-only computers panel on the client page degrades quietly to

@@ -50,9 +50,14 @@ class AutoElevateCompanyController extends Controller
         // would post "" and the clear-then-apply save below would silently destroy its mapping.
         //
         // Concat the UNKEYED rows, not $mappedClients: keyBy() keeps one client per company id,
-        // so two clients holding the same id (update() lowercases, autoMatch() does not) would
-        // leave the collapsed one with no <option> anywhere on the page -- exactly the mapping
-        // this concat exists to protect.
+        // so if two clients ever held the same id the collapsed one would have no <option>
+        // anywhere on the page. NOTE: at this tip that state is not reachable through either
+        // writer -- companies() already lowercases every id (AutoElevateReadService::companies)
+        // and update() rejects a duplicate company id outright -- so this is defence against a
+        // state the current code cannot produce, not a fix for an observed one. It costs one
+        // unkeyed read and removes a silent-destruction mode if either invariant is ever
+        // relaxed. It does NOT protect a mapping whose company the vendor stopped listing:
+        // that row is cleared by the next save regardless (see the INSTALL caveat).
         $allClients = Client::operational()->orderBy('name')->get(['id', 'name'])
             ->concat($mappedClientRows)
             ->unique('id')
@@ -70,6 +75,13 @@ class AutoElevateCompanyController extends Controller
     public function update(Request $request)
     {
         $mappings = $request->input('mappings', []);
+        // r3 diff:6: a non-array `mappings` is malformed input, not an empty form. Collapsing it
+        // into [] made both report "No AutoElevate companies were submitted", so a client
+        // sending the wrong type was told its payload was simply empty. Refuse it distinctly;
+        // nothing is cleared on either path.
+        if ($request->has('mappings') && ! is_array($mappings)) {
+            return back()->withErrors(['mappings' => 'The AutoElevate mapping form was submitted in an unexpected format, so nothing was changed. Existing mappings were kept. Reload the Map companies screen and try again.']);
+        }
         if (! is_array($mappings)) {
             $mappings = [];
         }
