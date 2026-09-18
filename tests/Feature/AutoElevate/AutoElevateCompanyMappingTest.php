@@ -213,6 +213,36 @@ class AutoElevateCompanyMappingTest extends TestCase
     }
 
     /** A non-array `mappings` (scalar) must also refuse rather than coerce to "clear all". */
+    /**
+     * r6 contract:4. update() carries `if (! is_array($mappings)) { $mappings = []; }` with a
+     * comment asserting it is the sole guard against a PRESENT null wiping every mapping -- and
+     * nothing in this file exercised that path. Every other guard test posts [], a scalar, or a
+     * file, all of which the malformed-payload branch catches first. r4 diff:8 had already argued
+     * this line was dead and removable, so an untested line the code calls load-bearing is exactly
+     * the line someone deletes next round.
+     *
+     * postJson is required: a form POST cannot express a present null (it arrives as the string
+     * "" or not at all), which is why input('mappings', []) returns null here and [] elsewhere.
+     *
+     * I first asserted 422 here and the test told me otherwise: the controller does not validate,
+     * it coerces to [] and takes the `$mappings === []` refusal, which redirects back (302) with
+     * an error on the `mappings` key. Pinned to what executes, not to what I expected.
+     */
+    public function test_save_with_a_present_null_mappings_keeps_every_mapping(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $b = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_B]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->postJson(route('settings.autoelevate-companies.update'), ['mappings' => null])
+            ->assertStatus(302)
+            ->assertSessionHasErrors('mappings');
+
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id, 'a present null must not reach the clear-then-apply write');
+        $this->assertSame(self::COMPANY_B, $b->fresh()->autoelevate_company_id);
+    }
+
     public function test_save_with_a_scalar_mappings_value_keeps_every_mapping(): void
     {
         $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
