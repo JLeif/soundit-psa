@@ -59,21 +59,25 @@ classify() {
   if [ "$st" -eq 126 ] || [ "$st" -eq 127 ]; then
     printf 'ERRORED\trunner could not be executed (status %s)\n' "$st"; return
   fi
-  if printf '%s' "$out" | grep -qE 'No such file or directory|command not found|Permission denied'; then
+  # Every guard and marker is matched with a here-string, never a pipe: under
+  # pipefail a `printf | grep -q` whose match lands early is killed by SIGPIPE
+  # (141) once the output exceeds the pipe buffer, and the guard would then read
+  # as false as a function of output size rather than of content.
+  if grep -qE 'No such file or directory|command not found|Permission denied' <<<"$out"; then
     printf 'ERRORED\trunner missing or not executable (%s)\n' "$PHPUNIT"; return
   fi
-  if printf '%s' "$out" | grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)'; then
+  if grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)' <<<"$out"; then
     printf 'ERRORED\tdependencies not installed (run composer install)\n'; return
   fi
-  if printf '%s' "$out" | grep -qiE 'No tests executed|No tests found|Could not find|No filter matched'; then
+  if grep -qiE 'No tests executed|No tests found|Could not find|No filter matched' <<<"$out"; then
     printf 'ERRORED\tsuite ran no tests for filter %s\n' "$FILTER"; return
   fi
 
   # Red markers (PHPUnit classic, PHPUnit 10/11 summary line, Pest).
-  if printf '%s' "$out" | grep -qE '^(FAILURES|ERRORS)!|Tests:.*(Failures|Errors): *[1-9]|Tests:.*[1-9][0-9]* +(failed|errored)'; then
+  if grep -qE '^(FAILURES|ERRORS)!|Tests:.*(Failures|Errors): *[1-9]|Tests:.*[1-9][0-9]* +(failed|errored)' <<<"$out"; then
     marker=RED
   # Green markers.
-  elif printf '%s' "$out" | grep -qE '^OK \(|^OK, but|Tests:.*[1-9][0-9]* +passed'; then
+  elif grep -qE '^OK \(|^OK, but|Tests:.*[1-9][0-9]* +passed' <<<"$out"; then
     marker=GREEN
   fi
 
@@ -128,7 +132,10 @@ PY
   if [ "$verdict" != KILLED ]; then
     # A non-kill is the interesting case: show the runner's own tail so the
     # reader can see what the harness read, not just what it concluded.
-    printf '%s' "$out" | tail -5 | sed "s/^/    | /"
+    # Newline-terminated: $out comes from command substitution, which strips
+    # trailing newlines, so a bare `printf '%s'` would glue the NEXT mutant's
+    # "MUTANT ... =>" line onto the end of this dump.
+    printf '%s\n' "$out" | tail -5 | sed "s/^/    | /"
   fi
   record "$verdict" "$name" "$reason"
 
@@ -139,6 +146,23 @@ PY
 C=app/Services/Hdb/HdbReportClient.php
 R=app/Services/Hdb/HdbReportRedaction.php
 V=app/Services/Hdb/HdbReportResult.php
+
+# Baseline. The UNMUTATED suite must run and pass BEFORE the first mutation, or
+# every KILLED below is indistinguishable from the tip being red for a reason
+# that predates the mutant: a suite already failing at $TIP scores 14/14 and
+# reports PASSED. Costs one extra suite run and is the precondition of any
+# mutation verdict. Judged by the same classify(), so "could not start" is not
+# mistaken for "red".
+BASE_OUT=$(timeout "$TIMEOUT" "$PHPUNIT" --filter "$FILTER" 2>&1)
+BASE_ST=$?
+BASE_LINE=$(classify "$BASE_ST" "$BASE_OUT")
+if [ "${BASE_LINE%%$'\t'*}" != SURVIVED ]; then
+  echo "BASELINE (unmutated) => NOT GREEN: ${BASE_LINE#*$'\t'}"
+  printf '%s\n' "$BASE_OUT" | tail -5 | sed "s/^/    | /"
+  echo "RED CHECK FAILED: unmutated suite is not green at $TIP; no mutation verdict is meaningful (rc=4)"
+  exit 4
+fi
+echo "baseline: unmutated suite ran and passed under filter $FILTER"
 
 # M1 — the upload gate deleted entirely (import an unfinished press).
 run M1-upload-gate-removed "$C" \
@@ -271,5 +295,5 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 
-echo "RED CHECK PASSED: all $TOTAL named mutants ran and were killed"
+echo "RED CHECK PASSED: unmutated baseline green; all $TOTAL named mutants ran and were killed"
 exit 0
