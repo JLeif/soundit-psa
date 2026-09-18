@@ -212,7 +212,6 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
     }
 
-    /** A non-array `mappings` (scalar) must also refuse rather than coerce to "clear all". */
     /**
      * r6 contract:4. update() carries `if (! is_array($mappings)) { $mappings = []; }` with a
      * comment asserting it is the sole guard against a PRESENT null wiping every mapping -- and
@@ -243,6 +242,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertSame(self::COMPANY_B, $b->fresh()->autoelevate_company_id);
     }
 
+    /** A non-array `mappings` (scalar) must also refuse rather than coerce to "clear all". */
     public function test_save_with_a_scalar_mappings_value_keeps_every_mapping(): void
     {
         $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
@@ -265,12 +265,6 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertStringNotContainsString('No AutoElevate companies were submitted', (string) session('errors')->first('mappings'));
     }
 
-    /**
-     * r4 context:8. index() and autoMatch() redirect away when AutoElevate is unconfigured, but
-     * update() did not, leaving the destructive clear-then-apply write reachable by a direct or
-     * replayed POST on an installation whose key had been removed -- a state from which the screen
-     * itself cannot be opened. The write path is now gated like the read paths.
-     */
     /**
      * r5 diff:1: an ERRORED upload named `mappings` (too large, partial, no tmp dir) has an empty
      * path, so hasFile() is false and input() is null -- the previous guard missed it and told the
@@ -296,6 +290,12 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
     }
 
+    /**
+     * r4 context:8. index() and autoMatch() redirect away when AutoElevate is unconfigured, but
+     * update() did not, leaving the destructive clear-then-apply write reachable by a direct or
+     * replayed POST on an installation whose key had been removed -- a state from which the screen
+     * itself cannot be opened. The write path is now gated like the read paths.
+     */
     public function test_update_is_refused_when_autoelevate_is_not_configured(): void
     {
         $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
@@ -370,6 +370,29 @@ class AutoElevateCompanyMappingTest extends TestCase
             ->assertOk()
             ->assertSee('AutoElevate returned zero companies for this key.')
             ->assertSee('1 client(s) still hold a mapping')
+            ->assertDontSee('Save Mappings');
+    }
+
+    /**
+     * r7 contract:7. Every other test of the zero-company screen creates at least one mapped
+     * client, so all of them exercise the TRUE branch of `@if($mappedClients->isNotEmpty())`.
+     * The false branch -- nothing listed AND nothing at risk -- had no control at all, so a
+     * change that made the alarming "client(s) still hold a mapping" line render
+     * unconditionally would have passed the whole suite.
+     *
+     * This pins the reassuring case: the empty-list notice still appears, Save is still
+     * withheld (no companies to submit), and the screen does NOT claim anything is at risk.
+     */
+    public function test_zero_companies_and_zero_mapped_clients_warns_about_nothing_at_risk(): void
+    {
+        $this->fakeCompanies([]);
+        $this->assertSame(0, Client::whereNotNull('autoelevate_company_id')->count(), 'fixture must have no mapped clients, or this test proves nothing');
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->get(route('settings.autoelevate-companies.index'))
+            ->assertOk()
+            ->assertSee('AutoElevate returned zero companies for this key.')
+            ->assertDontSee('still hold a mapping')
             ->assertDontSee('Save Mappings');
     }
 
