@@ -41,9 +41,11 @@ use Tests\TestCase;
  * bitten by three times is fixtures that all sit at the benign value, so a
  * broken reader passes the whole provider. So the answer-evidence tests below do
  * NOT all carry the same key: one drives DialBLegUUID, one DialBLegDuration, one
- * DialBLegStatus, one CallStatus, and the negatives carry the keys that are
- * present on a call NOBODY answered (DialBLegTo alone, empty DialBLegUUID) so a
- * reader that accepts any Dial* key at all fails here.
+ * DialBLegStatus, one DialAction=connected, and the negatives carry the keys that
+ * are present on a call NOBODY answered (DialBLegTo alone, empty DialBLegUUID,
+ * and the top-level CallStatus=in-progress that describes the A leg Plivo itself
+ * answered) so a reader that accepts any Dial* key — or the A leg's status — at
+ * all fails here.
  */
 class AnsweredCallFrozenAsMissedTest extends TestCase
 {
@@ -169,13 +171,17 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
     }
 
     /**
-     * DIFFERENT EVIDENCE KEY AGAIN: DialBLegStatus, and separately CallStatus.
-     * Plivo's docs enumerate no value list for DialBLegStatus, so the reader
-     * matches affirmative words only.
+     * DIFFERENT EVIDENCE KEY AGAIN: DialBLegStatus, and separately
+     * DialAction=connected. Plivo's docs enumerate no value list for
+     * DialBLegStatus, so the reader matches affirmative words only;
+     * DialAction is documented as answer|connected|hangup|digits and
+     * 'connected' is the explicit bridge event. Both are B-leg scoped, which
+     * the top-level CallStatus is not — that value is pinned as a NEGATIVE
+     * below, because the A leg is up on a call nobody picked up.
      *
      * RED at 4474fa88 on both rows: answered_at null.
      */
-    public function test_affirmative_status_words_are_accepted_as_answer_evidence(): void
+    public function test_affirmative_b_leg_evidence_is_accepted_as_answer_evidence(): void
     {
         $service = app(PhoneCallService::class);
 
@@ -187,20 +193,21 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
         ]);
         $this->assertNotNull(PhoneCall::where('call_uuid', 'late-answer-blegstatus')->firstOrFail()->answered_at);
 
-        $this->endedCallWithNoDuration('late-answer-callstatus');
-        $service->handleCallAnswered('late-answer-callstatus', [
-            'CallUUID' => 'late-answer-callstatus',
-            'CallStatus' => 'in-progress',
+        $this->endedCallWithNoDuration('late-answer-dialaction-connected');
+        $service->handleCallAnswered('late-answer-dialaction-connected', [
+            'CallUUID' => 'late-answer-dialaction-connected',
+            'DialAction' => 'connected',
         ]);
-        $this->assertNotNull(PhoneCall::where('call_uuid', 'late-answer-callstatus')->firstOrFail()->answered_at);
+        $this->assertNotNull(PhoneCall::where('call_uuid', 'late-answer-dialaction-connected')->firstOrFail()->answered_at);
     }
 
     /**
      * THE NEGATIVE THAT MATTERS MOST. A missed inbound call still RINGS a
      * tech's SIP endpoint, so DialBLegTo is present on a call nobody picked up,
      * and Plivo states DialBLegUUID is "empty if nobody answers". A reader that
-     * treated any Dial* key — or DialBLegTo, or an empty B-leg UUID — as an
-     * answer would convert every genuinely missed call into a completed one.
+     * treated any Dial* key — or DialBLegTo, or an empty B-leg UUID, or the A
+     * leg's own CallStatus — as an answer would convert every genuinely missed
+     * call into a completed one.
      *
      * This test is GREEN both before and after the fix by construction, and it
      * is the guard on the fix rather than on the defect: it is what stops the
@@ -220,13 +227,59 @@ class AnsweredCallFrozenAsMissedTest extends TestCase
             'DialBLegDuration' => '0',
             'DialBLegStatus' => 'no-answer',
             'DialBLegHangupCauseName' => 'NO_ANSWER',
+            // The A leg is STILL UP at end-of-dial - Plivo answered it to run the
+            // Dial at all - so a real no-answer payload carries this affirmative
+            // value alongside every B-leg key that says nobody picked up.
+            'CallStatus' => 'in-progress',
         ]);
 
         $stored = PhoneCall::where('call_uuid', 'never-answered')->firstOrFail();
 
         $this->assertNull($stored->answered_at,
-            'DialBLegTo names the destination ATTEMPTED and is present on a call nobody answered; an empty DialBLegUUID is Plivo saying nobody answered');
+            'DialBLegTo names the destination ATTEMPTED and is present on a call nobody answered; an empty DialBLegUUID is Plivo saying nobody answered, and CallStatus=in-progress is only the A leg');
         $this->assertSame(CallStatus::Missed, $stored->status);
+    }
+
+    /**
+     * THE A-LEG TRAP, pinned on its own with NO B-leg evidence in the payload at
+     * all. The top-level CallStatus is the A leg's state, and on an inbound call
+     * Plivo has already answered the A leg in order to execute the Dial/Record
+     * XML — so it reads 'in-progress' for the whole time a tech's endpoint is
+     * merely ringing, and on a call that rings out to voicemail. Plivo retries
+     * callbacks and PlivoWebhookController routes CallStatus=in-progress straight
+     * to handleCallAnswered, so such a delivery lands on an already-ended,
+     * duration-less row. Accepting it there would flip a genuinely missed call to
+     * Completed and suppress the voicemail auto-detect: the severe direction.
+     *
+     * GREEN both before and after the fix by construction; it is the guard on the
+     * fix, and it is what stops the repair being worse than the disease.
+     */
+    public function test_a_top_level_call_status_is_not_treated_as_answer_evidence(): void
+    {
+        $service = app(PhoneCallService::class);
+
+        $this->endedCallWithNoDuration('a-leg-in-progress-only');
+        $service->handleCallAnswered('a-leg-in-progress-only', [
+            'CallUUID' => 'a-leg-in-progress-only',
+            'CallStatus' => 'in-progress',
+        ]);
+
+        $stored = PhoneCall::where('call_uuid', 'a-leg-in-progress-only')->firstOrFail();
+        $this->assertNull($stored->answered_at,
+            'CallStatus describes the A leg Plivo itself answered and is affirmative on a call nobody picked up');
+        $this->assertSame(CallStatus::Missed, $stored->status);
+
+        // The other affirmative A-leg word, on a row already detected as a
+        // voicemail: it must neither stamp an answer moment nor resurrect it.
+        $this->endedCallWithNoDuration('a-leg-answered-voicemail', CallStatus::Voicemail);
+        $service->handleCallAnswered('a-leg-answered-voicemail', [
+            'CallUUID' => 'a-leg-answered-voicemail',
+            'CallStatus' => 'answered',
+        ]);
+
+        $voicemail = PhoneCall::where('call_uuid', 'a-leg-answered-voicemail')->firstOrFail();
+        $this->assertNull($voicemail->answered_at);
+        $this->assertSame(CallStatus::Voicemail, $voicemail->status);
     }
 
     /**

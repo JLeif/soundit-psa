@@ -289,6 +289,18 @@ class PhoneCallService
      *    is present on a dial nobody picked up, which is precisely a missed
      *    inbound call ringing a tech's SIP endpoint. Accepting it would convert
      *    every genuinely missed call into a completed one.
+     *  - The top-level CallStatus. It describes the A LEG, and every arm here is
+     *    deliberately B-leg scoped. On an inbound call Plivo has ALREADY answered
+     *    the A leg - that is how this Dial/Record XML is executing at all - so
+     *    CallStatus is 'in-progress' for the entire time a tech's endpoint is
+     *    merely ringing, and stays so on a call that then rings out to voicemail.
+     *    Plivo retries callbacks and PlivoWebhookController routes
+     *    CallStatus=in-progress straight to handleCallAnswered, so such a
+     *    delivery lands on an already-ended, duration-less row; reading it as
+     *    answer evidence would flip a genuinely missed call to Completed and
+     *    suppress the voicemail auto-detect. A live answer does not need it: that
+     *    path is the (! $callEnded) arm above, which never consults this
+     *    predicate.
      *
      * Casing is taken from the vendor verbatim (Plivo is PascalCase here); no
      * case-insensitive lookup is done, because a key we cannot name exactly is a
@@ -313,12 +325,6 @@ class PhoneCallService
         // would mislabel a missed call as answered.
         $blegStatus = is_string($data['DialBLegStatus'] ?? null) ? strtolower($data['DialBLegStatus']) : null;
         if (in_array($blegStatus, ['answer', 'answered', 'in-progress', 'connected'], true)) {
-            return true;
-        }
-
-        // Plivo's own top-level call status, same affirmative-only rule.
-        $callStatus = is_string($data['CallStatus'] ?? null) ? strtolower($data['CallStatus']) : null;
-        if (in_array($callStatus, ['in-progress', 'answered'], true)) {
             return true;
         }
 
