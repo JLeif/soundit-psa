@@ -67,6 +67,17 @@
 # pins the REASON (the extraction diagnostic on stderr) and runs a positive
 # control proving the inputs were readable first. Asserting an exit CODE that
 # several distinct failures share is not an assertion about which one happened.
+#
+# WHAT A ROUND-5 REVIEW CORRECTED, and it was again a guard that could not fail in
+# the case it was added for. The overrun guard tested only for a COLUMN-0 statement
+# inside the extracted range, but bash closes a function on an INDENTED `}` exactly
+# as it does on a column-0 one, and every line after it -- also indented -- is then
+# a top-level command that `eval` RUNS. One leading space (or a tab) defeated the
+# guard while this file's own comments asserted the hole was shut, and arm 3
+# certified only the column-0 variant the guard happened to catch. The guard is now
+# brace-DEPTH based -- the depth opened by the definition line must not return to
+# zero before the range's last line, whatever the indentation -- and arm 3 pins the
+# indented variant beside the column-0 one, by marker file rather than exit code.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,33 +154,58 @@ if [ "${1:-}" = "--selftest" ]; then
     # The control is the marker file. Asserting only the exit code would repeat
     # this round's other mistake -- the pre-fix sweep also exited nonzero here,
     # but for an unrelated reason, AFTER running the planted command.
-    overrun="$(mktemp)"; over_err="$(mktemp)"
-    marker="$(mktemp -u)"
-    trap 'rm -f "$mutant" "$blind" "$blind_err" "$overrun" "$over_err" "$marker"' EXIT
+    #
+    # TWO FIXTURES, because the first version of this arm pinned only the variant
+    # the first version of the guard happened to catch. Fixture A smuggles at
+    # column 0. Fixture B indents EVERY line after the indented closing brace, so a
+    # column-0 test sees nothing while bash still ends the function at that brace --
+    # B is the one that was still EXECUTED under the column-0-only guard, and it is
+    # the case the header's non-execution claim rests on.
+    overrun_a="$(mktemp)"; over_err_a="$(mktemp)"; marker_a="$(mktemp -u)"
+    overrun_b="$(mktemp)"; over_err_b="$(mktemp)"; marker_b="$(mktemp -u)"
+    trap 'rm -f "$mutant" "$blind" "$blind_err" "$overrun_a" "$over_err_a" "$marker_a" "$overrun_b" "$over_err_b" "$marker_b"' EXIT
     {
         echo 'assert_no_warnings() {'
         echo '    local f="$1"'
         for _pad in $(seq 1 25); do echo "    : pad_$_pad"; done
         echo '    return 0'
         echo '  }'   # INDENTED brace: the sed range cannot stop here
-        echo "touch '$marker'"
+        echo "touch '$marker_a'"
         echo 'other_function() {'
         echo '    :'
         echo '}'
-    } > "$overrun"
-    "$0" "$overrun" "$selftest_corpus" >/dev/null 2>"$over_err"
-    rc=$?
-    if [ -e "$marker" ]; then
-        echo "SELFTEST FAILED: the extractor EXECUTED script text beyond the function body" >&2
-        echo "  (planted marker $marker was created). This is the eval-smuggling defect." >&2
-        exit 1
-    fi
-    if [ "$rc" -ne 2 ] || ! grep -q 'column-0 statement' "$over_err"; then
-        echo "SELFTEST FAILED: overrunning body exited $rc (want 2) without the overrun diagnostic; stderr was:" >&2
-        sed 's/^/    /' "$over_err" >&2
-        exit 1
-    fi
-    echo "selftest: refuses an overrunning body WITHOUT executing what it swallowed"
+    } > "$overrun_a"
+    {
+        echo 'assert_no_warnings() {'
+        echo '    local f="$1"'
+        for _pad in $(seq 1 25); do echo "    : pad_$_pad"; done
+        echo '    return 0'
+        echo '  }'   # INDENTED brace: bash ends the function HERE
+        echo "    touch '$marker_b'"   # INDENTED too: invisible to a column-0 test
+        echo '    other_function() {'
+        echo '    :'
+        echo '}'
+    } > "$overrun_b"
+    # Called from this script's own shell, never inside `$( )`, so these exits are
+    # this script's exits -- the round-3 lesson, kept.
+    assert_refuses_overrun() {
+        local fixture="$1" errfile="$2" mark="$3" label="$4" rc
+        "$0" "$fixture" "$selftest_corpus" >/dev/null 2>"$errfile"
+        rc=$?
+        if [ -e "$mark" ]; then
+            echo "SELFTEST FAILED: the extractor EXECUTED script text beyond the function body ($label)" >&2
+            echo "  (planted marker $mark was created). This is the eval-smuggling defect." >&2
+            exit 1
+        fi
+        if [ "$rc" -ne 2 ] || ! grep -q 'ran past assert_no_warnings' "$errfile"; then
+            echo "SELFTEST FAILED: overrunning body ($label) exited $rc (want 2) without the overrun diagnostic; stderr was:" >&2
+            sed 's/^/    /' "$errfile" >&2
+            exit 1
+        fi
+    }
+    assert_refuses_overrun "$overrun_a" "$over_err_a" "$marker_a" "column-0 smuggling"
+    assert_refuses_overrun "$overrun_b" "$over_err_b" "$marker_b" "indented smuggling"
+    echo "selftest: refuses an overrunning body, column-0 AND indented, WITHOUT executing what it swallowed"
 
     echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted, and non-executing when the extraction range overruns"
     exit 0
@@ -199,19 +235,46 @@ CORPUS="${2:-$HERE/gc-verify-summary-corpus.txt}"
 # to execute a planted `touch` and print arbitrary text to stderr, while exiting
 # for an unrelated reason. See test_extractor_refuses_an_overrunning_body.
 #
-# The invariant that actually holds: a shell function's body is INDENTED. Every
-# line strictly between the definition line and the terminating brace must begin
-# with whitespace (or be blank). A column-0 statement inside the range is proof
-# the range escaped the function. Verified against both revisions of the real
-# function under review: 0 column-0 interior lines in each.
+# INDENTATION IS NOT THE INVARIANT, and a round-5 review was right that an earlier
+# version of this comment claimed it was. Bash ends a function at an INDENTED `}`
+# exactly as it does at a column-0 one, so a crafted body that indents its own
+# closing brace AND everything it wants executed satisfied every guard here while
+# `eval` ran it. "No column-0 interior line" is a property of the two files checked,
+# not a property that excludes execution.
+#
+# The invariant that actually holds is BRACE DEPTH: the depth opened by the
+# definition line must not return to zero before the LAST line of the extracted
+# range. Depth reaching zero earlier means the function closed there and everything
+# after it is smuggled text, at column 0 or indented or tabbed. The column-0 test is
+# kept beside it as a cheaper second witness of the same escape. Braces inside
+# strings and comments are counted too, which can only make this REFUSE a body it
+# might have accepted -- the safe direction for a guard whose alternative is `eval`.
+# Verified against both revisions of the real function under review: depth first
+# returns to zero on the final line, and 0 column-0 interior lines in each.
 extract_fn() {
     sed -n '/^assert_no_warnings()/,/^}$/p' "$1"
 }
 
-# Return 0 if the extracted body contains a column-0 line between its first and
-# last, i.e. the sed range ran past the function's own closing brace.
+# Return 0 if the extracted range covers anything other than this one function
+# body, i.e. the sed range ran past assert_no_warnings()'s own closing brace.
+# Refuses when the brace depth closes before the range's last line (an indented or
+# tabbed `}` closes it just as well as a column-0 one), when it never closes, and
+# -- as a second witness of the same escape -- when an interior line starts at
+# column 0.
 fn_body_overruns() {
-    printf '%s\n' "$1" | sed -n '2,$p' | head -n -1 | grep -q '^[^[:space:]]'
+    printf '%s\n' "$1" | awk '
+        { line[NR] = $0
+          t = $0; opens  = gsub(/\{/, "", t)
+          t = $0; closes = gsub(/\}/, "", t)
+          d += opens - closes
+          depth[NR] = d }
+        END {
+            if (NR < 2) exit 0                                  # nothing to bound
+            if (depth[NR] != 0) exit 0                          # never closed
+            for (i = 1; i < NR; i++) if (depth[i] <= 0) exit 0   # closed early
+            for (i = 2; i < NR; i++) if (line[i] !~ /^[ \t]/ && line[i] != "") exit 0
+            exit 1
+        }'
 }
 
 # A failed extraction is FATAL, never a verdict: the whole point is to execute the
@@ -235,11 +298,12 @@ require_extractable() {
         echo "FATAL: extracted body from $script is not brace-terminated" >&2
         exit 2
     }
-    # The range ended at a column-0 '}' -- but is that THIS function's brace? If
-    # any interior line starts at column 0, the range overran and `eval` would
-    # execute script text that is not the parser. Refuse rather than execute it.
+    # The range ended at a column-0 '}' -- but is that THIS function's brace? If the
+    # body's brace depth closes before the range's last line, or an interior line
+    # starts at column 0, the range overran and `eval` would execute script text
+    # that is not the parser. Refuse rather than execute it.
     fn_body_overruns "$fn" && {
-        echo "FATAL: extracted body from $script contains a column-0 statement, so the" >&2
+        echo "FATAL: extracted body from $script does not close on its own last line, so the" >&2
         echo "  range ran past assert_no_warnings()'s own closing brace; refusing to eval it" >&2
         exit 2
     }
