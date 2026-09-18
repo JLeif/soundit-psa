@@ -1,0 +1,170 @@
+# Real PHPUnit/paratest summary lines harvested from gate logs on the build box.
+# Committed so the false-positive sweep is reproducible off that box: the sweep
+# was this change's strongest evidence and a review correctly objected that it
+# could not be re-derived from the diff.
+#
+# PROVENANCE, corrected after a round-2 review measured it and found the original
+# claim false. This file is NOT uniformly observed runner output:
+#   * Most lines ARE real summary lines harvested from gate logs on the build box.
+#   * 27 lines are this repo's OWN sibling harness's report lines ("ok ...",
+#     "FAIL want=..."). They are log decoration, not runner output. They never
+#     match the parser's ^[[:space:]]*Tests:[[:space:]] selector, hit the
+#     no-summary-line early return, and so account for a large share of the
+#     refusal count. They are retained deliberately -- a parser must refuse log
+#     decoration -- but they must not be counted as evidence about summary lines.
+#   * The METRIC-BEARING lines below are constructed from php-timer's
+#     Duration::asString() and PHPUnit's ResourceUsageFormatter, i.e. derived from
+#     the PRODUCER'S CODE rather than observed. They are marked as such. They exist
+#     because the original corpus carried ZERO metric lines, which made this
+#     change's headline "changed=0" true by construction and worth nothing.
+# Some lines legitimately REFUSE (a real warnings floor must refuse) -- the sweep
+# asserts that no line regresses, not that every line passes.
+#
+# 129 lines.
+FAIL want=FAIL got=PASS  Tests:    1 warning, 7619 passed (48511 assertions)
+FAIL want=FAIL got=PASS  Tests:    467 passed (48511 assertions, Warnings: 3)
+FAIL want=FAIL got=PASS  Tests:    467 passed (7286 warnings, 48511 assertions)
+FAIL want=FAIL got=PASS  Tests:    7286 warnings, 467 passed (48511 assertions)
+FAIL want=FAIL got=PASS  Tests:    7619 passed (48511 assertions, 1 warning)
+FAIL want=FAIL got=PASS  Tests: 21, Assertions: 30, Warnings: 1.
+SUMMARY_LINE=  Tests:    157 skipped, 7618 passed (48636 assertions)
+SUMMARY_LINE=  Tests:    161 skipped, 7629 passed (48759 assertions)
+Tests:    1 failed (5 assertions)
+Tests:    1 failed, 136 skipped, 6977 passed (44187 assertions)
+Tests:    1 failed, 43 passed (501 assertions)
+Tests:    1 failed, 43 passed (503 assertions)
+Tests:    1 failed, 43 passed (504 assertions)
+Tests:    1 failed, 43 passed (506 assertions)
+Tests:    1 failed, 43 passed (508 assertions)
+Tests:    1 failed, 43 passed (510 assertions)
+Tests:    1 failed, 43 passed (511 assertions)
+Tests:    1 failed, 43 passed (512 assertions)
+Tests:    1 failed, 43 passed (513 assertions)
+Tests:    1 failed, 43 passed (514 assertions)
+Tests:    1 failed, 43 passed (516 assertions)
+Tests:    1 failed, 83 passed (354 assertions)
+Tests:    10 passed (17 assertions)
+Tests:    13 failed, 156 skipped, 7272 passed (46628 assertions)
+Tests:    13 failed, 156 skipped, 7322 passed (46844 assertions)
+Tests:    137 skipped, 6982 passed (44237 assertions)
+Tests:    137 skipped, 6995 passed (44286 assertions)
+Tests:    141 skipped, 7127 passed (45391 assertions)
+Tests:    141 skipped, 7162 passed (45680 assertions)
+Tests:    141 skipped, 7188 passed (46003 assertions)
+Tests:    15 failed, 21 passed (244 assertions)
+Tests:    150 skipped, 7192 passed (46090 assertions)
+Tests:    156 skipped, 7215 passed (46142 assertions)
+Tests:    156 skipped, 7271 passed (46684 assertions)
+Tests:    156 skipped, 7271 passed (46686 assertions)
+Tests:    156 skipped, 7277 passed (46704 assertions)
+Tests:    156 skipped, 7285 passed (46722 assertions)
+Tests:    156 skipped, 7320 passed (46833 assertions)
+Tests:    156 skipped, 7335 passed (46938 assertions)
+Tests:    156 skipped, 7339 passed (46963 assertions)
+Tests:    157 skipped, 7289 passed (46968 assertions)
+Tests:    157 skipped, 7404 passed (47436 assertions)
+Tests:    157 skipped, 7406 passed (47396 assertions)
+Tests:    157 skipped, 7408 passed (47399 assertions)
+Tests:    157 skipped, 7494 passed (47832 assertions)
+Tests:    157 skipped, 7494 passed (47870 assertions)
+Tests:    157 skipped, 7498 passed (47791 assertions)
+Tests:    157 skipped, 7510 passed (47807 assertions)
+Tests:    157 skipped, 7520 passed (48361 assertions)
+Tests:    157 skipped, 7521 passed (48370 assertions)
+Tests:    157 skipped, 7521 passed (48371 assertions)
+Tests:    157 skipped, 7529 passed (47843 assertions)
+Tests:    157 skipped, 7535 passed (47855 assertions)
+Tests:    157 skipped, 7541 passed (47862 assertions)
+Tests:    157 skipped, 7596 passed (48511 assertions)
+Tests:    157 skipped, 7602 passed (48538 assertions)
+Tests:    157 skipped, 7603 passed (48541 assertions)
+Tests:    157 skipped, 7604 passed (48543 assertions)
+Tests:    157 skipped, 7606 passed (48547 assertions)
+Tests:    157 skipped, 7607 passed (48553 assertions)
+Tests:    157 skipped, 7607 passed (48556 assertions)
+Tests:    157 skipped, 7608 passed (48555 assertions)
+Tests:    157 skipped, 7609 passed (48565 assertions)
+Tests:    157 skipped, 7610 passed (48577 assertions)
+Tests:    157 skipped, 7610 passed (48582 assertions)
+Tests:    157 skipped, 7611 passed (48564 assertions)
+Tests:    157 skipped, 7612 passed (48583 assertions)
+Tests:    157 skipped, 7612 passed (48591 assertions)
+Tests:    157 skipped, 7613 passed (48588 assertions)
+Tests:    157 skipped, 7618 passed (48589 assertions)
+Tests:    157 skipped, 7618 passed (48636 assertions)
+Tests:    157 skipped, 7619 passed (48598 assertions)
+Tests:    157 skipped, 7636 passed (48675 assertions)
+Tests:    161 skipped, 7629 passed (48759 assertions)
+Tests:    161 skipped, 7668 passed (48926 assertions)
+Tests:    161 skipped, 7698 passed (49047 assertions)
+Tests:    161 skipped, 7740 passed (49283 assertions)
+Tests:    2 failed, 42 passed (474 assertions)
+Tests:    2 failed, 42 passed (476 assertions)
+Tests:    2 failed, 42 passed (506 assertions)
+Tests:    2 failed, 42 passed (507 assertions)
+Tests:    2 failed, 42 passed (508 assertions)
+Tests:    2 failed, 42 passed (509 assertions)
+Tests:    2 failed, 42 passed (511 assertions)
+Tests:    2 failed, 82 passed (321 assertions)
+Tests:    2 failed, 82 passed (322 assertions)
+Tests:    2 failed, 82 passed (341 assertions)
+Tests:    2 failed, 82 passed (353 assertions)
+Tests:    2 failed, 82 passed (354 assertions)
+Tests:    2 failed, 82 passed (356 assertions)
+Tests:    3 failed, 141 skipped, 7124 passed (45385 assertions)
+Tests:    3 failed, 41 passed (491 assertions)
+Tests:    4 failed, 80 passed (344 assertions)
+Tests:    4 failed, 80 passed (349 assertions)
+Tests:    40 skipped, 6684 passed (41674 assertions)
+Tests:    44 passed (515 assertions)
+Tests:    44 passed (517 assertions)
+Tests:    62 skipped, 6828 passed (43142 assertions)
+Tests:    62 skipped, 6847 passed (43265 assertions)
+Tests:    7224 warnings, 467 passed (48362 assertions)
+Tests:    7225 warnings, 467 passed (48366 assertions)
+Tests:    7226 warnings, 467 passed (48369 assertions)
+Tests:    8 passed (15 assertions)
+Tests:    84 passed (357 assertions)
+Tests:    9 failed, 40 skipped, 6675 passed (41616 assertions)
+Tests:    92 passed (899 assertions)
+Tests:    93 skipped, 6877 passed (43526 assertions)
+Tests:    97 skipped, 6877 passed (43526 assertions)
+ok   FAIL Tests:    (
+ok   FAIL Tests:    1 warning, 7619 passed (48511 assertions)
+ok   FAIL Tests:    467 passed (
+ok   FAIL Tests:    467 passed (48511 assertions, 12 frobnications)
+ok   FAIL Tests:    467 passed (48511 assertions, Warnings: 3)
+ok   FAIL Tests:    467 passed (7286 warned)
+ok   FAIL Tests:    467 passed (7286 warnings, 48511 assertions)
+ok   FAIL Tests:    467 passed (nonsense)
+ok   FAIL Tests:    7286 warnings, 467 passed (48511 assertions)
+ok   FAIL Tests:    7619 passed (48511 assertions, 1 warning)
+ok   FAIL Tests: ( )
+ok   FAIL Tests: ()
+ok   FAIL Tests: 21, Assertions: 30, Warnings: 1.
+ok   PASS Tests:    156 skipped, 7339 passed (46963 assertions)
+ok   PASS Tests:    157 skipped, 7636 passed (48675 assertions)
+ok   PASS Tests:    467 passed ()
+ok   PASS Tests:    467 passed (48511 assertions, 2 deprecations)
+ok   PASS Tests:    467 passed (48511 assertions, 3 skipped)
+ok   PASS Tests:    467 passed (48511 assertions, 5 risky)
+ok   PASS Tests:    7619 passed (48511 assertions)
+ok   PASS Tests: 21, Assertions: 30.
+
+# --- Metric-bearing lines. DERIVED FROM THE PRODUCER'S CODE, not observed. ---
+# php-timer Duration::asString() formats every field with sprintf('%02d') and
+# prepends an hours field only when hours > 0; milliseconds are appended only when
+# nonzero. The hours form is the shape this round's must-fix was about: the first
+# enumeration admitted exactly one colon group and REFUSED a legitimate run that
+# happened to last over an hour.
+Tests: 467 passed (48511 assertions), Time: 00:02.729
+Tests: 467 passed (48511 assertions), Time: 01:02:03.456
+Tests: 467 passed (48511 assertions), Time: 01:02:03
+Tests: 467 passed (48511 assertions), Duration: 12.34s
+Tests: 467 passed (48511 assertions), Memory: 78.50 MB
+Tests: 467 passed (48511 assertions), Memory: 512 bytes
+# Metric-shaped tokens that must STILL REFUSE. A widened skip branch must not
+# swallow the very word the gate exists to catch, nor a malformed clock value.
+Tests: 467 passed (48511 assertions), Duration: 5 warnings
+Tests: 467 passed (48511 assertions), Duration: 1:2:3:4:5
+Tests: 467 passed (48511 assertions), Duration: 5 gremlins

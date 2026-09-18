@@ -170,8 +170,11 @@ assert_no_warnings() {
         IFS="$old_ifs"
         token="$(printf '%s' "$token" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
         [ -z "$token" ] && { IFS=','; continue; }
-        # Any token still here is either recognised below or fails closed below,
-        # so counting them here is the "at least one count was read" proof.
+        # Any token still here is recognised below, fails closed below, or is a
+        # NON-COUNT METRIC -- and that third outcome gives this increment back
+        # (see the metric branch's `seen=$((seen - 1))`), because a measurement
+        # is not evidence that a count was read. For every other token, counting
+        # here is the "at least one count was read" proof.
         seen=$((seen + 1))
         if printf '%s' "$token" | grep -qE '^[0-9]+$'; then
             # Bare count: PHPUnit TextUI's leading test total ("Tests: 21, ...").
@@ -180,6 +183,67 @@ assert_no_warnings() {
             # Laravel dialect: "7286 warnings".
             count="$(printf '%s' "$token" | sed -E 's/^([0-9]+).*/\1/')"
             label="$(printf '%s' "$token" | sed -E 's/^[0-9]+[[:space:]]+//')"
+        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*([0-9]+|[0-9]+\.[0-9]+|[0-9]+:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?)[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|byte|bytes|b|kb|mb|gb)?$'; then
+            # NON-COUNT METRIC (GitHub #2612), deliberately its own branch.
+            #
+            # ORDER IS LOAD-BEARING: this must be tested BEFORE the generic
+            # `Label: count` branch below. `Duration: 1` (an integer-valued
+            # metric) also matches that generic pattern, so if the generic
+            # branch ran first it would claim the token and then die on the
+            # label allow-list -- which is exactly how this defect presented in
+            # two different forms, and why fixing only the decimal shape would
+            # have left the integer shape still failing.
+            #
+            # Pest prints `Duration: 0.66s` and PHPUnit TextUI prints `Time: 0.66`
+            # / `Memory: 24.00 MB`. These are MEASUREMENTS, not counts of test
+            # outcomes, so they carry no warning information and there is nothing
+            # to add to `warnings`. They were previously refused: with a decimal
+            # value the token matched no pattern at all ("unrecognised token");
+            # with an integer value it parsed as the `Label: count` dialect and
+            # then died on the label allow-list ("unknown count 'duration'"). Both
+            # refusals were correct-by-design fail-closed behaviour on a token the
+            # gate could not read, and the gate only ever saw them when the metric
+            # shared the `Tests:` line -- on its own line it is never parsed.
+            #
+            # This branch is kept SEPARATE from the known-count allow-list below
+            # so that "a measurement I skip" and "a count I understand and do not
+            # fail on" remain distinguishable in the code. The value pattern is
+            # anchored and deliberately narrow: only these three labels, only a
+            # numeric value, and only a unit drawn from a CLOSED list. Anything
+            # else -- including a renamed or decorated warning token -- still
+            # falls through to the fail-closed `else` and FAILS, which is what
+            # #2532 exists to protect.
+            #
+            # THE UNIT LIST IS CLOSED FOR A MEASURED REASON. An earlier draft of
+            # this branch ended `[[:space:]]*[A-Za-z]*$` so that `0.66s` and
+            # `24.00 MB` would match. That trailing wildcard also matched the
+            # WORD `warnings`, so `Duration: 5 warnings` was accepted and the gate
+            # printed `warnings=0` over a line that reported five. Caught by an
+            # adversarial case before this shipped, not by the happy path: a
+            # permissive tail on a SKIP branch is a warning-smuggling route.
+            #
+            # `byte`/`bytes` are in the list because PHPUnit's OWN formatter
+            # emits them: php-timer's ResourceUsageFormatter::bytesToString()
+            # only knows GB/MB/KB and falls through to `N byte(s)` for a peak
+            # under 1024. Omitting them made this fix incomplete on its own
+            # premise -- verified against the installed vendor source, not
+            # assumed. The VALUE is also enumerated rather than loose: the
+            # earlier `[0-9][0-9.:]*` accepted `1...`, `1.` and `1:2:3:4:5`,
+            # which is the same permissiveness this comment warns about, one
+            # field to the left. An instrument that refuses what it cannot read
+            # must not quietly accept a measurement it cannot parse either.
+            #
+            # The clock form's hours field is OPTIONAL because the SIBLING file
+            # of that same package emits one: Duration::asString() prepends
+            # `HH:` whenever hours > 0, so a run at or over an hour prints
+            # `Time: 01:02:03.456`. Enumerating only M:SS(.fff) refused that
+            # legitimate zero-warning line as an unrecognised token -- the exact
+            # false-positive class this branch exists to close, found by review
+            # because the byte/bytes check stopped at ResourceUsageFormatter and
+            # did not read asString() beside it. Three fields is the ceiling:
+            # php-timer emits no fourth, and `1:2:3:4:5` stays refused.
+            seen=$((seen - 1))   # a metric is not the "at least one count was read" proof
+            IFS=','; continue
         elif printf '%s' "$token" | grep -qE '^[A-Za-z][A-Za-z[:space:]]*:[[:space:]]*[0-9]+$'; then
             # PHPUnit TextUI dialect: "Warnings: 1".
             label="$(printf '%s' "$token" | sed -E 's/:.*$//')"
