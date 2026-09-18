@@ -20,6 +20,42 @@ class TacticalDeviceSyncService
     /** Per-request timeout for the on-demand detail read (~3s, §11.5). */
     public const DETAIL_TIMEOUT_SECONDS = 3;
 
+    /**
+     * Smallest epoch we will believe as a real boot time: 2001-09-09.
+     *
+     * Below this a value is a sentinel or a garbled read (0, 1, -1, a truncated
+     * epoch), not a machine that has been up since 1970. No PSA-managed device
+     * booted before this and never rebooted.
+     */
+    private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
+
+    /**
+     * The widest real UTC offset is +14:00. createFromFormat's 'P' accepts far more
+     * than that without complaint and builds a Carbon whose timezone name carries a
+     * NUL byte, which then throws a ValueError on the next timezone-sensitive call.
+     */
+    private const BOOT_TIME_MAX_OFFSET_SECONDS = 14 * 3600;
+
+    /**
+     * The ONLY date-string spellings accepted for boot_time, tried in order.
+     *
+     * The vendor's documented type is a float epoch; this list exists because the
+     * payload is JSON and a deployment has been seen to stringify it. It is a
+     * closed enumeration on purpose: anything outside it is refused rather than
+     * handed to Carbon's relative-expression parser. Each is parsed with a leading
+     * '!' so unspecified fields reset to zero instead of defaulting to NOW —
+     * without it, a format that omits a time component silently adopts the current
+     * time and fabricates part of the observation.
+     */
+    private const BOOT_TIME_STRING_FORMATS = [
+        'Y-m-d H:i:s',
+        'Y-m-d\TH:i:s',
+        'Y-m-d\TH:i:sP',
+        'Y-m-d\TH:i:s.uP',
+        'Y-m-d\TH:i:s\Z',
+        'Y-m-d',
+    ];
+
     public function __construct(
         private readonly TacticalClient $client,
     ) {}
@@ -104,11 +140,280 @@ class TacticalDeviceSyncService
         $ta->update($update);
 
         // Offline→online: run any actions queued for this device (bd psa-xr84).
+        //
+        // This runs BEFORE the boot-time write on purpose: the sweep is unrelated
+        // work and must not be suppressed by a failure in an opportunistic column
+        // refresh (review 01a0b1a7 contract:9).
         if (! $wasOnline && $ta->status === 'online') {
             $this->dispatchSweepIfQueued((string) $ta->agent_id);
         }
 
+        // Without this write, assets.last_boot_at keeps whatever the original import
+        // wrote and reads as a months-old uptime forever, which AssetHealthService::
+        // patchFactor() then scores as "up {N}d (patches may be pending)".
+        //
+        // NOTE on where boot_time comes from: our list mapper (mapAgentToTacticalAsset)
+        // does not read boot_time, but that is a fact about OUR MAPPER, not about the
+        // vendor payload — the pinned upstream capture in
+        // tests/Fixtures/tactical/upstream_producers.json lists boot_time in the
+        // agents/ LIST row too (agent_table_serializer_fields, beside last_seen).
+        // So refreshing here is a choice, not the only possibility; widening it to the
+        // list sync is a separate change with its own fleet-wide blast radius.
+        //
+        // Deliberately forward-only: it corrects a row when someone refreshes that
+        // device, and does NOT backfill history. Rows never refreshed stay stale —
+        // see the card for the backfill decision, which is a data migration and not
+        // part of this change.
+        $this->refreshAssetBootTime($ta, $agent['boot_time'] ?? null);
+
         return DetailSyncResult::success($ta->status, $ta->synced_at);
+    }
+
+    /**
+     * Write the observed boot time onto the linked PSA asset.
+     *
+     * Mirrors the last_seen_at guard in the list refresh: an asset may have been
+     * ADOPTED from Ninja or Level, and both of those write last_boot_at from their
+     * own device payloads. So this never drags the column BACKWARDS — it writes only
+     * when the observed boot time is strictly newer than what is already stored (or
+     * when the column is empty). A machine that genuinely has not rebooted reports
+     * the same boot time every sync and is left alone.
+     *
+     * An absent/unparseable boot_time is no observation: leave the column untouched
+     * rather than blanking a value another integration is maintaining.
+     *
+     * $bootTime is mixed on purpose: it comes straight from a decoded vendor payload,
+     * so a non-scalar would raise an uncaught TypeError at this boundary if the
+     * parameter were narrowly typed — and this method's own try/catch cannot catch
+     * its own signature (review 01a0b1a7 contract:1). Refusal happens in parseBootTime.
+     */
+    private function refreshAssetBootTime(TacticalAsset $ta, mixed $bootTime): void
+    {
+        if (! $ta->asset_id) {
+            return;
+        }
+
+        $observed = $this->parseBootTime($bootTime);
+
+        if (! $observed) {
+            // Not an error: an absent boot_time is the normal shape for a payload
+            // that carries none. A PRESENT but unusable one is worth a trace, so a
+            // degraded vendor read is diagnosable instead of silent (C-56).
+            if ($bootTime !== null) {
+                Log::debug('Tactical boot_time ignored: not a usable observation.', [
+                    'agent_id' => $ta->agent_id,
+                    'type' => get_debug_type($bootTime),
+                ]);
+            }
+
+            return;
+        }
+
+        // A boot time in the future is not a reboot we can believe; a clock-skewed
+        // agent must not park the column ahead of every real observation.
+        if ($observed->isFuture()) {
+            Log::debug('Tactical boot_time refused: future value.', [
+                'agent_id' => $ta->agent_id,
+                'observed' => $observed->toDateTimeString(),
+            ]);
+
+            return;
+        }
+
+        // The ENTIRE read-modify-write is OPPORTUNISTIC: the detail sync has already
+        // succeeded by the time we get here, so nothing below may fail the sync or
+        // escape. refreshTactical() has no try/catch and syncDeviceDetail()'s catch
+        // takes TacticalClientException only, so anything thrown here reaches a
+        // user-facing surface carrying the statement with its bindings INTERPOLATED
+        // (measured: "SQL: update `assets` set `last_boot_at` = ... where `id` = 42").
+        // That is the psa #359 leak class this class already routes around via
+        // safeFailure().
+        //
+        // The boundary deliberately starts at the SELECT, not at the UPDATE. An
+        // earlier revision wrapped only the UPDATE, which left TWO escapes that the
+        // r3 panel caught and that are measured in the guard tests: the Asset::find()
+        // query itself, and — reached without any DB fault at all — Laravel's datetime
+        // CAST of an existing corrupt/legacy last_boot_at in the never-backwards
+        // comparison, which throws Carbon InvalidFormatException. A containment
+        // boundary has to cover every statement that can throw, not just the one whose
+        // failure was first imagined.
+        try {
+            $asset = Asset::find($ta->asset_id);
+
+            if (! $asset) {
+                return;
+            }
+
+            // Never drag the column backwards. NOTE this is deliberately
+            // one-directional and therefore cannot repair a wrong stored value written
+            // by another integration — the arbitration question ("strictly newer wins"
+            // vs "most recent observation wins") is on the card for a product ruling.
+            if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
+                return;
+            }
+
+            Asset::where('id', $asset->id)->update(['last_boot_at' => $observed]);
+        } catch (\Throwable $e) {
+            Log::warning('Tactical boot_time refresh failed; sync result unaffected.', [
+                'agent_id' => $ta->agent_id,
+                'asset_id' => $ta->asset_id,
+                'reason' => $this->safeFailure($e, 'boot time refresh'),
+            ]);
+        }
+    }
+
+    /**
+     * Parse a vendor boot_time into a believable instant, or null for "no observation".
+     *
+     * Tactical serialises psutil's boot_time, which is a FLOAT epoch, and a payload
+     * that has round-tripped through a JSON encoder can present the same value as a
+     * numeric STRING. Both are real observations and both are handled here as epochs.
+     *
+     * Everything else is refused rather than guessed. In particular Carbon::parse('')
+     * and Carbon::parse(' ') return NOW, so a near-empty string would otherwise
+     * fabricate a boot time of this instant and — being newer than anything stored —
+     * would always win the never-backwards guard (review 01a0b1a7 contract:4).
+     *
+     * That hazard is a property of Carbon::parse(), not of the blank string: 'now',
+     * 'today', 'midnight' and '+0 seconds' all resolve to THIS INSTANT too, so the
+     * date-string branch accepts only strings whose SHAPE is an absolute date. The
+     * plausibility floor likewise belongs to the parsed INSTANT and not to the numeric
+     * input shape — '1970-01-01' is the same garbled read as epoch 0 — so both branches
+     * enforce it.
+     */
+    private function parseBootTime(mixed $bootTime): ?Carbon
+    {
+        if (is_bool($bootTime) || $bootTime === null) {
+            return null;
+        }
+
+        // Numeric epoch in any of the three shapes the vendor/JSON can deliver:
+        // int, float (psutil's native type) or a numeric string.
+        if (is_int($bootTime) || is_float($bootTime)
+            || (is_string($bootTime) && is_numeric(trim($bootTime)))) {
+            $epoch = (float) (is_string($bootTime) ? trim($bootTime) : $bootTime);
+
+            // INF and NAN are not orderable, so EVERY comparison below is false and
+            // they would sail through the floor. Measured (r3 context:2): the string
+            // '1e999' casts to INF, `INF < FLOOR` and `NAN < FLOOR` are both false, and
+            // Carbon::createFromTimestamp(INF) returns 1970-01-01 — which is not future,
+            // so on an empty column it is WRITTEN. That is the same 1970 fabrication the
+            // floor exists to stop, arriving through a value the floor cannot rank.
+            // Reject non-finite input before any ordering is attempted.
+            if (! is_finite($epoch)) {
+                return null;
+            }
+
+            // A plausibility floor, not just a 0 sentinel: 0, 1, -1 and other small
+            // or negative values are "no reading", not a machine that booted in 1970
+            // (review 01a0b1a7 contract:5).
+            if ($epoch < self::BOOT_TIME_EPOCH_FLOOR) {
+                return null;
+            }
+
+            try {
+                // Truncate to whole seconds. The column is second-precision, so a
+                // FRACTIONAL epoch is written as ...:00 and re-read as ...:00.000000,
+                // while the next sync's in-memory value still carries .726743 — making
+                // `$observed->gt($stored)` TRUE on every single sync for a machine that
+                // never rebooted (r3 diff:1, measured). psutil's boot_time is a float,
+                // so that is the NORMAL case, not an edge one: the "only when newer"
+                // write was in fact an unconditional write of the whole Tactical fleet,
+                // bumping assets.updated_at forever. Comparing at the precision the
+                // column actually stores is what makes the guard's promise true.
+                return Carbon::createFromTimestamp((int) $epoch);
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        // A genuine date string is still accepted, but the accepted grammar is
+        // ENUMERATED, not guessed at by a shape pattern. An earlier version anchored
+        // a leading YYYY-MM-DD, which blocks 'now'/'today' but NOT a date prefix
+        // carrying relative arithmetic: measured at this tip, '1970-01-01 +56 years'
+        // matched that anchor, resolved to 2026-01-01, and so cleared the plausibility
+        // floor that the literal 1970 date is refused by. The floor tests the RESOLVED
+        // instant, so any relative suffix launders an implausible value into a
+        // plausible one. A prefix pattern cannot express "contains no relative
+        // arithmetic"; only a strict parse of the WHOLE string can.
+        if (is_string($bootTime)) {
+            $trimmed = trim($bootTime);
+
+            foreach (self::BOOT_TIME_STRING_FORMATS as $format) {
+                // The try must span EVERY call made on $parsed, not just its
+                // construction (r3 diff:4). The whole bug class being guarded against
+                // here is a Carbon that constructs cleanly and then throws on the next
+                // timezone-sensitive call, so wrapping only createFromFormat() leaves
+                // the guard's own getOffset()/utc()/getTimestamp() calls exposed to the
+                // very thing they are checking for. Measured: getOffset() and utc()
+                // happen to survive the '+9999' object — "happen to" is not a contract,
+                // and parseBootTime has no outer catch to fall back on.
+                try {
+                    $parsed = Carbon::createFromFormat('!'.$format, $trimmed);
+
+                    // createFromFormat does not throw on trailing junk; it records it.
+                    // Without this check '2026-09-17 +56 years' parses as the date and
+                    // silently discards the suffix, which is the same laundering hazard
+                    // arriving by a different door.
+                    $errors = Carbon::getLastErrors();
+
+                    if ($parsed === false
+                    || ($errors && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))) {
+                        continue;
+                    }
+
+                    // The offset-bearing formats accept an offset PHP itself cannot hold.
+                    // Measured at the previous tip: '+9999' parsed with no warning or error,
+                    // produced a 362340-second offset and a Carbon whose timezone name
+                    // contains a NUL byte, so the very next call — isFuture() — threw a
+                    // ValueError out of refreshAssetBootTime, past syncDeviceDetail's
+                    // TacticalClientException-only catch, and killed the whole sync.
+                    // Real offsets are within +/- 14:00 (RFC 9557 / IANA); anything beyond
+                    // it is not a timezone, it is a malformed reading.
+                    // REFUSE the value outright rather than `continue`. A recognised shape
+                    // carrying an impossible offset is a malformed reading, not a reason to
+                    // re-offer the same string to the laxer formats later in the list (r3
+                    // diff:5). Today nothing leaks through that path only because the one
+                    // remaining prefix-matching format always leaves trailing data and is
+                    // killed by the getLastErrors() check — a coincidence of list order, not
+                    // a property this code states. A zone-less format matching a full
+                    // datetime prefix would silently DISCARD the offset and write the wall
+                    // clock as if UTC, reintroducing the seven-hour-error class that the
+                    // ->utc() normalisation was added to fix.
+                    if (abs($parsed->getOffset()) > self::BOOT_TIME_MAX_OFFSET_SECONDS) {
+                        return null;
+                    }
+
+                    // Truncate to whole seconds here too, for the same reason as the
+                    // numeric branch: the microseconds spelling can otherwise re-trigger
+                    // the never-backwards comparison on every sync.
+                    $parsed = $parsed->startOfSecond();
+
+                    // Normalise to UTC before the floor and the write. The numeric branch
+                    // yields UTC, the column is cast to app timezone UTC, and the stored
+                    // value is compared against other integrations' writes — so an offset
+                    // string must be converted, not have its offset silently dropped.
+                    // Measured: '2026-09-16T10:00:00-07:00' stored 10:00 instead of 17:00,
+                    // a seven-hour error in the uptime the health score reads.
+                    $parsed = $parsed->utc();
+
+                    // Same floor as the numeric branch: a claim about the instant, not
+                    // about how the vendor spelled it, so a 1970 date string is refused
+                    // rather than written onto an empty column as a 56-year uptime.
+                    if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
+                        return null;
+                    }
+
+                    return $parsed;
+                } catch (\Throwable) {
+                    continue;
+                }
+            }
+
+            return null;
+        }
+
+        return null;
     }
 
     /**
