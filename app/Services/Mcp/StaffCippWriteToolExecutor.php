@@ -748,10 +748,30 @@ class StaffCippWriteToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+
+            return $this->admitDirectlyIfRequested($staged, $scheduledTokenId, $executeAt);
         }
 
         return $this->executeDirect($name, $arguments, $clientId, $actorLabel);
+    }
+
+    /**
+     * The immediate lane (ruled design point 3). See the identical guard in
+     * StaffTacticalActionToolExecutor for why the branch sits after staging.
+     *
+     * @param  array<string, mixed>  $staged
+     * @return array<string, mixed>
+     */
+    private function admitDirectlyIfRequested(array $staged, ?int $scheduledTokenId, ?ExecuteAt $executeAt): array
+    {
+        if ($executeAt === null || ! $executeAt->direct || $scheduledTokenId === null
+            || ! ($staged['success'] ?? false) || isset($staged['error'])) {
+            return $staged;
+        }
+
+        return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
+            ->admit($staged, $scheduledTokenId, $executeAt);
     }
 
     /** Read-only scheduled mailbox preparation. Never claims, dispatches, or releases a run. */

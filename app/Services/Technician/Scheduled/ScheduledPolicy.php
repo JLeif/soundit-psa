@@ -54,7 +54,16 @@ final class ScheduledPolicy
         return $user;
     }
 
-    public function lineage(TechnicianRun $run, ?int $tokenId): void
+    /**
+     * @param  ScheduledApprover|null  $approver  who authorised the row. NULL preserves the
+     *                                            human-approved reading for the pre-transaction
+     *                                            call sites that have no row yet; a token-approved
+     *                                            admission passes ScheduledApprover::token(), and
+     *                                            the fire-time preflight rebuilds it from the row's
+     *                                            own approver_user_id so the strict check cannot be
+     *                                            skipped by a caller that simply forgot to ask.
+     */
+    public function lineage(TechnicianRun $run, ?int $tokenId, ?ScheduledApprover $approver = null): void
     {
         // No legacy token labels or caller-supplied IDs are grandfathered. Staging
         // instrumentation must persist this provenance before adapters can enroll.
@@ -79,9 +88,24 @@ final class ScheduledPolicy
         // mode: `:immediate` implies staged in the grant grammar (McpToolModes), so a
         // token that could have run the tool now is not refused the safer approved path.
         // Deliberately no null/full-surface fallback and no bare-name grandfathering.
+        //
+        // A TOKEN-approved row (ruled design point 3) is the stricter case: no human ever
+        // saw it, so the token's own `<tool>:immediate` grant is the entire authority and
+        // must STILL be held at fire time. A downgrade to `:staged`, a pause or a revoke
+        // between admission and the window refuses here with the same named reason —
+        // withdrawing the grant is how an operator stops a queued token action. The
+        // approver-mode branch is read from the row, never from a caller's argument, so a
+        // token row can never be checked under the looser human rule.
+        $modes = $approver?->isToken() ? [$tool.':immediate'] : [$tool.':staged', $tool.':immediate'];
         if (! $token || ! $token->isActive() || ! is_array($token->tools)
-            || ! (in_array($tool.':staged', $token->tools, true) || in_array($tool.':immediate', $token->tools, true))) {
+            || array_intersect($modes, $token->tools) === []) {
             throw new InvalidArgumentException('lineage_revoked');
+        }
+        // A token-approved row must also still be the same token that queued it: the
+        // lineage_mismatch check above compares the provenance to $tokenId, and the
+        // approver carries that same id, so a row whose columns disagree is refused.
+        if ($approver?->isToken() && $approver->tokenId !== $tokenId) {
+            throw new InvalidArgumentException('lineage_mismatch');
         }
     }
 

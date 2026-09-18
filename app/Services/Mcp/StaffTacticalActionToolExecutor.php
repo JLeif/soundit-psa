@@ -198,7 +198,9 @@ class StaffTacticalActionToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+
+            return $this->admitDirectlyIfRequested($staged, $scheduledTokenId, $executeAt);
         }
         if ($executeAt !== null) {
             // The controller strips execute_at on the staged path only; a direct call
@@ -536,6 +538,34 @@ class StaffTacticalActionToolExecutor
             'retcode' => $result->retcode,
             'message' => $result->stdout ?: 'Tactical action executed.',
         ];
+    }
+
+    /**
+     * The immediate lane (ruled design point 3): a token that already holds
+     * `<tool>:immediate` and passed `execute_at` gets its proposal admitted straight into
+     * scheduled_authorizations with no cockpit approval.
+     *
+     * The branch is HERE, after staging, and not in the controller: staging is what builds
+     * the content hash, encrypted payload, provenance and sealed confirmation inputs that
+     * admission and both evidence providers read, and it is what enforces the duplicate,
+     * cooldown and pending-proposal rails. Admitting from the controller would mean a
+     * second construction of the same authorization payload, free to drift from the
+     * cockpit lane's. Every refusal stageAction() already returns — an unsupported tool,
+     * a missing ticket, a conflicting pending proposal — is returned unchanged, so this
+     * lane can only ever act on a proposal the ordinary path would have accepted.
+     *
+     * @param  array<string, mixed>  $staged
+     * @return array<string, mixed>
+     */
+    private function admitDirectlyIfRequested(array $staged, ?int $scheduledTokenId, ?ExecuteAt $executeAt): array
+    {
+        if ($executeAt === null || ! $executeAt->direct || $scheduledTokenId === null
+            || ! ($staged['success'] ?? false) || isset($staged['error'])) {
+            return $staged;
+        }
+
+        return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
+            ->admit($staged, $scheduledTokenId, $executeAt);
     }
 
     /** @return array<string, mixed> */

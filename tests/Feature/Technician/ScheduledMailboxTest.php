@@ -140,7 +140,7 @@ class ScheduledMailboxTest extends TestCase
 
     protected function admit(array $human = []): int
     {
-        return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+        return app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, null,
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(MailboxEvidence::class));
     }
 
@@ -428,7 +428,7 @@ class ScheduledMailboxTest extends TestCase
         $this->run = TechnicianRun::findOrFail($result['run_id']);
         $token = McpToken::where('label', 'synthetic-scheduler')->sole();
         $this->assertSame($token->id, $this->run->proposed_meta['scheduled_provenance']['token_id']);
-        $id = app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, $token->id,
+        $id = app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, $token->id,
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', [], app(MailboxEvidence::class));
         $token->update(['tools' => []]);
         $this->time = $this->time->setTime(1, 0);

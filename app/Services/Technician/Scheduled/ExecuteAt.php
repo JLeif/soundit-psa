@@ -39,7 +39,28 @@ final readonly class ExecuteAt
         /** The offset the caller supplied, kept for the operator-facing "Runs at" line. */
         public string $offset,
         public DateTimeImmutable $at,
+        /**
+         * Whether this call takes the DIRECT lane (ruled design point 3): the calling token
+         * holds `<tool>:immediate`, so it may already run this tool now without approval and
+         * the deferral is admitted straight into scheduled_authorizations with no cockpit
+         * proposal. False is the cockpit lane, where a human Approve admits it.
+         *
+         * The lane rides on THIS object rather than on a new executor argument because the
+         * instant already flows through every staging path unchanged; a parallel boolean
+         * parameter could drift out of step with it, and a staged proposal whose lane and
+         * instant disagreed is exactly the confusion this design must not allow.
+         */
+        public bool $direct = false,
     ) {}
+
+    /**
+     * Mark this instant as the direct (no-cockpit) lane. Only the controller's grant gate
+     * may call it, and only after allowsImmediateExecution() said yes for this exact tool.
+     */
+    public function withDirectAdmission(): self
+    {
+        return new self($this->utc, $this->offset, $this->at, true);
+    }
 
     /** Whether the CANONICAL tool name may carry execute_at. */
     public static function supportsCanonical(string $canonical): bool
@@ -101,7 +122,11 @@ final readonly class ExecuteAt
         return new self($at->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d\TH:i:sP'), $offset, $at->setTimezone(new \DateTimeZone('UTC')));
     }
 
-    /** Rehydrate from the sealed provenance written at staging time (already normalised). */
+    /**
+     * Rehydrate from the sealed provenance written at staging time (already normalised).
+     * Always the COCKPIT lane: a rehydrated instant is being read by an approver's click,
+     * so direct admission is never resurrected from stored provenance.
+     */
     public static function fromProvenance(array $provenance): ?self
     {
         $utc = $provenance['execute_at'] ?? null;

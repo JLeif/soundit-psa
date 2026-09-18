@@ -307,15 +307,19 @@ class ScheduledExecuteAtTest extends TestCase
         $this->assertCount(0, $this->wire);
     }
 
-    public function test_immediate_grant_with_execute_at_is_staged_to_the_cockpit_in_pr1_and_approve_admits(): void
+    public function test_an_immediate_grant_asking_explicitly_for_staged_still_takes_the_cockpit_lane(): void
     {
-        // PR2 owns the no-cockpit lane; until then execute_at on an :immediate grant is
-        // staged with an explicit message, never run now and never silently dropped.
-        $result = $this->mcp($this->bearer(['tactical_set_maintenance:immediate']), 'tactical_set_maintenance', $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => false]));
+        // PR2 gives an :immediate token the no-cockpit lane on staged=false, but an
+        // EXPLICIT staged=true is an explicit request for a human approval and must still
+        // get one. The lane follows the same grant/flag pair that decides staged=false
+        // without execute_at; it is never forced on a caller that asked to be held.
+        $result = $this->mcp($this->bearer(['tactical_set_maintenance:immediate']), 'tactical_set_maintenance', $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => true]));
         $this->assertTrue($result['success'] ?? false, json_encode($result));
         $this->assertStringContainsString('cockpit', $result['message']);
+        $this->assertArrayNotHasKey('downgraded_to_staged', $result);
         $run = TechnicianRun::findOrFail($result['run_id']);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
         $this->assertCount(0, $this->wire);
         $this->actingAs($this->user)->post(route('cockpit.approve', $run))->assertRedirect()->assertSessionHas('success');
         $this->assertSame('waiting', DB::table('scheduled_authorizations')->value('state'));
@@ -333,7 +337,11 @@ class ScheduledExecuteAtTest extends TestCase
 
     public function test_lineage_accepts_the_immediate_grant_for_a_human_approved_row(): void
     {
-        $run = $this->stageWithExecuteAt(['tactical_set_maintenance:immediate'], ['staged' => false]);
+        // Explicit staged=true: a human-approved row whose originating token happens to
+        // hold :immediate. lineage() must accept EITHER mode for it (`:immediate` implies
+        // staged in the grant grammar) — the stricter immediate-only rule is for
+        // token-approved rows, which this is not.
+        $run = $this->stageWithExecuteAt(['tactical_set_maintenance:immediate'], ['staged' => true]);
         $this->actingAs($this->user)->post(route('cockpit.approve', $run))->assertRedirect()->assertSessionHas('success');
         $id = DB::table('scheduled_authorizations')->sole()->id;
         $this->time = $this->time->setTime(3, 30);

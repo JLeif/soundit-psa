@@ -80,7 +80,15 @@ final class ScheduledCoordinator
                 throw new InvalidArgumentException('human_confirmation_mismatch');
             }
             $run = TechnicianRun::findOrFail($row->run_id);
-            $user = $this->policy->approver($row->approver_user_id);
+            // A token-approved row (immediate lane) has no approver to revalidate; its
+            // authority is the token grant, rechecked by lineage() inside the transaction
+            // below. Calling approver(null) would throw approver_revoked and block every
+            // such row, so the mode is read from the row itself.
+            $approver = ScheduledApprover::fromRow(
+                $row->approver_user_id === null ? null : (int) $row->approver_user_id,
+                $row->originating_mcp_token_id === null ? null : (int) $row->originating_mcp_token_id,
+            );
+            $user = $approver->isToken() ? null : $this->policy->approver((int) $approver->userId);
             $live = $evidence->revalidate($run, $user, $approved['binding']);
             if (ApprovalEnvelope::canonical($live) !== ApprovalEnvelope::canonical($approved['binding'])) {
                 throw new InvalidArgumentException('identity_changed');
@@ -112,9 +120,17 @@ final class ScheduledCoordinator
                     throw new InvalidArgumentException('envelope_changed_during_preflight');
                 }
                 $run = TechnicianRun::whereKey($row->run_id)->lockForUpdate()->firstOrFail();
-                $this->policy->approver($row->approver_user_id);
+                $lockedApprover = ScheduledApprover::fromRow(
+                    $row->approver_user_id === null ? null : (int) $row->approver_user_id,
+                    $row->originating_mcp_token_id === null ? null : (int) $row->originating_mcp_token_id,
+                );
+                if (! $lockedApprover->isToken()) {
+                    $this->policy->approver((int) $lockedApprover->userId);
+                }
                 $this->policy->ticket($run);
-                $this->policy->lineage($run, $row->originating_mcp_token_id);
+                // Token-approved: lineage() now demands the `<tool>:immediate` grant is
+                // STILL held. A downgrade, pause or revoke lands the row blocked here.
+                $this->policy->lineage($run, $row->originating_mcp_token_id, $lockedApprover);
                 foreach (['run_id', 'revision', 'client_id', 'ticket_id', 'action_type', 'direct_tool', 'content_hash', 'approver_user_id', 'originating_mcp_token_id', 'display_timezone', 'local_start', 'local_end', 'start_offset', 'end_offset'] as $key) {
                     if ((string) $approved[$key] !== (string) $row->$key) {
                         throw new InvalidArgumentException('envelope_binding_changed');
@@ -182,8 +198,14 @@ final class ScheduledCoordinator
         return DB::transaction(function () use ($id, $userId) {
             $row = DB::table('scheduled_authorizations')->where('id', $id)->lockForUpdate()->first();
             $this->policy->approver($userId);
-            // Only the approver may cancel this substrate; UI policy can narrow further.
-            if (! $row || $row->approver_user_id != $userId || ! in_array($row->state, ['waiting', 'claimed'], true)) {
+            // Only the approver may cancel a HUMAN-approved row; UI policy can narrow further.
+            // A token-approved row (approver_user_id NULL) has no approver, so that rule would
+            // make it uncancellable by anyone — any active Admin/Tech, already validated by the
+            // approver() call above, may stop it (ruled design point 4). Cancel is stop-only:
+            // it issues no dispatch intent and mutates nothing upstream.
+            $tokenApproved = $row !== null && $row->approver_user_id === null;
+            if (! $row || (! $tokenApproved && (int) $row->approver_user_id !== $userId)
+                || ! in_array($row->state, ['waiting', 'claimed'], true)) {
                 return false;
             }
             $this->transition($row, 'cancelled', 'operator_cancelled');

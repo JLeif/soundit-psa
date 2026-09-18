@@ -669,14 +669,23 @@ class McpStaffController extends Controller
         // still approves the action. Any grant of a stageable tool permits
         // staged=true. After the gate, rewrite to the internal dispatch name.
         $downgradedToStaged = false;
-        // Scheduled execution (ruled design point 1/2): an optional `execute_at` on a
+        // Scheduled execution (ruled design points 1/2/3): an optional `execute_at` on a
         // capability with a scheduled adapter. It is stripped from the arguments HERE,
         // before any executor sees them, and threaded explicitly; on every other tool
-        // it is a named refusal, never a silently-ignored key that runs now. In PR1 an
-        // execute_at call is always staged for the cockpit (the :immediate no-cockpit
-        // lane is PR2), so a token that could run now is told so in the result.
+        // it is a named refusal, never a silently-ignored key that runs now.
+        //
+        // Two lanes, decided by the SAME per-tool grant that decides staged=false:
+        //  - the token holds `<tool>:immediate` → the DIRECT lane. It may already run this
+        //    tool now without approval, so deferring it needs no new human in the loop; the
+        //    row is queued straight into scheduled_authorizations with approver_user_id
+        //    NULL and no cockpit proposal. The grant must STILL be held at fire time.
+        //  - the token holds only `<tool>:staged` → the cockpit lane, and the call carries
+        //    the ordinary downgraded_to_staged signal exactly as it would without
+        //    execute_at.
+        // The two notices are mutually exclusive by construction: $executeAtDirect and
+        // $downgradedToStaged are the two halves of one boolean.
         $executeAt = null;
-        $executeAtStagedImmediate = false;
+        $executeAtDirect = false;
         if (array_key_exists('execute_at', $arguments)) {
             $executeAtValue = $arguments['execute_at'];
             unset($arguments['execute_at']);
@@ -699,14 +708,23 @@ class McpStaffController extends Controller
                 ]]);
             }
             if (! $staged) {
-                $executeAtStagedImmediate = $this->allowsImmediateExecution($request, (string) $name);
-                // Compute the downgrade BEFORE forcing staged: a staged-only token that asked
-                // for immediate execution must still get the unmistakable downgraded_to_staged
-                // signal and its explanatory text, exactly as it would without execute_at. The
-                // two notices are mutually exclusive — either the token may run now (staged for
-                // the cockpit anyway in PR1) or it may not (downgraded).
-                $downgradedToStaged = ! $executeAtStagedImmediate;
+                $executeAtDirect = $this->allowsImmediateExecution($request, (string) $name);
+                // Compute the downgrade BEFORE forcing staged (#2093): a staged-only token
+                // that asked for immediate execution must still get the unmistakable
+                // downgraded_to_staged signal and its explanatory text, exactly as it would
+                // without execute_at. An AI client branching on that documented flag would
+                // otherwise conclude it had executed under its own authority.
+                $downgradedToStaged = ! $executeAtDirect;
+                // Staged is forced either way: on the cockpit lane because a human must
+                // approve, and on the direct lane because the DIRECT LANE IS BUILT ON
+                // STAGING — the executor stages the proposal (building the content hash,
+                // encrypted payload, provenance and sealed inputs that admission reads) and
+                // then admits it itself under the token's own grant. Nothing executes now on
+                // either lane.
                 $staged = true;
+                if ($executeAtDirect) {
+                    $executeAt = $executeAt->withDirectAdmission();
+                }
             }
         }
         if ($stageable) {
@@ -1298,11 +1316,10 @@ class McpStaffController extends Controller
                 $executor = new AssistantToolExecutor(ticket: null, clientId: $clientId, userId: $userId);
                 $result = $executor->execute($name, is_array($arguments) ? $arguments : []);
             }
-            // Make an auto-downgrade unmistakable to the caller: it asked for
-            // immediate execution but got a held proposal instead.
-            if ($executeAtStagedImmediate && is_array($result) && ! isset($result['error'])) {
-                $result['message'] = trim('Scheduled execution is admitted through cockpit approval in this release; the proposal is staged for the cockpit even though this token may run the tool without approval. '.(string) ($result['message'] ?? ''));
-            }
+            // The direct lane's own message is written by ScheduledDirectAdmission (it names
+            // the authorization and says no approval is required); nothing is appended here,
+            // and `downgraded_to_staged` is never set on it — the token was not downgraded,
+            // it exercised the grant it holds.
             if ($downgradedToStaged && is_array($result)) {
                 $result['downgraded_to_staged'] = true;
                 if (isset($result['error'])) {

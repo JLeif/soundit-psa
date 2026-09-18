@@ -60,17 +60,17 @@ if ($job['operation'] === 'admit') {
     });
     $evidence = new class implements App\Services\Technician\Scheduled\ScheduledEvidence
     {
-        public function approve(App\Models\TechnicianRun $run, App\Models\User $user, array $inputs): array
+        public function approve(App\Models\TechnicianRun $run, ?App\Models\User $user, array $inputs): array
         {
             return ['payload' => ['forward' => 'synthetic@example.test'], 'target' => ['tenant_id' => 'synthetic-tenant', 'object_id' => 'synthetic-object']];
         }
 
-        public function revalidate(App\Models\TechnicianRun $run, App\Models\User $user, array $approved): array
+        public function revalidate(App\Models\TechnicianRun $run, ?App\Models\User $user, array $approved): array
         {
             return $approved;
         }
     };
-    $result = app(App\Services\Technician\Scheduled\ScheduledAdmission::class)->admit($job['id'], $job['user'], str_repeat('a', 64), null,
+    $result = app(App\Services\Technician\Scheduled\ScheduledAdmission::class)->admit($job['id'], App\Services\Technician\Scheduled\ScheduledApprover::human($job['user']), str_repeat('a', 64), null,
         '2026-09-15 01:00:00', '2026-09-15 02:00:00', 'UTC', [], $evidence);
 } elseif ($job['operation'] === 'claim') {
     $result = $coordinator->claim($job['id']);

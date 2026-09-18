@@ -119,7 +119,7 @@ class ScheduledTacticalTest extends TestCase
 
     protected function admit(array $human = []): int
     {
-        return app(ScheduledAdmission::class)->admit($this->run->id, $this->user->id, $this->run->content_hash, null,
+        return app(ScheduledAdmission::class)->admit($this->run->id, \App\Services\Technician\Scheduled\ScheduledApprover::human($this->user->id), $this->run->content_hash, null,
             '2026-09-16 01:00:00', '2026-09-16 02:00:00', 'UTC', $human, app(TacticalEvidence::class));
     }
 
