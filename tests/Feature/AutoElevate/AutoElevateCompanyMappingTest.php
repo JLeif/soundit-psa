@@ -196,6 +196,53 @@ class AutoElevateCompanyMappingTest extends TestCase
     }
 
     /**
+     * r4 context:8. index() and autoMatch() redirect away when AutoElevate is unconfigured, but
+     * update() did not, leaving the destructive clear-then-apply write reachable by a direct or
+     * replayed POST on an installation whose key had been removed -- a state from which the screen
+     * itself cannot be opened. The write path is now gated like the read paths.
+     */
+    public function test_update_is_refused_when_autoelevate_is_not_configured(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        Setting::setEncrypted('autoelevate_api_key', '');
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->post(route('settings.autoelevate-companies.update'), [
+            'mappings' => [self::COMPANY_B => (string) $a->id],
+        ])->assertRedirect(route('settings.integrations'));
+
+        // The mapping must be untouched: an unconfigured install must not rewrite mappings.
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
+    }
+
+    /**
+     * r4 diff:9. The malformed-payload guard originally keyed on $request->has('mappings'), which
+     * reads all() INCLUDING uploaded files, while $request->input('mappings', []) excludes them.
+     * A multipart POST carrying a FILE named `mappings` made has() true and input() return the []
+     * default, so genuinely malformed input was reported as "nothing was submitted". Keying on the
+     * VALUE closes that gap. Nothing is cleared on either path.
+     */
+    public function test_save_with_a_file_named_mappings_is_reported_as_malformed(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->post(route('settings.autoelevate-companies.update'), [
+                'mappings' => \Illuminate\Http\UploadedFile::fake()->create('mappings.csv', 1),
+            ])
+            ->assertRedirect(route('settings.autoelevate-companies.index'))
+            ->assertSessionHasErrors('mappings');
+
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
+        $this->assertStringContainsString(
+            'unexpected format',
+            (string) session('errors')->first('mappings'),
+            'a file payload must be diagnosed as malformed, not as "nothing submitted"'
+        );
+    }
+
+    /**
      * The guard must not block ordinary unmapping: a form that DID list a company can still
      * clear it. Refusing only the no-keys case keeps one-at-a-time removal working.
      */
@@ -504,11 +551,15 @@ class AutoElevateCompanyMappingTest extends TestCase
 
     public function test_two_clients_sharing_a_company_id_are_both_offered_in_the_dropdown(): void
     {
-        // update() stores strtolower($companyId) while autoMatch() writes the vendor id verbatim,
-        // so two clients can hold the same company id in different case. index() keys the lookup
-        // collection with strtolower(), which collapses them to one row. The dropdown must still
-        // offer BOTH, or the collapsed client has no <option>, posts nothing, and the next
-        // clear-then-apply save destroys its mapping with a success flash.
+        // r4 diff:2: the original comment here claimed "autoMatch() writes the vendor id verbatim"
+        // -- a claim I retracted last round, because companies() lowercases every id before either
+        // writer sees it. Two clients CAN still hold one company id, but the reachable route is
+        // SoftDeletes (r4 context:2), not case divergence: the clear step is scoped to non-trashed
+        // rows, so a trashed client keeps its id while a live one is mapped to the same company,
+        // and restoring it yields two live rows sharing an id. index() keys the lookup collection
+        // with strtolower(), collapsing them to one row, so the dropdown must offer BOTH or the
+        // collapsed client has no <option>, posts nothing, and the next clear-then-apply save
+        // destroys its mapping behind a success flash.
         $this->fakeCompanies([self::company(self::COMPANY_A, 'Delta Freight')]);
         $held = Client::factory()->create(['name' => 'Held Co', 'is_active' => false, 'autoelevate_company_id' => strtoupper(self::COMPANY_A)]);
         $kept = Client::factory()->create(['name' => 'Kept Co', 'autoelevate_company_id' => strtolower(self::COMPANY_A)]);
@@ -523,14 +574,15 @@ class AutoElevateCompanyMappingTest extends TestCase
 
     public function test_empty_state_warning_fails_loudly_rather_than_under_reporting(): void
     {
-        // r3 diff:2 was right: this used to grep the Blade SOURCE for one exact spelling of an
-        // expression, rendering nothing and executing no request. It could not detect the
-        // regression it names, and would have passed against any reworded fallback. Replaced
-        // with a behavioural assertion: render the real empty-state screen with TWO clients
-        // mapped to the SAME company id -- the case keyBy() collapses to one -- and require the
-        // warning to say 2, which a collapsed count cannot produce.
+        // r3 diff:2 was right that the old version of this test grepped the Blade SOURCE for one
+        // spelling of an expression, rendering nothing. r4 diff:10 was then right that my
+        // behavioural replacement duplicated test_empty_state_warning_counts_clients_not_distinct
+        // _companies exactly. So this now covers what NEITHER did: the count must survive a
+        // NON-OPERATIONAL mapped client, which Client::operational() excludes from $mappedClients
+        // but which $mappedClientRows still carries. A count taken from the operational-only
+        // collection reports 1; the warning must say 2.
         Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
-        Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        Client::factory()->create(['autoelevate_company_id' => self::COMPANY_B, 'is_active' => false]);
         $this->fakeCompanies([]);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 

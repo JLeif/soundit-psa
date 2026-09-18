@@ -51,13 +51,20 @@ class AutoElevateCompanyController extends Controller
         //
         // Concat the UNKEYED rows, not $mappedClients: keyBy() keeps one client per company id,
         // so if two clients ever held the same id the collapsed one would have no <option>
-        // anywhere on the page. NOTE: at this tip that state is not reachable through either
-        // writer -- companies() already lowercases every id (AutoElevateReadService::companies)
-        // and update() rejects a duplicate company id outright -- so this is defence against a
-        // state the current code cannot produce, not a fix for an observed one. It costs one
-        // unkeyed read and removes a silent-destruction mode if either invariant is ever
-        // relaxed. It does NOT protect a mapping whose company the vendor stopped listing:
-        // that row is cleared by the next save regardless (see the INSTALL caveat).
+        // anywhere on the page. My r3 comment here claimed that state was "not reachable through
+        // either writer"; r4 context:2 refuted it and is correct. Client uses SoftDeletes, and the
+        // clear step (Client::whereNotNull(...)->update(...)) carries the global scope, so it skips
+        // TRASHED rows: a trashed client keeps its company id while a live client is mapped to the
+        // same company, and restoring it leaves two live rows sharing one id. keyBy(strtolower())
+        // then collapses them. So this concat addresses a reachable state, not a hypothetical one.
+        //
+        // It is still only a PARTIAL remedy (r4 context:1): it guarantees the collapsed client an
+        // <option>, but the select's data-selected comes from the keyed collection, so the
+        // collapsed row is not pre-selected and an unmodified save can still drop it. The full fix
+        // needs the clear-then-apply shape, which is out of scope for this leg.
+        //
+        // It does NOT protect a mapping whose company the vendor stopped listing: that row is
+        // cleared by the next save regardless (see the INSTALL caveat).
         $allClients = Client::operational()->orderBy('name')->get(['id', 'name'])
             ->concat($mappedClientRows)
             ->unique('id')
@@ -74,12 +81,32 @@ class AutoElevateCompanyController extends Controller
 
     public function update(Request $request)
     {
+        // r4 context:8: index() and autoMatch() both redirect away when the integration is not
+        // configured, but the WRITE path had no such gate -- so a direct or replayed POST could
+        // clear-then-apply mappings on an installation whose AutoElevate key had been removed,
+        // a state from which the screen itself is unreachable. Gate the destructive path the same
+        // way the read paths are gated.
+        if (! AutoElevateConfig::isConfigured()) {
+            return redirect()->route('settings.integrations')
+                ->withErrors(['mappings' => 'AutoElevate is not configured, so no mappings were changed.']);
+        }
+
         $mappings = $request->input('mappings', []);
         // r3 diff:6: a non-array `mappings` is malformed input, not an empty form. Collapsing it
         // into [] made both report "No AutoElevate companies were submitted", so a client
         // sending the wrong type was told its payload was simply empty. Refuse it distinctly;
         // nothing is cleared on either path.
-        if ($request->has('mappings') && ! is_array($mappings)) {
+        // r4 diff:8 + diff:9: the earlier shape tested $request->has('mappings') and then kept an
+        // `if (! is_array(...)) $mappings = []` coercion that no path could reach. It was also the
+        // wrong predicate: has() reads all() (which includes uploaded files) while input() reads
+        // only the input source, so a multipart POST with a FILE field named `mappings` made has()
+        // true and input() return the [] default -- malformed input reported as an empty form.
+        // Test the VALUE across BOTH sources. Measured: for a multipart POST with a file named
+        // `mappings`, has() is true, input() is NULL and hasFile() is true -- so an input()-only
+        // predicate misses it just as the has()-based one misreported it. The guard test proved
+        // this by failing on my first attempt at the fix.
+        $submitted = $request->input('mappings');
+        if (($submitted !== null && ! is_array($submitted)) || $request->hasFile('mappings')) {
             return back()->withErrors(['mappings' => 'The AutoElevate mapping form was submitted in an unexpected format, so nothing was changed. Existing mappings were kept. Reload the Map companies screen and try again.']);
         }
         if (! is_array($mappings)) {
@@ -103,7 +130,10 @@ class AutoElevateCompanyController extends Controller
         // is "unmap every company at once", which is still reachable one dropdown at a time on
         // a form that actually lists them. Nothing is cleared on this path.
         if ($mappings === []) {
-            return back()->withErrors(['mappings' => 'No AutoElevate companies were submitted, so nothing was changed. Existing mappings were kept. To remove a mapping, set its dropdown to "Not mapped" on a form that lists the company.']);
+            // r4 contract:5: the old wording told the admin to unmap "on a form that lists the
+            // company", which is impossible in the only state that produces a keyless POST -- the
+            // vendor lists nothing, so no form lists the company. Say what is actually true.
+            return back()->withErrors(['mappings' => 'No AutoElevate companies were submitted, so nothing was changed and existing mappings were kept. This happens when AutoElevate returns no companies at all; the mappings are held until it lists them again. If that is unexpected, check the AutoElevate connection in Settings > Integrations.']);
         }
 
         // Every key must be a company UUID; every non-empty value a client id. A client holds
