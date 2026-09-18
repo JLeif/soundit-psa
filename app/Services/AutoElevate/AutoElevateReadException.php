@@ -32,7 +32,8 @@ class AutoElevateReadException extends \RuntimeException
             'paging_over_cap' => 'This company reports more machines than one read can collect (over 10,000). '
                 .'Nothing was listed because a partial list would look complete.',
             'paging_count_mismatch' => 'AutoElevate returned a different number of distinct machines than it said it held, '
-                .'so at least one machine is missing from what it sent. Retry; if it persists, the vendor is paging inconsistently.',
+                .'so either machines are missing from what it sent or it sent rows it does not admit to holding. Nothing was '
+                .'listed because the list cannot be trusted either way. Retry; if it persists, the vendor is paging inconsistently.',
             'timestamp_implausible' => 'AutoElevate reported a check-in time outside any believable range, '
                 .'so no machine was shown rather than showing a wrong date.',
             default => null,
