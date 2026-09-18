@@ -9,6 +9,13 @@
 #
 # Gates:
 #   1. php artisan test          — the full PHPUnit suite must pass without warnings.
+#      Enforced by TWO independent belts, because --fail-on-warning alone was
+#      measured to be partial: it does not fail on the @-suppressed read at
+#      vendor/vlucas/phpdotenv/src/Store/File/Reader.php:73 that Laravel's error
+#      handler surfaces in the summary's `warnings` column. Belt one is
+#      --fail-on-warning (PHPUnit's own exit policy); belt two parses the
+#      summary line and requires warnings == 0. An unrecognised summary is a
+#      FAIL, never a PASS — this gate fails closed on a format it cannot read.
 #      Risky tests and deprecations (including PHPUnit metadata deprecations)
 #      retain PHPUnit/config defaults; this gate does not newly fail on them.
 #   2. pint --test (changed PHP) — code style, scoped to the PHP files this
@@ -20,7 +27,10 @@
 #                                  emails, private keys, or known token shapes
 #                                  (this is a public OSS repo).
 #
-# Assumes a ready app environment (.env with APP_KEY, vendor/ installed).
+# Environment: vendor/ must already be installed. A missing .env is PROVISIONED
+# here the way CI does it (cp .env.example .env; php artisan key:generate)
+# rather than tolerated, because a worktree without .env does not fail — it
+# silently converts ~7100 real passes into `warnings` and still exits 0.
 # Exits non-zero on the first failing gate.
 set -euo pipefail
 
@@ -35,13 +45,91 @@ for ref in origin/main main; do
     fi
 done
 
+echo "==> [0/3] environment (.env)"
+if [ ! -f .env ]; then
+    if [ ! -f .env.example ]; then
+        echo "ERROR: no .env and no .env.example to provision one from." >&2
+        echo "==> gc-verify: FAIL (no app environment)" >&2
+        exit 1
+    fi
+    echo "    .env absent — provisioning from .env.example (as CI does)"
+    if ! cp .env.example .env; then
+        echo "==> gc-verify: FAIL (could not provision .env)" >&2
+        exit 1
+    fi
+    if ! php artisan key:generate; then
+        echo "==> gc-verify: FAIL (could not generate APP_KEY)" >&2
+        exit 1
+    fi
+fi
+# Never rewrite a .env this script did not create; an unkeyed one is a refusal.
+if ! grep -qE '^APP_KEY=.+' .env; then
+    echo "ERROR: .env exists but APP_KEY is empty; refusing to modify it." >&2
+    echo "       Run: php artisan key:generate" >&2
+    echo "==> gc-verify: FAIL (no APP_KEY)" >&2
+    exit 1
+fi
+echo "    .env present with APP_KEY"
+
 echo "==> [1/3] php artisan test --fail-on-warning"
 if ! php artisan config:clear --ansi >/dev/null; then
     echo "==> gc-verify: FAIL (configuration clear)" >&2
     exit 1
 fi
-if ! php artisan test --fail-on-warning; then
+
+# Belt one: PHPUnit's own exit policy.
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/gc-verify-tests.XXXXXX")"
+trap 'rm -f "$TEST_LOG"' EXIT
+set +e
+php artisan test --fail-on-warning 2>&1 | tee "$TEST_LOG"
+TEST_STATUS="${PIPESTATUS[0]}"
+set -e
+if [ "$TEST_STATUS" -ne 0 ]; then
     echo "==> gc-verify: FAIL (PHPUnit failed or reported warnings)" >&2
+    exit 1
+fi
+
+# Belt two: the summary line must exist, be a dialect we recognise, and report
+# zero warnings. --fail-on-warning is known not to cover every warning class
+# (see the header), so a green exit code is not accepted on its own.
+assert_no_warnings() {
+    local log="$1" summary warnings=""
+    # Strip ANSI colour before matching; take the LAST summary line.
+    summary="$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log" \
+        | grep -E '^[[:space:]]*Tests:[[:space:]]' | tail -n 1)"
+    if [ -z "$summary" ]; then
+        echo "ERROR: no PHPUnit summary line found; cannot prove warnings == 0." >&2
+        return 1
+    fi
+    if printf '%s' "$summary" | grep -qE '[Ww]arnings?:[[:space:]]*[0-9]+'; then
+        # PHPUnit TextUI dialect: "Tests: 1, Assertions: 1, Warnings: 1."
+        warnings="$(printf '%s' "$summary" | sed -nE 's/.*[Ww]arnings?:[[:space:]]*([0-9]+).*/\1/p')"
+    elif printf '%s' "$summary" | grep -qE '[0-9]+[[:space:]]+warnings?([,[:space:]]|$)'; then
+        # Laravel dialect: "Tests:  7286 warnings, 467 passed (48511 assertions)"
+        warnings="$(printf '%s' "$summary" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+warnings?([,[:space:]].*|$)/\1/p')"
+    elif printf '%s' "$summary" | grep -qE '([0-9]+[[:space:]]+[a-z]+([,)]|$)|[A-Za-z]+:[[:space:]]*[0-9]+)'; then
+        # Recognised dialect, no warnings token at all => genuinely zero.
+        warnings=0
+    else
+        echo "ERROR: unrecognised PHPUnit summary format; failing closed." >&2
+        echo "       summary: $summary" >&2
+        return 1
+    fi
+    if [ -z "$warnings" ]; then
+        echo "ERROR: could not read a warning count from the summary line." >&2
+        echo "       summary: $summary" >&2
+        return 1
+    fi
+    if [ "$warnings" -ne 0 ]; then
+        echo "ERROR: PHPUnit reported $warnings warning(s); gate 1 requires zero." >&2
+        echo "       summary: $summary" >&2
+        return 1
+    fi
+    echo "    summary parsed: warnings=0"
+    return 0
+}
+if ! assert_no_warnings "$TEST_LOG"; then
+    echo "==> gc-verify: FAIL (PHPUnit warnings, or an unreadable summary)" >&2
     exit 1
 fi
 
