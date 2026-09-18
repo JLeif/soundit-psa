@@ -129,7 +129,8 @@ class ClientAutoElevatePanelTest extends TestCase
         // paging_over_cap — a tenant bigger than one walk can collect, known from page one.
         $this->panel($client)->assertOk()
             ->assertSee('data-reason="paging_over_cap"', false)
-            ->assertSee('more machines than one read can collect')
+            ->assertSee('more rows than one read can collect')
+            ->assertSee('over 10,000', false)   // derived from MAX_PAGES × MAX_TAKE, not typed
             ->assertDontSee('<table', false);
         Http::assertSentCount(1);
 
@@ -137,7 +138,9 @@ class ClientAutoElevatePanelTest extends TestCase
         Cache::flush();
         $this->panel($client)->assertOk()
             ->assertSee('data-reason="paging_count_mismatch"', false)
-            ->assertSee('different number of distinct machines than it said it held');
+            ->assertSee('different number of distinct rows than it said it held')
+            // Both directions raise this reason; the sentence must not assert only one.
+            ->assertSee('or it sent rows it does not admit to holding');
 
         // timestamp_implausible — the vendor's example value handed over in SECONDS.
         Cache::flush();
@@ -150,7 +153,7 @@ class ClientAutoElevatePanelTest extends TestCase
         Cache::flush();
         $this->panel($client)->assertOk()
             ->assertSee('data-reason="paging_incomplete"', false)
-            ->assertDontSee('more machines than one read can collect');
+            ->assertDontSee('more rows than one read can collect');
     }
 
     public function test_mapped_client_with_key_removed_is_a_failed_read_not_an_empty_one(): void

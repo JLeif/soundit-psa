@@ -158,9 +158,23 @@ class AutoElevateReadService
      *
      * An in-range integer is then held to a PLAUSIBILITY WINDOW, refused as
      * `timestamp_implausible`:
-     *   floor   PLAUSIBLE_FLOOR_MS (2000-01-01Z) — nothing this vendor reports predates it;
-     *   ceiling now + 1 year — a check-in cannot be meaningfully in the future, and a year
-     *           of slack absorbs clock skew at either end without admitting nonsense.
+     *   floor   PLAUSIBLE_FLOOR_MS (2000-01-01Z) — nothing this vendor reports predates it.
+     *           NOTE this also refuses epoch `0`, which the previous guard admitted and
+     *           rendered as 1970-01-01. The vendor documents `null` for "never reported in",
+     *           so a literal 0 is not a contract value; if a tenant is ever observed sending
+     *           0 as a sentinel, the right answer is to map it to null here, not to widen the
+     *           floor — rendering 1970-01-01 as a check-in date is the defect, not the cure.
+     *   ceiling now + 1 year — a check-in cannot be meaningfully in the future. The year is
+     *           deliberately far LOOSER than real clock skew (seconds to hours): the ceiling
+     *           is a nonsense bound, not a skew bound, and is set wide on purpose so that no
+     *           merely-odd value fails a whole tenant's read. Every unit slip this actually
+     *           targets (seconds, micro, nano, .NET ticks) is caught by the floor or lands
+     *           far beyond a year, so tightening it would add refusals without adding catches.
+     *
+     * BLAST RADIUS, stated because it is a real behaviour change: this throws for the whole
+     * read, so ONE implausible row fails the entire tenant's list rather than degrading that
+     * row. That matches the existing `timestamp_drift` escalation and C-56 (a degraded read
+     * screams), but per-row quarantine would be the kinder shape and is a live follow-up.
      *
      * Measured 2026-09-18 on Carbon 3.11.1, which is why the window is a range and not a
      * mere magnitude cap: `CarbonImmutable::createFromTimestampMsUTC()` throws for NO
@@ -215,10 +229,17 @@ class AutoElevateReadService
      *                          and omit another, which silently DROPS a machine while the row
      *                          count still looks right. De-duplicating alone would hide that
      *                          as a short list; reconciling turns it into a failed read.
+     *                          What it does NOT prove: see reconciled().
      *
      * De-duplication is by `id`, but `skip` ADVANCES BY ROWS RECEIVED, never by unique rows
-     * kept: `skip` is the vendor's cursor into its own result set, and advancing it by the
-     * smaller unique count would re-request rows already seen and walk the same page forever.
+     * kept: `skip` is the vendor's cursor into its own result set. Advancing it by the smaller
+     * unique count would re-request rows already seen, re-spending pages against a 100/hour
+     * bucket and pushing the walk into `paging_bound` without ever reaching the end. (It would
+     * not spin forever — the MAX_PAGES bound always terminates — so the cursor choice is about
+     * coverage and request cost, not termination. Do not read it as the loop's safety net.)
+     * On a repeat, the FIRST copy seen is kept and later copies are discarded; the vendor does
+     * not promise a later page is a fresher snapshot, so neither ordering is defensibly "more
+     * correct" and first-seen is simply the stated choice.
      * Rows whose `id` is absent or not a string are kept as-is for the per-row validators to
      * reject (`row_drift`); paging never silently discards a row it cannot key.
      *
@@ -273,9 +294,17 @@ class AutoElevateReadService
 
     /**
      * The collected unique rows must account for exactly the vendor's latest `totalCount`.
-     * Fewer means rows were repeated and therefore others were dropped; more means the
+     * Fewer is consistent with rows having been repeated and others dropped; more means the
      * vendor handed back rows it does not admit to having. Either way the list is not the
      * tenant's machines, and a wrong list must scream rather than render (C-56).
+     *
+     * WHAT THIS DOES NOT PROVE. It is a CARDINALITY check, not a coverage check, and the
+     * honest limit is worth stating because the reason label sounds stronger than it is:
+     * any drift that removes one row and adds another distinct one leaves the count intact
+     * and passes here. A vendor whose set SHRINKS mid-walk moves both sides of the
+     * comparison together and can likewise reconcile cleanly while a machine is missing.
+     * So this catches the repeat-and-drop shape #2115 was opened for; it is not a guarantee
+     * that the list is complete. Only a vendor-side cursor or a stable sort would give that.
      *
      * @param  list<array<string, mixed>>  $items
      * @return list<array<string, mixed>>

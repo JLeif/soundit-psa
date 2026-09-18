@@ -19,6 +19,11 @@ class AutoElevateReadException extends \RuntimeException
      * useful elaboration and should stand alone. Only the reasons whose meaning is NOT
      * evident from the label itself are listed; a hint that merely restates the label is
      * noise. Operator-safe by construction: fixed strings, no vendor text, no key.
+     *
+     * Wording note: the paging reasons are raised from the shared page walk, which serves
+     * BOTH the computers read and the companies read, so these sentences say "rows" rather
+     * than "machines" — a company-list failure must not tell an operator that a company
+     * reports too many machines.
      */
     public function operatorHint(): ?string
     {
@@ -29,10 +34,14 @@ class AutoElevateReadException extends \RuntimeException
     public static function hintFor(string $reason): ?string
     {
         return match ($reason) {
-            'paging_over_cap' => 'This company reports more machines than one read can collect (over 10,000). '
+            // The threshold is DERIVED, never typed as a literal: a change to either constant
+            // must move the sentence with it, or the screen states a bound that is not the one
+            // being enforced.
+            'paging_over_cap' => 'This company reports more rows than one read can collect (over '
+                .number_format(AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE).'). '
                 .'Nothing was listed because a partial list would look complete.',
-            'paging_count_mismatch' => 'AutoElevate returned a different number of distinct machines than it said it held, '
-                .'so either machines are missing from what it sent or it sent rows it does not admit to holding. Nothing was '
+            'paging_count_mismatch' => 'AutoElevate returned a different number of distinct rows than it said it held, '
+                .'so either rows are missing from what it sent or it sent rows it does not admit to holding. Nothing was '
                 .'listed because the list cannot be trusted either way. Retry; if it persists, the vendor is paging inconsistently.',
             'timestamp_implausible' => 'AutoElevate reported a check-in time outside any believable range, '
                 .'so no machine was shown rather than showing a wrong date.',

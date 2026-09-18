@@ -207,6 +207,39 @@ class AutoElevateReadServiceTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    /**
+     * The at-cap boundary walked to COMPLETION, not merely asserted to skip the over-cap
+     * branch: exactly MAX_PAGES × MAX_TAKE rows must be collectible, which means the 50th
+     * request returns the last full page, `$skip` reaches `$total` inside the final iteration
+     * and reconciliation passes on 10,000 unique rows. Without this, moving the loop bound or
+     * flipping the over-cap comparison to `>=` would silently start failing a tenant the
+     * design deliberately admits, and the negative test below would not notice.
+     *
+     * Deliberately uses bare row arrays rather than the full computer fixture: this asserts
+     * the PAGING boundary, and 10,000 normalized rows would make it a slow normalization test.
+     */
+    public function test_a_tenant_exactly_at_the_cap_walks_to_completion(): void
+    {
+        $atCap = AutoElevateReadService::MAX_PAGES * AutoElevateClient::MAX_TAKE;   // 10,000
+        $requests = 0;
+        Http::fake(function (Request $r) use ($atCap, &$requests) {
+            $requests++;
+            $skip = (int) self::query($r)['skip'];
+            $items = [];
+            for ($i = $skip + 1; $i <= min($skip + AutoElevateClient::MAX_TAKE, $atCap); $i++) {
+                $items[] = self::company(self::uuid($i), sprintf('Co %05d', $i));
+            }
+
+            return Http::response(self::envelope($items, $atCap), 200);
+        });
+
+        $rows = $this->service()->companies();
+
+        $this->assertCount($atCap, $rows, 'a tenant exactly at the cap must be collectible');
+        $this->assertSame($atCap, count(array_unique(array_column($rows, 'id'))));
+        $this->assertSame(AutoElevateReadService::MAX_PAGES, $requests, 'exactly 50 full pages, no 51st request');
+    }
+
     /** Exactly at the cap is collectible, so it is NOT over-cap: the walk proceeds and fails on its merits. */
     public function test_a_tenant_exactly_at_the_cap_is_not_over_cap(): void
     {
@@ -546,6 +579,35 @@ class AutoElevateReadServiceTest extends TestCase
      * caller — and three tests did — exercise the public method with the scope proof disabled.
      * Assert the signature itself, because that is what the caller can opt out of.
      */
+    /**
+     * The null-hint contract asserted directly on the table, because the panel test can only
+     * observe the ABSENCE of some particular sentence — which a label-restating hint would
+     * satisfy. Every reason the service can raise must either carry a sentence that adds
+     * information or carry none at all.
+     */
+    public function test_only_reasons_that_add_information_carry_a_hint(): void
+    {
+        foreach (['paging_over_cap', 'paging_count_mismatch', 'timestamp_implausible'] as $explained) {
+            $hint = AutoElevateReadException::hintFor($explained);
+            $this->assertIsString($hint);
+            $this->assertStringNotContainsString($explained, $hint, 'a hint must not restate its own label');
+            $this->assertGreaterThan(40, strlen($hint), 'a hint that adds nothing should be null instead');
+        }
+
+        // Self-evident or already-explained labels get no hint at all — not a restatement.
+        foreach (['paging_incomplete', 'paging_bound', 'row_drift', 'envelope_drift', 'timestamp_drift',
+            'configuration', 'transport', 'invalid_company_id', 'http_429'] as $bare) {
+            $this->assertNull(AutoElevateReadException::hintFor($bare), "{$bare} must not gain noise");
+        }
+
+        // operatorHint() is the instance door onto the same table and must not drift from it.
+        $this->assertSame(
+            AutoElevateReadException::hintFor('paging_over_cap'),
+            (new AutoElevateReadException('paging_over_cap'))->operatorHint()
+        );
+        $this->assertNull((new AutoElevateReadException('paging_incomplete'))->operatorHint());
+    }
+
     public function test_the_company_scope_argument_cannot_be_omitted_or_nulled(): void
     {
         $param = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))->getParameters()[1];
@@ -557,22 +619,41 @@ class AutoElevateReadServiceTest extends TestCase
     }
 
     /**
-     * The behavioural half of the same fix, and the one that actually exercises the code:
-     * invoke the method the way the unscoped callers did — one argument, a row belonging to
-     * ANOTHER company — and it must not produce a row. Fixed, PHP refuses the call itself
-     * (ArgumentCountError); before the fix this returned a normalized foreign machine.
+     * The behavioural half of the same fix. An earlier version of this test asserted only
+     * that an argument-less call raises ArgumentCountError — which is PHP's arity check
+     * firing before the method body runs, and would pass for ANY two-parameter method whether
+     * or not the scope proof existed. That is a control that restates a declaration instead
+     * of executing code, so it is replaced here.
+     *
+     * This one drives the SCOPE PROOF ITSELF over every value the old signature permitted:
+     * the removed default (null) and the empty string a nullable parameter invites. Each must
+     * refuse a foreign row with row_drift rather than normalize it, and a matching row must
+     * still pass — so the test fails if the check is dropped AND if it is made unconditional.
      */
-    public function test_normalize_cannot_be_invoked_without_a_company_and_yield_a_foreign_row(): void
+    public function test_no_company_argument_can_disable_the_scope_proof(): void
     {
         $foreign = self::computer(['companyId' => self::COMPANY_B]);
 
-        try {
-            $row = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))
-                ->invokeArgs($this->service(), [$foreign]);
-            $this->fail('the unscoped call must not succeed; it returned '.json_encode($row));
-        } catch (\ArgumentCountError $e) {
-            $this->assertStringContainsString('normalizeComputer', $e->getMessage());
+        foreach ([null, ''] as $weak) {
+            try {
+                $row = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))
+                    ->invokeArgs($this->service(), [$foreign, $weak]);
+                $this->fail('a foreign row must not normalize under '.var_export($weak, true)
+                    .'; it returned '.json_encode($row));
+            } catch (AutoElevateReadException $e) {
+                $this->assertSame('row_drift', $e->reason);
+            } catch (\TypeError $e) {
+                // null is now refused by the signature itself, before the body runs.
+                $this->assertStringContainsString('normalizeComputer', $e->getMessage());
+            }
         }
+
+        // The same proof must still ADMIT the row that genuinely belongs to the company,
+        // so this cannot be satisfied by a check that refuses everything.
+        $this->assertSame(
+            self::uuid(1),
+            $this->service()->normalizeComputer(self::computer(['id' => self::uuid(1)]), self::COMPANY_A)['id']
+        );
     }
 
     public function test_a_foreign_row_is_drift_even_when_normalize_is_called_directly(): void
