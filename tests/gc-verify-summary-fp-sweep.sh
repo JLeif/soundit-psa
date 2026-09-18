@@ -132,7 +132,46 @@ if [ "${1:-}" = "--selftest" ]; then
         sed 's/^/    /' "$blind_err" >&2
         exit 1
     fi
-    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted"
+    echo "selftest: fatal, and for the stated reason, when the parser cannot be extracted"
+
+    # ARM 3. The extractor must refuse a body whose own closing brace is indented,
+    # WITHOUT executing the text it swallowed. Arms 1 and 2 both prove the sweep
+    # can go red; neither proves it declines to EXECUTE. That distinction is the
+    # whole finding: the old guards passed on this input while `eval` ran the
+    # smuggled statements.
+    #
+    # The control is the marker file. Asserting only the exit code would repeat
+    # this round's other mistake -- the pre-fix sweep also exited nonzero here,
+    # but for an unrelated reason, AFTER running the planted command.
+    overrun="$(mktemp)"; over_err="$(mktemp)"
+    marker="$(mktemp -u)"
+    trap 'rm -f "$mutant" "$blind" "$blind_err" "$overrun" "$over_err" "$marker"' EXIT
+    {
+        echo 'assert_no_warnings() {'
+        echo '    local f="$1"'
+        for _pad in $(seq 1 25); do echo "    : pad_$_pad"; done
+        echo '    return 0'
+        echo '  }'   # INDENTED brace: the sed range cannot stop here
+        echo "touch '$marker'"
+        echo 'other_function() {'
+        echo '    :'
+        echo '}'
+    } > "$overrun"
+    "$0" "$overrun" "$selftest_corpus" >/dev/null 2>"$over_err"
+    rc=$?
+    if [ -e "$marker" ]; then
+        echo "SELFTEST FAILED: the extractor EXECUTED script text beyond the function body" >&2
+        echo "  (planted marker $marker was created). This is the eval-smuggling defect." >&2
+        exit 1
+    fi
+    if [ "$rc" -ne 2 ] || ! grep -q 'column-0 statement' "$over_err"; then
+        echo "SELFTEST FAILED: overrunning body exited $rc (want 2) without the overrun diagnostic; stderr was:" >&2
+        sed 's/^/    /' "$over_err" >&2
+        exit 1
+    fi
+    echo "selftest: refuses an overrunning body WITHOUT executing what it swallowed"
+
+    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted, and non-executing when the extraction range overruns"
     exit 0
 fi
 
@@ -146,8 +185,33 @@ CORPUS="${2:-$HERE/gc-verify-summary-corpus.txt}"
 # Extract assert_no_warnings() from a script. The range is bounded at a column-0
 # '}' so a file without one cannot run the sed range to EOF and eval the rest of
 # the script.
+#
+# ROUND 5 CLOSED THE HOLE THIS BOUND LEFT OPEN. Bounding the range at the FIRST
+# column-0 '}' bounds where the range ENDS; it says nothing about what the range
+# CONTAINS. If the function's own closing brace is indented (or absent), the range
+# runs on to the NEXT column-0 '}' -- swallowing every statement in between, which
+# `eval` then executes. Both prior guards passed while this happened, by
+# construction: an overrun body is LONGER (so the >=20 line floor is satisfied)
+# and it ends at a column-0 '}' (so the brace-termination assertion is satisfied).
+# The guards could not fail in the case they were added for.
+#
+# MEASURED, not reasoned: a fixture whose own brace is indented caused this sweep
+# to execute a planted `touch` and print arbitrary text to stderr, while exiting
+# for an unrelated reason. See test_extractor_refuses_an_overrunning_body.
+#
+# The invariant that actually holds: a shell function's body is INDENTED. Every
+# line strictly between the definition line and the terminating brace must begin
+# with whitespace (or be blank). A column-0 statement inside the range is proof
+# the range escaped the function. Verified against both revisions of the real
+# function under review: 0 column-0 interior lines in each.
 extract_fn() {
     sed -n '/^assert_no_warnings()/,/^}$/p' "$1"
+}
+
+# Return 0 if the extracted body contains a column-0 line between its first and
+# last, i.e. the sed range ran past the function's own closing brace.
+fn_body_overruns() {
+    printf '%s\n' "$1" | sed -n '2,$p' | head -n -1 | grep -q '^[^[:space:]]'
 }
 
 # A failed extraction is FATAL, never a verdict: the whole point is to execute the
@@ -169,6 +233,14 @@ require_extractable() {
     }
     printf '%s' "$fn" | grep -qE '^\}$' || {
         echo "FATAL: extracted body from $script is not brace-terminated" >&2
+        exit 2
+    }
+    # The range ended at a column-0 '}' -- but is that THIS function's brace? If
+    # any interior line starts at column 0, the range overran and `eval` would
+    # execute script text that is not the parser. Refuse rather than execute it.
+    fn_body_overruns "$fn" && {
+        echo "FATAL: extracted body from $script contains a column-0 statement, so the" >&2
+        echo "  range ran past assert_no_warnings()'s own closing brace; refusing to eval it" >&2
         exit 2
     }
 }
