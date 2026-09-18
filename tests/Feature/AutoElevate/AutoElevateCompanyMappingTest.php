@@ -24,10 +24,21 @@ class AutoElevateCompanyMappingTest extends TestCase
         parent::setUp();
         Http::preventStrayRequests();
         // r5 contract:8: Http::assertNothingSent() only inspects $recorded, and Factory populates
-        // that solely when fake()/record() has set the recording flag. With preventStrayRequests()
-        // alone, every assertNothingSent() in this file asserted an always-empty array -- it could
-        // not fail. record() turns those assertions into real ones; preventStrayRequests() stays,
-        // so an unfaked call is still an error rather than a silently recorded one.
+        // that solely when fake()/record() has set the recording flag. record() turns those
+        // assertions into real ones; preventStrayRequests() stays, so an unfaked call is still an
+        // error rather than a silently recorded one.
+        //
+        // r6 context:2 corrected the claim that USED to sit here. I had written that without
+        // record() "every assertNothingSent() in this file asserted an always-empty array". That is
+        // true only of the tests whose request never reaches a fake: the ones that call
+        // fakeCompanies() first have recording switched on by fake() itself, so their assertions
+        // were already live. record() is what covers the REMAINDER -- the paths that are refused
+        // before any HTTP call. Overstating the blast radius of my own fix is the same error class
+        // as understating it.
+        //
+        // r6 diff:9: this line is the reason those assertions can fail at all, and nothing pinned
+        // it, so deleting it would silently hollow them out rather than break a test.
+        // test_setup_records_http_so_assert_nothing_sent_can_actually_fail is that pin.
         Http::record();
         Setting::setEncrypted('autoelevate_api_key', 'synthetic-only-key');
     }
@@ -35,6 +46,29 @@ class AutoElevateCompanyMappingTest extends TestCase
     private function fakeCompanies(array $companies): void
     {
         Http::fake([self::BASE.'/api/v1/companies*' => Http::response(self::envelope($companies), 200)]);
+    }
+
+    /**
+     * r6 diff:9. setUp()'s Http::record() is what makes every Http::assertNothingSent() in this
+     * file capable of failing, and nothing pinned it: deleting that one line would leave all five
+     * of them asserting an always-empty array, green and meaningless.
+     *
+     * This asserts the MECHANISM rather than the source text -- a test that greps for
+     * "Http::record" would pass against a file where the call had been moved somewhere it never
+     * runs.
+     *
+     * MY FIRST VERSION OF THIS TEST WAS ITSELF VACUOUS, and the red check is what caught it. It
+     * called Http::fake() and then asserted recording was on -- but fake() SETS the recording flag
+     * itself, so it passed happily with setUp()'s record() deleted. It measured fake(), not the
+     * line it claimed to pin. The fix is to touch no fake at all: read the Factory's recording
+     * flag directly, which only setUp()'s record() can have set.
+     */
+    public function test_setup_records_http_so_assert_nothing_sent_can_actually_fail(): void
+    {
+        $factory = Http::getFacadeRoot();
+        $recording = (new \ReflectionProperty($factory, 'recording'))->getValue($factory);
+
+        $this->assertTrue($recording, 'setUp() must leave HTTP recording ON; without it Http::assertNothingSent() inspects an always-empty array on every refusal path and cannot fail');
     }
 
     public function test_migration_adds_a_nullable_indexed_uuid_column_only(): void
@@ -622,7 +656,7 @@ class AutoElevateCompanyMappingTest extends TestCase
         $this->assertContains($held->id, $offered, 'a client collapsed by keyBy() must still be selectable');
     }
 
-    public function test_empty_state_warning_fails_loudly_rather_than_under_reporting(): void
+    public function test_empty_state_warning_counts_mapped_rows_not_the_dropdown_collection(): void
     {
         // r3 diff:2 was right that the old version of this test grepped the Blade SOURCE for one
         // spelling of an expression, rendering nothing. r4 diff:10 was then right that my
@@ -640,6 +674,12 @@ class AutoElevateCompanyMappingTest extends TestCase
         // which concats operational clients) rather than the mapped rows: that over-reports by
         // counting unmapped clients. Pin the count against an operational UNMAPPED client, which
         // no other test in this file supplies.
+        //
+        // r6 diff:7/context:3/contract:8 said this test "exercises no loud failure and nothing
+        // about under-reporting". On the NAME they were right and it is now renamed for what it
+        // actually pins. On the substance they were wrong, and I checked by mutation rather than by
+        // reading: over-counting the source ($mappedClientRows->count() + 1) FAILS this test
+        // (1 failed, 2 assertions). It is a real control, so it stays.
         Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
         Client::factory()->create(['autoelevate_company_id' => null]);
         $this->fakeCompanies([]);
