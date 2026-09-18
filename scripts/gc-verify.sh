@@ -111,25 +111,62 @@ assert_no_warnings() {
         echo "ERROR: no PHPUnit summary line found; cannot prove warnings == 0." >&2
         return 1
     fi
-    if printf '%s' "$summary" | grep -qE '[Ww]arnings?:[[:space:]]*[0-9]+'; then
-        # PHPUnit TextUI dialect: "Tests: 1, Assertions: 1, Warnings: 1."
-        warnings="$(printf '%s' "$summary" | sed -nE 's/.*[Ww]arnings?:[[:space:]]*([0-9]+).*/\1/p')"
-    elif printf '%s' "$summary" | grep -qE '[0-9]+[[:space:]]+warnings?([,[:space:]]|$)'; then
-        # Laravel dialect: "Tests:  7286 warnings, 467 passed (48511 assertions)"
-        warnings="$(printf '%s' "$summary" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+warnings?([,[:space:]].*|$)/\1/p')"
-    elif printf '%s' "$summary" | grep -qE '([0-9]+[[:space:]]+[a-z]+([,)]|$)|[A-Za-z]+:[[:space:]]*[0-9]+)'; then
-        # Recognised dialect, no warnings token at all => genuinely zero.
-        warnings=0
-    else
-        echo "ERROR: unrecognised PHPUnit summary format; failing closed." >&2
+    # Every count token on the line must be one this gate UNDERSTANDS. An
+    # allow-list, not a catch-all: if a runner renames or adds a token (say
+    # `7286 warned` or `Warnings(!): 7286`), the gate does not get to assume it
+    # meant zero warnings. It says so and FAILs. That is the whole point of the
+    # exercise — a parser that shrugs at what it cannot read is how a 7286-
+    # warning floor passed as PASS in the first place.
+    local body token label count
+    # Drop the `Tests:` label and any parenthetical (e.g. "(48511 assertions)").
+    body="$(printf '%s' "$summary" | sed -E 's/^[[:space:]]*Tests:[[:space:]]*//; s/\([^)]*\)//g; s/[.[:space:]]*$//')"
+    if [ -z "$body" ]; then
+        echo "ERROR: PHPUnit summary line carries no counts; failing closed." >&2
         echo "       summary: $summary" >&2
         return 1
     fi
-    if [ -z "$warnings" ]; then
-        echo "ERROR: could not read a warning count from the summary line." >&2
-        echo "       summary: $summary" >&2
-        return 1
-    fi
+    warnings=0
+    local old_ifs="$IFS"
+    IFS=','
+    for token in $body; do
+        IFS="$old_ifs"
+        token="$(printf '%s' "$token" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        [ -z "$token" ] && { IFS=','; continue; }
+        if printf '%s' "$token" | grep -qE '^[0-9]+$'; then
+            # Bare count: PHPUnit TextUI's leading test total ("Tests: 21, ...").
+            IFS=','; continue
+        elif printf '%s' "$token" | grep -qE '^[0-9]+[[:space:]]+[A-Za-z][A-Za-z[:space:]]*$'; then
+            # Laravel dialect: "7286 warnings".
+            count="$(printf '%s' "$token" | sed -E 's/^([0-9]+).*/\1/')"
+            label="$(printf '%s' "$token" | sed -E 's/^[0-9]+[[:space:]]+//')"
+        elif printf '%s' "$token" | grep -qE '^[A-Za-z][A-Za-z[:space:]]*:[[:space:]]*[0-9]+$'; then
+            # PHPUnit TextUI dialect: "Warnings: 1".
+            label="$(printf '%s' "$token" | sed -E 's/:.*$//')"
+            count="$(printf '%s' "$token" | sed -E 's/^.*:[[:space:]]*//')"
+        else
+            echo "ERROR: unrecognised token in PHPUnit summary; failing closed." >&2
+            echo "       token:   $token" >&2
+            echo "       summary: $summary" >&2
+            IFS="$old_ifs"
+            return 1
+        fi
+        # Normalise: lowercase, collapse spaces, drop a leading "phpunit ".
+        label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[[:space:]]+/ /g; s/^phpunit //; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+        case "$label" in
+            warning|warnings)
+                warnings=$((warnings + count)) ;;
+            assertion|assertions|test|tests|passed|failed|failure|failures|error|errors|skipped|incomplete|risky|deprecation|deprecations|deprecated|notice|notices|todo|todos|pending)
+                : ;;  # known, and deliberately not failed on here
+            *)
+                echo "ERROR: unknown count '$label' in PHPUnit summary; failing closed." >&2
+                echo "       summary: $summary" >&2
+                IFS="$old_ifs"
+                return 1 ;;
+        esac
+        IFS=','
+    done
+    IFS="$old_ifs"
     if [ "$warnings" -ne 0 ]; then
         echo "ERROR: PHPUnit reported $warnings warning(s); gate 1 requires zero." >&2
         echo "       summary: $summary" >&2

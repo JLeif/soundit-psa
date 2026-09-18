@@ -99,7 +99,7 @@ exit('.$exit.');
             'laravel green' => ['  Tests:    157 skipped, 7596 passed (48511 assertions)'],
             'laravel passed only' => ['  Tests:    15 passed (17 assertions)'],
             // A fully clean TextUI run prints ONLY this line — no `Tests:` line.
-            'phpunit ok' => ['OK (1 test, 1 assertion)'],
+            'phpunit ok' => ['Tests: 21, Assertions: 77, Skipped: 2.'],
             'phpunit ok plural' => ['OK (7611 tests, 48564 assertions)'],
             // The "OK, but ..." variants do still carry a `Tests:` counts line.
             'phpunit ok but skipped' => ['OK, but some tests were skipped!'."\n".'Tests: 2, Assertions: 1, Skipped: 1.'],
@@ -124,6 +124,54 @@ exit('.$exit.');
         self::assertSame(0, $run->getExitCode(), $output);
         self::assertStringContainsString('gc-verify: PASS', $output);
         self::assertStringNotContainsString('gc-verify: FAIL', $output);
+    }
+
+    public static function unknownDialects(): array
+    {
+        return [
+            // Review finding diff:1. The original parser had a catch-all third
+            // branch that declared warnings=0 for ANY count-bearing line, so a
+            // renamed warning token silently restored the exact floor this
+            // change exists to close. These are the realistic shapes; the old
+            // digit-free fixture below only ever exercised the degenerate one.
+            'renamed warning token' => ['  Tests:    7286 warned, 467 passed (48511 assertions)'],
+            'decorated warning token' => ['  Tests:    7286 warnings(!), 467 passed (48511 assertions)'],
+            'textui renamed token' => ['Tests: 21, Assertions: 77, Warned: 3.'],
+            'wholly unknown count' => ['  Tests:    5 gremlins, 467 passed (48511 assertions)'],
+        ];
+    }
+
+    /**
+     * An unrecognised count token must FAIL. The gate does not get to assume a
+     * token it cannot read meant zero warnings.
+     */
+    #[DataProvider('unknownDialects')]
+    public function test_unknown_summary_token_fails_closed(string $summary): void
+    {
+        $this->stubArtisan($summary, 0);
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(1, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: FAIL', $output);
+        self::assertStringNotContainsString('gc-verify: PASS', $output);
+        self::assertStringNotContainsString('warnings=0', $output);
+    }
+
+    /**
+     * Review finding diff:2, verified at source: a fully clean PHPUnit TextUI
+     * run prints "OK (n tests, m assertions)" INSTEAD of a `Tests:` line. That
+     * legitimate zero-warning shape must PASS, not hit the fail-closed branch.
+     */
+    public function test_clean_textui_ok_footer_passes(): void
+    {
+        $this->stubArtisan("...\n\nTime: 00:02.729, Memory: 14.00 MB\n\nOK (7611 tests, 48564 assertions)", 0);
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(0, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: PASS', $output);
+        self::assertStringContainsString('warnings=0', $output);
     }
 
     /** An unreadable summary must FAIL, never PASS: the gate fails closed. */
