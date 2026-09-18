@@ -12,7 +12,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 /**
- * Call Log index display guards (card 6aac2ffcf8e1ffa448e60539):
+ * Call Log index display guards (issue #2078):
  *  - the answered-by fallback must not imply a person ("Staff" did);
  *  - the caller's name must be a real link to their person page;
  *  - every row carries a dedicated Open control, and the phone number is

@@ -112,11 +112,17 @@ class PhoneCallService
         //
         // It is NOT monotonic, and the difference matters: a delivery that
         // resolves a DIFFERENT non-null user replaces the stored one, so this is
-        // last-non-null-writer-wins. handleCallAnswered() below takes the
-        // opposite precedence ('if (! $call->answered_by)' - first writer wins),
-        // so the two writers disagree and which value survives depends on
-        // delivery order. Which should win is an open product question, tracked
-        // as issue #2166; do not read this comment as a decision.
+        // last-non-null-writer-wins among outbound deliveries.
+        //
+        // Against handleCallAnswered() the outcome is NOT order-dependent, it is
+        // a fixed precedence: that writer guards 'if (! $call->answered_by)' and
+        // declines when a value exists, while this one overwrites a differing
+        // one, so whenever this delivery resolves an endpoint ITS user wins
+        // regardless of which ran first. The column therefore prefers the
+        // PLACING user over the ANSWERING one, which is the opposite of what the
+        // column's name says. Whether that is right is an open product question,
+        // tracked as issue #2166 - it is a precedence decision, not a race to be
+        // fixed with sequencing or a lock. Do not read this comment as a ruling.
         if ($endpoint?->user_id !== null && $call->answered_by !== $endpoint->user_id) {
             $call->answered_by = $endpoint->user_id;
             $call->save();

@@ -97,10 +97,15 @@ class OutboundCallAnsweredByTest extends TestCase
     }
 
     /**
-     * Adjudication context:1/diff:1 on review 01a0b139: the earlier repeat-webhook test
-     * resolved the endpoint on BOTH deliveries, so it could not see the destructive case.
-     * Plivo re-delivers webhooks; if the endpoint no longer resolves on the later delivery,
-     * the attribution already resolved must survive. answered_by fills in, never clears.
+     * The earlier repeat-webhook test resolved the endpoint on BOTH deliveries, so it
+     * could not see the destructive case. Plivo re-delivers webhooks; if the endpoint no
+     * longer resolves on the later delivery, the attribution already resolved must
+     * survive.
+     *
+     * That is all this pins: an UNRESOLVED delivery never clears. It is NOT "fills in,
+     * never clears" - a delivery that resolves a DIFFERENT non-null user does replace the
+     * stored one (see the service comment; the precedence question is issue #2166). No
+     * test covers that case yet.
      */
     public function test_a_repeat_webhook_with_an_unresolved_endpoint_keeps_the_resolved_answered_by(): void
     {
@@ -110,7 +115,7 @@ class OutboundCallAnsweredByTest extends TestCase
         $service = app(PhoneCallService::class);
 
         $payload = [
-            'CallUUID' => 'outbound-answered-by-monotonic',
+            'CallUUID' => 'outbound-answered-by-unresolved-redelivery',
             'From' => 'sip:tester@phone.plivo.com',
             'To' => '+15555550199',
         ];
