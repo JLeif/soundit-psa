@@ -34,8 +34,14 @@ use Tests\TestCase;
  *  3. handleRecordingReady() backfilled duration and re-ran only the prepay
  *     debit. The correcting fact arrived and was dropped.
  *
- * Every test here was RED-CHECKED against the unfixed code at 4474fa88 before
- * the fix; the per-test notes say which failure each one produced.
+ * SOME of the tests here were RED-CHECKED against the unfixed code at 4474fa88
+ * and fail there; the per-test notes say which failure each one produced and are
+ * the accurate record. The others are GREEN both before and after by
+ * construction and say so individually - they are guards on the FIX rather than
+ * on the defect (the unanswered-B-leg negative, the unknown-vendor-word
+ * negative, the unanswered-outbound negative, the voicemail guards). An earlier
+ * version of this line claimed EVERY test was red-checked, which the per-test
+ * notes below already contradicted.
  *
  * FIXTURES ARE VARIED DELIBERATELY. The masking pattern this repo has been
  * bitten by three times is fixtures that all sit at the benign value, so a

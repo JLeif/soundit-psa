@@ -25,11 +25,21 @@ use Tests\TestCase;
  * moved out — flagged at diff:1/context:1 and deliberately deferred to this
  * branch.
  *
- * Why started_at is not cosmetic: prepay debiting is derived from the call, and
- * re-dating the start re-dates the charge.
+ * Why started_at is not cosmetic, cited rather than asserted: PrepayService
+ * dates the transaction it writes with `$call->started_at ?? $call->created_at`
+ * (PrepayService.php, the two 'date' => assignments in debitFromPhoneCall's
+ * write path). So re-dating started_at re-dates the prepay charge for the call.
+ * Note the `?? $call->created_at` fallback bounds the blast radius - a row whose
+ * started_at were NULL would fall back to creation time rather than to nothing -
+ * but on these rows started_at is set, so the redelivery value is what is used.
  *
- * All four regression tests below were RED-CHECKED against 4474fa88 before the
- * fix. Fixtures are varied across both affected paths — logOutboundCall AND
+ * THREE of the five tests below were RED-CHECKED against 4474fa88 and fail
+ * there: the two outbound regressions and the inbound one. The remaining two are
+ * GREEN both before and after by construction and are guards on the FIX rather
+ * than on the defect - that a first delivery still establishes Ringing and a
+ * start time, and that the answered_by guard is undisturbed. An earlier version
+ * of this docblock said "all four", which was wrong on both the count and the
+ * red-check claim. Fixtures are varied across both affected paths — logOutboundCall AND
  * logIncomingCall carry the identical hazard, and a fix applied to only one of
  * them would pass half of this file.
  */
@@ -87,7 +97,10 @@ class CallRedeliveryRegressionTest extends TestCase
 
     /**
      * THE RE-DATING, which is the one that moves money: started_at feeds the
-     * prepay charge's dating.
+     * prepay charge's dating - see the class docblock for the cited assignment
+     * in PrepayService. This test pins the timestamp, not the charge: no prepay
+     * transaction is exercised here, so it is evidence for the input to that
+     * dating, not proof of a mis-dated transaction end to end.
      *
      * RED at 4474fa88: started_at was rewritten to the redelivery instant.
      */
