@@ -237,6 +237,43 @@ class ScheduledImmediateLaneTest extends \Tests\TestCase
             (string) $run->content_hash, $this->token()->id, '2026-09-16 03:30:00', '2026-09-16 04:30:00', 'UTC', [], $evidence);
     }
 
+    public function test_a_token_row_is_refused_a_second_admission_under_a_different_token(): void
+    {
+        // The approver carries the token id, and lineage() cross-checks it against the
+        // provenance. Without that check a row queued by token A could be re-admitted
+        // naming token B, and the NULL-exact approver comparison would not catch it:
+        // both approver ids are NULL.
+        $result = $this->immediateCall();
+        $run = TechnicianRun::findOrFail($result['run_id']);
+        $other = McpToken::create(['label' => 'other-token', 'token_hash' => str_repeat('b', 64),
+            'token_prefix' => 'psa_other', 'tools' => ['tactical_set_maintenance:immediate'], 'activated_at' => now()]);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('lineage_mismatch');
+        app(\App\Services\Technician\Scheduled\ScheduledAdmission::class)->admit(
+            $run->id, \App\Services\Technician\Scheduled\ScheduledApprover::token($other->id),
+            (string) $run->content_hash, $this->token()->id,
+            '2026-09-16 03:30:00', '2026-09-16 04:30:00', 'UTC', [], app(\App\Services\Technician\Scheduled\TacticalEvidence::class));
+    }
+
+    public function test_the_fire_time_dispatcher_never_substitutes_a_user_for_the_absent_approver(): void
+    {
+        // A token row has no approver, and the destructive-action confirm token binds the
+        // actor id. Filling the absence with any live user would put a real technician's id
+        // on an action they never authorised, and the audit trail would name them.
+        $result = $this->mcp($this->bearer(['tactical_reboot_device:immediate']), 'tactical_reboot_device',
+            $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => false, 'confirm_hostname' => 'fixture-device']));
+        $this->assertTrue($result['scheduled'] ?? false, json_encode($result));
+        $this->time = $this->time->setTime(3, 30);
+        app(TacticalDispatch::class)->run((int) $result['authorization_id']);
+        $this->assertCount(1, $this->wire);
+        // The action log is the record. It must credit the scheduled authorization, and no
+        // user row, for a run nobody approved.
+        $audit = \App\Models\TacticalActionLog::orderByDesc('id')->first();
+        $this->assertNotNull($audit, 'the scheduled dispatch wrote no action log row');
+        $this->assertNull($audit->actor_id, 'the dispatcher credited a user for a token-queued action');
+        $this->assertStringStartsWith('scheduled:', (string) $audit->actor_label);
+    }
+
     public function test_a_human_row_arriving_later_as_a_token_row_is_refused_not_returned(): void
     {
         $run = $this->stageWithExecuteAt(['tactical_set_maintenance:immediate']);
