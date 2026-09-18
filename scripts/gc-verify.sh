@@ -134,8 +134,16 @@ assert_no_warnings() {
     # exercise — a parser that shrugs at what it cannot read is how a 7286-
     # warning floor passed as PASS in the first place.
     local body token label count
-    # Drop the `Tests:` label and any parenthetical (e.g. "(48511 assertions)").
-    body="$(printf '%s' "$summary" | sed -E 's/^[[:space:]]*Tests:[[:space:]]*//; s/\([^)]*\)//g; s/[.[:space:]]*$//')"
+    # Drop the `Tests:` label, then UNWRAP any parenthetical rather than deleting
+    # it. Deleting it was GitHub #2532: `Tests: 467 passed (7286 warnings, 48511
+    # assertions)` had its warnings count removed before the allow-list below
+    # ever saw it, and the gate then "proved" warnings == 0 from the absence it
+    # had just manufactured. The counts inside the parens are counts like any
+    # other, so they go through the same allow-list: a warnings count fails the
+    # gate wherever it appears, and a token this gate cannot read fails closed
+    # wherever it appears. Parens become commas so the existing IFS split sees
+    # each token; an empty parenthetical collapses to nothing.
+    body="$(printf '%s' "$summary" | sed -E 's/^[[:space:]]*Tests:[[:space:]]*//; s/[()]/,/g; s/[.[:space:]]*$//')"
     if [ -z "$body" ]; then
         echo "ERROR: PHPUnit summary line carries no counts; failing closed." >&2
         echo "       summary: $summary" >&2
