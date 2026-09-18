@@ -9,6 +9,7 @@ use Symfony\Component\Process\Process;
  * Gate 0: gc-verify.sh must provision .env the way CI does, or refuse to start.
  *
  * A worktree created without .env does not fail loudly — phpdotenv's
+ *
  * @-suppressed read at Store/File/Reader.php:73 is surfaced per test process,
  * PHPUnit relabels passes as `warnings`, and the gate still exits 0. Depending
  * on someone remembering wt/README.md:35 ("Copy .env from psa-work") is not a

@@ -29,7 +29,7 @@ class GcVerifySummaryWarningGateTest extends TestCase
         mkdir($this->fixture, 0700);
         (new Process(['git', 'init', '--quiet', $this->fixture]))->mustRun();
         // A provisioned environment, so these cases isolate summary parsing.
-        file_put_contents($this->fixture.'/.env', "APP_KEY=base64:".base64_encode(random_bytes(32))."\n");
+        file_put_contents($this->fixture.'/.env', 'APP_KEY=base64:'.base64_encode(random_bytes(32))."\n");
         file_put_contents($this->fixture.'/.env.example', "APP_KEY=\n");
     }
 
