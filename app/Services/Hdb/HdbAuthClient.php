@@ -56,14 +56,47 @@ use Illuminate\Support\Facades\Http;
  *   server-side, so it is not reproduced here: it would send a prefix of the
  *   SHA-1 of the operator's password to a third party on every connection test.
  *
+ * MEASURED 2026-09-17 against the production portal, once, by the operator who
+ * holds the credentials — the sign-in chain this client must survive:
+ *
+ * - An ACCEPTED credential post answers 302 to `/home.php`, which 307s to
+ *   `/home`, which 302s to `/2fa_auth.php`, which 307s to `/2fa_auth`. Four
+ *   hops, all on the configured origin, and the portal serves the second-factor
+ *   page at the end of them. {@see MAX_REDIRECTS} is sized from that chain.
+ * - The second-factor page is titled "2FA Authentication" and carries fields
+ *   `otp`, `g-recaptcha-response` and `totpskip`. `otp` matches
+ *   {@see CHALLENGE_FIELD_PATTERN}, so {@see findChallengeForm} drives it.
+ * - 🔴 **`g-recaptcha-response` is UNRESOLVED and deliberately not handled.**
+ *   Whether the portal ENFORCES that captcha when the code is submitted has NOT
+ *   been measured — the one control stopped at fetching the page. If it is
+ *   enforced, automated second-factor sign-in is blocked outright and no code
+ *   this client generates can pass; that is a design question for the portal
+ *   owner, not a defect to work around here. Said precisely, because the loose
+ *   version of this sentence was wrong: {@see findChallengeForm} forwards every
+ *   hidden field at the value the portal SERVED, so the captcha field IS posted
+ *   back — empty, exactly as served — and so is `totpskip`. What this class does
+ *   not do is INVENT a value for either. Do not "fix" the empty captcha by
+ *   supplying a token.
+ *
+ *   🔴 `totpskip` is forwarded, and forwarding is not a neutral act: its NAME
+ *   says it controls whether the second factor is skipped. Served `0`, this
+ *   client posts `0`. If the portal ever serves it enabled, this client would
+ *   forward that too and a bypassed second factor would classify as a clean
+ *   sign-in — tracked as a ticket-class residual on this leg rather than
+ *   guessed at here, because the alternative (dropping a field the portal
+ *   served) is its own guess and neither has been measured.
+ *
  * 🔴 TWO HONEST LIMITS, because a reviewer should not have to find them:
  *
- * 1. **The second-factor leg is unverified against the live portal.** The
- *    challenge page is only reachable with real credentials, which this box
- *    does not hold, so the field is DISCOVERED from the returned form rather
- *    than hard-coded ({@see findChallengeForm}). A prompt this client cannot
- *    recognise reports REASON_TOTP_CHALLENGE_UNRECOGNISED — a distinct outcome
- *    from a refused code, so the first real run says which leg to fix.
+ * 1. **The second-factor leg is unverified END TO END against the live portal.**
+ *    The challenge PAGE is now measured (above), but no code has ever been
+ *    posted back to it, so everything after the prompt — whether the captcha
+ *    gates the submit, what a refused code looks like, what a signed-in page
+ *    looks like — remains unobserved. The field is therefore still DISCOVERED
+ *    from the returned form rather than hard-coded ({@see findChallengeForm}).
+ *    A prompt this client cannot recognise reports
+ *    REASON_TOTP_CHALLENGE_UNRECOGNISED — a distinct outcome from a refused
+ *    code, so the first real run says which leg to fix.
  * 2. **Success is a NEGATIVE test.** With no observed authenticated page there
  *    is no positive marker to assert, so "authenticated" means the portal
  *    answered 2xx with a non-empty body carrying neither an unauthenticated
@@ -108,7 +141,23 @@ final class HdbAuthClient
      */
     public const MAX_REQUESTS = 3;
 
-    private const MAX_REDIRECTS = 5;
+    /**
+     * Guzzle-followed redirect hops one top-level request may spend.
+     *
+     * RAISED 5 -> 8 on 2026-09-17, because the real sign-in chain was measured
+     * and it is 4 hops against the old cap of 5 — one hop of headroom, which is
+     * tighter than the number looks. The portal answers an accepted credential
+     * post with `/home.php` (302), which 307s to `/home`, which 302s to
+     * `/2fa_auth.php`, which 307s to `/2fa_auth`, which serves the second-factor
+     * page. Each `.php` path pairs with an extension-less one, so the portal's
+     * own routing spends hops two at a time: ONE more such pair anywhere in the
+     * chain would have reported REASON_REQUEST_BUDGET_EXHAUSTED for a sign-in
+     * that was working. 8 leaves room for two more pairs and still stops a loop.
+     *
+     * This cap is what a loop actually dies on ({@see transportReasonFor}); the
+     * top-level {@see MAX_REQUESTS} counts legs, not hops, and never sees these.
+     */
+    private const MAX_REDIRECTS = 8;
 
     private const CONNECT_TIMEOUT_SECONDS = 5;
 
@@ -336,9 +385,14 @@ final class HdbAuthClient
                 HdbAuthResult::REASON_TOTP_CHALLENGE_UNRECOGNISED,
             );
         } catch (HdbRedirectRefusedException) {
-            // A hop that left the configured origin. Guzzle re-POSTs the
-            // credential body on every redirect under `strict`, so the hop is
-            // refused BEFORE it is followed and nothing reached that host.
+            // A hop that left the configured origin, refused BEFORE it was
+            // followed, so nothing reached that host. This is THE password
+            // guard on the redirect chain: browser semantics drop the body on a
+            // 300/301/302/303, but EVERY OTHER 3xx — 307 and 308, and anything
+            // future — carries it verbatim, and the portal's own chain uses
+            // both. So an off-origin hop can still be a send of the decrypted
+            // credential, and is refused on its destination rather than on a
+            // guess about what it would have carried.
             return $this->result(HdbAuthStatus::Unreachable, HdbAuthResult::REASON_REDIRECT_REFUSED);
         } catch (\Throwable $e) {
             // The exception NEVER reaches the operator: a Guzzle message carries
@@ -680,17 +734,34 @@ final class HdbAuthClient
             ->timeout(self::TIMEOUT_SECONDS)
             ->withOptions([
                 'cookies' => $this->cookies,
-                // `strict` means a 301/302 on the credential POST is re-issued
-                // AS a POST, body and all (307/308 always are), so EVERY hop is
-                // another send of the decrypted password — and the first URL
-                // passing the destination guard decides nothing about where hop
-                // two goes. Guzzle's defaults allow `http` and check no host, so
-                // both are pinned here: https only, and each hop measured
-                // against the same origin the first one was. The configured
-                // origin or nowhere.
+                // BROWSER SEMANTICS, and the correction of this client's worst
+                // bug: `strict => false` makes Guzzle turn a 300/301/302/303 on
+                // the credential POST into a GET, exactly as a browser does
+                // (RedirectMiddleware downgrades on `303 || (<= 302 && !strict)`,
+                // so the rule is every 3xx up to 302, plus 303 — and NOTHING
+                // above it). Under
+                // `strict => true` — what shipped until 2026-09-17 — the POST
+                // method and body were re-issued at every hop, so the login body
+                // was posted at `/home.php`, `/home`, `/2fa_auth.php` and
+                // `/2fa_auth`, and the vendor's second-factor page answered 500
+                // "Fatal error." on a POST it never expects. The client failed
+                // closed on that and reported `unexpected_response` — its own
+                // crash, four hops after a sign-in the portal had ACCEPTED.
+                //
+                // `strict` was justified in this file as a password protection.
+                // It was the opposite: it re-sent the password to four further
+                // endpoints. THE PASSWORD GUARD IS THE ORIGIN PIN BELOW —
+                // measured on the real chain, every hop stayed on the configured
+                // origin and nothing left it. That pin stays, and it still earns
+                // its keep with `strict` off: a 307/308 preserves the body
+                // whatever `strict` says, and this portal's chain is half 307s.
+                //
+                // Guzzle's defaults allow `http` and check no host, so both are
+                // pinned: https only, and each hop measured against the same
+                // origin the first one was. The configured origin or nowhere.
                 'allow_redirects' => [
                     'max' => self::MAX_REDIRECTS,
-                    'strict' => true,
+                    'strict' => false,
                     'referer' => true,
                     'protocols' => ['https'],
                     'on_redirect' => function ($request, $response, $uri) {
@@ -868,9 +939,13 @@ final class HdbAuthClient
     /**
      * Whether a URL is the configured portal origin, or somewhere under it.
      *
-     * Applied to every redirect hop as well as to form actions: under `strict`
-     * redirects each hop re-sends the credential body, so the first URL passing
-     * {@see HdbPortalConfig::baseUrlVerdict()} is not enough on its own.
+     * Applied to every redirect hop as well as to form actions, and it is what
+     * actually keeps the credential on the configured origin — the redirect
+     * policy's `strict` flag never did that job and is off ({@see request}).
+     * A 307/308 re-sends the body verbatim no matter what `strict` says, and a
+     * followed GET still carries the session cookie, so the first URL passing
+     * {@see HdbPortalConfig::baseUrlVerdict()} is not enough on its own: hop two
+     * is measured as hop one was.
      *
      * Scheme and host are lowercased first, because a Location header may spell
      * either differently from the stored setting; the rest is a path-boundary

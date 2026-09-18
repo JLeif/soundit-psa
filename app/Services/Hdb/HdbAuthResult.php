@@ -103,9 +103,15 @@ final readonly class HdbAuthResult
     public const REASON_REQUEST_BUDGET_EXHAUSTED = 'request_budget_exhausted';
 
     /**
-     * The portal tried to redirect a leg off the configured origin. Redirects
-     * re-send the credential body, so the hop was refused rather than followed
-     * and nothing reached that host.
+     * The portal tried to redirect a leg off the configured origin, so the hop
+     * was refused rather than followed and nothing reached that host.
+     *
+     * The refusal does not depend on whether that hop would have carried the
+     * credential body: redirects follow browser semantics, so a 3xx up to 302,
+     * and 303, drop it — but every higher 3xx (307, 308) preserves it verbatim,
+     * and a followed request carries the session cookie either way. An
+     * off-origin hop is refused on the destination, not on what it would have
+     * sent.
      */
     public const REASON_REDIRECT_REFUSED = 'redirect_refused';
 

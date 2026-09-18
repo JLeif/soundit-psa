@@ -5,11 +5,16 @@ namespace App\Services\Hdb;
 /**
  * A redirect hop left the configured portal origin.
  *
- * Guzzle's redirect middleware re-issues a credential POST AS a POST under
- * `strict` mode, so every hop is another send of the decrypted service
- * subaccount password. Refusing one means throwing out of the `on_redirect`
- * callback; this type exists so {@see HdbAuthClient} can tell that refusal apart
- * from an ordinary transport failure and report it as its own reason.
+ * This is the guard that keeps the decrypted service subaccount password on the
+ * configured origin. The redirect policy follows BROWSER semantics
+ * (`strict => false`), so a 3xx up to 302, and 303, drop the credential body —
+ * but every higher 3xx (307, 308) carries it verbatim regardless, the followed
+ * request still carries the session
+ * cookie, and this portal's own sign-in chain mixes both. So an off-origin hop
+ * is refused before it is followed rather than reasoned about. Refusing one
+ * means throwing out of the `on_redirect` callback; this type exists so
+ * {@see HdbAuthClient} can tell that refusal apart from an ordinary transport
+ * failure and report it as its own reason.
  *
  * It deliberately carries no message: the URL it refused is exactly the text
  * that must not escape this package.
