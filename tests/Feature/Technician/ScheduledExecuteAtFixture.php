@@ -4,11 +4,11 @@ namespace Tests\Feature\Technician;
 
 use App\Models\Asset;
 use App\Models\Client;
+use App\Models\Setting;
 use App\Models\TacticalAsset;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
-use App\Models\Setting;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Technician\Scheduled\ScheduledClock;
 use Carbon\CarbonImmutable;
@@ -35,7 +35,6 @@ use Mockery;
 trait ScheduledExecuteAtFixture
 {
     use RefreshDatabase;
-
 
     protected const AT = '2026-09-16T03:30:00+00:00';
 
