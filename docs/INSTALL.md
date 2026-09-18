@@ -1195,6 +1195,18 @@ migrate is skipped; the read-only computers panel on the client page degrades qu
   existing mapping before re-applying the ones the screen listed, so an unlisted company's
   mapping is dropped by the next save. It can only be set again once the vendor lists the
   company.
+- **Caveat, a mapping can become unremovable through the UI.** While the vendor lists zero
+  companies the screen withholds Save (above) and a submission carrying no company keys is
+  refused, so an existing mapping cannot be removed from this screen in that state. It is
+  held, not lost; it becomes removable again as soon as the vendor lists the company. To
+  clear one while the list is empty, unmap it from the client record instead.
+- **Caveat, the save depends on the page's JavaScript.** The client dropdowns are populated
+  by script on the mapping screen. If that script does not run, the form still submits, but
+  every company posts an empty value — which is a non-empty submission, so the empty-list
+  refusal does not apply and the clear-then-apply write removes every mapping while reporting
+  "Saved 0 mapping(s)". Do not save this screen if the dropdowns are not populated.
+- If the API key is missing or empty, saving the mapping form is refused outright and
+  redirects to Integrations without changing any mapping.
 - All mapping routes are admin-only; the client panel is read-only for any user who can see
   the client.
 

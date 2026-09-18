@@ -23,6 +23,12 @@ class AutoElevateCompanyMappingTest extends TestCase
     {
         parent::setUp();
         Http::preventStrayRequests();
+        // r5 contract:8: Http::assertNothingSent() only inspects $recorded, and Factory populates
+        // that solely when fake()/record() has set the recording flag. With preventStrayRequests()
+        // alone, every assertNothingSent() in this file asserted an always-empty array -- it could
+        // not fail. record() turns those assertions into real ones; preventStrayRequests() stays,
+        // so an unfaked call is still an error rather than a silently recorded one.
+        Http::record();
         Setting::setEncrypted('autoelevate_api_key', 'synthetic-only-key');
     }
 
@@ -201,6 +207,31 @@ class AutoElevateCompanyMappingTest extends TestCase
      * replayed POST on an installation whose key had been removed -- a state from which the screen
      * itself cannot be opened. The write path is now gated like the read paths.
      */
+    /**
+     * r5 diff:1: an ERRORED upload named `mappings` (too large, partial, no tmp dir) has an empty
+     * path, so hasFile() is false and input() is null -- the previous guard missed it and told the
+     * admin the form was empty. It must be reported as malformed, like any other file part.
+     */
+    public function test_save_with_an_errored_file_upload_named_mappings_is_reported_as_malformed(): void
+    {
+        $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
+        $errored = new \Illuminate\Http\UploadedFile('', 'mappings.csv', 'text/csv', UPLOAD_ERR_INI_SIZE, true);
+        $this->assertFalse($errored->isValid(), 'fixture must be an errored upload, or this test proves nothing');
+
+        $this->from(route('settings.autoelevate-companies.index'))
+            ->post(route('settings.autoelevate-companies.update'), ['mappings' => $errored])
+            ->assertRedirect(route('settings.autoelevate-companies.index'))
+            ->assertSessionHasErrors('mappings');
+
+        $this->assertSame(
+            'The AutoElevate mapping form was submitted in an unexpected format, so nothing was changed. Existing mappings were kept. Reload the Map companies screen and try again.',
+            session('errors')->get('mappings')[0],
+            'an errored upload must be diagnosed as malformed, not as an empty submission'
+        );
+        $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
+    }
+
     public function test_update_is_refused_when_autoelevate_is_not_configured(): void
     {
         $a = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
@@ -209,7 +240,10 @@ class AutoElevateCompanyMappingTest extends TestCase
 
         $this->post(route('settings.autoelevate-companies.update'), [
             'mappings' => [self::COMPANY_B => (string) $a->id],
-        ])->assertRedirect(route('settings.integrations'));
+        ])->assertRedirect(route('settings.integrations'))
+            // r5 context:2: pinning only the redirect let withErrors() be dropped with the suite
+            // green, bouncing the admin to Integrations with no explanation. Pin the message too.
+            ->assertSessionHasErrors('mappings');
 
         // The mapping must be untouched: an unconfigured install must not rewrite mappings.
         $this->assertSame(self::COMPANY_A, $a->fresh()->autoelevate_company_id);
@@ -560,9 +594,25 @@ class AutoElevateCompanyMappingTest extends TestCase
         // with strtolower(), collapsing them to one row, so the dropdown must offer BOTH or the
         // collapsed client has no <option>, posts nothing, and the next clear-then-apply save
         // destroys its mapping behind a success flash.
+        //
+        // r5 diff:6: this fixture USED to build the shared-id state by case divergence
+        // (strtoupper vs strtolower) -- precisely the route the comment above declares
+        // unproducible, since companies() lowercases every id before either writer sees it.
+        // Build it by the route the rationale actually names: trash a mapped client, run the
+        // clear step (which the SoftDeletes global scope skips for trashed rows), then restore.
         $this->fakeCompanies([self::company(self::COMPANY_A, 'Delta Freight')]);
-        $held = Client::factory()->create(['name' => 'Held Co', 'is_active' => false, 'autoelevate_company_id' => strtoupper(self::COMPANY_A)]);
-        $kept = Client::factory()->create(['name' => 'Kept Co', 'autoelevate_company_id' => strtolower(self::COMPANY_A)]);
+        //
+        // The collapsed client must ALSO be outside Client::operational(), or $allClients would
+        // already carry it from the operational query and the concat would be doing no work --
+        // the fixture would pass against a mutant that concats the keyed collection. Measured:
+        // with both clients operational, concat($mappedClients) survives.
+        $held = Client::factory()->create(['name' => 'Held Co', 'is_active' => false, 'autoelevate_company_id' => self::COMPANY_A]);
+        $held->delete();
+        Client::whereNotNull('autoelevate_company_id')->update(['autoelevate_company_id' => null]);
+        $held->restore();
+        $kept = Client::factory()->create(['name' => 'Kept Co', 'autoelevate_company_id' => self::COMPANY_A]);
+        $this->assertSame(self::COMPANY_A, $held->fresh()->autoelevate_company_id, 'the clear step must skip trashed rows, or this fixture proves nothing');
+        $this->assertFalse($held->fresh()->is_active, 'the collapsed client must be non-operational, or the concat is not exercised');
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
         $offered = $this->get(route('settings.autoelevate-companies.index'))->assertOk()
@@ -577,18 +627,28 @@ class AutoElevateCompanyMappingTest extends TestCase
         // r3 diff:2 was right that the old version of this test grepped the Blade SOURCE for one
         // spelling of an expression, rendering nothing. r4 diff:10 was then right that my
         // behavioural replacement duplicated test_empty_state_warning_counts_clients_not_distinct
-        // _companies exactly. So this now covers what NEITHER did: the count must survive a
-        // NON-OPERATIONAL mapped client, which Client::operational() excludes from $mappedClients
-        // but which $mappedClientRows still carries. A count taken from the operational-only
-        // collection reports 1; the warning must say 2.
+        // _companies exactly. r5 diff:5 was right AGAIN: my second replacement rested on a false
+        // premise -- I wrote that Client::operational() scopes $mappedClients, but index() builds
+        // it with keyBy() alone (no operational() scope), so a non-operational mapped client is
+        // counted either way and the test passed against the very mutant it claimed to catch.
+        // Measured: mutating the count to $mappedClients->count() left this test GREEN and only
+        // its sibling failed.
+        //
+        // What actually distinguishes the two collections is keyBy() COLLAPSING equal keys, and
+        // the sibling already pins that for two clients sharing one id. The remaining
+        // undiscriminated risk is the count being taken from the DROPDOWN collection ($allClients,
+        // which concats operational clients) rather than the mapped rows: that over-reports by
+        // counting unmapped clients. Pin the count against an operational UNMAPPED client, which
+        // no other test in this file supplies.
         Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
-        Client::factory()->create(['autoelevate_company_id' => self::COMPANY_B, 'is_active' => false]);
+        Client::factory()->create(['autoelevate_company_id' => null]);
         $this->fakeCompanies([]);
         $this->actingAs(User::factory()->create(['role' => UserRole::Admin]));
 
         $this->get(route('settings.autoelevate-companies.index'))
             ->assertOk()
-            ->assertSee('2 client(s) still hold a mapping');
+            ->assertSee('1 client(s) still hold a mapping')
+            ->assertDontSee('2 client(s) still hold a mapping');
     }
 
     public function test_integrations_settings_links_to_map_companies_for_admins_only(): void

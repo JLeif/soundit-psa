@@ -105,10 +105,24 @@ class AutoElevateCompanyController extends Controller
         // `mappings`, has() is true, input() is NULL and hasFile() is true -- so an input()-only
         // predicate misses it just as the has()-based one misreported it. The guard test proved
         // this by failing on my first attempt at the fix.
+        // r5 diff:1/contract:6: hasFile() is not enough. It requires isValidFile(), so an
+        // ERRORED upload (UPLOAD_ERR_INI_SIZE and friends) named `mappings` has an empty path,
+        // returns hasFile() false and input() null, and fell through to the empty-form refusal --
+        // the exact misdiagnosis diff:9 set out to close, for the one upload shape most likely to
+        // occur in practice. Measured on this tree: for an errored upload has()=true,
+        // input()=NULL, hasFile()=FALSE, but file() is non-null. Test file() instead, which sees
+        // valid and errored uploads alike.
         $submitted = $request->input('mappings');
-        if (($submitted !== null && ! is_array($submitted)) || $request->hasFile('mappings')) {
+        if (($submitted !== null && ! is_array($submitted)) || $request->file('mappings') !== null) {
             return back()->withErrors(['mappings' => 'The AutoElevate mapping form was submitted in an unexpected format, so nothing was changed. Existing mappings were kept. Reload the Map companies screen and try again.']);
         }
+        // r5 contract:7: this coercion is NOT dead, and the guard above does not subsume it.
+        // The only way to reach it is a body with a PRESENT null `mappings` (e.g. the JSON
+        // `{"mappings": null}`): input() returns that null rather than substituting the []
+        // default, so $submitted === null and the malformed-payload guard lets it through.
+        // Measured against this tree: input('mappings', []) returns NULL for a present null and
+        // [] only when the key is absent. Without this line such a request would miss the
+        // `=== []` refusal below and reach foreach(null) in the clear-then-apply write.
         if (! is_array($mappings)) {
             $mappings = [];
         }
@@ -133,7 +147,12 @@ class AutoElevateCompanyController extends Controller
             // r4 contract:5: the old wording told the admin to unmap "on a form that lists the
             // company", which is impossible in the only state that produces a keyless POST -- the
             // vendor lists nothing, so no form lists the company. Say what is actually true.
-            return back()->withErrors(['mappings' => 'No AutoElevate companies were submitted, so nothing was changed and existing mappings were kept. This happens when AutoElevate returns no companies at all; the mappings are held until it lists them again. If that is unexpected, check the AutoElevate connection in Settings > Integrations.']);
+            // r5 diff:2/context:3: the old wording asserted ONE cause ("AutoElevate returns no
+            // companies at all") that this handler never observes -- update() performs no vendor
+            // read -- and promised the mappings are "held until it lists them again", which the
+            // partial-list save does not honour (see the INSTALL caveat: a save that omits a
+            // company still clears it). State only what this path actually knows.
+            return back()->withErrors(['mappings' => 'No AutoElevate companies were submitted, so nothing was changed and existing mappings were kept. This usually means the company list was empty when the form was submitted. If that is unexpected, reload the Map companies screen and check the AutoElevate connection in Settings > Integrations.']);
         }
 
         // Every key must be a company UUID; every non-empty value a client id. A client holds
