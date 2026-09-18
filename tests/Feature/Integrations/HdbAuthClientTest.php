@@ -13,6 +13,7 @@ use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\TooManyRedirectsException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request as GuzzleRequest;
 use GuzzleHttp\Psr7\Response as GuzzleResponse;
 use GuzzleHttp\Psr7\Uri;
@@ -163,6 +164,40 @@ class HdbAuthClientTest extends TestCase
     private function signedInPage(): string
     {
         return '<html><body><h1>Reports</h1><!-- '.self::BEACON.' --><a href="/logout">Sign out</a></body></html>';
+    }
+
+    /**
+     * The portal's REAL second-factor page, reduced to the parts this client
+     * reads. Measured 2026-09-17 21:59Z by the operator who holds the
+     * credentials, one shot: the page served at the end of the sign-in chain is
+     * titled "2FA Authentication", is 7,229 bytes, and carries the fields `otp`,
+     * `g-recaptcha-response` and `totpskip`. Two session cookies were issued.
+     *
+     * HONEST about what is measured (C-56 rule 2): the TITLE and the three FIELD
+     * NAMES are measured and are the only things asserted off this fixture. The
+     * markup around them — element types, the empty captcha value, the form
+     * action, the prose — is WRITTEN, not captured, because the captured page
+     * carries live session tokens and was never saved.
+     *
+     * ONE ASSUMPTION IS CALLED OUT RATHER THAN BURIED: the ELEMENT TYPE of
+     * `g-recaptcha-response` was not recorded, only its name. This fixture makes
+     * it a hidden `<input>` with an empty value, which is the case that puts the
+     * field in front of {@see HdbAuthClient::findChallengeForm} — the harder
+     * case, because the client then has to decide what to send for it. If the
+     * live page renders it as reCAPTCHA normally does, a `<textarea>`, the
+     * client's input-only scan never sees it and forwards nothing for it, which
+     * is the same conservative outcome by a shorter route. Either way this
+     * client invents no value, and that is what the tests below pin.
+     */
+    private function measuredTwoFactorPage(): string
+    {
+        return '<html><head><title>2FA Authentication</title></head><body><!-- '.self::BEACON.' -->'
+            .'<p>Enter the verification code from your authenticator.</p>'
+            .'<form action="" method="post">'
+            .'<input type="text" name="otp" maxlength="6">'
+            .'<input type="hidden" name="g-recaptcha-response" value="">'
+            .'<input type="hidden" name="totpskip" value="0">'
+            .'<input type="submit" name="submit"></form></body></html>';
     }
 
     private function challengePage(string $fieldName = 'otp', string $action = ''): string
@@ -698,6 +733,68 @@ class HdbAuthClientTest extends TestCase
         });
     }
 
+    public function test_the_portals_measured_2fa_page_engages_the_existing_totp_path(): void
+    {
+        // POINT 3 of the ruling, as a measurement rather than an assumption: now
+        // that browser semantics let the chain REACH the second-factor page, does
+        // the path this client already had engage on the page the portal actually
+        // serves? The field `otp` matches CHALLENGE_FIELD_PATTERN, the page has no
+        // password input, so findChallengeForm drives it — and with no seed
+        // stored the answer is the existing `totp_required_no_seed`, not a new
+        // symbol and not `unexpected_response`.
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->measuredTwoFactorPage()),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertSame(HdbAuthStatus::Rejected, $result->status);
+        $this->assertSame(HdbAuthResult::REASON_TOTP_REQUIRED_NO_SEED, $result->reason);
+        $this->assertSame(2, $result->requests);
+        $this->assertNothingLeaked($result);
+    }
+
+    public function test_it_posts_a_code_to_the_portals_measured_2fa_page_and_invents_no_captcha_value(): void
+    {
+        // The other half of point 3, plus the FLAG the ruling asked to measure
+        // and NOT to solve. The page carries `g-recaptcha-response` and
+        // `totpskip` as hidden fields, so findChallengeForm forwards them at
+        // their SERVED values — empty and `0`. That is the correct conservative
+        // behaviour and it is pinned here precisely so nobody later "fixes" the
+        // empty captcha by inventing a token or flips `totpskip` to skip the
+        // second factor. Whether the portal ENFORCES the captcha on submit is
+        // unmeasured and is a design question, not something this client guesses.
+        Setting::setEncrypted('hdb_totp_secret', self::SEED);
+
+        Http::fake([
+            self::LOGIN_URL => Http::sequence()
+                ->push($this->loginPage())
+                ->push($this->measuredTwoFactorPage())
+                ->push($this->signedInPage()),
+        ]);
+
+        $result = (new HdbAuthClient)->authenticate();
+
+        $this->assertTrue($result->ok());
+        $this->assertSame(3, $result->requests);
+        $this->assertNothingLeaked($result);
+
+        Http::assertSent(function (Request $request) {
+            $data = $request->data();
+
+            if ($request->method() !== 'POST' || ! isset($data['otp'])) {
+                return false;
+            }
+
+            return preg_match('/^\d{6}$/', (string) $data['otp']) === 1
+                && array_key_exists('g-recaptcha-response', $data)
+                && $data['g-recaptcha-response'] === ''   // served empty, forwarded empty
+                && ($data['totpskip'] ?? null) === '0';   // served 0, never flipped
+        });
+    }
+
     public function test_a_challenge_with_no_stored_seed_says_so_specifically(): void
     {
         Http::fake([
@@ -1035,16 +1132,125 @@ class HdbAuthClientTest extends TestCase
 
         // Guzzle's own default allows http and checks no host; both are pinned.
         $this->assertSame(['https'], $allow['protocols'] ?? null);
-        $this->assertSame(5, $allow['max'] ?? null);
+        $this->assertSame(8, $allow['max'] ?? null);
         $this->assertIsCallable($allow['on_redirect'] ?? null);
+    }
+
+    public function test_the_redirect_policy_follows_browser_semantics_rather_than_re_posting(): void
+    {
+        // The flag itself, pinned as a value: `strict => true` is what re-issued
+        // the credential POST at every hop and crashed the vendor's second-factor
+        // page with a 500. A browser turns a 302/303 into a GET, and so must we.
+        // The BEHAVIOUR this produces is measured one test below; this one exists
+        // so the reason the flag is false cannot be lost to a tidy-up.
+        $this->assertFalse($this->capturedRedirectOptions()['strict'] ?? null);
+    }
+
+    /**
+     * The portal's measured sign-in chain, replayed through a REAL Guzzle stack.
+     *
+     * `Http::fake()` cannot settle any of this: its stub is installed OUTSIDE
+     * RedirectMiddleware, so a faked 302 comes back as a body and is never
+     * followed. Only a real stack over a MockHandler, handed the client's own
+     * captured options, runs the middleware that decides method and body per hop.
+     *
+     * The responses are the ones measured 2026-09-17 21:58Z against the portal:
+     * an accepted credential post 302s to `/home.php`, which 307s to `/home`,
+     * which 302s to `/2fa_auth.php`, which 307s to `/2fa_auth`.
+     *
+     * @return list<\Psr\Http\Message\RequestInterface> every request the stack issued, in order
+     */
+    private function replayMeasuredSignInChain(): array
+    {
+        $stack = HandlerStack::create(new MockHandler([
+            new GuzzleResponse(302, ['Location' => self::BASE.'/home.php']),
+            new GuzzleResponse(307, ['Location' => self::BASE.'/home']),
+            new GuzzleResponse(302, ['Location' => self::BASE.'/2fa_auth.php']),
+            new GuzzleResponse(307, ['Location' => self::BASE.'/2fa_auth']),
+            new GuzzleResponse(200, [], $this->measuredTwoFactorPage()),
+        ]));
+
+        $issued = [];
+        $stack->push(Middleware::history($issued));
+
+        $response = (new GuzzleClient(['handler' => $stack, 'http_errors' => false]))
+            ->post(self::BASE.'/login', [
+                'allow_redirects' => $this->capturedRedirectOptions(),
+                'form_params' => ['email' => 'reports@example.test', 'password' => 'service-account-password'],
+            ]);
+
+        $this->assertSame(200, $response->getStatusCode(), 'The measured chain did not reach the second-factor page.');
+
+        return array_map(fn (array $entry) => $entry['request'], $issued);
+    }
+
+    public function test_the_credential_body_is_not_re_posted_across_the_portals_own_redirects(): void
+    {
+        // THE DEFECT, as a behavioural guard. Under the shipped `strict => true`
+        // every hop below was re-issued as a POST carrying the login body, so the
+        // vendor's second-factor page — which never expects a POST — answered 500
+        // "Fatal error.", and this client failed closed on it and reported
+        // `unexpected_response`: its own crash, four hops after a sign-in the
+        // portal had ACCEPTED. Browser semantics are the fix, and the shape of
+        // them is per status: a 302/303 becomes a bodyless GET, a 307/308 keeps
+        // the method and body by definition of those codes.
+        $issued = $this->replayMeasuredSignInChain();
+
+        $shape = array_map(
+            fn ($request) => $request->getMethod().' '.$request->getUri()->getPath(),
+            $issued,
+        );
+
+        $this->assertSame([
+            'POST /login',      // the credentials
+            'GET /home.php',    // 302 -> a browser GETs it, body dropped
+            'GET /home',        // 307 preserves the method, and the method is now GET
+            'GET /2fa_auth.php',
+            'GET /2fa_auth',    // the page that used to be POSTed and 500
+        ], $shape);
+
+        foreach (array_slice($issued, 1) as $hop) {
+            $body = (string) $hop->getBody();
+
+            $this->assertSame('', $body, 'A redirect hop re-sent a request body.');
+            $this->assertStringNotContainsString('service-account-password', $body);
+            $this->assertStringNotContainsString('password', $body);
+        }
+    }
+
+    public function test_the_redirect_cap_clears_the_portals_measured_sign_in_chain(): void
+    {
+        // The chain above spends 4 hops. The cap was 5 — one hop of headroom on a
+        // portal that routes in `.php`/extension-less PAIRS, so one more pair
+        // anywhere would have reported `request_budget_exhausted` for a sign-in
+        // that was working. This pins that the measured chain clears the cap with
+        // room, rather than pinning the integer twice.
+        $hops = count($this->replayMeasuredSignInChain()) - 1;
+
+        $this->assertSame(4, $hops, 'The measured sign-in chain is not 4 hops any more.');
+        $this->assertGreaterThanOrEqual($hops + 2, $this->capturedRedirectOptions()['max']);
+    }
+
+    public function test_the_origin_pin_still_refuses_an_off_origin_hop_with_browser_semantics(): void
+    {
+        // The password guard, and the thing `strict` was wrongly credited with.
+        // It must hold with `strict => false` too: a 307/308 re-sends the body
+        // verbatim whatever `strict` says, and a followed GET still carries the
+        // session cookie.
+        $onRedirect = $this->capturedRedirectOptions()['on_redirect'];
+
+        $this->expectException(HdbRedirectRefusedException::class);
+
+        $onRedirect(null, null, new Uri('https://attacker.example/2fa_auth'));
     }
 
     public function test_the_redirect_guard_refuses_a_hop_to_another_host(): void
     {
         $onRedirect = $this->capturedRedirectOptions()['on_redirect'];
 
-        // `strict` re-POSTs the credential body on every hop, so an off-origin
-        // hop must be refused BEFORE it is followed.
+        // An off-origin hop is refused BEFORE it is followed: a 307/308 would
+        // re-send the credential body verbatim, and even a bodyless GET carries
+        // the session cookie.
         $this->expectException(HdbRedirectRefusedException::class);
 
         $onRedirect(null, null, new Uri('https://attacker.example/login'));
@@ -1193,10 +1399,19 @@ class HdbAuthClientTest extends TestCase
         // The other half of the same measurement: a same-origin loop satisfies
         // on_redirect every time, so what ends it is `max`, and what it throws is
         // the class the mapping reads.
+        //
+        // The queue is sized FROM the client's own cap rather than hard-coded.
+        // It used to hold 8 responses against a cap of 5; raising the cap to 8
+        // exhausted the mock first and this test failed with "Mock queue is
+        // empty" — a MockHandler artefact reported as if Guzzle had stopped
+        // enforcing the cap. Deriving the count means the next cap change cannot
+        // silently turn this measurement into noise.
+        $overCap = $this->capturedRedirectOptions()['max'] + 2;
+
         $client = new GuzzleClient([
             'handler' => HandlerStack::create(new MockHandler(array_map(
                 fn () => new GuzzleResponse(302, ['Location' => self::BASE.'/login']),
-                range(1, 8),
+                range(1, $overCap),
             ))),
             'http_errors' => false,
         ]);
