@@ -41,3 +41,15 @@ PASS|Tests: 21, Assertions: 30.
 # --- empty / malformed parenthetical must not crash or silently pass ---
 PASS|Tests:    467 passed ()
 FAIL|Tests:    467 passed (nonsense)
+
+# --- unwrapping must not manufacture an absence of its own ---
+# Unwrapping turns `()` into `,,` and `(` into `,`, neither of which is empty, so
+# the "carries no counts" guard cannot fire and every field is then skipped as
+# blank. Without the balance and recognised-count guards these all return 0: the
+# gate proving zero warnings off a line it read zero counts from, which is #2532
+# wearing a different hat. A clipped `tee` is enough to produce one. Note the
+# PASS case above does NOT pin this — it carries a real token either way.
+FAIL|Tests:    (
+FAIL|Tests: ()
+FAIL|Tests: ( )
+FAIL|Tests:    467 passed (

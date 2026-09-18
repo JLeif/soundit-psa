@@ -142,7 +142,21 @@ assert_no_warnings() {
     # other, so they go through the same allow-list: a warnings count fails the
     # gate wherever it appears, and a token this gate cannot read fails closed
     # wherever it appears. Parens become commas so the existing IFS split sees
-    # each token; an empty parenthetical collapses to nothing.
+    # each token. Unwrapping never empties `body` though: `()` collapses to
+    # `,,`, not to nothing, so the `-z "$body"` check below can no longer be
+    # what catches a line carrying no readable counts. Two explicit guards take
+    # that weight instead — the parens must balance, so a clipped `Tests: 467
+    # passed (` is refused as the unreadable line it is, and the loop must end
+    # having recognised at least one count. Without them a truncated log would
+    # be "proved" to have zero warnings from an absence: #2532 by another route.
+    local seen=0 opens closes
+    opens="$(printf '%s' "$summary" | tr -cd '(' | wc -c | tr -d '[:space:]')"
+    closes="$(printf '%s' "$summary" | tr -cd ')' | wc -c | tr -d '[:space:]')"
+    if [ "$opens" != "$closes" ]; then
+        echo "ERROR: unbalanced parentheses in PHPUnit summary; failing closed." >&2
+        echo "       summary: $summary" >&2
+        return 1
+    fi
     body="$(printf '%s' "$summary" | sed -E 's/^[[:space:]]*Tests:[[:space:]]*//; s/[()]/,/g; s/[.[:space:]]*$//')"
     if [ -z "$body" ]; then
         echo "ERROR: PHPUnit summary line carries no counts; failing closed." >&2
@@ -156,6 +170,9 @@ assert_no_warnings() {
         IFS="$old_ifs"
         token="$(printf '%s' "$token" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
         [ -z "$token" ] && { IFS=','; continue; }
+        # Any token still here is either recognised below or fails closed below,
+        # so counting them here is the "at least one count was read" proof.
+        seen=$((seen + 1))
         if printf '%s' "$token" | grep -qE '^[0-9]+$'; then
             # Bare count: PHPUnit TextUI's leading test total ("Tests: 21, ...").
             IFS=','; continue
@@ -191,6 +208,11 @@ assert_no_warnings() {
         IFS=','
     done
     IFS="$old_ifs"
+    if [ "$seen" -eq 0 ]; then
+        echo "ERROR: PHPUnit summary line carries no readable counts; failing closed." >&2
+        echo "       summary: $summary" >&2
+        return 1
+    fi
     if [ "$warnings" -ne 0 ]; then
         echo "ERROR: PHPUnit reported $warnings warning(s); gate 1 requires zero." >&2
         echo "       summary: $summary" >&2
