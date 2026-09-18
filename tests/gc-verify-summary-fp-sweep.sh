@@ -76,8 +76,12 @@
 # guard while this file's own comments asserted the hole was shut, and arm 3
 # certified only the column-0 variant the guard happened to catch. The guard is now
 # brace-DEPTH based -- the depth opened by the definition line must not return to
-# zero before the range's last line, whatever the indentation -- and arm 3 pins the
-# indented variant beside the column-0 one, by marker file rather than exit code.
+# zero before the range's last line -- and arm 3 pins the indented variant beside
+# the column-0 one, by marker file rather than exit code. That depth count is
+# lexical: a brace inside a quoted string, or a `}`/`{` pair on one line, can mask
+# the real closing brace, so this guard catches accidental overrun of a trusted
+# checkout and is NOT a boundary against a hostile baseline script -- the baseline
+# is eval'd by design and must be one you would run.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -207,7 +211,7 @@ if [ "${1:-}" = "--selftest" ]; then
     assert_refuses_overrun "$overrun_b" "$over_err_b" "$marker_b" "indented smuggling"
     echo "selftest: refuses an overrunning body, column-0 AND indented, WITHOUT executing what it swallowed"
 
-    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted, and non-executing when the extraction range overruns"
+    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the parser cannot be extracted, and non-executing on the column-0 and indented overruns pinned above (the lexical depth count does not bound a hostile baseline -- see extract_fn's header)"
     exit 0
 fi
 
@@ -242,13 +246,15 @@ CORPUS="${2:-$HERE/gc-verify-summary-corpus.txt}"
 # `eval` ran it. "No column-0 interior line" is a property of the two files checked,
 # not a property that excludes execution.
 #
-# The invariant that actually holds is BRACE DEPTH: the depth opened by the
+# The invariant this guard tests is BRACE DEPTH: the depth opened by the
 # definition line must not return to zero before the LAST line of the extracted
 # range. Depth reaching zero earlier means the function closed there and everything
-# after it is smuggled text, at column 0 or indented or tabbed. The column-0 test is
-# kept beside it as a cheaper second witness of the same escape. Braces inside
-# strings and comments are counted too, which can only make this REFUSE a body it
-# might have accepted -- the safe direction for a guard whose alternative is `eval`.
+# after it is smuggled text, whether at column 0, indented or tabbed. The column-0
+# test is kept beside it as a cheaper second witness of the same escape.
+# The depth count is lexical: a brace inside a quoted string, or a `}`/`{` pair on
+# one line, can mask the real closing brace, so this guard catches accidental
+# overrun of a trusted checkout and is NOT a boundary against a hostile baseline
+# script -- the baseline is eval'd by design and must be one you would run.
 # Verified against both revisions of the real function under review: depth first
 # returns to zero on the final line, and 0 column-0 interior lines in each.
 extract_fn() {
