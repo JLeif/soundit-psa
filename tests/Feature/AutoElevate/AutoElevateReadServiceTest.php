@@ -556,6 +556,25 @@ class AutoElevateReadServiceTest extends TestCase
         $this->assertSame('string', (string) $param->getType());
     }
 
+    /**
+     * The behavioural half of the same fix, and the one that actually exercises the code:
+     * invoke the method the way the unscoped callers did — one argument, a row belonging to
+     * ANOTHER company — and it must not produce a row. Fixed, PHP refuses the call itself
+     * (ArgumentCountError); before the fix this returned a normalized foreign machine.
+     */
+    public function test_normalize_cannot_be_invoked_without_a_company_and_yield_a_foreign_row(): void
+    {
+        $foreign = self::computer(['companyId' => self::COMPANY_B]);
+
+        try {
+            $row = (new \ReflectionMethod(AutoElevateReadService::class, 'normalizeComputer'))
+                ->invokeArgs($this->service(), [$foreign]);
+            $this->fail('the unscoped call must not succeed; it returned '.json_encode($row));
+        } catch (\ArgumentCountError $e) {
+            $this->assertStringContainsString('normalizeComputer', $e->getMessage());
+        }
+    }
+
     public function test_a_foreign_row_is_drift_even_when_normalize_is_called_directly(): void
     {
         $this->expectException(AutoElevateReadException::class);
