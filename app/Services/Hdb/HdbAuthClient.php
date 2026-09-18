@@ -388,9 +388,11 @@ final class HdbAuthClient
             // A hop that left the configured origin, refused BEFORE it was
             // followed, so nothing reached that host. This is THE password
             // guard on the redirect chain: browser semantics drop the body on a
-            // 302/303, but a 307/308 carries it verbatim and the portal's own
-            // chain uses both — so an off-origin hop can still be a send of the
-            // decrypted credential, and is refused rather than measured.
+            // 300/301/302/303, but EVERY OTHER 3xx — 307 and 308, and anything
+            // future — carries it verbatim, and the portal's own chain uses
+            // both. So an off-origin hop can still be a send of the decrypted
+            // credential, and is refused on its destination rather than on a
+            // guess about what it would have carried.
             return $this->result(HdbAuthStatus::Unreachable, HdbAuthResult::REASON_REDIRECT_REFUSED);
         } catch (\Throwable $e) {
             // The exception NEVER reaches the operator: a Guzzle message carries
@@ -733,8 +735,11 @@ final class HdbAuthClient
             ->withOptions([
                 'cookies' => $this->cookies,
                 // BROWSER SEMANTICS, and the correction of this client's worst
-                // bug: `strict => false` makes Guzzle turn a 301/302/303 on the
-                // credential POST into a GET, exactly as a browser does. Under
+                // bug: `strict => false` makes Guzzle turn a 300/301/302/303 on
+                // the credential POST into a GET, exactly as a browser does
+                // (RedirectMiddleware downgrades on `303 || (<= 302 && !strict)`,
+                // so the rule is every 3xx up to 302, plus 303 — and NOTHING
+                // above it). Under
                 // `strict => true` — what shipped until 2026-09-17 — the POST
                 // method and body were re-issued at every hop, so the login body
                 // was posted at `/home.php`, `/home`, `/2fa_auth.php` and

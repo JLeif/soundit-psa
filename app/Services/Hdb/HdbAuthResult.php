@@ -107,10 +107,11 @@ final readonly class HdbAuthResult
      * was refused rather than followed and nothing reached that host.
      *
      * The refusal does not depend on whether that hop would have carried the
-     * credential body: redirects follow browser semantics, so a 302/303 drops
-     * it — but a 307/308 preserves it verbatim, and a followed request carries
-     * the session cookie either way. An off-origin hop is refused on the
-     * destination, not on what it would have sent.
+     * credential body: redirects follow browser semantics, so a 3xx up to 302,
+     * and 303, drop it — but every higher 3xx (307, 308) preserves it verbatim,
+     * and a followed request carries the session cookie either way. An
+     * off-origin hop is refused on the destination, not on what it would have
+     * sent.
      */
     public const REASON_REDIRECT_REFUSED = 'redirect_refused';
 

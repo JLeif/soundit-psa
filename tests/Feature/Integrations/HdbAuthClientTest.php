@@ -177,7 +177,10 @@ class HdbAuthClientTest extends TestCase
      * NAMES are measured. Everything else — element types, the empty captcha
      * value, `totpskip`'s `0`, the form action, the prose — is WRITTEN, not
      * captured, because the captured page carried live session tokens and was
-     * never saved.
+     * never saved. The fixture also carries a FOURTH control the
+     * measurement did not record at all — a submit input — present because the
+     * client's discovery scan must be shown ignoring it; nothing is asserted
+     * about it, and its presence is not evidence the live form has one.
      *
      * And the tests below DO assert off some of those written parts — an earlier
      * draft of this docblock claimed they did not, which was false and is the
@@ -190,7 +193,10 @@ class HdbAuthClientTest extends TestCase
      * such.
      *
      * ONE ASSUMPTION IS CALLED OUT RATHER THAN BURIED: the ELEMENT TYPE of
-     * `g-recaptcha-response` was not recorded, only its name. This fixture makes
+     * `g-recaptcha-response` was not recorded, only its name — and the same is
+     * true of `totpskip`, whose type and served `0` are equally invented here;
+     * the captcha's is singled out only because reCAPTCHA has a conventional
+     * shape to be wrong about. This fixture makes
      * it a hidden `<input>` with an empty value, which is the case that puts the
      * field in front of {@see HdbAuthClient::findChallengeForm} — the harder
      * case, because the client then has to decide what to send for it. If the
@@ -1106,15 +1112,30 @@ class HdbAuthClientTest extends TestCase
     /**
      * The redirect control, pulled out of the options array and invoked.
      *
-     * `Http::fake()` installs its stub OUTSIDE Guzzle's RedirectMiddleware, so a
-     * faked 302 comes back as a body and is never followed — no amount of faking
-     * reaches `allow_redirects`, and that is why three cycles of work on this
-     * guard shipped with no coverage at all. Measured on `67348bf8`: deleting
-     * `'protocols' => ['https']` AND the whole `on_redirect` closure left all 24
-     * tests in this file, and all 93 HDB tests, green. The seam that does work is
-     * the options array the fake callback is handed: the closure the client
-     * installed can be taken out of it and called with the hop URI Guzzle would
-     * have passed.
+     * `Http::fake()` short-circuits before any hop is followed, so a faked 302
+     * comes back as a body and `allow_redirects` is never exercised — which is
+     * why three cycles of work on this guard shipped with no coverage at all.
+     *
+     * The MECHANISM, corrected 2026-09-17 after this docblock asserted the
+     * opposite: the stub does not sit outside RedirectMiddleware. Laravel pushes
+     * it LAST in PendingRequest::pushHandlers(), which makes it the INNERMOST
+     * handler, inside the middleware. The middleware runs — it is what merges
+     * its own defaults into the options, which is why `track_redirects` appears
+     * in the capture below — but the stub answers with a plain response that is
+     * never re-dispatched, so no hop is taken. Same observable effect, and the
+     * false version of this sentence was worth correcting on a branch whose
+     * subject is comments that argue the opposite of the code.
+     *
+     * Measured on `67348bf8` and NO LONGER TRUE, kept because it is why this
+     * seam exists: deleting `'protocols' => ['https']` AND the whole
+     * `on_redirect` closure left all 24 tests in this file, and all 93 HDB
+     * tests, green. That same mutant now fails 5 tests (measured 2026-09-17),
+     * because the tests below drive the closure through this seam. History, not
+     * a standing claim about the current suite.
+     *
+     * The seam that does work is the options array the fake callback is handed:
+     * the closure the client installed can be taken out of it and called with
+     * the hop URI Guzzle would have passed.
      *
      * @return array{max: int, strict: bool, referer: bool, protocols: array<int, string>, on_redirect: callable}
      */
@@ -1211,8 +1232,9 @@ class HdbAuthClientTest extends TestCase
         // "Fatal error.", and this client failed closed on it and reported
         // `unexpected_response`: its own crash, four hops after a sign-in the
         // portal had ACCEPTED. Browser semantics are the fix, and the shape of
-        // them is per status: a 302/303 becomes a bodyless GET, a 307/308 keeps
-        // the method and body by definition of those codes.
+        // them is per status: a 3xx up to 302, and 303, become a bodyless GET,
+        // while every higher 3xx (307/308) keeps the method and body by
+        // definition of those codes.
         $issued = $this->replayMeasuredSignInChain();
 
         $shape = array_map(
@@ -1247,9 +1269,9 @@ class HdbAuthClientTest extends TestCase
     public function test_a_307_answering_the_credential_post_still_carries_the_body_and_is_bounded_only_by_the_origin_pin(): void
     {
         // THE LIMIT OF THIS FIX, pinned as behaviour so it cannot be forgotten.
-        // `strict => false` converts a 301/302/303 into a GET — it does NOT and
-        // cannot stop a 307/308, which preserve method and body by definition of
-        // those status codes. The measured chain happens to open with a 302, so
+        // `strict => false` converts a 3xx up to 302, and 303, into a GET — it
+        // does NOT and cannot stop anything above that (307, 308, and any future
+        // code in that range), which preserve method and body by definition. The measured chain happens to open with a 302, so
         // every later hop is already a GET; a portal that answered the credential
         // POST with a 307 instead would re-POST the password onward exactly as
         // before. The ONLY thing bounding that is the origin pin, and the pin
@@ -1258,6 +1280,15 @@ class HdbAuthClientTest extends TestCase
         // This is not a defect introduced here and it is not something this
         // client can fix by a flag — it is the residual the docblocks claim, and
         // this test is what makes the claim checkable.
+        //
+        // WHAT THIS TEST IS NOT: it is not a requirement that the password be
+        // re-sent. It characterises Guzzle's 307 rule as it stands today. If the
+        // on_redirect callback is ever hardened to bound an ON-ORIGIN 307
+        // carrying a credential body — which it can be, since the callback
+        // already receives the request and response and currently reads only the
+        // URI — then this test SHOULD go red, and the right response is to
+        // rewrite it around the new bound, not to weaken the bound. Said here so
+        // a red line in this file never argues for keeping fail-open behaviour.
         $stack = HandlerStack::create(new MockHandler([
             new GuzzleResponse(307, ['Location' => self::BASE.'/2fa_auth']),
             new GuzzleResponse(200, [], $this->measuredTwoFactorPage()),
@@ -1274,7 +1305,7 @@ class HdbAuthClientTest extends TestCase
 
         $hop = $issued[1]['request'];
 
-        $this->assertSame('POST', $hop->getMethod(), 'A 307 no longer preserves the method; re-read this test rather than deleting it.');
+        $this->assertSame('POST', $hop->getMethod(), 'A 307 no longer preserves the method: either the dependency changed or the client now bounds this hop. Re-read the comment above before changing this test.');
         $this->assertStringContainsString('service-account-password', (string) $hop->getBody());
 
         // And the guard that DOES bound it: same body, off-origin destination,
