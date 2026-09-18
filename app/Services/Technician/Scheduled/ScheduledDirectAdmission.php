@@ -4,6 +4,7 @@ namespace App\Services\Technician\Scheduled;
 
 use App\Enums\TechnicianRunState;
 use App\Models\TechnicianRun;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
 /**
@@ -27,12 +28,19 @@ use InvalidArgumentException;
  *    Scheduled tombstone all behave identically on both lanes.
  *
  * So the direct lane is "stage, then immediately admit under the token's own authority".
- * The proposal exists for one transaction and leaves cockpit state Scheduled, never
- * AwaitingApproval — it is never offered to a human to approve, which is the whole point.
- * If admission refuses, the staged proposal is WITHDRAWN rather than left sitting in the
- * cockpit: the caller asked to schedule under its own permission, not to queue work for a
- * technician, and silently converting a refused direct call into an approval request would
- * be a lane the caller never chose.
+ * That is NOT the same as the proposal never being visible: stageAction() commits the run
+ * AwaitingApproval before this class runs, and admission reads vendor evidence outside its
+ * transaction, so for the span of that read the row is a real cockpit card a technician can
+ * approve. The race has exactly one winner — the run fence admits a single authorization
+ * per run — so the loser gets a refusal, never a second authorization.
+ * If the human won it, the authorization on the run is theirs and the caller is told the
+ * work is scheduled under it rather than told the call was refused: a refusal there would
+ * read to an AI caller as "nothing is queued" and invite it to re-issue the destructive
+ * action immediately, executing it twice. Only when the run carries no authorization at all
+ * is the staged proposal WITHDRAWN rather than left sitting in the cockpit: the caller asked
+ * to schedule under its own permission, not to queue work for a technician, and silently
+ * converting a refused direct call into an approval request would be a lane the caller never
+ * chose.
  */
 final class ScheduledDirectAdmission
 {
@@ -81,16 +89,43 @@ final class ScheduledDirectAdmission
             $id = $this->admission->admit($run->id, ScheduledApprover::token($tokenId), (string) $run->content_hash,
                 $tokenId, $start, $end, 'UTC', $human, $evidence);
         } catch (InvalidArgumentException|ScheduledUnavailable $e) {
-            $this->withdraw($run);
-
-            return ['error' => 'execute_at_admission_refused:'.$e->getMessage()];
+            return $this->refuse($run, $staged, $executeAt, 'execute_at_admission_refused:'.$e->getMessage());
         } catch (\Throwable) {
-            $this->withdraw($run);
-
-            return ['error' => 'execute_at_admission_refused'];
+            return $this->refuse($run, $staged, $executeAt, 'execute_at_admission_refused');
         }
 
         return $this->success($staged, $executeAt, $id);
+    }
+
+    /**
+     * Admission refused — but first ask whether the run nonetheless carries an authorization.
+     * The cockpit can see this proposal while admission reads vendor evidence outside its
+     * transaction, and a technician who approves in that window holds the one authorization
+     * the run fence allows, which is exactly what makes admission here refuse. Reporting that
+     * as a refusal would tell the caller nothing is scheduled while the destructive action is
+     * in fact queued, so name the existing authorization instead and leave the human's row
+     * untouched. Withdraw only when there is genuinely no authorization to report.
+     *
+     * @param  array<string, mixed>  $staged
+     * @return array<string, mixed>
+     */
+    private function refuse(TechnicianRun $run, array $staged, ExecuteAt $executeAt, string $error): array
+    {
+        $existing = DB::table('scheduled_authorizations')->where('run_id', $run->id)
+            ->orderByDesc('revision')->first();
+        if ($existing !== null) {
+            $result = $this->success($staged, $executeAt, (int) $existing->id);
+            $result['message'] = 'Queued to run at '.$executeAt->display()
+                .($existing->approver_user_id === null
+                    ? ' under an authorization this run already holds; this call added nothing and nothing has executed yet. '
+                    : ' under a technician approval that landed while this call was being admitted; nothing has executed yet. ')
+                .'Do not re-issue this action: permissions, target identity and ticket binding are rechecked in the window.';
+
+            return $result;
+        }
+        $this->withdraw($run);
+
+        return ['error' => $error];
     }
 
     /**

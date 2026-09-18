@@ -564,6 +564,15 @@ class StaffTacticalActionToolExecutor
             return $staged;
         }
 
+        // An idempotent stage result names a run this call did NOT create: either a Done run
+        // for identical content, or a proposal still live in the cockpit that may have been
+        // staged natively by a technician or by another token. Admitting it would put this
+        // token's authority on someone else's row, and a refused admission would WITHDRAW
+        // their live decision. Refuse by name and touch nothing.
+        if ($staged['idempotent'] ?? false) {
+            return ['error' => 'execute_at_conflicts_with_existing_run'];
+        }
+
         return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
             ->admit($staged, $scheduledTokenId, $executeAt);
     }

@@ -770,6 +770,15 @@ class StaffCippWriteToolExecutor
             return $staged;
         }
 
+        // An idempotent stage result names a run this call did NOT create: either a Done run
+        // for identical content, or a proposal still live in the cockpit that may have been
+        // staged natively by a technician or by another token. Admitting it would put this
+        // token's authority on someone else's row, and a refused admission would WITHDRAW
+        // their live decision. Refuse by name and touch nothing.
+        if ($staged['idempotent'] ?? false) {
+            return ['error' => 'execute_at_conflicts_with_existing_run'];
+        }
+
         return app(\App\Services\Technician\Scheduled\ScheduledDirectAdmission::class)
             ->admit($staged, $scheduledTokenId, $executeAt);
     }
@@ -1358,6 +1367,18 @@ class StaffCippWriteToolExecutor
         $directTool = self::STAGED_TO_DIRECT[$tool];
         $params = $this->hashParams($directTool, $license, $state, $mailbox);
         $contentHash = $this->contentHash($tool, $client->id, $person->person->id, $ticket->id, $params);
+
+        // Some verbs are released only after an approver RE-TYPES the value the cockpit card
+        // prompts for — the external SMTP address, the out-of-office bodies. The immediate
+        // lane has no cockpit card and no approver, so that confirmation cannot be collected
+        // at all and the run would fire with sensitive_inputs nobody ever typed. Refused here,
+        // before anything is staged: no run, no audit row, and the cooldown is not burned.
+        if ($executeAt !== null && $executeAt->direct) {
+            $sensitive = $this->sensitiveInputsForStagedAction($directTool, $params);
+            if ($sensitive !== []) {
+                return ['error' => 'execute_at_direct_requires_approver_inputs:'.implode(',', $sensitive)];
+            }
+        }
 
         // RECREATABLE_TARGET_STAGED_TOOLS skip the executed-content rail below, so
         // nothing else stops a same-content re-stage from landing on the run that
