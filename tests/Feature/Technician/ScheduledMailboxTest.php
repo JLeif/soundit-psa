@@ -540,8 +540,11 @@ class ScheduledMailboxTest extends TestCase
         $result = $this->mailboxLaneCall($tool, $extra, 'immediate');
         $this->assertSame('execute_at_direct_requires_approver_inputs:'.implode(',', $inputs), $result['error'] ?? null, json_encode($result));
         $this->assertDatabaseCount('scheduled_authorizations', 0);
-        $this->assertDatabaseCount('technician_runs', 0, 'the refusal staged a proposal');
-        $this->assertDatabaseCount('technician_action_logs', 0, 'the refusal burned the cooldown');
+        // assertDatabaseCount()'s third argument is the CONNECTION NAME, not a failure
+        // message: passing one resolves a connection named after the message and errors
+        // the test instead of asserting anything. Count the tables directly.
+        $this->assertSame(0, DB::table('technician_runs')->count(), 'the refusal staged a proposal');
+        $this->assertSame(0, DB::table('technician_action_logs')->count(), 'the refusal burned the cooldown');
         $this->assertCount(0, $this->wire);
 
         $staged = $this->mailboxLaneCall($tool, $extra, 'staged');
@@ -553,10 +556,33 @@ class ScheduledMailboxTest extends TestCase
         $this->assertCount(0, $this->wire);
     }
 
-    /** One MCP tools/call on the named lane: a `<tool>:<mode>` grant carrying execute_at. */
-    private function mailboxLaneCall(string $tool, array $extra, string $mode): array
+    /**
+     * The same lane confusion on the CIPP surface: an `:immediate` token's deliberately
+     * cockpit-staged proposal must not be admitted by a later staged=false call from that
+     * same token. The direct-lane marker in the provenance is what tells the two apart.
+     */
+    public function test_a_cockpit_staged_mailbox_proposal_is_never_admitted_by_a_later_direct_call(): void
     {
-        $bearer = \App\Support\McpConfig::rotateStaffToken(allowedTools: [$tool.':'.$mode], label: 'synthetic-'.$mode);
+        $bearer = \App\Support\McpConfig::rotateStaffToken(allowedTools: ['cipp_convert_mailbox:immediate'], label: 'synthetic-immediate');
+        $cockpit = $this->mailboxLaneCall('cipp_convert_mailbox', ['mailbox_type' => 'Shared'], 'staged', $bearer);
+        $this->assertTrue($cockpit['success'] ?? false, json_encode($cockpit));
+        $run = TechnicianRun::findOrFail($cockpit['run_id']);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertArrayNotHasKey('execute_at_direct', $run->proposed_meta['scheduled_provenance'],
+            'a cockpit-lane proposal was marked as direct-lane');
+
+        $direct = $this->mailboxLaneCall('cipp_convert_mailbox', ['mailbox_type' => 'Shared'], 'immediate', $bearer);
+        $this->assertSame('execute_at_conflicts_with_existing_run', $direct['error'] ?? null, json_encode($direct));
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state,
+            'the caller\'s own cockpit proposal was converted into a token-approved row');
+        $this->assertCount(0, $this->wire);
+    }
+
+    /** One MCP tools/call on the named lane: a `<tool>:<mode>` grant carrying execute_at. */
+    private function mailboxLaneCall(string $tool, array $extra, string $mode, ?string $bearer = null): array
+    {
+        $bearer ??= \App\Support\McpConfig::rotateStaffToken(allowedTools: [$tool.':'.$mode], label: 'synthetic-'.$mode);
         $reply = $this->withHeaders(['Authorization' => 'Bearer '.$bearer])->postJson('/api/mcp/staff', [
             'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => $tool,
                 'arguments' => array_merge(['client_id' => $this->client->id, 'person_id' => $this->owner->id,

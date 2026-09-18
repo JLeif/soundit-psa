@@ -790,9 +790,10 @@ class StaffCippWriteToolExecutor
     /**
      * Whether the run an idempotent stage result names is THIS caller's own live direct-lane
      * proposal for THIS instant — the provenance the direct admission would itself demand.
-     * A Done run, a technician's proposal and another token's proposal all fail it and are
-     * refused by name, untouched; only the caller's own orphan is allowed through to be
-     * finished.
+     * A Done run, a technician's proposal, another token's proposal AND the caller's own
+     * cockpit-lane proposal (staged=true, which an `:immediate` grant also permits) all
+     * fail it and are refused by name, untouched; only the caller's own DIRECT-lane orphan,
+     * marked as such in its provenance at staging time, is allowed through to be finished.
      */
     private function ownsLiveDirectProposal(mixed $runId, int $scheduledTokenId, ExecuteAt $executeAt): bool
     {
@@ -804,6 +805,7 @@ class StaffCippWriteToolExecutor
 
         return is_array($provenance) && ($provenance['kind'] ?? null) === 'mcp'
             && ($provenance['token_id'] ?? null) === $scheduledTokenId
+            && ($provenance['execute_at_direct'] ?? null) === true
             && ($provenance['execute_at'] ?? null) === $executeAt->utc;
     }
 
@@ -1497,6 +1499,16 @@ class StaffCippWriteToolExecutor
                 // a staged mailbox proposal never stores them.
                 $meta['scheduled_provenance']['execute_at'] = $executeAt->utc;
                 $meta['scheduled_provenance']['execute_at_offset'] = $executeAt->offset;
+                // The LANE is recorded, not just the instant. An `:immediate` grant also
+                // permits an explicit staged=true, and THAT proposal is a cockpit card a
+                // human must approve; with no marker its provenance is identical to a
+                // direct-lane orphan's, so a later staged=false call for the same instant
+                // would admit the card under the token's own authority with approver_user_id
+                // NULL — resolving a human-approval decision the caller had asked for. Only
+                // the direct lane is marked; the cockpit lane's provenance is unchanged.
+                if ($executeAt->direct) {
+                    $meta['scheduled_provenance']['execute_at_direct'] = true;
+                }
             }
         }
         $proposedContent = $this->stagedDisplay($directTool, $person, $license, $state, $mailbox)."\nReason: ".$reason;

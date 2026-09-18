@@ -415,4 +415,30 @@ class ScheduledImmediateLaneTest extends \Tests\TestCase
             'a refusal that should have touched nothing withdrew the other token\'s proposal');
         $this->assertCount(0, $this->wire);
     }
+
+    public function test_the_callers_own_cockpit_proposal_is_never_admitted_by_a_later_direct_call(): void
+    {
+        // An `:immediate` grant also permits staged=true, and that call is an EXPLICIT
+        // request for human review. Its provenance carries no direct-lane marker, so a
+        // later staged=false call from the SAME token for the SAME instant is refused by
+        // name rather than admitted with approver_user_id NULL — which would resolve the
+        // human-approval decision the caller asked for with the token's own authority and
+        // take the card out from under the technician reading it.
+        $bearer = $this->bearer(['tactical_set_maintenance:immediate']);
+        $cockpit = $this->mcp($bearer, 'tactical_set_maintenance',
+            $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => true]));
+        $this->assertTrue($cockpit['success'] ?? false, json_encode($cockpit));
+        $run = TechnicianRun::findOrFail($cockpit['run_id']);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertArrayNotHasKey('execute_at_direct', $run->proposed_meta['scheduled_provenance'],
+            'a cockpit-lane proposal was marked as direct-lane');
+
+        $direct = $this->mcp($bearer, 'tactical_set_maintenance',
+            $this->maintenanceArgs(['execute_at' => self::AT, 'staged' => false]));
+        $this->assertSame('execute_at_conflicts_with_existing_run', $direct['error'] ?? null, json_encode($direct));
+        $this->assertDatabaseCount('scheduled_authorizations', 0);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state,
+            'the caller\'s own cockpit proposal was converted into a token-approved row');
+        $this->assertCount(0, $this->wire);
+    }
 }
