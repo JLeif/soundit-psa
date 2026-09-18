@@ -437,11 +437,72 @@ class TacticalBootTimeRefreshTest extends TestCase
             'iso offset' => ['2026-09-17T04:00:00+00:00', '2026-09-17 04:00:00'],
             'iso microseconds' => ['2026-09-17T04:00:00.123456+00:00', '2026-09-17 04:00:00'],
 
+            // A NON-UTC offset is the case every other spelling here misses: with
+            // every fixture at +00:00 a parser that silently DROPPED the offset
+            // would pass this whole provider. 04:00 at -07:00 is 11:00 UTC, and the
+            // column is UTC (config/app.php timezone), read by AssetHealthService
+            // and compared against Ninja's and Level's writes to the same column.
+            'iso non-utc offset is converted' => ['2026-09-17T04:00:00-07:00', '2026-09-17 11:00:00'],
+            'iso positive offset is converted' => ['2026-09-17T14:00:00+05:30', '2026-09-17 08:30:00'],
+
             // Date-only must reset the time to midnight, not adopt the current
             // instant. Without the '!' reset in the format this returns 12:00:00
             // (the frozen test clock) and fabricates the time half of a reading
             // that the vendor never sent.
             'date only resets to midnight' => ['2026-09-17', '2026-09-17 00:00:00'],
+        ];
+    }
+
+    /**
+     * An offset PHP cannot hold is a malformed reading, and refusing it is not
+     * pedantry: createFromFormat's 'P' accepts '+9999' with NO warning and NO error,
+     * so the trailing-junk check passes it. The resulting Carbon carries an offset of
+     * 362340 seconds and a timezone NAME CONTAINING A NUL BYTE, and the very next
+     * call on it — isFuture(), one line later — throws
+     * ValueError: DateTimeZone::__construct(): Argument #1 must not contain any null
+     * bytes. That escapes refreshAssetBootTime, sails past syncDeviceDetail's
+     * TacticalClientException-only catch and refreshTactical's absent one, and fails
+     * the ENTIRE device sync over an opportunistic column refresh.
+     *
+     * Measured before the guard: this exact input errored the probe at
+     * TacticalDeviceSyncService.php:207 (the isFuture call), not at the write.
+     *
+     * @dataProvider unholdableOffsets
+     */
+    public function test_an_out_of_range_offset_is_refused_without_breaking_the_sync(string $bootTime): void
+    {
+        $asset = $this->linkedAsset(['last_boot_at' => null]);
+
+        $service = $this->syncService([
+            new Response(200, [], $this->agentDetail(['boot_time' => $bootTime])),
+        ]);
+
+        // The sync itself must survive: this is asserted through the public result,
+        // so a ValueError escaping the parse fails here as an ERROR, not silently.
+        $result = $service->syncDeviceDetail($asset);
+
+        $this->assertTrue(
+            $result->ok,
+            "a malformed offset in {$bootTime} must not fail the device sync",
+        );
+        $this->assertNull(
+            $asset->refresh()->last_boot_at,
+            "{$bootTime} is not a real observation and must not be written",
+        );
+    }
+
+    /** @return array<string, array{string}> */
+    public static function unholdableOffsets(): array
+    {
+        return [
+            // Beyond anything PHP can represent: yields the NUL-byte timezone name.
+            'absurd positive' => ['2026-09-17T04:00:00+9999'],
+            'absurd negative' => ['2026-09-17T04:00:00-9999'],
+            'colon spelled' => ['2026-09-17T04:00:00+99:99'],
+
+            // Representable but not a real zone: +24:00 exceeds the +14:00 maximum,
+            // and accepting it would shift the instant a full day.
+            'a full day' => ['2026-09-17T04:00:00+2400'],
         ];
     }
 

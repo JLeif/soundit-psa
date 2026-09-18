@@ -30,6 +30,13 @@ class TacticalDeviceSyncService
     private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
 
     /**
+     * The widest real UTC offset is +14:00. createFromFormat's 'P' accepts far more
+     * than that without complaint and builds a Carbon whose timezone name carries a
+     * NUL byte, which then throws a ValueError on the next timezone-sensitive call.
+     */
+    private const BOOT_TIME_MAX_OFFSET_SECONDS = 14 * 3600;
+
+    /**
      * The ONLY date-string spellings accepted for boot_time, tried in order.
      *
      * The vendor's documented type is a float epoch; this list exists because the
@@ -320,6 +327,26 @@ class TacticalDeviceSyncService
                     || ($errors && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0))) {
                     continue;
                 }
+
+                // The offset-bearing formats accept an offset PHP itself cannot hold.
+                // Measured at the previous tip: '+9999' parsed with no warning or error,
+                // produced a 362340-second offset and a Carbon whose timezone name
+                // contains a NUL byte, so the very next call — isFuture() — threw a
+                // ValueError out of refreshAssetBootTime, past syncDeviceDetail's
+                // TacticalClientException-only catch, and killed the whole sync.
+                // Real offsets are within +/- 14:00 (RFC 9557 / IANA); anything beyond
+                // it is not a timezone, it is a malformed reading.
+                if (abs($parsed->getOffset()) > self::BOOT_TIME_MAX_OFFSET_SECONDS) {
+                    continue;
+                }
+
+                // Normalise to UTC before the floor and the write. The numeric branch
+                // yields UTC, the column is cast to app timezone UTC, and the stored
+                // value is compared against other integrations' writes — so an offset
+                // string must be converted, not have its offset silently dropped.
+                // Measured: '2026-09-16T10:00:00-07:00' stored 10:00 instead of 17:00,
+                // a seven-hour error in the uptime the health score reads.
+                $parsed = $parsed->utc();
 
                 // Same floor as the numeric branch: a claim about the instant, not
                 // about how the vendor spelled it, so a 1970 date string is refused
