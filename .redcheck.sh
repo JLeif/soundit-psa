@@ -69,11 +69,24 @@ run M6-degraded-is-importable "$V" \
   'return $this->status === HdbReportStatus::Fetched;' \
   'return in_array($this->status, [HdbReportStatus::Fetched, HdbReportStatus::Degraded], true);'
 
-# M7 — the authorization gate consulted only AFTER the session is spent.
-run M7-gate-after-session "$C" \
-  '        $session = $this->session ??= $this->auth->authenticate();' \
-  '        $session = $this->session ??= $this->auth->authenticate();
-        if (false) { return HdbReportResult::refused(HdbReportFetchRefusal::NoKeyedNote); }'
+# M7 — the gate DEFERRED: the session is established and the fetch attempted
+# first, and only then is the refusal returned. The status is identical; what
+# changes is that a refused press now costs round trips, which is the existence
+# oracle the zero-request assertion exists to stop.
+run M7-gate-deferred-after-network "$C" \
+  '        if ($authorization->refused()) {
+            return HdbReportResult::refused($authorization->refusal ?? HdbReportFetchRefusal::NoKeyedNote);
+        }
+
+        // The authorizer'"'"'s normalised id' \
+  '        if ($authorization->refused()) {
+            $this->session ??= $this->auth->authenticate();
+            $this->get('"'"'00000000-0000-4000-8000-000000000000'"'"', self::FILE_TICKET);
+
+            return HdbReportResult::refused($authorization->refusal ?? HdbReportFetchRefusal::NoKeyedNote);
+        }
+
+        // The authorizer'"'"'s normalised id'
 
 # M7b — the gate itself removed: every press authorizes.
 run M7b-gate-removed "$C" \
@@ -113,9 +126,10 @@ run M11-transport-catch-removed "$C" \
   '} catch (\Throwable) {' \
   '} catch (\LogicException) {'
 
-# M12 — the memo memoises every outcome, so a retry can never succeed.
-run M12-memoise-everything "$C" \
-  'return $this->fetched[$press] = HdbReportResult::fetched(' \
-  'return $this->fetched[$press] = $this->fetched[$press] ?? HdbReportResult::fetched('
+# M12 — every outcome memoised, so a failing press is pinned for the life of
+# the process and no retry can ever succeed.
+run M12-memoise-every-outcome "$C" \
+  '        return $this->fetchAuthorized($press);' \
+  '        return $this->fetched[$press] = $this->fetchAuthorized($press);'
 
 echo "restored tip: $(git rev-parse HEAD); dirty: $(git status --porcelain | wc -l)"
