@@ -655,7 +655,16 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
         Queue::fake();
         $service = $this->spyingPhoneCallService();
 
-        $call = $this->ringingCall();
+        // The call must have STARTED long enough ago that the service's derived
+        // end time and the controller's now() cannot coincide. This is not
+        // cosmetic: with the file's default started_at of now()-2min and a
+        // duration of 180, the derived value is started_at + 180 = now() + 60,
+        // which finaliseCallTheHangupNeverClosed() CLAMPS to now() because it
+        // refuses to date a hangup in the future. Both writers would then produce
+        // exactly now() and no assertion could tell them apart. Starting the call
+        // an hour ago puts the derived value at start + 180s, ~57 minutes before
+        // now(), so the two candidates are unambiguously distinct.
+        $call = $this->ringingCall(['started_at' => now()->subHour()]);
         // The greeting-hangup row: a duration already derived from an earlier
         // recording callback, and a recording_duration of 0 that leaves
         // effectiveDurationSeconds() no fallback of its own.
@@ -686,9 +695,31 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
 
         $this->assertSame(180, (int) $call->duration);
         $this->assertNotNull($call->ended_at);
-        $this->assertTrue(
-            $call->ended_at->greaterThan($call->started_at->copy()->addSeconds(60)),
-            'ORDERING: the controller writes ended_at = now() and runs AFTER the service derived started_at + duration, so the observed end time must survive rather than the derived one. The fixture starts the call 2 minutes ago, so the derived value (started_at + 0s) is more than 60s earlier than now.'
+
+        // ORDERING, asserted so that it can actually FAIL on the thing it names.
+        //
+        // An earlier version of this assertion read `ended_at > started_at + 60s`
+        // and was NOT a discriminator: the row still holds duration = 180 when
+        // the service runs, so the service's DERIVED value is started_at + 180s,
+        // which clears a 60s threshold just as the controller's now() does
+        // (started_at is 2 minutes back). Proven by mutation rather than by
+        // reading: a controller that finalises, preserves the duration, and then
+        // restores the service's derived ended_at PASSED the old assertion. A
+        // control that cannot fail on its own claim is worse than no control,
+        // because the tally looks identical.
+        //
+        // So both candidates are now named explicitly and the two are separated
+        // by 180 seconds, which no clock skew in a test run can close.
+        $derivedByService = $call->started_at->copy()->addSeconds(180);
+        $this->assertFalse(
+            $call->ended_at->equalTo($derivedByService),
+            'ORDERING: ended_at is the value the SERVICE derived (started_at + duration). The controller ran after it and must have overwritten it with the observed end time.'
+        );
+        $this->assertEqualsWithDelta(
+            now()->timestamp,
+            $call->ended_at->timestamp,
+            5,
+            'ORDERING: the controller writes ended_at = now() and runs AFTER the service derived started_at + duration, so the observed end time must survive rather than the derived one.'
         );
     }
 }

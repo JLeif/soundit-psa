@@ -417,11 +417,26 @@ class PlivoWebhookController extends Controller
             // separate POSTs before mid-May 2026, which is why the older rows are
             // intact and the newer ones are not — the code shape never changed).
             // This branch used to `return response('OK', 200)` here, and
-            // handleCallEnded() — git grep confirms it is the sole writer of
-            // ended_at in app/ — is reachable only from the two branches BELOW
+            // handleCallEnded() is reachable only from the two branches BELOW
             // this one. So every coalesced delivery was acknowledged 200 and
             // discarded: 182 production rows, all carrying a recording, left with
             // ended_at NULL and still accruing at roughly 17/month.
+            //
+            // handleCallEnded() is NOT the only writer of ended_at, and a reader
+            // reasoning about who may write that column must not assume it is.
+            // PhoneCallService::handleRecordingReady() also finalises, through
+            // finaliseCallTheHangupNeverClosed(), deriving ended_at from
+            // started_at + duration for a call whose hangup webhook never
+            // arrived. On a coalesced payload BOTH run in one request: the
+            // recording work above first (derived value), then this branch
+            // (ended_at = now()). This branch therefore WINS the timestamp, which
+            // is deliberate — on a coalesced delivery the vendor is reporting the
+            // end as it happens, so now() is an observed time, while the service's
+            // is documented as an approximation for a hangup that never came, and
+            // a derived value should not outlive a real one. Note the asymmetry
+            // before adding a third writer: the service guards on
+            // `ended_at !== null` and declines; handleCallEnded() does not guard
+            // at all.
             //
             // Voicemail is over-represented in those rows for a structural reason
             // rather than a vendor one: a voicemail IS a call whose recording ends
