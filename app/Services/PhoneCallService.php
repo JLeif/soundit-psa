@@ -27,6 +27,24 @@ use Illuminate\Support\Str;
 class PhoneCallService
 {
     /**
+     * The maxLength ceiling on the <Record> element emitted by
+     * PlivoWebhookController. A recording callback reporting a duration AT or
+     * ABOVE this stopped because the RECORDING hit its limit, not because the
+     * call ended - the call may still be connected. Kept beside the consumer
+     * that reasons about it; the emitter is the controller, and the two must
+     * agree (a mismatch would make the guard below silently inert, which is
+     * why a control pins the value rather than only the behaviour).
+     *
+     * PUBLIC because there are two consumers, not one: the live guard below,
+     * and the FinaliseStuckCalls sweep, which must decline the same rows for
+     * the same reason. The ceiling is a single external fact about the XML the
+     * controller emits, so a second copy of the number could drift from this
+     * one and re-open the hole the guard closes. The sweep duplicates the RULE
+     * deliberately; it does not duplicate the NUMBER.
+     */
+    public const RECORDING_MAX_LENGTH_SECONDS = 14400;
+
+    /**
      * Log an incoming call from a Plivo webhook.
      * Returns immediately — caller lookup dispatched async.
      */
@@ -487,6 +505,13 @@ class PhoneCallService
                 $call->duration = $duration;
             }
 
+            // A recording that reached its maxLength ceiling is evidence the
+            // RECORDING stopped, not that the CALL did - see the guard in
+            // finaliseCallTheHangupNeverClosed(). Anything shorter stopped
+            // because the call did.
+            $recordingIsComplete = $duration === null || $duration < self::RECORDING_MAX_LENGTH_SECONDS;
+
+            $this->finaliseCallTheHangupNeverClosed($call, $recordingIsComplete);
             $this->reconcileAnsweredStateWithDuration($call);
 
             $call->save();
@@ -508,6 +533,125 @@ class PhoneCallService
         }
 
         return $call;
+    }
+
+    /**
+     * THE CALL THAT NEVER ENDED. A recording has arrived for a row that still
+     * claims to be ringing, because the hangup webhook that would have written
+     * ended_at and the final status never reached us.
+     *
+     * Measured in production 2026-09-18: 36 such rows, oldest 2026-05-05,
+     * newest 2026-09-15, all inbound. Every one carries BOTH recording_url and
+     * recording_duration - which is the evidence this method rests on. The
+     * recording callback is proof the call ended; nothing else about the row
+     * is.
+     *
+     * Why the second look below could not do this job: it returns early when
+     * ended_at === null, so the one webhook that DID arrive declined to act on
+     * exactly the rows that needed it. This runs FIRST and supplies the
+     * ended_at the second look then reads, which is why the ordering in
+     * handleRecordingReady() is load-bearing rather than cosmetic.
+     *
+     * What it deliberately does NOT do:
+     *  1. It does not invent an answer. A recording proves audio existed, not
+     *     that a human picked up - the inference handleCallEnded() refuses to
+     *     make, refused identically here. A row with no answered_at finalises
+     *     as Missed; only a row that already carries an answer fingerprint
+     *     finalises as Completed. status is decided by the same rule
+     *     handleCallEnded() uses, deliberately duplicated rather than shared,
+     *     because the two paths hold the rule for different reasons and a
+     *     future change to one should not silently move the other.
+     *  2. It does not touch a row that already ended. The guard is on
+     *     ended_at, not on status, so a Completed row whose recording arrives
+     *     late is left entirely alone and a redelivery is a no-op.
+     *  3. It does not resurrect a voicemail. Status is only ever written for a
+     *     row that is not already Voicemail; a stuck voicemail gets its
+     *     ended_at and keeps its status.
+     *  4. It does not stamp now(). These rows can be months old, so now()
+     *     would re-date a spring call to whenever this shipped and corrupt
+     *     every report reading the column. ended_at is DERIVED as started_at
+     *     plus the recorded length.
+     *
+     * The derivation is approximate and that is stated rather than hidden: it
+     * assumes the recording covers the call, so on a call that rang for a
+     * while before recording began the end time is early by the ring time. It
+     * is bounded by two real values (never before started_at, never later than
+     * now) and is a far smaller wrong than a row that claims to still be
+     * ringing four months on. With no usable duration at all the end time
+     * falls back to started_at - the last moment the row itself can defend.
+     *
+     * ONE CASE THIS MUST NOT TOUCH, and the reason the $recordingIsComplete
+     * argument exists. The recording callback does not only fire at hangup:
+     * PlivoWebhookController emits <Record ... maxLength="14400" />, and a
+     * Record element posts its callback when the RECORDING stops - at
+     * maxLength as well as at hangup. On a call still connected past four
+     * hours that callback is mid-conversation, and without this guard the
+     * finalisation below would stamp ended_at and flip the status on a live
+     * call. That is a regression THIS METHOD INTRODUCED: before it existed
+     * the mid-call callback wrote the recording columns and nothing else,
+     * because reconcileAnsweredStateWithDuration() returns early on a null
+     * ended_at.
+     *
+     * DECLINING IS NOT THE WHOLE FIX, because the caller has already written
+     * recording_url, recording_duration and (on a duration-less row) duration
+     * by the time this returns. The row left behind - null ended_at, full end
+     * evidence, hours old - is exactly the shape FinaliseStuckCalls sweeps, so
+     * that command applies this same ceiling test to its population and counts
+     * what it declines. Both halves read RECORDING_MAX_LENGTH_SECONDS above;
+     * neither restates the number.
+     *
+     * Raised by three independent review seats against the first version of
+     * this change, whose docblock asserted the opposite - that the recording
+     * columns are 'never written while a call is connected'. Verified at
+     * source before acting: the maxLength attribute is real, the controller
+     * routes any RecordingDuration >= 0 here, and nothing downstream
+     * distinguished the two callbacks.
+     *
+     * Not currently reachable in the measured data - the longest call on
+     * record is 9720s against a 14400s ceiling - which is why it is a guard
+     * and a control rather than an incident.
+     *
+     * Mutates the model only; the caller saves.
+     */
+    private function finaliseCallTheHangupNeverClosed(PhoneCall $call, bool $recordingIsComplete = true): void
+    {
+        if ($call->ended_at !== null) {
+            return;
+        }
+
+        if (! $recordingIsComplete) {
+            return;
+        }
+
+        $seconds = $call->effectiveDurationSeconds();
+        $startedAt = $call->started_at ?? $call->created_at;
+
+        if ($startedAt === null) {
+            return;
+        }
+
+        $endedAt = $seconds && $seconds > 0
+            ? $startedAt->copy()->addSeconds($seconds)
+            : $startedAt->copy();
+
+        // Never claim a call ended in the future: a recording_duration longer
+        // than the time since the call started would otherwise date the hangup
+        // ahead of now.
+        $call->ended_at = $endedAt->isFuture() ? now() : $endedAt;
+
+        if ($call->status === CallStatus::Voicemail) {
+            return;
+        }
+
+        $call->status = $call->answered_at === null
+            ? CallStatus::Missed
+            : CallStatus::Completed;
+
+        Log::info('[PhoneCall] Finalised a call the hangup webhook never closed', [
+            'call_id' => $call->id,
+            'derived_ended_at' => $call->ended_at->toDateTimeString(),
+            'duration_seconds' => $seconds,
+        ]);
     }
 
     /**
