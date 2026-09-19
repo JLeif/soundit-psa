@@ -264,6 +264,79 @@ class StuckRingingCallTest extends TestCase
     }
 
     /**
+     * THE REGRESSION THIS CHANGE ITSELF INTRODUCED, caught by three review
+     * seats and fixed at source.
+     *
+     * The recording callback does not only fire at hangup: the <Record>
+     * element carries maxLength="14400", and a Record element posts its
+     * callback when the RECORDING stops - at that ceiling as well as at
+     * hangup. On a call still connected past four hours the callback is
+     * mid-conversation. Before this change that was harmless, because
+     * reconcileAnsweredStateWithDuration() returns early on a null ended_at;
+     * after it, the finalisation would have stamped ended_at and flipped the
+     * status on a LIVE call.
+     */
+    public function test_a_maxlength_recording_does_not_finalise_a_still_connected_call(): void
+    {
+        Queue::fake();
+        $call = $this->stuckRingingCall('stuck-ringing-maxlength');
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-ringing-maxlength',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-maxlen.mp3',
+            14400,
+        );
+
+        $stored = $call->fresh();
+
+        $this->assertNull($stored->ended_at,
+            'a recording that hit its maxLength ceiling says the RECORDING stopped, not the call');
+        $this->assertSame(CallStatus::Ringing, $stored->status,
+            'a call that may still be connected must not be finalised by its own recording rolling over');
+        $this->assertSame(14400, $stored->recording_duration,
+            'the recording columns are still written - only the finalisation is withheld');
+    }
+
+    /**
+     * One second under the ceiling is an ordinary completed recording and
+     * still finalises. Without this, the guard above could be satisfied by a
+     * method that never finalises anything.
+     */
+    public function test_a_recording_just_under_the_ceiling_still_finalises(): void
+    {
+        Queue::fake();
+        $call = $this->stuckRingingCall('stuck-ringing-under-ceiling');
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-ringing-under-ceiling',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-under.mp3',
+            14399,
+        );
+
+        $this->assertNotNull($call->fresh()->ended_at,
+            'a recording that stopped before the ceiling stopped because the call ended');
+    }
+
+    /**
+     * The guard reasons about a ceiling the CONTROLLER sets. If the two ever
+     * disagree the guard goes silently inert - it would compare against a
+     * threshold no recording can reach - so pin the emitted value itself.
+     * This is a source assertion on purpose: the number is a contract between
+     * two files, and no behavioural test can observe a mismatch.
+     */
+    public function test_the_recording_ceiling_matches_the_value_the_controller_emits(): void
+    {
+        $controller = file_get_contents(base_path('app/Http/Controllers/Api/PlivoWebhookController.php'));
+
+        $this->assertMatchesRegularExpression(
+            '/<Record[^>]*maxLength="14400"/',
+            $controller,
+            'the <Record> maxLength the controller emits must match RECORDING_MAX_LENGTH_SECONDS; '
+            .'if this fails, update both together or the mid-call guard stops firing'
+        );
+    }
+
+    /**
      * A recording with no usable duration proves the call ended but gives no
      * length to anchor from. The row must still stop claiming to ring, and
      * the end time falls back to the last moment we can defend - the start.

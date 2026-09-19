@@ -277,9 +277,21 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * row is swept: a zero-length ended_at and a final status written onto a
      * conversation in progress.
      *
-     * Its duration and recording columns are all null because that is exactly
-     * what a connected call looks like - duration lands at hangup, the
-     * recording columns land when the recording callback fires.
+     * Its duration and recording columns are all null because that is what a
+     * connected call looks like BEFORE its recording callback has fired:
+     * duration lands at hangup, and the recording columns land when the
+     * recording callback fires.
+     *
+     * Stated that narrowly on purpose. An earlier version of this docblock
+     * said the recording columns are never written while a call is connected,
+     * and that is false for the very maxLength shape this test is about - a
+     * recording rolling over at the ceiling posts its callback mid-call. Such
+     * a row does not reach this command at all: handleRecordingReady() stamps
+     * ended_at (or, for the maxLength case, deliberately declines to and
+     * leaves the row duration-less), so the first population predicate
+     * excludes it before the evidence filter is consulted. The fixture below
+     * is the pre-callback shape, which is the one the evidence filter is
+     * genuinely load-bearing for.
      */
     public function test_a_long_running_live_call_is_not_swept(): void
     {

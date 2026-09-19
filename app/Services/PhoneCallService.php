@@ -27,6 +27,17 @@ use Illuminate\Support\Str;
 class PhoneCallService
 {
     /**
+     * The maxLength ceiling on the <Record> element emitted by
+     * PlivoWebhookController. A recording callback reporting a duration AT or
+     * ABOVE this stopped because the RECORDING hit its limit, not because the
+     * call ended - the call may still be connected. Kept beside the consumer
+     * that reasons about it; the emitter is the controller, and the two must
+     * agree (a mismatch would make the guard below silently inert, which is
+     * why a control pins the value rather than only the behaviour).
+     */
+    private const RECORDING_MAX_LENGTH_SECONDS = 14400;
+
+    /**
      * Log an incoming call from a Plivo webhook.
      * Returns immediately — caller lookup dispatched async.
      */
@@ -487,7 +498,13 @@ class PhoneCallService
                 $call->duration = $duration;
             }
 
-            $this->finaliseCallTheHangupNeverClosed($call);
+            // A recording that reached its maxLength ceiling is evidence the
+            // RECORDING stopped, not that the CALL did - see the guard in
+            // finaliseCallTheHangupNeverClosed(). Anything shorter stopped
+            // because the call did.
+            $recordingIsComplete = $duration === null || $duration < self::RECORDING_MAX_LENGTH_SECONDS;
+
+            $this->finaliseCallTheHangupNeverClosed($call, $recordingIsComplete);
             $this->reconcileAnsweredStateWithDuration($call);
 
             $call->save();
@@ -556,11 +573,38 @@ class PhoneCallService
      * ringing four months on. With no usable duration at all the end time
      * falls back to started_at - the last moment the row itself can defend.
      *
+     * ONE CASE THIS MUST NOT TOUCH, and the reason the $recordingIsComplete
+     * argument exists. The recording callback does not only fire at hangup:
+     * PlivoWebhookController emits <Record ... maxLength="14400" />, and a
+     * Record element posts its callback when the RECORDING stops - at
+     * maxLength as well as at hangup. On a call still connected past four
+     * hours that callback is mid-conversation, and without this guard the
+     * finalisation below would stamp ended_at and flip the status on a live
+     * call. That is a regression THIS METHOD INTRODUCED: before it existed
+     * the mid-call callback wrote the recording columns and nothing else,
+     * because reconcileAnsweredStateWithDuration() returns early on a null
+     * ended_at.
+     *
+     * Raised by three independent review seats against the first version of
+     * this change, whose docblock asserted the opposite - that the recording
+     * columns are 'never written while a call is connected'. Verified at
+     * source before acting: the maxLength attribute is real, the controller
+     * routes any RecordingDuration >= 0 here, and nothing downstream
+     * distinguished the two callbacks.
+     *
+     * Not currently reachable in the measured data - the longest call on
+     * record is 9720s against a 14400s ceiling - which is why it is a guard
+     * and a control rather than an incident.
+     *
      * Mutates the model only; the caller saves.
      */
-    private function finaliseCallTheHangupNeverClosed(PhoneCall $call): void
+    private function finaliseCallTheHangupNeverClosed(PhoneCall $call, bool $recordingIsComplete = true): void
     {
         if ($call->ended_at !== null) {
+            return;
+        }
+
+        if (! $recordingIsComplete) {
             return;
         }
 

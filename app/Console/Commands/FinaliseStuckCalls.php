@@ -26,13 +26,36 @@ use Illuminate\Support\Facades\Log;
  * operator runs --apply.
  *
  * The bound that actually separates live from stuck is STORED EVIDENCE THAT
- * THE CALL ENDED: a recording_url, a recording_duration, or a duration. None
- * of the three is ever written while a call is connected - duration lands at
- * hangup in handleCallEnded(), the recording columns land when the recording
- * callback fires - so a row carrying none of them cannot be told apart from a
- * conversation in progress, and a backfill that cannot tell must not write.
- * Every row in the measured population carries a recording, so this costs
- * nothing against the rows this command exists for. What it does cost is
+ * THE CALL ENDED: a recording_url, a recording_duration, or a duration. A row
+ * carrying none of them cannot be told apart from a conversation in progress,
+ * and a backfill that cannot tell must not write.
+ *
+ * BE PRECISE ABOUT WHY THAT IS SAFE, because an earlier version of this
+ * docblock gave a reason that is FALSE and three review seats said so. It
+ * claimed 'none of the three is ever written while a call is connected'. The
+ * recording half does not hold: PlivoWebhookController emits
+ * <Record ... maxLength="14400" />, and a Record element posts its callback
+ * when the RECORDING stops - at that ceiling as well as at hangup - so on a
+ * call still connected past four hours the recording columns ARE written
+ * mid-call.
+ *
+ * What actually keeps such a row out of this population is the FIRST
+ * predicate, not the evidence filter: handleRecordingReady() runs
+ * finaliseCallTheHangupNeverClosed(), which stamps ended_at, so any row whose
+ * recording callback has fired at all is excluded by whereNull('ended_at')
+ * before the evidence filter is consulted. And that method now declines the
+ * maxLength case outright, so a live four-hour call keeps a null ended_at and
+ * is held out by the age floor plus the absence of a duration instead.
+ *
+ * The evidence filter's real job is narrower and still worth having: it
+ * excludes rows that never finalised AND left no trace at all, which is the
+ * one shape indistinguishable from a call in progress.
+ *
+ * On cost, also stated precisely: every row of the 36-row ringing/in-progress
+ * class carries a recording, so the filter costs nothing there. That
+ * measurement does NOT cover the 182 voicemail and 3 completed rows this
+ * command also sweeps - their coverage under this filter is unmeasured, and
+ * the declined count below is what reports it rather than an assumption. What it does cost is
  * reach: a row that really did end and left no trace at all is unreachable
  * here, and each run reports how many such rows it declined rather than
  * dropping them silently.
