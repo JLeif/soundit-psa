@@ -34,8 +34,15 @@ class PhoneCallService
      * that reasons about it; the emitter is the controller, and the two must
      * agree (a mismatch would make the guard below silently inert, which is
      * why a control pins the value rather than only the behaviour).
+     *
+     * PUBLIC because there are two consumers, not one: the live guard below,
+     * and the FinaliseStuckCalls sweep, which must decline the same rows for
+     * the same reason. The ceiling is a single external fact about the XML the
+     * controller emits, so a second copy of the number could drift from this
+     * one and re-open the hole the guard closes. The sweep duplicates the RULE
+     * deliberately; it does not duplicate the NUMBER.
      */
-    private const RECORDING_MAX_LENGTH_SECONDS = 14400;
+    public const RECORDING_MAX_LENGTH_SECONDS = 14400;
 
     /**
      * Log an incoming call from a Plivo webhook.
@@ -584,6 +591,14 @@ class PhoneCallService
      * the mid-call callback wrote the recording columns and nothing else,
      * because reconcileAnsweredStateWithDuration() returns early on a null
      * ended_at.
+     *
+     * DECLINING IS NOT THE WHOLE FIX, because the caller has already written
+     * recording_url, recording_duration and (on a duration-less row) duration
+     * by the time this returns. The row left behind - null ended_at, full end
+     * evidence, hours old - is exactly the shape FinaliseStuckCalls sweeps, so
+     * that command applies this same ceiling test to its population and counts
+     * what it declines. Both halves read RECORDING_MAX_LENGTH_SECONDS above;
+     * neither restates the number.
      *
      * Raised by three independent review seats against the first version of
      * this change, whose docblock asserted the opposite - that the recording

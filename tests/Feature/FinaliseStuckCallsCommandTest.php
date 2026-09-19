@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
+use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 /**
@@ -282,16 +284,20 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * duration lands at hangup, and the recording columns land when the
      * recording callback fires.
      *
-     * Stated that narrowly on purpose. An earlier version of this docblock
-     * said the recording columns are never written while a call is connected,
-     * and that is false for the very maxLength shape this test is about - a
-     * recording rolling over at the ceiling posts its callback mid-call. Such
-     * a row does not reach this command at all: handleRecordingReady() stamps
-     * ended_at (or, for the maxLength case, deliberately declines to and
-     * leaves the row duration-less), so the first population predicate
-     * excludes it before the evidence filter is consulted. The fixture below
-     * is the pre-callback shape, which is the one the evidence filter is
-     * genuinely load-bearing for.
+     * Stated that narrowly on purpose, and twice corrected. An earlier version
+     * of this docblock said the recording columns are never written while a
+     * call is connected - false for the very maxLength shape this test is
+     * about, since a recording rolling over at the ceiling posts its callback
+     * mid-call. The version after it was wrong the other way: it said such a
+     * row never reaches this command, because handleRecordingReady() either
+     * stamps ended_at or leaves the row duration-less. It does neither - it
+     * writes all three evidence columns and THEN declines, so the row lands
+     * squarely in this population. That is what the maxLength ceiling
+     * predicate excludes, and
+     * test_a_call_declined_by_the_maxlength_guard_is_not_swept() is its pin.
+     * The fixture below is the different, pre-callback shape - no columns at
+     * all - which is the one the evidence filter is genuinely load-bearing
+     * for.
      */
     public function test_a_long_running_live_call_is_not_swept(): void
     {
@@ -315,6 +321,66 @@ class FinaliseStuckCallsCommandTest extends TestCase
             'a call connected for three hours is past every age bound and is still not stuck');
         $this->assertSame(CallStatus::Ringing, $storedLive->status,
             'the sweep must not disposition a call it cannot prove ended');
+
+        $this->assertNotNull($aged->fresh()->ended_at,
+            'positive control: the aged row in the same run must still be finalised');
+    }
+
+    /**
+     * THE SAME DEFECT, ONE COMMAND OVER. A live call whose recording rolls
+     * over at maxLength gets its recording callback mid-conversation.
+     * handleRecordingReady() writes recording_url, recording_duration and
+     * duration and only THEN declines to finalise - so the row it leaves has a
+     * null ended_at, full end evidence, and at four hours an age past every
+     * floor. Every predicate this command had was satisfied by a connected
+     * call, and --apply would have stamped an end time and a final status onto
+     * it.
+     *
+     * The fixture is produced by running the real webhook path rather than by
+     * hand, so it is the shape the service ACTUALLY leaves behind, not the
+     * shape this test believes it leaves - the assumption that failed twice
+     * already. The three preconditions below pin that shape explicitly: if a
+     * future change stops writing those columns before declining, they go red
+     * and say why rather than leaving the sweep's predicate silently vacuous.
+     */
+    public function test_a_call_declined_by_the_maxlength_guard_is_not_swept(): void
+    {
+        Queue::fake();
+
+        $aged = $this->stuckCall('sweep-ceiling-aged', CallStatus::Ringing, 60);
+
+        $live = PhoneCall::create([
+            'call_uuid' => 'sweep-ceiling-live',
+            'direction' => 'inbound',
+            'from_number' => '+15555550111',
+            'to_number' => '+15555550222',
+            'status' => CallStatus::Ringing,
+            'started_at' => now()->subHours(5),
+        ]);
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'sweep-ceiling-live',
+            'https://media.example.test/rec-ceiling.mp3',
+            14400,
+        );
+
+        $afterCallback = $live->fresh();
+        $this->assertNull($afterCallback->ended_at,
+            'precondition: the live guard declined to finalise the rolled-over recording');
+        $this->assertNotNull($afterCallback->recording_url,
+            'precondition: the recording columns ARE written on the declined row');
+        $this->assertEquals(14400, $afterCallback->duration,
+            'precondition: duration is backfilled too, so the declined row carries end evidence');
+
+        $this->artisan('calls:finalise-stuck --apply')
+            ->expectsOutputToContain('at or above the maxLength recording ceiling')
+            ->assertSuccessful();
+
+        $storedLive = $live->fresh();
+        $this->assertNull($storedLive->ended_at,
+            'a recording that stopped at its ceiling is not evidence the call ended');
+        $this->assertSame(CallStatus::Ringing, $storedLive->status,
+            'the sweep must not disposition a call that may still be connected');
 
         $this->assertNotNull($aged->fresh()->ended_at,
             'positive control: the aged row in the same run must still be finalised');

@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
+use App\Services\PhoneCallService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -20,36 +21,52 @@ use Illuminate\Support\Facades\Log;
  * call records: it runs when a human decides it should, having read the
  * dry-run, and its default mode writes nothing.
  *
- * It is bounded twice, and the two bounds do different jobs. A call that is
- * live at this instant has no ended_at either - that is what in-flight MEANS
- * - so an unbounded population would sweep the calls connected while an
- * operator runs --apply.
+ * It is bounded three times, and the three bounds do different jobs. A call
+ * that is live at this instant has no ended_at either - that is what
+ * in-flight MEANS - so an unbounded population would sweep the calls
+ * connected while an operator runs --apply.
  *
- * The bound that actually separates live from stuck is STORED EVIDENCE THAT
- * THE CALL ENDED: a recording_url, a recording_duration, or a duration. A row
- * carrying none of them cannot be told apart from a conversation in progress,
- * and a backfill that cannot tell must not write.
+ * The first bound is STORED EVIDENCE THAT THE CALL ENDED: a recording_url, a
+ * recording_duration, or a duration. A row carrying none of them cannot be
+ * told apart from a conversation in progress, and a backfill that cannot tell
+ * must not write.
  *
- * BE PRECISE ABOUT WHY THAT IS SAFE, because an earlier version of this
- * docblock gave a reason that is FALSE and three review seats said so. It
- * claimed 'none of the three is ever written while a call is connected'. The
- * recording half does not hold: PlivoWebhookController emits
+ * THAT BOUND IS NOT SUFFICIENT ALONE, and two earlier versions of this
+ * docblock claimed otherwise, each wrongly. The first claimed 'none of the
+ * three is ever written while a call is connected' - three review seats said
+ * so and they were right: PlivoWebhookController emits
  * <Record ... maxLength="14400" />, and a Record element posts its callback
  * when the RECORDING stops - at that ceiling as well as at hangup - so on a
  * call still connected past four hours the recording columns ARE written
  * mid-call.
  *
- * What actually keeps such a row out of this population is the FIRST
- * predicate, not the evidence filter: handleRecordingReady() runs
- * finaliseCallTheHangupNeverClosed(), which stamps ended_at, so any row whose
- * recording callback has fired at all is excluded by whereNull('ended_at')
- * before the evidence filter is consulted. And that method now declines the
- * maxLength case outright, so a live four-hour call keeps a null ended_at and
- * is held out by the age floor plus the absence of a duration instead.
+ * The second claimed the live guard holds such a row out of here. It does
+ * not. handleRecordingReady() writes recording_url, recording_duration and
+ * (on a duration-less row) duration BEFORE
+ * finaliseCallTheHangupNeverClosed() declines the maxLength case. The row it
+ * leaves behind carries a null ended_at, full end evidence, and at four hours
+ * an age past every floor - it satisfied every predicate this command had.
+ * The live guard moved the defect one command over rather than closing it.
  *
- * The evidence filter's real job is narrower and still worth having: it
- * excludes rows that never finalised AND left no trace at all, which is the
- * one shape indistinguishable from a call in progress.
+ * So the second bound is that same ceiling test, applied HERE: a row whose
+ * stored length is at or above
+ * PhoneCallService::RECORDING_MAX_LENGTH_SECONDS is out of the population,
+ * because that length says the RECORDING stopped, not the call. It reads the
+ * service's constant instead of repeating the number, so the two cannot
+ * drift apart and leave this predicate comparing against a threshold no
+ * recording can reach.
+ *
+ * The trade is the same one the live path makes, and it is stated rather than
+ * hidden: a call that really did end with its recording at the ceiling is
+ * declined here too. That false negative is bought against a false positive
+ * that would write an end time and a final status onto a live conversation,
+ * and it is not a silent loss - those rows are COUNTED and reported on every
+ * run, and a later hangup webhook, or a rerun after one arrives, still
+ * reaches them.
+ *
+ * With both bounds in place the evidence filter's job is the narrow one it
+ * always really did: it excludes rows that never finalised AND left no trace
+ * at all, which is the one shape indistinguishable from a call in progress.
  *
  * On cost, also stated precisely: every row of the 36-row ringing/in-progress
  * class carries a recording, so the filter costs nothing there. That
@@ -60,7 +77,7 @@ use Illuminate\Support\Facades\Log;
  * here, and each run reports how many such rows it declined rather than
  * dropping them silently.
  *
- * The AGE FLOOR is the second bound and it is NOT the liveness test. Age
+ * The AGE FLOOR is the third bound and it is NOT the liveness test. Age
  * alone cannot separate "started long ago and ended" from "started long ago
  * and still talking": PlivoWebhookController emits <Record maxLength="14400"
  * />, so a four-hour conversation is an in-contract shape and sits past both
@@ -69,8 +86,10 @@ use Illuminate\Support\Facades\Log;
  * of a backfill. Rows whose start is younger than --min-age-hours (default 2,
  * never less than 1) are not in the population at all.
  *
- * It reuses no private service method. The derivation is duplicated here
- * rather than shared because the two callers answer different questions - the
+ * It reuses no service method. The one thing it takes from the service is the
+ * maxLength constant - a single external fact about the XML the controller
+ * emits, which must not exist in two places. The derivation is duplicated
+ * here rather than shared because the two callers answer different questions - the
  * service finalises ONE row at webhook time on evidence it was just handed,
  * this sweeps a historical population on evidence already stored - and
  * because a sweep that silently changed behaviour when the service changed
@@ -106,7 +125,9 @@ class FinaliseStuckCalls extends Command
         // than both the one-hour clamp and the two-hour default, and age alone
         // would have swept it - writing a zero-length end and a final status
         // onto a conversation in progress. What separates live from stuck is
-        // the END-EVIDENCE requirement in the population filter below.
+        // the END-EVIDENCE requirement in the population filter below and -
+        // for the one shape that satisfies end-evidence mid-call - the
+        // maxLength ceiling test beside it.
         //
         // The floor stays for a smaller, real job: a row that ended minutes
         // ago may simply be waiting on a hangup webhook still in flight or
@@ -131,14 +152,32 @@ class FinaliseStuckCalls extends Command
         // from TODAY, where the ringing population stops at 2026-09-15. That
         // is an ACTIVE class, not a historical one.
         //
-        // END EVIDENCE IS THE LIVENESS TEST. A row is in the population only
-        // if it carries a stored fact that the call ended - a recording_url, a
-        // recording_duration, or a duration - because none of the three is
-        // ever written while a call is connected. A row with none of them
-        // cannot be told apart from a call in progress, so it is declined and
-        // COUNTED rather than guessed at. Rows carrying a recording but no
-        // length are still in: the recording is the evidence, and the report
-        // says which rows had a length to derive from and which did not.
+        // END EVIDENCE IS HALF THE LIVENESS TEST. A row is in the population
+        // only if it carries a stored fact that the call ended - a
+        // recording_url, a recording_duration, or a duration. A row with none
+        // of them cannot be told apart from a call in progress, so it is
+        // declined and COUNTED rather than guessed at. Rows carrying a
+        // recording but no length are still in: the recording is the evidence,
+        // and the report says which rows had a length to derive from and which
+        // did not.
+        //
+        // IT IS ONLY HALF. An earlier version of this comment justified it
+        // with 'none of the three is ever written while a call is connected',
+        // and that is false. <Record maxLength="14400" /> posts its callback
+        // when the RECORDING stops, at the ceiling as well as at hangup, and
+        // handleRecordingReady() writes all three columns before
+        // finaliseCallTheHangupNeverClosed() declines to finalise. So a call
+        // still connected past four hours lands here carrying evidence, a null
+        // ended_at and an age past the floor: every predicate satisfied by a
+        // conversation in progress.
+        //
+        // THE CEILING IS THE OTHER HALF. A stored length at or above the
+        // maxLength the controller emits says the RECORDING stopped, not the
+        // call, so the row is out of the population - the same discriminator
+        // the live path uses, reading the same constant so the two cannot
+        // drift. It costs the row that really did end with its recording at
+        // the ceiling: declined, counted below, and left for a later webhook
+        // rather than risked.
         //
         // Ageing keys on the same anchor the derivation below uses -
         // started_at, else created_at - so a row can never be aged by one
@@ -151,6 +190,23 @@ class FinaliseStuckCalls extends Command
             $q->whereNotNull('recording_url')
                 ->orWhere('recording_duration', '>', 0)
                 ->orWhere('duration', '>', 0);
+        };
+
+        // Written as "below the ceiling, or no length at all" rather than as a
+        // negated >=, because under SQL NULL semantics NOT (duration >= N)
+        // drops every row whose duration is null - which is most of this
+        // population, including the 11 measured rows that carry a recording
+        // and no duration.
+        $belowRecordingCeiling = function ($q) {
+            $ceiling = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
+
+            $q->where(function ($q) use ($ceiling) {
+                $q->whereNull('recording_duration')
+                    ->orWhere('recording_duration', '<', $ceiling);
+            })->where(function ($q) use ($ceiling) {
+                $q->whereNull('duration')
+                    ->orWhere('duration', '<', $ceiling);
+            });
         };
 
         $agedEnough = function ($q) use ($cutoff) {
@@ -166,6 +222,7 @@ class FinaliseStuckCalls extends Command
 
         $query = PhoneCall::whereNull('ended_at')
             ->where($endedEvidence)
+            ->where($belowRecordingCeiling)
             ->where($agedEnough)
             ->orderBy('id');
 
@@ -193,6 +250,28 @@ class FinaliseStuckCalls extends Command
                 .'(no recording_url, recording_duration or duration - that shape cannot be '
                 .'told apart from a call still in progress).',
                 $declined
+            ));
+        }
+
+        // The second decline, reported for the same reason and derived the
+        // same way - by subtracting the predicate from the population that
+        // precedes it, so it cannot drift from the filter it reports on. These
+        // rows DID leave a trace; the trace is a recording that rolled over at
+        // the ceiling, which says the recording stopped and not the call. A
+        // genuinely ended call in this shape is reachable again as soon as a
+        // hangup webhook lands, and until then this run says out loud that it
+        // did not cover it.
+        $agedStuckWithEvidence = $agedStuck->clone()->where($endedEvidence);
+        $declinedAtCeiling = $agedStuckWithEvidence->clone()->count()
+            - $agedStuckWithEvidence->clone()->where($belowRecordingCeiling)->count();
+
+        if ($declinedAtCeiling > 0) {
+            $this->warn(sprintf(
+                '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
+                .'population (a recording that rolled over says the RECORDING stopped, not '
+                .'the call - such a row may still be connected).',
+                $declinedAtCeiling,
+                PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));
         }
 
