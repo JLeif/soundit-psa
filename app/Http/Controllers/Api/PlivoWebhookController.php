@@ -26,12 +26,23 @@ class PlivoWebhookController extends Controller
      * Plivo's inbound call recording callbacks often don't reach our webhook (configured in the
      * Plivo application, not our code). This queries the API directly after a short delay to
      * give Plivo time to finalize the recording.
+     *
+     * NOTE ON PLACEMENT: this docblock documents resolveRecordingAfterEnd(),
+     * which is now defined BELOW the three members added for card 6aade104. The
+     * members were spliced in here rather than after it so the card's additions
+     * read as one contiguous block; the cost is this separation, recorded so a
+     * reader does not mistake the docblock for a description of the const that
+     * immediately follows it.
      */
     /**
-     * CallStatus values that mean the call is over. Named once because three
-     * branches of handle() ask this same question and a copy that drifted would
-     * silently reopen card 6aade104: a terminal callback the recording branch
-     * did not recognise is a callback whose ended_at is never written.
+     * CallStatus values that mean the call is over. Named once because two call
+     * sites now read this list — payloadIsTerminal(), used by the coalesced
+     * branch, and the terminal-CallStatus branch's own in_array() — and a copy
+     * that drifted would silently reopen card 6aade104: a terminal callback the
+     * recording branch did not recognise is a callback whose ended_at is never
+     * written. (The hangup branch still asks its own question inline, `if
+     * ($dialAction === 'hangup')`, and does not consult this list; it is a
+     * DialAction test, not a CallStatus one.)
      */
     private const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'timeout', 'no-answer', 'cancel'];
 
@@ -75,8 +86,12 @@ class PlivoWebhookController extends Controller
      *   2. DialBLegDuration when it is POSITIVE. That field is scoped to the
      *      DIALED (B) leg, and on the unanswered dial that produces a voicemail
      *      — the shape that dominates card 6aade104 — the B leg is exactly the
-     *      one that never connected, so Plivo reports 0 there (the repo's own
-     *      answerIsObserved() treats that zero as a real vendor value). A
+     *      one that never connected, so Plivo reports 0 there. (The repo's own
+     *      answerIsObserved() requires DialBLegDuration > 0 before it will call
+     *      a leg answered, and fails closed on everything else — it does not
+     *      affirm 0 as a vendor report of anything, so read it as consistent
+     *      with treating 0 as no-evidence, not as authority that 0 is a
+     *      meaningful duration.) A
      *      presence test would inject that 0 ahead of the recording-derived
      *      duration this method exists to preserve, zeroing a real voicemail's
      *      length and, on a row whose recording_duration is also 0, re-opening
@@ -415,28 +430,52 @@ class PlivoWebhookController extends Controller
             // callback. Plivo coalesces the recording and the terminal event into
             // ONE POST (that is when it does; the same account received them as two
             // separate POSTs before mid-May 2026, which is why the older rows are
-            // intact and the newer ones are not — the code shape never changed).
+            // intact and the newer ones are not). What IS established is that the
+            // code shape never changed — the early return is in the repo's initial
+            // commit, which postdates the onset in the data — so the cause is
+            // external to this repo. WHICH external cause is not established: a
+            // Plivo product change and a change to the recording callback
+            // configuration, which lives in the Plivo application rather than
+            // here (see the note at the top of this class), both fit the
+            // evidence, and they differ in whether it can silently revert.
             // This branch used to `return response('OK', 200)` here, and
-            // handleCallEnded() is reachable only from the two branches BELOW
-            // this one. So every coalesced delivery was acknowledged 200 and
-            // discarded: 182 production rows, all carrying a recording, left with
-            // ended_at NULL and still accruing at roughly 17/month.
+            // handleCallEnded() WAS reachable only from the two branches below
+            // this one (the block below is now a third call site). So every
+            // coalesced delivery was acknowledged 200 and discarded: 182
+            // production rows, all carrying a recording, left with ended_at NULL
+            // and still accruing at roughly 17/month.
             //
             // handleCallEnded() is NOT the only writer of ended_at, and a reader
             // reasoning about who may write that column must not assume it is.
             // PhoneCallService::handleRecordingReady() also finalises, through
             // finaliseCallTheHangupNeverClosed(), deriving ended_at from
-            // started_at + duration for a call whose hangup webhook never
-            // arrived. On a coalesced payload BOTH run in one request: the
-            // recording work above first (derived value), then this branch
-            // (ended_at = now()). This branch therefore WINS the timestamp, which
+            // started_at + duration — CLAMPED to now() when that sum is in the
+            // future, which it often is — for a call whose hangup webhook never
+            // arrived. On a coalesced payload with RecordingDuration >= 0 BOTH
+            // run in one request: the recording work above first (derived value),
+            // then this branch (ended_at = now()). On RecordingDuration = -1
+            // handleRecordingReady() does not run at all and this branch is the
+            // ONLY writer. Where both run, this branch WINS the timestamp, which
             // is deliberate — on a coalesced delivery the vendor is reporting the
             // end as it happens, so now() is an observed time, while the service's
             // is documented as an approximation for a hangup that never came, and
-            // a derived value should not outlive a real one. Note the asymmetry
-            // before adding a third writer: the service guards on
-            // `ended_at !== null` and declines; handleCallEnded() does not guard
-            // at all.
+            // a derived value should not outlive a real one.
+            //
+            // TWO ASYMMETRIES TO KNOW BEFORE ADDING A FOURTH CALLER, because the
+            // service is the careful writer and this path is not:
+            //  1. The service declines when `ended_at !== null`; handleCallEnded()
+            //     does not guard at all, so a redelivered coalesced POST moves
+            //     ended_at forward and re-runs the debit. That was inert before
+            //     this change (the payload returned 200 and did nothing) and is
+            //     not inert now. It is filed, not fixed, on this branch.
+            //  2. The service declines when the recording hit its maxLength
+            //     ceiling (RECORDING_MAX_LENGTH_SECONDS), on the argument that
+            //     such a callback proves the RECORDING stopped, not the CALL.
+            //     This path has NO analogue: a terminal marker is a stronger and
+            //     different fact than a recording ending, so finalising on it is
+            //     intended — but nothing here would stop a future caller keying
+            //     on the recording instead, which is the over-reach class and is
+            //     worse than the defect this branch fixes.
             //
             // Voicemail is over-represented in those rows for a structural reason
             // rather than a vendor one: a voicemail IS a call whose recording ends

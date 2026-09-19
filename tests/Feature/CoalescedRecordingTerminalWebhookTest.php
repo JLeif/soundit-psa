@@ -76,6 +76,19 @@ use Tests\TestCase;
  * that cannot fail is not proof of anything and is worth having only if it says
  * so out loud.
  *
+ * A STANDING CAVEAT ON `assertNotNull($call->ended_at)` IN THIS FILE, because it
+ * would otherwise be read as evidence it is not. On the merged tree the service
+ * finalises ANY recording delivery with RecordingDuration >= 0, so in every test
+ * here whose payload carries a non-negative RecordingDuration that assertion is
+ * satisfied by the service ALONE, whether or not the controller branch runs. It
+ * is retained as a statement of the user-visible outcome, NOT as a control on
+ * this branch's behaviour. Only two ended_at assertions in this file can fail on
+ * the controller's account: the RecordingDuration = -1 test (where the service
+ * never runs) and the ordering test's explicit two-candidate pair. Everything
+ * else that discriminates does so through the spy. This is the same degeneracy
+ * that made the ordering assertion inert, named here rather than left for the
+ * next reader to rediscover.
+ *
  * That red-check is the reason several tests here assert a spy count rather than
  * a column, and the finding is worth stating plainly because it nearly escaped.
  * Re-running the red-check at the NEW base, with only the two scope guards
@@ -701,19 +714,30 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
         // An earlier version of this assertion read `ended_at > started_at + 60s`
         // and was NOT a discriminator: the row still holds duration = 180 when
         // the service runs, so the service's DERIVED value is started_at + 180s,
-        // which clears a 60s threshold just as the controller's now() does
-        // (started_at is 2 minutes back). Proven by mutation rather than by
-        // reading: a controller that finalises, preserves the duration, and then
-        // restores the service's derived ended_at PASSED the old assertion. A
-        // control that cannot fail on its own claim is worse than no control,
-        // because the tally looks identical.
+        // which cleared that 60s threshold just as the controller's now() did
+        // (the fixture then started the call 2 minutes back; it now starts an
+        // hour back, for the clamp reason given at the top of this test). Proven
+        // by mutation rather than by reading: a controller that finalises,
+        // preserves the duration, and then restores the service's derived
+        // ended_at PASSED the old assertion. A control that cannot fail on its
+        // own claim is worse than no control, because the tally looks identical.
         //
-        // So both candidates are now named explicitly and the two are separated
-        // by 180 seconds, which no clock skew in a test run can close.
+        // So both candidates are named explicitly below. With started_at an hour
+        // back they are ~3420 seconds apart, and the discriminating assertion is
+        // the exact-inequality one: it is deterministic and needs no clock
+        // budget. The proximity-to-now() assertion is deliberately SECOND and
+        // deliberately loose — it states the positive half of the claim (the
+        // surviving value IS the observed one, not merely not-the-derived-one),
+        // and 5s is ample because the two candidates are three orders of
+        // magnitude further apart than that.
         $derivedByService = $call->started_at->copy()->addSeconds(180);
         $this->assertFalse(
             $call->ended_at->equalTo($derivedByService),
             'ORDERING: ended_at is the value the SERVICE derived (started_at + duration). The controller ran after it and must have overwritten it with the observed end time.'
+        );
+        $this->assertTrue(
+            $call->ended_at->greaterThan($derivedByService->copy()->addMinutes(5)),
+            'ORDERING, clock-free: the surviving ended_at is not merely unequal to the servicederived value but far later than it, which only the controller writing now() produces.'
         );
         $this->assertEqualsWithDelta(
             now()->timestamp,
