@@ -63,15 +63,14 @@ classify() {
   # pipefail a `printf | grep -q` whose match lands early is killed by SIGPIPE
   # (141) once the output exceeds the pipe buffer, and the guard would then read
   # as false as a function of output size rather than of content.
-  if grep -qE 'No such file or directory|command not found|Permission denied' <<<"$out"; then
-    printf 'ERRORED\trunner missing or not executable (%s)\n' "$PHPUNIT"; return
-  fi
-  if grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)' <<<"$out"; then
-    printf 'ERRORED\tdependencies not installed (run composer install)\n'; return
-  fi
-  if grep -qiE 'No tests executed|No tests found|Could not find|No filter matched' <<<"$out"; then
-    printf 'ERRORED\tsuite ran no tests for filter %s\n' "$FILTER"; return
-  fi
+  #
+  # The runner's OWN SUMMARY is read FIRST and outranks everything below it. The
+  # infrastructure guards scan the WHOLE captured output for generic English
+  # that ordinary PHP exception and assertion text routinely contains ("No such
+  # file or directory"), so consulting them ahead of the summary turned a
+  # genuine kill into an ERROR and refused a green tip at the baseline with a
+  # false "runner missing" diagnosis. They now speak only when the runner
+  # printed no summary at all -- which is the case where it really did not run.
 
   # Red markers (PHPUnit classic, PHPUnit 10/11 summary line, Pest).
   if grep -qE '^(FAILURES|ERRORS)!|Tests:.*(Failures|Errors): *[1-9]|Tests:.*[1-9][0-9]* +(failed|errored)' <<<"$out"; then
@@ -82,7 +81,94 @@ classify() {
   fi
 
   if [ -z "$marker" ]; then
+    if grep -qE 'No such file or directory|command not found|Permission denied' <<<"$out"; then
+      printf 'ERRORED\trunner missing or not executable (%s)\n' "$PHPUNIT"; return
+    fi
+    if grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)' <<<"$out"; then
+      printf 'ERRORED\tdependencies not installed (run composer install)\n'; return
+    fi
+    # "No tests executed!" is the producer's own marker for numberOfTestsRun()
+    # == 0. "Could not find" used to sit in this list and is NOT a producer
+    # string at all -- it is ordinary exception English, so it is gone.
+    if grep -qiE 'No tests executed|No tests found|No filter matched' <<<"$out"; then
+      printf 'ERRORED\tsuite ran no tests for filter %s\n' "$FILTER"; return
+    fi
     printf 'ERRORED\tunrecognised runner output; no pass/fail summary found (status %s)\n' "$st"; return
+  fi
+
+  # A green BANNER is not proof that anything was ASSERTED, and "not skipped"
+  # is not the same as "asserted". There are TWO green banner shapes and BOTH
+  # have to be counted -- not just the one that is followed by a "Tests:" line:
+  #
+  #   SummaryPrinter::print() emits "OK (N tests, M assertions)" when the run
+  #   was successful with nothing skipped and no issues. M is allowed to be 0
+  #   (#[DoesNotPerformAssertions], expectNotToPerformAssertions(), or
+  #   beStrictAboutTestsThatDoNotTestAnything="false"), so this banner is NOT
+  #   proof of assertion either -- and it IS that run's count line: no separate
+  #   "Tests: ..." line is printed alongside it.
+  #
+  #   The bare "OK, but there were issues!" banner carries NO counts of its own
+  #   and is always followed by the "Tests: N, Assertions: M, ..." line.
+  #
+  # There are TWO of them, and an earlier revision of this guard only understood
+  # one. Read from the producer (vendor/phpunit/.../TextUI/Output/SummaryPrinter.php
+  # and Runner/TestResult/TestResult.php), not from output I happened to see:
+  #
+  #   wasSuccessful()      = no errored, no failed, no phpunit-error events.
+  #                          It IGNORES incomplete and risky entirely.
+  #   hasTestsWithIssues() = risky OR incomplete OR deprecations OR notices
+  #                          OR warnings.
+  #
+  # so a run in which every test calls markTestIncomplete() in its BODY is
+  # "successful with issues": it prints "OK, but there were issues!" with
+  # "Tests: 14, Assertions: 0, Incomplete: 14." and exits 0. Those tests were
+  # prepared and DID emit testFinished, so "No tests executed!" never fires and
+  # numberOfTestsRun() is 14 -- while zero assertions were made. Subtracting
+  # only "Skipped:" admits exactly that run, and the harness would then score 14
+  # mutants against a suite that asserted nothing and call them all SURVIVED.
+  #
+  # So: require at least one test to have run that was NOT skipped and NOT
+  # incomplete, AND require at least one assertion -- read from WHICHEVER of
+  # the two shapes the producer printed, so neither banner can bypass the
+  # check. Risky is NOT subtracted: a risky test RAN and its assertions ARE
+  # counted (the Collector only flags it), so subtracting it would refuse a
+  # healthy, asserting baseline; an all-risky run that asserted nothing is
+  # already caught by the zero-assertion check below. Skipped and Incomplete
+  # are printed under their own tokens by printCountString(), never folded
+  # into another.
+  if [ "$marker" = GREEN ] && grep -qE '^OK \(|^OK, but' <<<"$out"; then
+    local counts okline ntests nassert nskipped nincomplete nreal
+    counts=$(grep -m1 -E '^Tests: [0-9]+, Assertions: [0-9]+' <<<"$out")
+    if [ -z "$counts" ]; then
+      # No "Tests:" line: normalise the "OK (N tests, M assertions)" banner
+      # into the same shape so ONE set of checks reads both.
+      okline=$(grep -m1 -oE '^OK \([0-9]+ tests?, [0-9]+ assertions?\)' <<<"$out")
+      if [ -n "$okline" ] && [[ "$okline" =~ ([0-9]+)\ tests?,\ ([0-9]+)\ assertion ]]; then
+        counts="Tests: ${BASH_REMATCH[1]}, Assertions: ${BASH_REMATCH[2]}"
+      fi
+    fi
+    if [ -z "$counts" ]; then
+      printf 'ERRORED\tgreen banner with no counts; cannot prove any test ran or asserted (status %s)\n' "$st"; return
+    fi
+    countof() { # token -> value, or 0 when the token is absent
+      local v
+      v=$(grep -oE "$1: [0-9]+" <<<"$counts" | head -1)
+      v=${v##* }
+      printf '%s' "${v:-0}"
+    }
+    ntests=$(countof 'Tests')
+    nassert=$(countof 'Assertions')
+    nskipped=$(countof 'Skipped')
+    nincomplete=$(countof 'Incomplete')
+    nreal=$(( ntests - nskipped - nincomplete ))
+    if [ "$nreal" -le 0 ]; then
+      printf 'ERRORED\tno test actually executed: %s collected, %s skipped, %s incomplete (filter %s)\n' \
+        "$ntests" "$nskipped" "$nincomplete" "$FILTER"; return
+    fi
+    if [ "$nassert" -eq 0 ]; then
+      printf 'ERRORED\tsuite reported a green banner with ZERO assertions (%s tests); nothing was asserted for filter %s\n' \
+        "$ntests" "$FILTER"; return
+    fi
   fi
   if [ "$marker" = RED ] && [ "$st" -eq 0 ]; then
     printf 'ERRORED\tsummary says failed but runner exited 0 (untrustworthy runner)\n'; return
