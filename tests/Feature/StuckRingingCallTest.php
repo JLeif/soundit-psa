@@ -335,7 +335,8 @@ class StuckRingingCallTest extends TestCase
         );
 
         $this->assertNotNull($call->fresh()->ended_at,
-            'a recording that stopped before the ceiling stopped because the call ended');
+            'a recording that stopped short of the ceiling is treated as evidence the call ended; '
+            .'without this the guard above could be satisfied by a method that never finalises anything');
     }
 
     /**

@@ -36,11 +36,10 @@ class PhoneCallService
      * why a control pins the value rather than only the behaviour).
      *
      * PUBLIC because there are two consumers, not one: the live guard below,
-     * and the FinaliseStuckCalls sweep, which must decline the same rows for
-     * the same reason. The ceiling is a single external fact about the XML the
-     * controller emits, so a second copy of the number could drift from this
-     * one and re-open the hole the guard closes. The sweep duplicates the RULE
-     * deliberately; it does not duplicate the NUMBER.
+     * and the FinaliseStuckCalls sweep. The ceiling is a single external fact
+     * about the XML the controller emits, so a second copy of the number could
+     * drift from this one and re-open the hole the guard closes. The sweep
+     * duplicates the RULE deliberately; it does not duplicate the NUMBER.
      */
     public const RECORDING_MAX_LENGTH_SECONDS = 14400;
 
@@ -543,8 +542,10 @@ class PhoneCallService
      * Measured in production 2026-09-18: 36 such rows, oldest 2026-05-05,
      * newest 2026-09-15, all inbound. Every one carries BOTH recording_url and
      * recording_duration - which is the evidence this method rests on. The
-     * recording callback is proof the call ended; nothing else about the row
-     * is.
+     * recording callback is the only evidence these rows carry that the call
+     * is over, and on its own it is not conclusive: a recording also stops
+     * when it hits the maxLength ceiling, which is why $recordingIsComplete is
+     * threaded through below.
      *
      * Why the second look below could not do this job: it returns early when
      * ended_at === null, so the one webhook that DID arrive declined to act on

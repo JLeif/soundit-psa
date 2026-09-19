@@ -297,9 +297,9 @@ class FinaliseStuckCalls extends Command
         if ($declinedAtCeiling > 0) {
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
-                .'population. A row counted here may have rolled over at a recording '
-                .'ceiling, or may be a genuinely long call or a backfilled duration; '
-                .'either way it is worth looking at directly.',
+                .'population. Such a row may have rolled over at a recording ceiling, may '
+                .'be a genuinely long call or a backfilled duration, or may still be '
+                .'connected - look at it directly before assuming it ended.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));
