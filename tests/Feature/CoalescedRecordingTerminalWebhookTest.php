@@ -14,6 +14,7 @@ use App\Models\Contract;
 use App\Models\PhoneCall;
 use App\Models\PrepayTransaction;
 use App\Models\Ticket;
+use App\Services\PhoneCallService;
 use App\Services\PrepayService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Process;
@@ -28,11 +29,29 @@ use Tests\TestCase;
  *
  * THE MECHANISM, verified at source rather than inferred. In
  * app/Http/Controllers/Api/PlivoWebhookController.php the `if ($hasRecording)`
- * branch ends `return response('OK', 200)`. handleCallEnded() — which `git grep`
- * confirms is the sole writer of ended_at in app/ (PhoneCallService.php, the one
- * `$call->ended_at = now()` assignment) — is reachable only from the two
- * branches BELOW it, on DialAction=hangup and on a terminal CallStatus. A
- * payload carrying RecordUrl AND a terminal marker therefore cannot reach it.
+ * branch ends `return response('OK', 200)`. handleCallEnded() is reachable only
+ * from the two branches BELOW it, on DialAction=hangup and on a terminal
+ * CallStatus. A payload carrying RecordUrl AND a terminal marker therefore
+ * cannot reach it, so the call's real, delivered end time is acknowledged 200
+ * and discarded.
+ *
+ * ONE PREMISE OF THIS FILE HAS SINCE CHANGED, and it is recorded here rather
+ * than silently absorbed because two of these tests were built on it. When this
+ * file was written against 53829d85, handleCallEnded() was the SOLE writer of
+ * ended_at in app/. It is not any more: card 6aadb3c4 (PR 2693) landed as
+ * f4fa7452 — this branch's base after a rebase — adding
+ * PhoneCallService::handleRecordingReady() -> finaliseCallTheHangupNeverClosed(),
+ * which derives ended_at from started_at + duration for a call whose hangup
+ * webhook never arrived. The two legs do not overlap textually (this one is
+ * controller-side, that one service-side), which is why `git merge-tree` is
+ * clean and only a merged-tree test run sees the interaction at all.
+ *
+ * What that costs this file is an INSTRUMENT, not a property. The two scope
+ * guards at the bottom used `ended_at` as a proxy for "the controller did not
+ * finalise"; that proxy was only ever valid while one writer existed. They are
+ * re-aimed at the controller's non-action directly (see spyingPhoneCallService()),
+ * and a new test pins the ORDERING the two writers now imply. The defect above,
+ * and every other test here, is unchanged.
  *
  * WHAT THIS IS NOT, because the distinction changes what these tests may assume.
  * It is not a code regression with a datable window. The onset in the data is
@@ -51,11 +70,24 @@ use Tests\TestCase;
  * 182/182 on the broken set and 78/78 on the working set, so carrying a
  * recording is not the discriminator — arriving coalesced is.
  *
- * RED-CHECKED against 53829d85 (origin/main at the time of writing). Five of the
- * seven tests below FAIL there. The two that pass unfixed are labelled as such
- * on the method itself and are guards on behaviour the fix must not break, not
- * evidence of the defect — a control that cannot fail is not proof of anything
- * and is worth having only if it says so out loud.
+ * RED-CHECKED against the unfixed controller at this branch's base f4fa7452:
+ * EIGHT of the ten tests below FAIL there, and the two that pass are exactly the
+ * two scope guards, which are labelled as such on the method itself — a control
+ * that cannot fail is not proof of anything and is worth having only if it says
+ * so out loud.
+ *
+ * That red-check is the reason several tests here assert a spy count rather than
+ * a column, and the finding is worth stating plainly because it nearly escaped.
+ * Re-running the red-check at the NEW base, with only the two scope guards
+ * re-aimed, five of the seven original tests PASSED against the unfixed
+ * controller — they had been silently disarmed by the rebase. Nothing about
+ * them changed; the sibling's new writer simply satisfies an `ended_at`
+ * assertion without the fix present. A stale premise does not only break tests
+ * loudly, as CI showed; it can also make them pass quietly, which is worse,
+ * because a green control reads as proof. The columns are still asserted — they
+ * are the user-visible outcome — but the DEFECT is now asserted where only this
+ * branch can satisfy it: the controller routing a coalesced payload to
+ * handleCallEnded() with a usable Duration.
  *
  * FIXTURES: every call row carries recording_disk_path pre-seeded, so
  * downloadRecording() returns at its first guard and no socket is opened. This
@@ -99,14 +131,73 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
     }
 
     /**
+     * AN INSTRUMENT FOR THE CONTROLLER'S NON-ACTION, and why the obvious one no
+     * longer works.
+     *
+     * The two scope guards at the bottom of this file originally asserted that
+     * ended_at stays NULL after a recording-only POST, using the column as a
+     * proxy for "the coalesced branch was not entered". That proxy was sound
+     * only while handleCallEnded() was the SOLE writer of ended_at, which it was
+     * at 53829d85 and is not any more: card 6aadb3c4 (PR 2693, merged as
+     * f4fa7452) added a second writer, PhoneCallService::handleRecordingReady()
+     * -> finaliseCallTheHangupNeverClosed(), which DELIBERATELY finalises a
+     * recording-only delivery. So on the merged tree ended_at is non-null after
+     * a recording-only POST, legitimately, and by a collaborator that owns that
+     * decision.
+     *
+     * The property those guards exist to protect did not die with the proxy. It
+     * is "THIS CONTROLLER does not treat a recording as a terminal marker" — the
+     * over-reach class, where keying on the recording rather than on the
+     * terminal marker would end calls that are still connected. So the guards
+     * are re-aimed at the controller's own non-action, observed directly, rather
+     * than at a row-level end state another writer now legitimately owns.
+     *
+     * This spy is a real PhoneCallService subclass bound into the container, not
+     * a mock: every call still runs parent::, so the rest of the request behaves
+     * exactly as in production and the surrounding assertions stay meaningful. A
+     * `shouldReceive(...)->never()` mock would have stubbed the very service
+     * whose work these tests also check.
+     */
+    private function spyingPhoneCallService(): PhoneCallService
+    {
+        $service = new class extends PhoneCallService
+        {
+            /** @var list<array<string, mixed>> Every payload the controller handed to handleCallEnded(), in order. */
+            public array $handleCallEndedPayloads = [];
+
+            public function handleCallEnded(string $callUuid, array $data): ?PhoneCall
+            {
+                $this->handleCallEndedPayloads[] = $data;
+
+                return parent::handleCallEnded($callUuid, $data);
+            }
+        };
+
+        $this->app->instance(PhoneCallService::class, $service);
+
+        return $service;
+    }
+
+    /**
      * THE DEFECT, in its exact production shape: one POST carrying both
      * RecordUrl and CallStatus=completed.
      *
-     * RED at 53829d85: ended_at stays NULL.
+     * RED at 53829d85 on `ended_at` alone. NOT RED on `ended_at` alone at
+     * f4fa7452, and that is the single most important thing the rebase taught
+     * this file: the sibling's finaliseCallTheHangupNeverClosed() stamps a
+     * DERIVED ended_at on this same payload, so at the new base this test's
+     * original assertion is satisfied by a writer that is not the fix. The
+     * symptom is masked; the defect is not. The controller still discards the
+     * vendor's delivered end time and its Duration.
+     *
+     * So the defect assertion is the controller's ACTION, observed directly,
+     * exactly as the two scope guards below assert its non-action. Red at
+     * f4fa7452: handleCallEnded() is called ZERO times.
      */
     public function test_a_coalesced_recording_and_completed_status_finalises_the_call(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -117,12 +208,16 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'Duration' => 25,
         ])->assertOk();
 
+        $this->assertCount(
+            1,
+            $service->handleCallEndedPayloads,
+            'THE DEFECT: the coalesced delivery carries CallStatus=completed and the recording branch returned 200 without ever routing it to handleCallEnded().'
+        );
+
         $call->refresh();
 
-        $this->assertNotNull(
-            $call->ended_at,
-            'The coalesced delivery carried CallStatus=completed and was discarded by the recording branch.'
-        );
+        $this->assertNotNull($call->ended_at);
+        $this->assertSame(25, (int) $call->duration, "The vendor's own Duration must reach the row; the recording-derived value is the fallback, not the answer.");
         $this->assertSame('https://media.plivo.com/v1/rec/abc.mp3', $call->recording_url);
         $this->assertSame(22, $call->recording_duration);
     }
@@ -132,11 +227,14 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * other terminal marker. A fix written for only one of the two markers
      * passes half of this file.
      *
-     * RED at 53829d85: ended_at stays NULL.
+     * RED at f4fa7452: handleCallEnded() is called zero times. (Its original
+     * ended_at assertion is masked at the new base by the sibling's derived
+     * stamp — see the completed-status test above for the full reasoning.)
      */
     public function test_a_coalesced_recording_and_hangup_finalises_the_call(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -147,7 +245,11 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'Duration' => 19,
         ])->assertOk();
 
-        $this->assertNotNull($call->refresh()->ended_at);
+        $this->assertCount(1, $service->handleCallEndedPayloads, 'DialAction=hangup is the other terminal marker and must reach handleCallEnded() from the recording branch too.');
+
+        $call->refresh();
+        $this->assertNotNull($call->ended_at);
+        $this->assertSame(19, (int) $call->duration);
     }
 
     /**
@@ -156,12 +258,17 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * the row ALREADY carries it — which is exactly why the recording work has
      * to run before the finalisation and not after.
      *
-     * RED at 53829d85: ended_at stays NULL (the status was already right there,
-     * so this test measures the ORDERING, not the status rule).
+     * RED at f4fa7452 on the handleCallEnded() call: the status was already
+     * right there, so this test measures the ORDERING within the controller, not
+     * the status rule. The status assertion is kept because it is what the
+     * ordering is FOR — it would break if the finalisation were moved above the
+     * recording work — and the spy is what makes the test fail against a
+     * controller that never finalises at all.
      */
     public function test_a_coalesced_voicemail_keeps_its_voicemail_status_and_gains_an_ended_at(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -171,6 +278,8 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'RecordingDuration' => 31,
             'Duration' => 34,
         ])->assertOk();
+
+        $this->assertCount(1, $service->handleCallEndedPayloads, 'The coalesced voicemail must still reach handleCallEnded() from the recording branch.');
 
         $call->refresh();
 
@@ -194,15 +303,22 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * and the call's charge would reverse itself. That is a write to a client's
      * prepay balance caused by a webhook that reported nothing new.
      *
-     * RED at 53829d85 for the ended_at assertion. The duration and prepay
-     * assertions are what fail against a fix that falls through WITHOUT
-     * preserving the duration — they are aimed at the naive version of this fix,
-     * not at main. Both are wanted: the duration assertion names the mechanism,
-     * the surviving-transaction assertion names the harm.
+     * RED against a fix that falls through WITHOUT preserving the duration — the
+     * naive version of this fix, which is the dangerous one. Both assertions are
+     * wanted: the duration assertion names the mechanism, the
+     * surviving-transaction assertion names the harm.
+     *
+     * NOT red at f4fa7452, and that is stated rather than left to be discovered:
+     * an unfixed controller never calls handleCallEnded() on this payload, so it
+     * never nulls the column and the debit survives by inaction. This test is
+     * aimed at the naive FIX, not at the base — which is why the spy assertion
+     * below is here too, so the test cannot be satisfied by a controller that
+     * simply does nothing.
      */
     public function test_a_coalesced_delivery_without_duration_does_not_reverse_the_prepay_debit(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
 
         $client = Client::create(['name' => 'Coalesced Duration Co']);
         $contract = Contract::create([
@@ -253,6 +369,12 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'RecordingDuration' => 0,
             // NO Duration key — the shape that nulls the column.
         ])->assertOk();
+
+        $this->assertCount(
+            1,
+            $service->handleCallEndedPayloads,
+            'The call must be finalised BY THE CONTROLLER — otherwise the surviving debit below proves only that nothing happened.'
+        );
 
         $call->refresh();
 
@@ -308,11 +430,16 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * duration handleRecordingReady() derived from the recording seconds
      * earlier, reporting a 95-second voicemail as a zero-length call.
      *
-     * RED against a presence-tested fallback: duration comes back 0.
+     * RED against a presence-tested fallback: duration comes back 0. Like the
+     * money guard above it is aimed at a wrong FIX rather than at the base, so it
+     * also asserts the controller actually finalised — at f4fa7452 it does not,
+     * and a 95-second duration that survives because nothing ran would otherwise
+     * read as a pass.
      */
     public function test_a_zero_b_leg_duration_does_not_overwrite_the_recording_derived_duration(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -323,6 +450,8 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'DialBLegDuration' => 0,
             // NO Duration key — the coalesced voicemail shape.
         ])->assertOk();
+
+        $this->assertCount(1, $service->handleCallEndedPayloads, 'The coalesced hangup must reach handleCallEnded(); a duration that survives because nothing ran proves nothing.');
 
         $call->refresh();
 
@@ -379,10 +508,24 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * 2026 and how the intact 78 rows were written. The fix must not disturb it,
      * and since the terminal POST carries no RecordUrl it never enters the
      * changed branch at all.
+     *
+     * RE-AIMED at f4fa7452 (this branch's new base) and the reason is recorded
+     * rather than quietly absorbed. The middle assertion used to read
+     * `assertNull($call->refresh()->ended_at)` after the FIRST post. That premise
+     * died when card 6aadb3c4 landed: handleRecordingReady() now finalises a
+     * recording-only delivery on purpose, so ended_at is non-null there and CI
+     * was right to fail this test. What the assertion was really protecting is
+     * that the CONTROLLER did not finalise, so it now observes the controller
+     * directly — handleCallEnded() is not called by the first post — and the
+     * two-POST outcome it was always about is still asserted at the end.
+     * Deleting it instead would have discarded a live scope guarantee under
+     * cover of "the test was stale", and a deleted test's tally is
+     * indistinguishable from a test that never existed.
      */
     public function test_two_separate_posts_still_work(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -391,7 +534,11 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'RecordingDuration' => 18,
         ])->assertOk();
 
-        $this->assertNull($call->refresh()->ended_at, 'A recording-only POST says nothing about the call having ended.');
+        $this->assertSame(
+            [],
+            $service->handleCallEndedPayloads,
+            'A recording-only POST carries no terminal marker, so the coalesced branch must not be entered and the controller must not finalise. (ended_at itself is no longer a valid instrument here: since f4fa7452, handleRecordingReady() legitimately writes it on this very shape.)'
+        );
 
         $this->postWebhook([
             'CallUUID' => $call->call_uuid,
@@ -399,24 +546,53 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'Duration' => 20,
         ])->assertOk();
 
+        $this->assertCount(
+            1,
+            $service->handleCallEndedPayloads,
+            'The SECOND post is the terminal one and is what finalises through the controller.'
+        );
+
         $call->refresh();
         $this->assertNotNull($call->ended_at);
         $this->assertSame(20, (int) $call->duration);
     }
 
     /**
-     * PASSES UNFIXED BY DESIGN — the complementary boundary.
+     * PASSES UNFIXED BY DESIGN — the complementary boundary, and the one whose
+     * instrument the new base took away.
      *
-     * A recording callback with no terminal marker must NOT finalise the call.
-     * This is the guard against over-reach: the fix keys on the terminal marker,
-     * not on the presence of a recording, and a version that finalised every
-     * recording delivery would end calls that are still connected. That is the
-     * defect class the sibling leg (card 6aadb3c4) had to fix in its sweep, and
-     * it is worse than the one being fixed here.
+     * THE PROPERTY, unchanged: this controller must not treat a recording as a
+     * terminal marker. The fix keys on the terminal marker, not on the presence
+     * of a recording; a version that finalised every recording delivery from the
+     * CONTROLLER would end calls that are still connected — the over-reach class,
+     * which is worse than the defect being fixed here.
+     *
+     * THE INSTRUMENT, changed, and this is the whole of the re-aim. It used to
+     * assert `ended_at` stays NULL. Since f4fa7452 that is false for a reason
+     * that is not a defect: handleRecordingReady() calls
+     * finaliseCallTheHangupNeverClosed(), which derives ended_at from
+     * started_at + duration for a row whose hangup webhook never arrived. That is
+     * card 6aadb3c4's deliberate contract, and it is guarded on ITS side by the
+     * RECORDING_MAX_LENGTH_SECONDS ceiling — a recording that hit maxLength is
+     * evidence the RECORDING stopped, not the CALL, and is declined there. So the
+     * over-reach hazard on the recording-only shape is now owned, and guarded, by
+     * the service.
+     *
+     * What is still THIS branch's to guarantee is that the controller adds no
+     * second, unguarded route to the same outcome — one that would bypass that
+     * ceiling entirely, because handleCallEnded() applies no such test. So the
+     * assertion is now on the controller's non-action, observed directly.
+     *
+     * Measured on the merged tree rather than assumed (the values are in this
+     * card's record): after this exact POST, handleCallEnded() is called ZERO
+     * times and ended_at is nevertheless stamped at started_at + 9s by the
+     * service. Both facts are true at once, which is precisely why the old
+     * instrument had to be replaced rather than merely re-expected.
      */
     public function test_a_recording_without_a_terminal_marker_does_not_finalise(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
 
         $this->postWebhook([
@@ -425,9 +601,94 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'RecordingDuration' => 9,
         ])->assertOk();
 
+        $this->assertSame(
+            [],
+            $service->handleCallEndedPayloads,
+            'THE OVER-REACH GUARD: no terminal marker is in this payload, so the controller must not route it to handleCallEnded(). Finalising on the recording alone is the service\'s decision to make under its maxLength ceiling, not a second unguarded route through this controller.'
+        );
+
+        $call->refresh();
+        $this->assertSame('https://media.plivo.com/v1/rec/live.mp3', $call->recording_url);
+    }
+
+    /**
+     * ORDERING, NOT IDEMPOTENCY — the question the new base raises and that no
+     * receipt on this card answered before it.
+     *
+     * Two writers of ended_at now exist on a payload carrying a recording: the
+     * service's finaliseCallTheHangupNeverClosed() (card 6aadb3c4) and this
+     * branch's coalesced controller branch. Double-finalisation is already closed
+     * on the SIBLING's side — its first statement is `if ($call->ended_at !==
+     * null) { return; }` — so whichever writer is second is a no-op there. That
+     * was read at source on the merged tree, not inherited from a comment, and it
+     * means the hazard is not "do both fire". It is WHICH ONE WINS, and whether
+     * this branch's duration precedence still holds now that
+     * handleRecordingReady() has already derived BOTH a duration and an ended_at
+     * before the controller code runs.
+     *
+     * THE ANSWER THIS PINS. On a coalesced POST the recording work runs first, so
+     * the service finalises to started_at + duration; the controller then calls
+     * handleCallEnded(), whose FIRST statement is `$call->ended_at = now()` with
+     * no ended_at guard of its own. So the CONTROLLER WINS the timestamp, and
+     * that is the correct outcome rather than a tolerated one: on a coalesced
+     * delivery the vendor is reporting the end as it happens, so now() is an
+     * observed end time, while the service's value is explicitly documented as a
+     * derivation for a hangup webhook that never came. The derived value must not
+     * outlive the real one.
+     *
+     * THE CASE THAT MAKES IT MATTER, and it is the money one:
+     * recording_duration = 0, a caller who hung up during the greeting. There
+     * effectiveDurationSeconds() has no recording fallback, so if the payload's
+     * absent Duration reached handleCallEnded() the column would be nulled and
+     * PrepayService would reverse the client's charge. This asserts the payload
+     * the controller actually hands over — Duration = the stored 180, supplied by
+     * terminalPayloadPreservingDuration() — so the precedence is observed at the
+     * boundary where it acts, not merely inferred from the column afterwards.
+     *
+     * RED against a fix that drops the duration preservation: the handed-over
+     * payload has no Duration key and the surviving-transaction assertion in
+     * test_a_coalesced_delivery_without_duration_does_not_reverse_the_prepay_debit
+     * fails with it.
+     */
+    public function test_the_controller_wins_the_ordering_and_keeps_the_duration_on_a_coalesced_payload(): void
+    {
+        Queue::fake();
+        $service = $this->spyingPhoneCallService();
+
+        $call = $this->ringingCall();
+        // The greeting-hangup row: a duration already derived from an earlier
+        // recording callback, and a recording_duration of 0 that leaves
+        // effectiveDurationSeconds() no fallback of its own.
+        $call->duration = 180;
+        $call->recording_duration = 0;
+        $call->save();
+
+        $this->postWebhook([
+            'CallUUID' => $call->call_uuid,
+            'CallStatus' => 'completed',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/ordering.mp3',
+            'RecordingDuration' => 0,
+            // NO Duration key — the coalesced shape that nulls the column.
+        ])->assertOk();
+
+        $this->assertCount(
+            1,
+            $service->handleCallEndedPayloads,
+            'The coalesced payload carries a terminal marker, so the controller must finalise exactly once — not zero times (deferring to the service) and not twice.'
+        );
+        $this->assertSame(
+            180,
+            (int) ($service->handleCallEndedPayloads[0]['Duration'] ?? null),
+            'THE PRECEDENCE, observed at the boundary: the controller must hand handleCallEnded() the recording-derived duration even though handleRecordingReady() has already run and already written both a duration and an ended_at. Without it the column is nulled and, with recording_duration 0, the prepay debit reverses.'
+        );
+
         $call->refresh();
 
-        $this->assertNull($call->ended_at, 'A live call whose recording rolled over must not be finalised.');
-        $this->assertSame('https://media.plivo.com/v1/rec/live.mp3', $call->recording_url);
+        $this->assertSame(180, (int) $call->duration);
+        $this->assertNotNull($call->ended_at);
+        $this->assertTrue(
+            $call->ended_at->greaterThan($call->started_at->copy()->addSeconds(60)),
+            'ORDERING: the controller writes ended_at = now() and runs AFTER the service derived started_at + duration, so the observed end time must survive rather than the derived one. The fixture starts the call 2 minutes ago, so the derived value (started_at + 0s) is more than 60s earlier than now.'
+        );
     }
 }
