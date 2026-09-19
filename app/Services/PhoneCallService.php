@@ -552,12 +552,20 @@ class PhoneCallService
      * computed as ($duration === null || $duration < CEILING), so a callback
      * carrying NO usable length reads as complete and finalises. That is a
      * deliberate choice - the recording callback is itself evidence the call
-     * ended, and tests/Feature/StuckRingingCallTest.php pins it - but it means
-     * the ceiling guard protects against a long recording, NOT against an
-     * unmeasured one. The controller widens that case: $request->integer()
-     * turns an ABSENT RecordingDuration into 0, so a rollover callback that
-     * omits the field is indistinguishable here from a zero-length recording.
-     * Do not read this guard as covering it.
+     * ended - but it means the ceiling guard protects against a long recording,
+     * NOT against an unmeasured one. The controller widens that case:
+     * $request->integer() turns an ABSENT RecordingDuration into 0, so a
+     * rollover callback that omits the field is indistinguishable here from a
+     * zero-length recording. Do not read this guard as covering it.
+     *
+     * ON WHAT IS ACTUALLY PINNED, stated narrowly because an earlier version of
+     * this docblock overclaimed it: test_a_recording_without_a_duration_still_
+     * finalises_the_row covers the NULL arm by calling this service directly
+     * with null. That is a real contract and it is why the null branch must not
+     * be flipped. It is NOT coverage of production, because the sole production
+     * caller passes $request->integer(), which cannot return null - so the
+     * branch that test pins is one no delivery reaches. The value production
+     * actually emits for an absent field is 0, and no test passes 0 here.
      *
      * Why the second look below could not do this job: it returns early when
      * ended_at === null, so the one webhook that DID arrive declined to act on
