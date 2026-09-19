@@ -297,14 +297,6 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * predicate excludes, and
      * test_a_call_declined_by_the_maxlength_guard_is_not_swept() is its pin.
      *
-     * A third correction, of scope rather than mechanism: that ceiling is
-     * emitted only by browserAnswer(), which serves OUTBOUND browser calls.
-     * The inbound handler emits no <Record> element, so the rolled-over shape
-     * above is an outbound-only shape and the predicate excludes nothing on
-     * the inbound rows that make up 220 of the 221 real never-finalised rows.
-     * The predicate is still correct where it applies; it is simply not a
-     * bound on THIS population, and the end-evidence filter and age floor are
-     * what actually hold it.
      * The fixture below is the different, pre-callback shape - no columns at
      * all - which is the one the evidence filter is genuinely load-bearing
      * for.
