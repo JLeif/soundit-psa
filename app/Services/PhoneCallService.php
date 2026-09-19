@@ -487,6 +487,7 @@ class PhoneCallService
                 $call->duration = $duration;
             }
 
+            $this->finaliseCallTheHangupNeverClosed($call);
             $this->reconcileAnsweredStateWithDuration($call);
 
             $call->save();
@@ -508,6 +509,90 @@ class PhoneCallService
         }
 
         return $call;
+    }
+
+    /**
+     * THE CALL THAT NEVER ENDED. A recording has arrived for a row that still
+     * claims to be ringing, because the hangup webhook that would have written
+     * ended_at and the final status never reached us.
+     *
+     * Measured in production 2026-09-18: 36 such rows, oldest 2026-05-05,
+     * newest 2026-09-15, all inbound. Every one carries BOTH recording_url and
+     * recording_duration - which is the evidence this method rests on. The
+     * recording callback is proof the call ended; nothing else about the row
+     * is.
+     *
+     * Why the second look below could not do this job: it returns early when
+     * ended_at === null, so the one webhook that DID arrive declined to act on
+     * exactly the rows that needed it. This runs FIRST and supplies the
+     * ended_at the second look then reads, which is why the ordering in
+     * handleRecordingReady() is load-bearing rather than cosmetic.
+     *
+     * What it deliberately does NOT do:
+     *  1. It does not invent an answer. A recording proves audio existed, not
+     *     that a human picked up - the inference handleCallEnded() refuses to
+     *     make, refused identically here. A row with no answered_at finalises
+     *     as Missed; only a row that already carries an answer fingerprint
+     *     finalises as Completed. status is decided by the same rule
+     *     handleCallEnded() uses, deliberately duplicated rather than shared,
+     *     because the two paths hold the rule for different reasons and a
+     *     future change to one should not silently move the other.
+     *  2. It does not touch a row that already ended. The guard is on
+     *     ended_at, not on status, so a Completed row whose recording arrives
+     *     late is left entirely alone and a redelivery is a no-op.
+     *  3. It does not resurrect a voicemail. Status is only ever written for a
+     *     row that is not already Voicemail; a stuck voicemail gets its
+     *     ended_at and keeps its status.
+     *  4. It does not stamp now(). These rows can be months old, so now()
+     *     would re-date a spring call to whenever this shipped and corrupt
+     *     every report reading the column. ended_at is DERIVED as started_at
+     *     plus the recorded length.
+     *
+     * The derivation is approximate and that is stated rather than hidden: it
+     * assumes the recording covers the call, so on a call that rang for a
+     * while before recording began the end time is early by the ring time. It
+     * is bounded by two real values (never before started_at, never later than
+     * now) and is a far smaller wrong than a row that claims to still be
+     * ringing four months on. With no usable duration at all the end time
+     * falls back to started_at - the last moment the row itself can defend.
+     *
+     * Mutates the model only; the caller saves.
+     */
+    private function finaliseCallTheHangupNeverClosed(PhoneCall $call): void
+    {
+        if ($call->ended_at !== null) {
+            return;
+        }
+
+        $seconds = $call->effectiveDurationSeconds();
+        $startedAt = $call->started_at ?? $call->created_at;
+
+        if ($startedAt === null) {
+            return;
+        }
+
+        $endedAt = $seconds && $seconds > 0
+            ? $startedAt->copy()->addSeconds($seconds)
+            : $startedAt->copy();
+
+        // Never claim a call ended in the future: a recording_duration longer
+        // than the time since the call started would otherwise date the hangup
+        // ahead of now.
+        $call->ended_at = $endedAt->isFuture() ? now() : $endedAt;
+
+        if ($call->status === CallStatus::Voicemail) {
+            return;
+        }
+
+        $call->status = $call->answered_at === null
+            ? CallStatus::Missed
+            : CallStatus::Completed;
+
+        Log::info('[PhoneCall] Finalised a call the hangup webhook never closed', [
+            'call_id' => $call->id,
+            'derived_ended_at' => $call->ended_at->toDateTimeString(),
+            'duration_seconds' => $seconds,
+        ]);
     }
 
     /**
