@@ -189,12 +189,13 @@ class FinaliseStuckCalls extends Command
         // ended_at and an age past the floor: every predicate satisfied by a
         // conversation in progress.
         //
-        // THE CEILING IS THE OTHER HALF. A stored length at or above the
-        // maxLength the controller emits says the RECORDING stopped, not the
-        // call, so the row is out of the population - the same discriminator
-        // the live path uses, reading the same constant so the two cannot
-        // drift. It costs the row that really did end with its recording at
-        // the ceiling: declined, counted below, and left for a later webhook
+        // THE CEILING IS THE OTHER HALF: a stored length at or above
+        // PhoneCallService::RECORDING_MAX_LENGTH_SECONDS puts the row out of
+        // the population, reading the service's constant so the two cannot
+        // drift. What such a length does and does not establish is stated
+        // once in the docblock above and deliberately not restated here. It
+        // costs the row that really did end with its recording at the
+        // ceiling: declined, counted below, and left for a later webhook
         // rather than risked.
         //
         // Ageing keys on the same anchor the derivation below uses -
@@ -284,8 +285,8 @@ class FinaliseStuckCalls extends Command
         // The second decline, reported for the same reason and derived the
         // same way - by subtracting the predicate from the population that
         // precedes it, so it cannot drift from the filter it reports on. These
-        // rows DID leave a trace; the trace is a recording that rolled over at
-        // the ceiling, which says the recording stopped and not the call. A
+        // rows DID leave a trace, but one at or above the ceiling, which the
+        // docblock above explains is not something this command will act on. A
         // genuinely ended call in this shape is reachable again as soon as a
         // hangup webhook lands, and until then this run says out loud that it
         // did not cover it.
@@ -296,10 +297,9 @@ class FinaliseStuckCalls extends Command
         if ($declinedAtCeiling > 0) {
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
-                .'population (a recording that rolled over says the RECORDING stopped, not '
-                .'the call - such a row may still be connected). A row counted here may have '
-                .'rolled over at a recording ceiling, or may be a genuinely long call or a '
-                .'backfilled duration; either way it is worth looking at directly.',
+                .'population. A row counted here may have rolled over at a recording '
+                .'ceiling, or may be a genuinely long call or a backfilled duration; '
+                .'either way it is worth looking at directly.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));

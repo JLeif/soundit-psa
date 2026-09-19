@@ -426,7 +426,7 @@ class FinaliseStuckCallsCommandTest extends TestCase
 
         $storedLive = $live->fresh();
         $this->assertNull($storedLive->ended_at,
-            'a recording that stopped at its ceiling is not evidence the call ended');
+            'a recording at or above the ceiling is too weak to treat as evidence the call ended');
         $this->assertSame(CallStatus::Ringing, $storedLive->status,
             'the sweep must not disposition a call that may still be connected');
 

@@ -310,7 +310,8 @@ class StuckRingingCallTest extends TestCase
         $stored = $call->fresh();
 
         $this->assertNull($stored->ended_at,
-            'a recording that hit its maxLength ceiling says the RECORDING stopped, not the call');
+            'a recording at the maxLength ceiling may have stopped while the call continued, '
+            .'so it is not treated as evidence the call ended');
         $this->assertSame(CallStatus::Ringing, $stored->status,
             'a call that may still be connected must not be finalised by its own recording rolling over');
         $this->assertSame(14400, $stored->recording_duration,
