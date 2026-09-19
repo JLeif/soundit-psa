@@ -408,4 +408,34 @@ class StuckRingingCallTest extends TestCase
             'the recording still proves the call ended, even with no length');
         $this->assertNotSame(CallStatus::Ringing, $stored->status);
     }
+
+    /**
+     * The ceiling guard must be impossible to skip by omission.
+     *
+     * finaliseCallTheHangupNeverClosed() once defaulted $recordingIsComplete
+     * to true. The sole caller passes it, so no behavioural test could fail if
+     * the default came back - a future second call site would silently inherit
+     * the pre-guard behaviour and finalise a still-connected call. There is no
+     * safe default (true skips the guard; false declines everything the method
+     * exists to do), so the contract is that the caller MUST state it.
+     *
+     * This asserts the contract itself rather than a behaviour, because the
+     * defect it guards is precisely the absence of a caller to observe.
+     */
+    public function test_the_ceiling_flag_cannot_be_omitted_by_a_future_caller(): void
+    {
+        $method = new \ReflectionMethod(PhoneCallService::class, 'finaliseCallTheHangupNeverClosed');
+        $parameter = $method->getParameters()[1];
+
+        $this->assertSame('recordingIsComplete', $parameter->getName(),
+            'guarding the wrong parameter - the ceiling flag moved position');
+
+        $this->assertFalse($parameter->isOptional(),
+            'finaliseCallTheHangupNeverClosed() must REQUIRE $recordingIsComplete: '
+            .'a default lets a future caller skip the ceiling guard and finalise a live call, '
+            .'and no behavioural test would catch it because the only caller today passes it');
+
+        $this->assertSame(2, $method->getNumberOfRequiredParameters(),
+            'both the call and the ceiling verdict must be supplied by the caller');
+    }
 }

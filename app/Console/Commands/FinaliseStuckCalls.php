@@ -78,9 +78,15 @@ use Illuminate\Support\Facades\Log;
  * recording at or above the ceiling is declined here too, on either
  * direction. That false negative is bought against a false positive on a live
  * call, and it is not a silent loss - those rows are COUNTED and reported on
- * every run, and a later hangup webhook, or a rerun after one arrives, still
- * reaches them. Whether the exclusion should be narrowed is an open question
- * for the card owner; this round states the reach rather than changes it.
+ * every run. A rerun of THIS command will never take them: the population is
+ * whereNull('ended_at'), so once a hangup webhook writes ended_at the row has
+ * already left it, and until one arrives the ceiling predicate excludes the
+ * row for the same stored length on every pass. There is no state a rerun can
+ * observe that moves a declined row back in - the hangup webhook finalises it,
+ * not this sweep. An operator who reads the exclusion as temporary and waits
+ * for the next run will wait forever. Whether the exclusion should be narrowed
+ * is an open question for the card owner; this round states the reach rather
+ * than changes it.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
