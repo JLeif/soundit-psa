@@ -103,17 +103,28 @@ use Illuminate\Support\Facades\Log;
  * next rerun DOES take the row. Do not tell an operator this subset is beyond
  * reach.
  *
- * What does NOT rescue the row: do not read this exclusion as a handoff to the
- * hangup webhook. This command's population is whereNull('ended_at') - rows
- * whose hangup webhook never arrived, which is what PhoneCallService::
- * finaliseCallTheHangupNeverClosed() is named for. If that webhook does arrive
- * it writes ended_at and the row leaves this population, but for the rows this
- * command exists to serve it never does. So an operator who reads the exclusion
- * as temporary, and waits for a later webhook, waits forever. For the rows
- * declined on duration - the ones no rerun re-admits either - that means a
- * genuinely ended ceiling-length call is dispositioned by nothing at all today.
- * Whether the exclusion should be narrowed is an open question for the card
- * owner; this round states the reach rather than changes it.
+ * What this exclusion is NOT: it is not a handoff to the hangup webhook. Do not
+ * read a declined row as queued for one. But do not read the opposite into it
+ * either - this paragraph deliberately makes no claim that nothing reaches
+ * these rows, because several things can:
+ *
+ *   - a late or retried hangup webhook, via PhoneCallService::handleCallEnded(),
+ *     which writes ended_at with no ceiling or age guard;
+ *   - a redelivered recording callback, since an absent RecordingDuration
+ *     arrives as 0 (see the constant docblock in PhoneCallService) and reads as
+ *     complete, which finalises the row this sweep declined.
+ *
+ * Both act on a row this command passed over, and neither is this command. The
+ * honest statement of reach is the narrow one: THIS sweep declines these rows,
+ * reports them, and leaves their disposition to whatever else arrives. Whether
+ * the exclusion should be narrowed is an open question for the card owner; this
+ * round states the reach rather than changes it.
+ *
+ * One more thing this population is NOT: it is not "rows whose hangup webhook
+ * never arrived". whereNull('ended_at') selects three classes - never arrived,
+ * not arrived YET, and calls still connected right now. That is the founding
+ * bound stated above and in handle(), and collapsing the three is how an
+ * operator talks themselves into force-finalising a live call.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -228,9 +239,10 @@ class FinaliseStuckCalls extends Command
         // drift. What such a length does and does not establish is stated
         // once in the docblock above and deliberately not restated here. It
         // costs the row that really did end with its recording at the
-        // ceiling: declined, counted below, and left undispositioned rather
-        // than risked. Not "left for a later webhook" - the population is
-        // rows whose webhook never came.
+        // ceiling: declined, counted below, and left to whatever else may
+        // reach it rather than risked here. Not "left for a later webhook" -
+        // this sweep hands off to nothing, and the population mixes calls
+        // whose webhook never came with ones still in progress.
         //
         // Ageing keys on the same anchor the derivation below uses -
         // started_at, else created_at - so a row can never be aged by one
@@ -320,15 +332,14 @@ class FinaliseStuckCalls extends Command
         // same way - by subtracting the predicate from the population that
         // precedes it, so it cannot drift from the filter it reports on. These
         // rows DID leave a trace, but one at or above the ceiling, which the
-        // docblock above explains is not something this command will act on. A
-        // genuinely ended call in this shape is not reached by the hangup
-        // webhook - that webhook's absence is what put the row in this
-        // population. Whether a RERUN reaches it depends on which arm declined
-        // it: a row at the ceiling on duration stays out, while one declined
-        // only on recording_duration can return if a later resolve writes a
-        // shorter length (see the docblock above). So this run says out loud
-        // that it did not cover these rows, without promising anything about
-        // when - or whether - something else will.
+        // docblock above explains is not something this command will act on.
+        // Do not read that as a promise in either direction: a rerun may take
+        // the row back if it was declined only on recording_duration and a
+        // later resolve writes a shorter length, and a late hangup webhook or a
+        // redelivered recording callback can finalise it independently of this
+        // sweep (see the docblock above). Some of these rows are also still
+        // connected. So this run says out loud that it did not cover them, and
+        // promises nothing about what will.
         $agedStuckWithEvidence = $agedStuck->clone()->where($endedEvidence);
         $declinedAtCeiling = $agedStuckWithEvidence->clone()->count()
             - $agedStuckWithEvidence->clone()->where($belowRecordingCeiling)->count();
