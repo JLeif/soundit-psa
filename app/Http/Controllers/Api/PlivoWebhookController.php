@@ -22,6 +22,139 @@ class PlivoWebhookController extends Controller
     ) {}
 
     /**
+     * CallStatus values that mean the call is over. Named once because two call
+     * sites now read this list — payloadIsTerminal(), used by the coalesced
+     * branch, and the terminal-CallStatus branch's own in_array() — and a copy
+     * that drifted would silently reopen card 6aade104: a terminal callback the
+     * recording branch did not recognise is a callback whose ended_at is never
+     * written. (The hangup branch still asks its own question inline, `if
+     * ($dialAction === 'hangup')`, and does not consult this list; it is a
+     * DialAction test, not a CallStatus one.)
+     */
+    private const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'timeout', 'no-answer', 'cancel'];
+
+    /**
+     * Does THIS payload say the call has ended? Independent of whether it also
+     * carries a recording — Plivo coalesces the two, and that coalescing is the
+     * whole of card 6aade104.
+     *
+     * BOTH PARAMETERS ARE NULLABLE, and that is not defensive decoration. The
+     * caller reads `$request->input('CallStatus', '')`, which does NOT guarantee
+     * a string: input() resolves through data_get(), which tests
+     * array_key_exists, so the '' default applies only to an ABSENT key. A field
+     * Plivo posts empty (`CallStatus=`) arrives PRESENT and null, because the
+     * global ConvertEmptyStringsToNull middleware already converted it. Declared
+     * `string`, that null is a TypeError — there is no declare(strict_types=1)
+     * in this file, but coercive mode still refuses null for a userland
+     * non-nullable string — and it would be thrown AFTER the recording work
+     * above has run, turning a payload that previously answered 200 into a 500
+     * that Plivo retries, repeating handleRecordingReady() and any voicemail
+     * notification on every retry. null is simply not terminal here: it matches
+     * neither comparison below.
+     */
+    private function payloadIsTerminal(?string $dialAction, ?string $callStatus): bool
+    {
+        return $dialAction === 'hangup' || in_array($callStatus, self::TERMINAL_CALL_STATUSES, true);
+    }
+
+    /**
+     * The payload handleCallEnded() should see, with a Duration it can use.
+     *
+     * WHY THIS EXISTS, and it is a money guard rather than a tidiness one.
+     * handleCallEnded() assigns `duration` unconditionally:
+     *
+     *     $call->duration = isset($data['Duration']) ? (int) $data['Duration'] : null;
+     *
+     * — so a payload with no Duration NULLS the column. On the coalesced
+     * recording+terminal delivery this method serves, handleRecordingReady() has
+     * just written a recording-derived duration into that same column (its own
+     * comment: "use its duration as the call duration so UI, reports, and
+     * exports all render correctly"). Falling through without this would erase
+     * it moments after writing it.
+     *
+     * The money edge: PrepayService::debitFromPhoneCall() reverses an existing
+     * debit outright when effectiveDurationSeconds() comes back falsy
+     * (PrepayService.php — the `! $durationSeconds` branch calls
+     * reverseDebitForPhoneCall()). effectiveDurationSeconds() does fall back to
+     * recording_duration, so a nulled `duration` alone is usually survivable;
+     * it is NOT survivable on a row whose recording_duration is 0 — a caller who
+     * hung up during the greeting — where nulling duration takes the last
+     * non-zero signal away and the call's charge reverses itself. Supplying the
+     * Duration closes both the display regression and the reversal.
+     *
+     * Precedence, most authoritative first:
+     *   1. Plivo's own Duration for the call, WHEN IT IS POSITIVE. The positivity
+     *      test is the same judgement applied to DialBLegDuration below, and for
+     *      the same reason: a presence test admits a zero. Measured at source on
+     *      this tree rather than reasoned about — posting Duration=0 (as the
+     *      string '0' or the integer 0) against a row carrying duration=180 and
+     *      recording_duration=0 wrote duration=0, which is precisely the state
+     *      that leaves effectiveDurationSeconds() with nothing and reverses the
+     *      client's debit. The empty string does NOT reach here (Laravel's
+     *      ConvertEmptyStringsToNull middleware turns it into null, and isset()
+     *      is false for null), but the zero does.
+     *
+     *      A zero-second call is not a fact this method needs to preserve: a row
+     *      that genuinely has no duration is better served by the stored value
+     *      or by no key at all than by a 0 that reads as "measured, and empty".
+     *   2. DialBLegDuration when it is POSITIVE. That field is scoped to the
+     *      DIALED (B) leg, and on the unanswered dial that produces a voicemail
+     *      — the shape that dominates card 6aade104 — the B leg is exactly the
+     *      one that never connected, so Plivo reports 0 there. (The repo's own
+     *      answerIsObserved() requires DialBLegDuration > 0 before it will call
+     *      a leg answered, and fails closed on everything else — it does not
+     *      affirm 0 as a vendor report of anything, so read it as consistent
+     *      with treating 0 as no-evidence, not as authority that 0 is a
+     *      meaningful duration.) A
+     *      presence test would inject that 0 ahead of the recording-derived
+     *      duration this method exists to preserve, zeroing a real voicemail's
+     *      length and, on a row whose recording_duration is also 0, re-opening
+     *      the very debit reversal described above. So a non-positive B-leg
+     *      duration does not outrank the stored value.
+     *   3. The duration already stored on the row, which on this path is the one
+     *      handleRecordingReady() just derived from the recording.
+     *   4. Failing both of those, a non-positive DialBLegDuration is still passed
+     *      through when Plivo sent one — with nothing stored there is nothing to
+     *      protect, and this keeps the Duration-less hangup branch (which passes
+     *      no $call) behaving exactly as it did before.
+     * If none of those exists the key stays absent, which is the pre-existing
+     * behaviour for a Duration-less hangup.
+     */
+    private function terminalPayloadPreservingDuration(array $data, ?PhoneCall $call): array
+    {
+        if (isset($data['Duration']) && (int) $data['Duration'] > 0) {
+            return $data;
+        }
+
+        // A present-but-zero Duration falls through to the same precedence a
+        // missing one gets. Without this the isset() above would hand
+        // handleCallEnded() a 0 and null out a recording-derived duration — the
+        // money defect this whole method exists to prevent, arriving through the
+        // one branch that was not value-tested.
+        unset($data['Duration']);
+
+        $bLegDuration = isset($data['DialBLegDuration']) ? (int) $data['DialBLegDuration'] : null;
+
+        if ($bLegDuration !== null && $bLegDuration > 0) {
+            $data['Duration'] = $data['DialBLegDuration'];
+
+            return $data;
+        }
+
+        if ($call && $call->duration && $call->duration > 0) {
+            $data['Duration'] = $call->duration;
+
+            return $data;
+        }
+
+        if ($bLegDuration !== null) {
+            $data['Duration'] = $data['DialBLegDuration'];
+        }
+
+        return $data;
+    }
+
+    /**
      * After a call ends, resolve the recording from Plivo's API if none arrived via callback.
      * Plivo's inbound call recording callbacks often don't reach our webhook (configured in the
      * Plivo application, not our code). This queries the API directly after a short delay to
@@ -320,16 +453,96 @@ class PlivoWebhookController extends Controller
                 }
             }
 
+            // CARD 6aade104 — the recording branch must not swallow a terminal
+            // callback. Plivo coalesces the recording and the terminal event into
+            // ONE POST (that is when it does; the same account received them as two
+            // separate POSTs before mid-May 2026, which is why the older rows are
+            // intact and the newer ones are not). What IS established is that the
+            // code shape never changed — the early return is in the repo's initial
+            // commit, which postdates the onset in the data — so the cause is
+            // external to this repo. WHICH external cause is not established: a
+            // Plivo product change and a change to the recording callback
+            // configuration, which lives in the Plivo application rather than
+            // here (see the note at the top of this class), both fit the
+            // evidence, and they differ in whether it can silently revert.
+            // This branch used to `return response('OK', 200)` here, and
+            // handleCallEnded() WAS reachable only from the two branches below
+            // this one (the block below is now a third call site). So every
+            // coalesced delivery was acknowledged 200 and discarded: 182
+            // production rows, all carrying a recording, left with ended_at NULL
+            // and still accruing at roughly 17/month.
+            //
+            // handleCallEnded() is NOT the only writer of ended_at, and a reader
+            // reasoning about who may write that column must not assume it is.
+            // PhoneCallService::handleRecordingReady() also finalises, through
+            // finaliseCallTheHangupNeverClosed(), deriving ended_at from
+            // started_at + duration — CLAMPED to now() when that sum is in the
+            // future, which it often is — for a call whose hangup webhook never
+            // arrived. On a coalesced payload with RecordingDuration >= 0 BOTH
+            // run in one request: the recording work above first (derived value),
+            // then this branch (ended_at = now()). On RecordingDuration = -1
+            // handleRecordingReady() does not run at all and this branch is the
+            // ONLY writer. Where both run, this branch WINS the timestamp, which
+            // is deliberate — on a coalesced delivery the vendor is reporting the
+            // end as it happens, so now() is an observed time, while the service's
+            // is documented as an approximation for a hangup that never came, and
+            // a derived value should not outlive a real one.
+            //
+            // TWO ASYMMETRIES TO KNOW BEFORE ADDING A FOURTH CALLER, because the
+            // service is the careful writer and this path is not:
+            //  1. The service declines when `ended_at !== null`; handleCallEnded()
+            //     does not guard at all, so a redelivered coalesced POST moves
+            //     ended_at forward and re-runs the debit. That was inert before
+            //     this change (the payload returned 200 and did nothing) and is
+            //     not inert now. It is filed, not fixed, on this branch.
+            //  2. The service declines when the recording hit its maxLength
+            //     ceiling (RECORDING_MAX_LENGTH_SECONDS), on the argument that
+            //     such a callback proves the RECORDING stopped, not the CALL.
+            //     This path has NO analogue: a terminal marker is a stronger and
+            //     different fact than a recording ending, so finalising on it is
+            //     intended — but nothing here would stop a future caller keying
+            //     on the recording instead, which is the over-reach class and is
+            //     worse than the defect this branch fixes.
+            //
+            // Voicemail is over-represented in those rows for a structural reason
+            // rather than a vendor one: a voicemail IS a call whose recording ends
+            // at the moment the call ends, so it is the shape most likely to have
+            // both facts in one payload. Nothing here is voicemail-specific.
+            //
+            // Ordering is load-bearing and is pinned by a test: the recording work
+            // above runs FIRST so the row carries its recording (and, for a
+            // voicemail, its Voicemail status, which handleCallEnded() then
+            // preserves) before the call is finalised.
+            if ($this->payloadIsTerminal($dialAction, $callStatus)) {
+                $call = PhoneCall::where('call_uuid', $callUuid)->first();
+                $data = $this->terminalPayloadPreservingDuration($request->all(), $call);
+
+                $call = $this->phoneCallService->handleCallEnded($callUuid, $data);
+
+                // resolveRecordingAfterEnd() IS called here, exactly as the two
+                // terminal branches below do. "recording_url is always set on
+                // this path" is false: the branch predicate is RecordUrl being
+                // present in the PAYLOAD, while recording_url is written only by
+                // handleRecordingReady(), which runs only when RecordingDuration
+                // is >= 0. On Plivo's temporary-recording callback
+                // (RecordingDuration = -1) coalesced with a terminal marker the
+                // column is still NULL, and finalising without this call would
+                // leave the row ended with no recording and no remaining trigger
+                // to fetch one. Its own first guard returns when recording_url
+                // IS set, so on the ordinary coalesced delivery this costs a
+                // guard, not a process.
+                $this->resolveRecordingAfterEnd($call);
+                $this->emitCallReceived($call);
+
+                return response('OK', 200);
+            }
+
             return response('OK', 200);
         }
 
         // Hangup — DialAction=hangup (Plivo often omits CallStatus on hangup)
         if ($dialAction === 'hangup') {
-            // Use DialBLegDuration as fallback for Duration
-            $data = $request->all();
-            if (! isset($data['Duration']) && isset($data['DialBLegDuration'])) {
-                $data['Duration'] = $data['DialBLegDuration'];
-            }
+            $data = $this->terminalPayloadPreservingDuration($request->all(), null);
 
             $call = $this->phoneCallService->handleCallEnded($callUuid, $data);
             $this->resolveRecordingAfterEnd($call);
@@ -339,7 +552,7 @@ class PlivoWebhookController extends Controller
         }
 
         // Terminal states via CallStatus
-        if (in_array($callStatus, ['completed', 'busy', 'failed', 'timeout', 'no-answer', 'cancel'])) {
+        if (in_array($callStatus, self::TERMINAL_CALL_STATUSES, true)) {
             $call = $this->phoneCallService->handleCallEnded($callUuid, $request->all());
             $this->resolveRecordingAfterEnd($call);
             $this->emitCallReceived($call);
