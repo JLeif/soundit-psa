@@ -157,15 +157,15 @@ if [ "${1:-}" = "--selftest" ]; then
     # at column 0 after an indented brace; B indents the smuggled line too, so a
     # column-0 test sees nothing).
     #
-    # Sourcing a file runs its top level, so the ONLY thing that keeps these
-    # fixtures from executing is that the smuggled statement is no longer inside
-    # anything the sweep reconstructs -- it is plain top-level script in a file we
-    # were told to load. So this arm asserts the honest property, and ONLY the
-    # honest property: the sweep no longer creates the marker from text that
-    # belongs to the function's own body, because it no longer guesses where that
-    # body ends. Fixture A's smuggled `touch` sits at top level and WILL run when
-    # sourced -- exactly as it would if you ran the file, which is the contract
-    # this sweep now states plainly rather than pretending to bound.
+    # Sourcing a file RUNS ITS TOP LEVEL, and this arm does not pretend
+    # otherwise: a statement written at top level in a baseline you pass WILL
+    # execute, exactly as it would if you ran the file. That is the sweep's
+    # stated contract, not a hole in it.
+    #
+    # So the marker below is deliberately placed INSIDE a function body, which is
+    # the one place the extraction era would have executed it from and sourcing
+    # never does. The arm therefore pins the honest difference: the sweep no
+    # longer manufactures execution out of text whose bounds it guessed.
     #
     # What is therefore pinned here is the DIFFERENCE: a well-formed library whose
     # brace is indented is now used CORRECTLY (the function is defined and swept,
@@ -181,17 +181,47 @@ if [ "${1:-}" = "--selftest" ]; then
         # refused outright by every extraction-era guard.
         sed '$ s/^}$/  }/' "$NEW"
         echo 'other_function() {'
-        echo '    :'
+        # INSIDE the trailing function, never at top level. This line is what the
+        # extraction era would have swallowed and eval'd: a sed range ending at
+        # the first column-0 `}` ran past the indented brace and took everything
+        # after it, so the marker got created. Sourcing defines other_function
+        # and never calls it, so a correct sweep leaves no marker.
+        echo "    touch '$marker_i'"
         echo '}'
     } > "$indented"
+    # BOTH properties of the fixture must be proven to have landed, or the two
+    # assertions below measure nothing. Round 1 asserted on the marker without
+    # any fixture ever planting one, so that branch could never fire -- the
+    # review caught it and it was a fair catch.
     if cmp -s "$NEW" "$indented"; then
         echo "SELFTEST FATAL: indented-brace fixture did not land; arm 3 measures nothing" >&2
         exit 2
     fi
+    if ! grep -q "^  }$" "$indented"; then
+        echo "SELFTEST FATAL: the fixture's closing brace is not indented; arm 3 is not testing #2655" >&2
+        exit 2
+    fi
+    if ! grep -qF "touch '$marker_i'" "$indented"; then
+        echo "SELFTEST FATAL: the fixture plants no marker; the marker assertion cannot fail" >&2
+        exit 2
+    fi
+    if [ -e "$marker_i" ]; then
+        echo "SELFTEST FATAL: marker exists before the sweep ran; the arm proves nothing" >&2
+        exit 2
+    fi
+    if ! bash -n "$indented" 2>/dev/null; then
+        echo "SELFTEST FATAL: the indented-brace fixture is not valid shell; it is unfaithful" >&2
+        exit 2
+    fi
     "$0" "$indented" "$selftest_corpus" >/dev/null 2>"$ind_err"
     rc=$?
+    # The marker is planted INSIDE the trailing function, so sourcing the file
+    # defines that function and never runs it. If the marker exists, something
+    # executed a statement belonging to a function body -- which is exactly what
+    # the extraction era did by guessing where a body ended.
     if [ -e "$marker_i" ]; then
-        echo "SELFTEST FAILED: arm 3 fixture executed a planted marker; it should contain none" >&2
+        echo "SELFTEST FAILED: arm 3 fixture executed a statement from inside a function body;" >&2
+        echo "  that is the eval-the-extracted-range class this lift deletes." >&2
         exit 1
     fi
     if [ "$rc" -ne 0 ]; then
@@ -229,19 +259,32 @@ require_defines_parser() {
     # scripts/gc-verify.sh, and that argument is what everyone's shell history
     # still holds. Sourcing the GATE executes it -- .env provisioning and ~7800
     # PHPUnit tests -- so the predictable mistake is expensive and silent rather
-    # than wrong-looking. Refusing the one filename catches it and says where the
-    # parser moved to.
+    # than wrong-looking.
     #
-    # This is NOT a boundary against a hostile or merely unlucky baseline: any
-    # other file is sourced as given, because sourcing IS how this sweep runs the
-    # real parser. Saying so plainly is the point -- three rounds of lexical
-    # guards on the old extraction each claimed a bound they did not have, and a
-    # check on a basename would be the fourth if it were described as safety.
-    if [ "$(basename "$lib")" = "gc-verify.sh" ]; then
+    # ROUND 1 GOT THIS WRONG AND THE REVIEW CAUGHT IT. The check tested the
+    # BASENAME against "gc-verify.sh", but the mistake it names is a REDIRECT:
+    # `git show origin/main:scripts/gc-verify.sh > /tmp/base.sh`. The basename is
+    # then base.sh, so the guard did not fire on the exact command in its own
+    # documentation -- measured, not theorised. A typo-catcher that misses the
+    # documented typo is worse than none, because it implies a coverage it has
+    # not got. It now recognises the gate by a line the GATE ITSELF prints, which
+    # survives being redirected to any filename.
+    #
+    # STILL NOT A BOUNDARY, and the wording stays deliberate. Any other file is
+    # sourced as given, because sourcing IS how this sweep runs the real parser
+    # and the baseline must be a file you would run. Three rounds of lexical
+    # guards on the old extraction each claimed a bound they did not have; this
+    # one claims only to recognise one known file by one known string, and a
+    # renamed or edited gate defeats it trivially. That is acceptable for a typo,
+    # and would not be for a boundary -- which is why it is not called one.
+    if [ "$(basename "$lib")" = "gc-verify.sh" ] || grep -q '^echo "==> \[1/3\] php artisan test' "$lib"; then
         echo "FATAL: $lib looks like the GATE, not the parser library." >&2
-        echo "  Sourcing it would RUN the gate. The parser moved to" >&2
-        echo "  scripts/lib/gc-verify-summary.sh; pass a checkout of that instead:" >&2
-        echo "    git show <ref>:scripts/lib/gc-verify-summary.sh > /tmp/base.sh" >&2
+        echo "  Sourcing it would RUN the gate. The parser lives in" >&2
+        echo "  scripts/lib/gc-verify-summary.sh; pass a checkout of that instead, e.g." >&2
+        echo "    git show HEAD:scripts/lib/gc-verify-summary.sh > /tmp/base.sh" >&2
+        echo "  (the library exists only at refs where this change has landed; before" >&2
+        echo "  that, the comparable baseline is the inline parser in the gate at that" >&2
+        echo "  ref, which is why this sweep's own gate run cuts it by line range.)" >&2
         exit 2
     fi
     # Load in a SUBSHELL for the check so this script's own shell keeps whatever
