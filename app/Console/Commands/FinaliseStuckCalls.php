@@ -95,8 +95,15 @@ use Illuminate\Support\Facades\Log;
  *
  * Declined ONLY on recording_duration, with duration null: that row CAN come
  * back. resolveRecordingFromPlivo() sets recording_duration to the vendor's
- * length or null, and the webhook caller invokes it with no duration guard
- * (unlike the bulk and singular resolve paths, which require duration > 0).
+ * length or null, and the webhook caller in PlivoWebhookController invokes it
+ * directly on the delivery it is already handling. That caller is the ONLY
+ * path that reaches these rows. Neither resolve command can: both skip a row
+ * that already has a recording_url, and every row here has one BY
+ * CONSTRUCTION - the only two writers of recording_duration in app/ each set
+ * recording_url in the same block, so a row declined on recording_duration
+ * cannot exist without a URL. It is that guard that excludes them, not a
+ * duration test: the bulk command does carry duration > 0, but the singular
+ * one carries no duration guard at all, so do not go looking for one there.
  * handleRecordingReady() backfills duration only when the callback carries a
  * positive one, so a rollover callback that omits the field leaves it null. If
  * a later resolve writes a shorter recording_duration, both arms pass and the
@@ -164,7 +171,7 @@ class FinaliseStuckCalls extends Command
                             {--limit=0 : Process at most this many rows (0 = no limit).}
                             {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}';
 
-    protected $description = 'Finalise calls stuck at ringing/in-progress whose hangup webhook never arrived';
+    protected $description = 'Finalise calls stuck at ringing/in-progress with no ended_at (webhook never arrived, not arrived yet, or still connected)';
 
     public function handle(): int
     {
