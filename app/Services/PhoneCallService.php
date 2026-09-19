@@ -43,7 +43,9 @@ class PhoneCallService
      * several (see the docblock in FinaliseStuckCalls). The ceiling is a single
      * external fact about the XML the controller emits, so a second copy of the
      * number could drift from this one and re-open the hole the guard closes.
-     * The sweep duplicates the NUMBER, not the RULE.
+     * The sweep reads this constant rather than restating the number; what it
+     * duplicates is the derivation - it re-implements its own ceiling test,
+     * deliberately, because it answers a different question.
      */
     public const RECORDING_MAX_LENGTH_SECONDS = 14400;
 
