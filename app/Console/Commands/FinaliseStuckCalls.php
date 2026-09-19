@@ -78,19 +78,30 @@ use Illuminate\Support\Facades\Log;
  * recording at or above the ceiling is declined here too, on either
  * direction. That false negative is bought against a false positive on a live
  * call, and it is not a silent loss - those rows are COUNTED and reported on
- * every run. A rerun of THIS command will not take them, and NOTHING ELSE IS
- * KNOWN TO EITHER. Both halves of that need stating precisely, because earlier
- * versions of this paragraph got each of them wrong in turn.
+ * every run. What happens to them next depends on WHICH arm declined them, and
+ * earlier versions of this paragraph got that wrong in both directions - first
+ * by promising a later webhook would rescue them, then by promising nothing
+ * ever could. Neither is true of every declined row.
  *
- * Why a rerun does not: the ceiling arm reads the STORED duration and
- * recording_duration, and a declined row keeps a stored length at or above the
- * ceiling, so the predicate excludes it again on every pass. Note what this
- * does NOT rest on - the stored length is not frozen. PhoneCallService::
- * resolveRecordingFromPlivo() rewrites recording_duration (and writes no
- * ended_at), and the controller can call it on the same delivery. The reason a
- * rerun still declines is that the duration column, backfilled before the
- * ceiling test, stays at the ceiling and the predicate requires BOTH arms below
- * it.
+ * The predicate is a conjunction: a row is kept only when recording_duration
+ * AND duration are each null-or-below the ceiling. So a row is declined when
+ * EITHER stored length reaches it, and the two cases differ.
+ *
+ * Declined on the duration column: that row stays declined on every pass. The
+ * stored length is not frozen in general - PhoneCallService::
+ * resolveRecordingFromPlivo() rewrites recording_duration, writing no duration
+ * and no ended_at, and the controller calls it on the same delivery - but
+ * nothing on that path lowers duration, so the conjunction keeps failing.
+ *
+ * Declined ONLY on recording_duration, with duration null: that row CAN come
+ * back. resolveRecordingFromPlivo() sets recording_duration to the vendor's
+ * length or null, and the webhook caller invokes it with no duration guard
+ * (unlike the bulk and singular resolve paths, which require duration > 0).
+ * handleRecordingReady() backfills duration only when the callback carries a
+ * positive one, so a rollover callback that omits the field leaves it null. If
+ * a later resolve writes a shorter recording_duration, both arms pass and the
+ * next rerun DOES take the row. Do not tell an operator this subset is beyond
+ * reach.
  *
  * What does NOT rescue the row: do not read this exclusion as a handoff to the
  * hangup webhook. This command's population is whereNull('ended_at') - rows
@@ -98,10 +109,11 @@ use Illuminate\Support\Facades\Log;
  * finaliseCallTheHangupNeverClosed() is named for. If that webhook does arrive
  * it writes ended_at and the row leaves this population, but for the rows this
  * command exists to serve it never does. So an operator who reads the exclusion
- * as temporary, and waits either for the next run or for a later webhook, waits
- * forever: a genuinely ended ceiling-length row is dispositioned by nothing at
- * all today. Whether the exclusion should be narrowed is an open question for
- * the card owner; this round states the reach rather than changes it.
+ * as temporary, and waits for a later webhook, waits forever. For the rows
+ * declined on duration - the ones no rerun re-admits either - that means a
+ * genuinely ended ceiling-length call is dispositioned by nothing at all today.
+ * Whether the exclusion should be narrowed is an open question for the card
+ * owner; this round states the reach rather than changes it.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -309,11 +321,14 @@ class FinaliseStuckCalls extends Command
         // precedes it, so it cannot drift from the filter it reports on. These
         // rows DID leave a trace, but one at or above the ceiling, which the
         // docblock above explains is not something this command will act on. A
-        // genuinely ended call in this shape is reached by NOTHING today: this
-        // sweep declines it for the same stored length on every pass, and the
-        // hangup webhook that would finalise it is the one that never arrived -
-        // that absence is what put the row in this population. So this run says
-        // out loud that it did not cover it, and nothing else will either.
+        // genuinely ended call in this shape is not reached by the hangup
+        // webhook - that webhook's absence is what put the row in this
+        // population. Whether a RERUN reaches it depends on which arm declined
+        // it: a row at the ceiling on duration stays out, while one declined
+        // only on recording_duration can return if a later resolve writes a
+        // shorter length (see the docblock above). So this run says out loud
+        // that it did not cover these rows, without promising anything about
+        // when - or whether - something else will.
         $agedStuckWithEvidence = $agedStuck->clone()->where($endedEvidence);
         $declinedAtCeiling = $agedStuckWithEvidence->clone()->count()
             - $agedStuckWithEvidence->clone()->where($belowRecordingCeiling)->count();
