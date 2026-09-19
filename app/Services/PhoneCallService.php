@@ -36,8 +36,8 @@ class PhoneCallService
      * why a control pins the value rather than only the behaviour).
      *
      * PUBLIC because there are two consumers, not one: the live guard below,
-     * and the FinaliseStuckCalls sweep. They share this NUMBER, not this
-     * inference - the guard reasons about a callback just received, where the
+     * and the FinaliseStuckCalls sweep. They share this NUMBER and nothing
+     * else. The guard reasons about a callback just received, where the
      * ceiling is the likeliest reason that recording closed; the sweep reasons
      * about stored rows, where a length at the ceiling is one hypothesis among
      * several (see the docblock in FinaliseStuckCalls). The ceiling is a single
