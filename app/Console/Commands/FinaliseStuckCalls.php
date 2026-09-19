@@ -63,19 +63,41 @@ use Illuminate\Support\Facades\Log;
  * The only <Record maxLength="14400"> this application emits is in
  * PlivoWebhookController::browserAnswer(), which serves OUTBOUND calls from
  * browser endpoints; the inbound handler returns a bare
- * <Response></Response> carrying no <Record> element, so NO INBOUND ROW CAN
- * EVER REACH THIS CEILING. Measured against production when this was written:
- * 220 of the 221 rows with a null ended_at are inbound, and the single
- * outbound row carries no recording at all - so this predicate excludes
- * nothing in practice, and the largest recording in that population is 301s
- * against a 14400s ceiling, a factor of 47.8.
+ * <Response></Response> carrying no <Record> element, so NO INBOUND RECORDING
+ * CAN ROLL OVER AT THIS CEILING.
  *
- * The predicate is KEPT, not deleted, because it is correct where it applies
- * and free where it is not: an outbound browser call that rolls over at the
- * ceiling is a real shape this command must not finalise. What is withdrawn is
- * the CLAIM that it bounds this population generally. The two bounds actually
- * doing the work on every row here are the stored end-evidence filter and the
- * age floor.
+ * That is narrower than it sounds, and a FOURTH version of this paragraph -
+ * the one these lines correct - overstated it as "no inbound row can ever
+ * reach this ceiling". The predicate below is not a rollover test. It compares
+ * the ordinary duration column against the ceiling as well as
+ * recording_duration, and duration is written on inbound rows by the normal
+ * hangup/answer path, not only by a recording callback. There is no direction
+ * term. So an inbound conversation that really lasted four hours and one
+ * minute - or a row whose duration was backfilled that long - DOES reach the
+ * threshold and IS excluded here. What cannot happen on an inbound row is the
+ * ROLLOVER the exclusion is reasoning about; the exclusion is therefore
+ * over-broad on inbound rows rather than inapplicable to them. Such a row is
+ * declined, counted and reported by the second warning below, not lost
+ * silently.
+ *
+ * Measured against production when this was written: 220 of the 221 rows with
+ * a null ended_at are inbound, and the single outbound row carries no
+ * recording at all - so this predicate excludes nothing on THAT population,
+ * and the largest recording in it is 301s against a 14400s ceiling, a factor
+ * of 47.8. That is a measurement of today's rows, not a bound on what a row
+ * may carry.
+ *
+ * The predicate is KEPT, not deleted, because it is correct where it applies:
+ * an outbound browser call that rolls over at the ceiling is a real shape this
+ * command must not finalise. It is NOT free where it does not apply - a
+ * four-hour-plus inbound call is declined by it too - but that cost is visible
+ * rather than silent: no such row exists on the measured population, and any
+ * that appears is counted and reported by the ceiling warning below. Whether
+ * the exclusion should be narrowed to the rows whose rollover it reasons about
+ * is an open question for the card owner; this round states the reach rather
+ * than changes it. What is withdrawn is the CLAIM that it bounds this
+ * population generally. The two bounds actually doing the work on every row
+ * here are the stored end-evidence filter and the age floor.
  *
  * The trade is the same one the live path makes, and it is stated rather than
  * hidden: an OUTBOUND BROWSER call that really did end with its recording at
@@ -219,15 +241,20 @@ class FinaliseStuckCalls extends Command
         // drops every row whose duration is null - which is most of this
         // population, including the 11 measured rows that carry a recording
         // and no duration.
-        // Jurisdiction note, because the name reads broader than the reach:
-        // this excludes rows whose recording rolled over at the <Record>
-        // maxLength ceiling, and that element is emitted ONLY by
-        // PlivoWebhookController::browserAnswer() on OUTBOUND browser calls.
-        // An inbound row cannot reach the ceiling by any path, so on the
-        // measured population (220 of 221 null-ended_at rows inbound, max
-        // recording 301s against a 14400s ceiling) this predicate excludes
-        // nothing. Retained because it is correct where it applies and free
-        // where it is not - not because it bounds this population.
+        // Jurisdiction note, and it has two halves that must not be collapsed
+        // into one. The shape this REASONS about is a recording that rolled
+        // over at the <Record> maxLength ceiling, and that element is emitted
+        // ONLY by PlivoWebhookController::browserAnswer() on OUTBOUND browser
+        // calls, so no inbound recording can roll over.
+        // What it TESTS is broader: a stored length at or above the ceiling in
+        // recording_duration OR in the ordinary duration column, with no
+        // direction term. duration is written on inbound rows by the normal
+        // hangup path, so a genuinely 4h+ inbound call is excluded here too -
+        // declined and counted by the ceiling warning below, not dropped.
+        // On the measured population (220 of 221 null-ended_at rows inbound,
+        // max recording 301s against a 14400s ceiling) it excludes nothing.
+        // Retained because it is correct where it applies - not because it
+        // bounds this population, and not because it is free elsewhere.
         $belowRecordingCeiling = function ($q) {
             $ceiling = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
 
@@ -300,8 +327,10 @@ class FinaliseStuckCalls extends Command
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
                 .'population (a recording that rolled over says the RECORDING stopped, not '
-                .'the call - such a row may still be connected). That ceiling is emitted only '
-                .'on OUTBOUND browser calls, so an inbound row is never declined for this reason.',
+                .'the call - such a row may still be connected). Only an OUTBOUND browser '
+                .'call can roll over at that ceiling; an inbound row counted here carries a '
+                .'stored length that long for some other reason - a genuinely long call, or a '
+                .'backfilled duration - and is worth looking at directly.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));
