@@ -143,19 +143,38 @@ new_sandbox() {
                -e 's|^if \[ "$( unset -f assert_no_warnings .*!= LOADED \]; then|if false; then|' \
                -e 's|^if ! declare -F assert_no_warnings >/dev/null; then|if false; then|' \
                -e 's|^unset -f assert_no_warnings 2>/dev/null \|\| true$|:|' \
-               -e 's|^\. "$GC_VERIFY_LIB"$|. "$GC_VERIFY_LIB" 2>/dev/null \|\| true|' \
+               -e 's|^\. "$GC_VERIFY_LIB".*$|. "$GC_VERIFY_LIB" </dev/null 2>/dev/null \|\| true|' \
                "$box/scripts/gc-verify.sh"
         # ALL FIVE must land, not "at least one". Round 1 compared one sha256
         # across the whole file, which an OR across independent expressions
         # satisfies partially -- the review called that out. Each expression is
         # therefore asserted to have changed the text it targets.
-        for pat in 'if \[ ! -f "\$GC_VERIFY_LIB" \]' 'unset -f assert_no_warnings 2>/dev/null; \. "\$GC_VERIFY_LIB"' 'if ! declare -F assert_no_warnings' '^unset -f assert_no_warnings 2>/dev/null \|\| true$' '^\. "\$GC_VERIFY_LIB"$'; do
+        #
+        # THE FIFTH IS CHECKED AS A PROPERTY, NOT AS THE ABSENCE OF A STRING.
+        # The first four expressions delete whole refusals, so "the old text is
+        # gone" is a faithful test of them. The fifth REWRITES the real source,
+        # and keying its check to that line's exact shape is how it died: the
+        # line grew a trailing ` </dev/null` and both the `$`-anchored sed and
+        # the `$`-anchored check stopped matching, so the mutation silently did
+        # not apply AND the check that exists to catch that could not fire. It
+        # is checked below by the property the mutation must create -- a real
+        # source made survivable -- which holds whatever redirections that line
+        # carries, so a future redirect cannot disarm it the same way again.
+        for pat in 'if \[ ! -f "\$GC_VERIFY_LIB" \]' 'unset -f assert_no_warnings 2>/dev/null; \. "\$GC_VERIFY_LIB"' 'if ! declare -F assert_no_warnings' '^unset -f assert_no_warnings 2>/dev/null \|\| true$'; do
             if grep -qE "$pat" "$box/scripts/gc-verify.sh"; then
                 echo "SELFTEST FATAL: mutation did not remove /$pat/ from $box/scripts/gc-verify.sh;"
                 echo "  the guard's text moved and this harness is not testing what it claims."
                 exit 2
             fi
         done
+        if ! grep -qE '^\. "\$GC_VERIFY_LIB".*\|\| true$' "$box/scripts/gc-verify.sh"; then
+            echo "SELFTEST FATAL: the real source of \$GC_VERIFY_LIB was not made survivable in"
+            echo "  $box/scripts/gc-verify.sh; the fifth mutation did not apply, so the negative"
+            echo "  cases would go red on bash's own abort at a bad \`.\` rather than on a gate"
+            echo "  that sourced whatever was there and skipped belt two -- a different mutant"
+            echo "  from the one this suite documents."
+            exit 2
+        fi
         after="$(sha256sum "$box/scripts/gc-verify.sh" | cut -d' ' -f1)"
         # THE MUTATION MUST LAND. A selftest whose mutation silently fails to
         # apply measures the unmutated file and then reports whatever that file
