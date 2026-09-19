@@ -66,7 +66,10 @@ build_stub_gate() {
     # The block therefore ends at the LAST line of the second guard, found by the
     # first `^fi$` at or after the final `declare -F` line. Both ends are located
     # by content in the shipped file and RE-LOCATED the same way in the copy.
-    local dest="$1" root="$2" first last dclare
+    # `last` is assigned only inside the `if` below, and the refusal that follows
+    # dereferences it unconditionally under `set -u`; initialise it so a drifted
+    # gate gets the named FATAL rather than `last: unbound variable`.
+    local dest="$1" root="$2" first last="" dclare
     first="$(grep -n '^GC_VERIFY_LIB=' "$GATE" | head -1 | cut -d: -f1)"
     dclare="$(grep -n '^if ! declare -F assert_no_warnings ' "$GATE" | tail -1 | cut -d: -f1)"
     if [ -n "$dclare" ]; then
@@ -102,7 +105,8 @@ build_stub_gate() {
     # original -- by its own first and last lines -- rather than by counting the
     # prologue. An earlier version did the arithmetic and was off by one, which is
     # the whole argument against line-range reasoning that put this branch here.
-    local dfirst dlast
+    # Same conditional assignment, same reason: see `last` above.
+    local dfirst dlast=""
     dfirst="$(grep -n '^GC_VERIFY_LIB=' "$dest" | head -1 | cut -d: -f1)"
     local ddeclare
     ddeclare="$(grep -n '^if ! declare -F assert_no_warnings ' "$dest" | tail -1 | cut -d: -f1)"

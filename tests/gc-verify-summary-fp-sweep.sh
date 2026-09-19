@@ -162,10 +162,21 @@ if [ "${1:-}" = "--selftest" ]; then
     # execute, exactly as it would if you ran the file. That is the sweep's
     # stated contract, not a hole in it.
     #
-    # So the marker below is deliberately placed INSIDE a function body, which is
-    # the one place the extraction era would have executed it from and sourcing
-    # never does. The arm therefore pins the honest difference: the sweep no
-    # longer manufactures execution out of text whose bounds it guessed.
+    # THERE IS NO EXECUTION MARKER IN THIS ARM, and that is deliberate: no marker
+    # placement could discriminate, so any marker assertion here would be a
+    # control incapable of firing. Sourcing runs the WHOLE top level, while the
+    # extraction era eval'd only a sed range cut out of the same file -- so
+    # sourcing executes a SUPERSET of whatever the old eval could run. A marker at
+    # top level therefore fires under both and would make a correct sweep look
+    # red; a marker inside the trailing function body fires under neither, because
+    # a range ending at that function's column-0 brace hands eval a complete
+    # DEFINITION and nothing ever calls it. Round 1 asserted on a marker no
+    # fixture planted; asserting on one planted inside a function body would have
+    # been unfireable for a new reason rather than a repair.
+    #
+    # The difference that IS fireable is the VERDICT, and that is what this arm
+    # asserts: the extraction-era guards REFUSED this shape outright, so a
+    # regression to them turns the rc=0 assertion below red.
     #
     # What is therefore pinned here is the DIFFERENCE: a well-formed library whose
     # brace is indented is now used CORRECTLY (the function is defined and swept,
@@ -173,26 +184,25 @@ if [ "${1:-}" = "--selftest" ]; then
     # indented-brace shape was never actually dangerous -- bash closes a function
     # at an indented `}` exactly as at a column-0 one -- and refusing it was
     # GitHub #2655's false-FAIL class, which this lift deletes.
-    indented="$(mktemp)"; ind_err="$(mktemp)"; marker_i="$(mktemp -u)"
-    trap 'rm -f "$mutant" "$blind" "$blind_err" "$indented" "$ind_err" "$marker_i"' EXIT
+    indented="$(mktemp)"; ind_err="$(mktemp)"
+    trap 'rm -f "$mutant" "$blind" "$blind_err" "$indented" "$ind_err"' EXIT
     {
         # A faithful copy of the real library whose closing brace is INDENTED and
         # which defines a second function afterwards: valid shell, valid parser,
-        # refused outright by every extraction-era guard.
+        # refused outright by every extraction-era guard. The trailing definition
+        # is what made the shape refusable -- a range bounded by where it ends ran
+        # past the indented brace and swallowed it -- so it stays, empty of
+        # anything that pretends to be an execution probe.
         sed '$ s/^}$/  }/' "$NEW"
         echo 'other_function() {'
-        # INSIDE the trailing function, never at top level. This line is what the
-        # extraction era would have swallowed and eval'd: a sed range ending at
-        # the first column-0 `}` ran past the indented brace and took everything
-        # after it, so the marker got created. Sourcing defines other_function
-        # and never calls it, so a correct sweep leaves no marker.
-        echo "    touch '$marker_i'"
+        echo '    :'
         echo '}'
     } > "$indented"
-    # BOTH properties of the fixture must be proven to have landed, or the two
-    # assertions below measure nothing. Round 1 asserted on the marker without
-    # any fixture ever planting one, so that branch could never fire -- the
-    # review caught it and it was a fair catch.
+    # EVERY property of the fixture must be proven to have landed, or the
+    # assertion below measures nothing. Round 1 asserted on a marker no fixture
+    # ever planted, so that branch could never fire -- the review caught it and it
+    # was a fair catch. The repair is to assert only what a regression can
+    # actually turn red.
     if cmp -s "$NEW" "$indented"; then
         echo "SELFTEST FATAL: indented-brace fixture did not land; arm 3 measures nothing" >&2
         exit 2
@@ -201,12 +211,9 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "SELFTEST FATAL: the fixture's closing brace is not indented; arm 3 is not testing #2655" >&2
         exit 2
     fi
-    if ! grep -qF "touch '$marker_i'" "$indented"; then
-        echo "SELFTEST FATAL: the fixture plants no marker; the marker assertion cannot fail" >&2
-        exit 2
-    fi
-    if [ -e "$marker_i" ]; then
-        echo "SELFTEST FATAL: marker exists before the sweep ran; the arm proves nothing" >&2
+    if ! grep -q '^other_function() {$' "$indented"; then
+        echo "SELFTEST FATAL: the fixture carries no definition after the indented brace;" >&2
+        echo "  arm 3 is not testing the shape the extraction-era guards refused" >&2
         exit 2
     fi
     if ! bash -n "$indented" 2>/dev/null; then
@@ -215,15 +222,6 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
     "$0" "$indented" "$selftest_corpus" >/dev/null 2>"$ind_err"
     rc=$?
-    # The marker is planted INSIDE the trailing function, so sourcing the file
-    # defines that function and never runs it. If the marker exists, something
-    # executed a statement belonging to a function body -- which is exactly what
-    # the extraction era did by guessing where a body ended.
-    if [ -e "$marker_i" ]; then
-        echo "SELFTEST FAILED: arm 3 fixture executed a statement from inside a function body;" >&2
-        echo "  that is the eval-the-extracted-range class this lift deletes." >&2
-        exit 1
-    fi
     if [ "$rc" -ne 0 ]; then
         echo "SELFTEST FAILED: a valid library with an indented closing brace was refused (rc=$rc)." >&2
         echo "  That is the #2655 false-FAIL class this lift removes. stderr was:" >&2
