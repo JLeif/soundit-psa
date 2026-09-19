@@ -34,6 +34,14 @@
 # Exits non-zero on the first failing gate.
 set -euo pipefail
 
+# Resolve this script's own directory BEFORE the cd below, and absolutely. The
+# library path is derived from it, and `dirname "${BASH_SOURCE[0]}"` is relative
+# to the CALLER's cwd: `bash scripts/gc-verify.sh` run from a subdirectory would
+# otherwise resolve `scripts/lib/...` against the repo root we are about to move
+# to and not find the file. Computed once, here, so the source below cannot
+# depend on where the gate was invoked from.
+GC_VERIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 cd "$(git rev-parse --show-toplevel)"
 
 # Resolve the base commit to diff against (prefer origin/main, then main).
@@ -108,183 +116,30 @@ fi
 # Belt two: the summary line must exist, be a dialect we recognise, and report
 # zero warnings. --fail-on-warning is known not to cover every warning class
 # (see the header), so a green exit code is not accepted on its own.
-assert_no_warnings() {
-    local log="$1" plain summary warnings=""
-    # Strip ANSI colour before matching; take the LAST summary line.
-    plain="$(sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log")"
-    summary="$(printf '%s\n' "$plain" \
-        | grep -E '^[[:space:]]*Tests:[[:space:]]' | tail -n 1)"
-    if [ -z "$summary" ]; then
-        # A fully clean PHPUnit TextUI run prints "OK (n tests, m assertions)"
-        # INSTEAD of a `Tests:` counts line (SummaryPrinter returns early), so
-        # that line is itself proof of zero warnings. The "OK, but ..." variants
-        # do print a `Tests:` line and are handled by the dialects below.
-        if printf '%s\n' "$plain" \
-            | grep -qE '^[[:space:]]*OK \([0-9]+ tests?, [0-9]+ assertions?\)[[:space:]]*$'; then
-            echo "    summary parsed: warnings=0 (clean TextUI run)"
-            return 0
-        fi
-        echo "ERROR: no PHPUnit summary line found; cannot prove warnings == 0." >&2
-        return 1
-    fi
-    # Every count token on the line must be one this gate UNDERSTANDS. An
-    # allow-list, not a catch-all: if a runner renames or adds a token (say
-    # `7286 warned` or `Warnings(!): 7286`), the gate does not get to assume it
-    # meant zero warnings. It says so and FAILs. That is the whole point of the
-    # exercise — a parser that shrugs at what it cannot read is how a 7286-
-    # warning floor passed as PASS in the first place.
-    local body token label count
-    # Drop the `Tests:` label, then UNWRAP any parenthetical rather than deleting
-    # it. Deleting it was GitHub #2532: `Tests: 467 passed (7286 warnings, 48511
-    # assertions)` had its warnings count removed before the allow-list below
-    # ever saw it, and the gate then "proved" warnings == 0 from the absence it
-    # had just manufactured. The counts inside the parens are counts like any
-    # other, so they go through the same allow-list: a warnings count fails the
-    # gate wherever it appears, and a token this gate cannot read fails closed
-    # wherever it appears. Parens become commas so the existing IFS split sees
-    # each token. Unwrapping never empties `body` though: `()` collapses to
-    # `,,`, not to nothing, so the `-z "$body"` check below can no longer be
-    # what catches a line carrying no readable counts. Two explicit guards take
-    # that weight instead — the parens must balance, so a clipped `Tests: 467
-    # passed (` is refused as the unreadable line it is, and the loop must end
-    # having recognised at least one count. Without them a truncated log would
-    # be "proved" to have zero warnings from an absence: #2532 by another route.
-    local seen=0 opens closes
-    opens="$(printf '%s' "$summary" | tr -cd '(' | wc -c | tr -d '[:space:]')"
-    closes="$(printf '%s' "$summary" | tr -cd ')' | wc -c | tr -d '[:space:]')"
-    if [ "$opens" != "$closes" ]; then
-        echo "ERROR: unbalanced parentheses in PHPUnit summary; failing closed." >&2
-        echo "       summary: $summary" >&2
-        return 1
-    fi
-    body="$(printf '%s' "$summary" | sed -E 's/^[[:space:]]*Tests:[[:space:]]*//; s/[()]/,/g; s/[.[:space:]]*$//')"
-    if [ -z "$body" ]; then
-        echo "ERROR: PHPUnit summary line carries no counts; failing closed." >&2
-        echo "       summary: $summary" >&2
-        return 1
-    fi
-    warnings=0
-    local old_ifs="$IFS"
-    IFS=','
-    for token in $body; do
-        IFS="$old_ifs"
-        token="$(printf '%s' "$token" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-        [ -z "$token" ] && { IFS=','; continue; }
-        # Any token still here is recognised below, fails closed below, or is a
-        # NON-COUNT METRIC -- and that third outcome gives this increment back
-        # (see the metric branch's `seen=$((seen - 1))`), because a measurement
-        # is not evidence that a count was read. For every other token, counting
-        # here is the "at least one count was read" proof.
-        seen=$((seen + 1))
-        if printf '%s' "$token" | grep -qE '^[0-9]+$'; then
-            # Bare count: PHPUnit TextUI's leading test total ("Tests: 21, ...").
-            IFS=','; continue
-        elif printf '%s' "$token" | grep -qE '^[0-9]+[[:space:]]+[A-Za-z][A-Za-z[:space:]]*$'; then
-            # Laravel dialect: "7286 warnings".
-            count="$(printf '%s' "$token" | sed -E 's/^([0-9]+).*/\1/')"
-            label="$(printf '%s' "$token" | sed -E 's/^[0-9]+[[:space:]]+//')"
-        elif printf '%s' "$token" | grep -qiE '^(Duration|Time|Memory)[[:space:]]*:[[:space:]]*([0-9]+|[0-9]+\.[0-9]+|[0-9]+:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?)[[:space:]]*(s|ms|us|sec|secs|seconds|m|min|byte|bytes|b|kb|mb|gb)?$'; then
-            # NON-COUNT METRIC (GitHub #2612), deliberately its own branch.
-            #
-            # ORDER IS LOAD-BEARING: this must be tested BEFORE the generic
-            # `Label: count` branch below. `Duration: 1` (an integer-valued
-            # metric) also matches that generic pattern, so if the generic
-            # branch ran first it would claim the token and then die on the
-            # label allow-list -- which is exactly how this defect presented in
-            # two different forms, and why fixing only the decimal shape would
-            # have left the integer shape still failing.
-            #
-            # Pest prints `Duration: 0.66s` and PHPUnit TextUI prints `Time: 0.66`
-            # / `Memory: 24.00 MB`. These are MEASUREMENTS, not counts of test
-            # outcomes, so they carry no warning information and there is nothing
-            # to add to `warnings`. They were previously refused: with a decimal
-            # value the token matched no pattern at all ("unrecognised token");
-            # with an integer value it parsed as the `Label: count` dialect and
-            # then died on the label allow-list ("unknown count 'duration'"). Both
-            # refusals were correct-by-design fail-closed behaviour on a token the
-            # gate could not read, and the gate only ever saw them when the metric
-            # shared the `Tests:` line -- on its own line it is never parsed.
-            #
-            # This branch is kept SEPARATE from the known-count allow-list below
-            # so that "a measurement I skip" and "a count I understand and do not
-            # fail on" remain distinguishable in the code. The value pattern is
-            # anchored and deliberately narrow: only these three labels, only a
-            # numeric value, and only a unit drawn from a CLOSED list. Anything
-            # else -- including a renamed or decorated warning token -- still
-            # falls through to the fail-closed `else` and FAILS, which is what
-            # #2532 exists to protect.
-            #
-            # THE UNIT LIST IS CLOSED FOR A MEASURED REASON. An earlier draft of
-            # this branch ended `[[:space:]]*[A-Za-z]*$` so that `0.66s` and
-            # `24.00 MB` would match. That trailing wildcard also matched the
-            # WORD `warnings`, so `Duration: 5 warnings` was accepted and the gate
-            # printed `warnings=0` over a line that reported five. Caught by an
-            # adversarial case before this shipped, not by the happy path: a
-            # permissive tail on a SKIP branch is a warning-smuggling route.
-            #
-            # `byte`/`bytes` are in the list because PHPUnit's OWN formatter
-            # emits them: php-timer's ResourceUsageFormatter::bytesToString()
-            # only knows GB/MB/KB and falls through to `N byte(s)` for a peak
-            # under 1024. Omitting them made this fix incomplete on its own
-            # premise -- verified against the installed vendor source, not
-            # assumed. The VALUE is also enumerated rather than loose: the
-            # earlier `[0-9][0-9.:]*` accepted `1...`, `1.` and `1:2:3:4:5`,
-            # which is the same permissiveness this comment warns about, one
-            # field to the left. An instrument that refuses what it cannot read
-            # must not quietly accept a measurement it cannot parse either.
-            #
-            # The clock form's hours field is OPTIONAL because the SIBLING file
-            # of that same package emits one: Duration::asString() prepends
-            # `HH:` whenever hours > 0, so a run at or over an hour prints
-            # `Time: 01:02:03.456`. Enumerating only M:SS(.fff) refused that
-            # legitimate zero-warning line as an unrecognised token -- the exact
-            # false-positive class this branch exists to close, found by review
-            # because the byte/bytes check stopped at ResourceUsageFormatter and
-            # did not read asString() beside it. Three fields is the ceiling:
-            # php-timer emits no fourth, and `1:2:3:4:5` stays refused.
-            seen=$((seen - 1))   # a metric is not the "at least one count was read" proof
-            IFS=','; continue
-        elif printf '%s' "$token" | grep -qE '^[A-Za-z][A-Za-z[:space:]]*:[[:space:]]*[0-9]+$'; then
-            # PHPUnit TextUI dialect: "Warnings: 1".
-            label="$(printf '%s' "$token" | sed -E 's/:.*$//')"
-            count="$(printf '%s' "$token" | sed -E 's/^.*:[[:space:]]*//')"
-        else
-            echo "ERROR: unrecognised token in PHPUnit summary; failing closed." >&2
-            echo "       token:   $token" >&2
-            echo "       summary: $summary" >&2
-            IFS="$old_ifs"
-            return 1
-        fi
-        # Normalise: lowercase, collapse spaces, drop a leading "phpunit ".
-        label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' \
-            | sed -E 's/[[:space:]]+/ /g; s/^phpunit //; s/^[[:space:]]+//; s/[[:space:]]+$//')"
-        case "$label" in
-            warning|warnings)
-                warnings=$((warnings + count)) ;;
-            assertion|assertions|test|tests|passed|failed|failure|failures|error|errors|skipped|incomplete|risky|deprecation|deprecations|deprecated|notice|notices|todo|todos|pending)
-                : ;;  # known, and deliberately not failed on here
-            *)
-                echo "ERROR: unknown count '$label' in PHPUnit summary; failing closed." >&2
-                echo "       summary: $summary" >&2
-                IFS="$old_ifs"
-                return 1 ;;
-        esac
-        IFS=','
-    done
-    IFS="$old_ifs"
-    if [ "$seen" -eq 0 ]; then
-        echo "ERROR: PHPUnit summary line carries no readable counts; failing closed." >&2
-        echo "       summary: $summary" >&2
-        return 1
-    fi
-    if [ "$warnings" -ne 0 ]; then
-        echo "ERROR: PHPUnit reported $warnings warning(s); gate 1 requires zero." >&2
-        echo "       summary: $summary" >&2
-        return 1
-    fi
-    echo "    summary parsed: warnings=0"
-    return 0
-}
+# THE PARSER LIVES IN scripts/lib/gc-verify-summary.sh, and is sourced rather
+# than defined here. Both test harnesses need the SAME function; while it lived
+# inline they recovered it by regex and `eval`'d the text they recovered, which
+# is GitHub #2650/#2655/#2665 -- a sed range bounded by where it ends, not by
+# what it contains. Sourcing a file that defines the function and executes
+# nothing removes the extraction, the validation and the eval together. Ruled by
+# Jeeves on Trello card 6aadcd16 (2026-09-18): one definition, two consumers.
+#
+# This is the only source path, so a missing or unreadable library is a FAIL,
+# never a skipped belt: belt two silently not running is how a 7286-warning
+# floor passed as PASS in the first place.
+GC_VERIFY_LIB="$GC_VERIFY_SCRIPT_DIR/lib/gc-verify-summary.sh"
+if [ ! -r "$GC_VERIFY_LIB" ]; then
+    echo "ERROR: cannot read $GC_VERIFY_LIB; belt two (summary parsing) is unavailable." >&2
+    echo "==> gc-verify: FAIL (summary parser library missing)" >&2
+    exit 1
+fi
+# shellcheck source=lib/gc-verify-summary.sh
+. "$GC_VERIFY_LIB"
+if ! declare -F assert_no_warnings >/dev/null; then
+    echo "ERROR: $GC_VERIFY_LIB did not define assert_no_warnings." >&2
+    echo "==> gc-verify: FAIL (summary parser library did not load)" >&2
+    exit 1
+fi
 if ! assert_no_warnings "$TEST_LOG"; then
     echo "==> gc-verify: FAIL (PHPUnit warnings, or an unreadable summary)" >&2
     exit 1

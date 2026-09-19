@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
-# Control suite for assert_no_warnings() in scripts/gc-verify.sh (GitHub #2532/#2533).
+# Control suite for assert_no_warnings() in scripts/lib/gc-verify-summary.sh
+# (GitHub #2532/#2533/#2650).
 #
-# DISCIPLINE: this suite EXTRACTS AND EXECUTES the shipped function. It does not
+# DISCIPLINE: this suite SOURCES AND EXECUTES the shipped function. It does not
 # re-implement the parsing it tests — a suite that restates the logic agrees with
 # itself by construction and measures nothing.
+#
+# IT USED TO EXTRACT THE FUNCTION BY awk RANGE, which is the defect class Jeeves
+# ruled out on Trello card 6aadcd16 (2026-09-18): a range bounded by where it ends
+# says nothing about what it contains, so an indented or missing closing brace let
+# the sibling harness swallow and `eval` the statements that followed. The parser
+# now lives in a sourceable library that defines a function and executes nothing,
+# so both harnesses load it. The extraction, its >=20-line floor and its
+# brace-termination assertion are gone; what replaces them is a check that the
+# file actually defined the function, because a suite that silently tests nothing
+# is the outcome all of those guards existed to prevent.
 #
 #   ./tests/test-gc-verify-summary.sh            run the cases
 #   ./tests/test-gc-verify-summary.sh --selftest prove the harness can FAIL
@@ -15,32 +26,38 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-GATE="$ROOT/scripts/gc-verify.sh"
+LIB="$ROOT/scripts/lib/gc-verify-summary.sh"
 CASES="$HERE/gc-verify-summary-cases.txt"
 
-[ -r "$GATE" ]  || { echo "FATAL: cannot read $GATE"; exit 2; }
+[ -r "$LIB" ]   || { echo "FATAL: cannot read $LIB"; exit 2; }
 [ -r "$CASES" ] || { echo "FATAL: cannot read $CASES"; exit 2; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Extract assert_no_warnings() verbatim: from its definition line to the closing
-# brace at column 0. Fail loudly rather than silently testing nothing.
-extract() {
-    awk '/^assert_no_warnings\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$GATE" > "$WORK/fn.sh"
-    if ! grep -q '^assert_no_warnings() {' "$WORK/fn.sh" || ! grep -q '^}' "$WORK/fn.sh"; then
-        echo "FATAL: could not extract assert_no_warnings() from $GATE"; exit 2
-    fi
-    # Sanity: the body must be substantial. A one-line extract means the awk
-    # range broke against a refactor and every case below would be vacuous.
-    local n; n="$(wc -l < "$WORK/fn.sh")"
-    [ "$n" -ge 20 ] || { echo "FATAL: extracted body is only $n lines; refusing to test a stub"; exit 2; }
-}
+# Take the library as-is. Copying rather than sourcing the original in place is
+# what lets --selftest mutate it without touching the repo file.
+cp "$LIB" "$WORK/fn.sh"
+
+# THE LIBRARY MUST BE SIDE-EFFECT FREE, and this is the control that pins the
+# contract its header states. Both consumers source it; if it ever grows a
+# top-level command, sourcing it inside the gate would run that command mid-gate
+# and sourcing it here would run it mid-suite. Measured, not assumed: load it in a
+# subshell with `set -x`-free tracing off and assert it produced NO output and
+# left the shell able to see exactly the one new function.
+side_effect_out="$( . "$LIB" 2>&1 )"
+if [ -n "$side_effect_out" ]; then
+    echo "FATAL: sourcing $LIB produced output, so it is not side-effect free:"
+    printf '%s\n' "$side_effect_out" | sed 's/^/    /'
+    exit 2
+fi
+if ! ( . "$LIB" >/dev/null 2>&1; declare -F assert_no_warnings >/dev/null ); then
+    echo "FATAL: $LIB did not define assert_no_warnings; refusing to test nothing"; exit 2
+fi
 
 MUTATE=0
 [ "${1:-}" = "--selftest" ] && MUTATE=1
 
-extract
 if [ "$MUTATE" = 1 ]; then
     before="$(sha256sum "$WORK/fn.sh" | cut -d' ' -f1)"
     sed -i -E 's/warnings=\$\(\(warnings \+ count\)\)/warnings=0/' "$WORK/fn.sh"
