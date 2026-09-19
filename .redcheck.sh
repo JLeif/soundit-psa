@@ -63,15 +63,14 @@ classify() {
   # pipefail a `printf | grep -q` whose match lands early is killed by SIGPIPE
   # (141) once the output exceeds the pipe buffer, and the guard would then read
   # as false as a function of output size rather than of content.
-  if grep -qE 'No such file or directory|command not found|Permission denied' <<<"$out"; then
-    printf 'ERRORED\trunner missing or not executable (%s)\n' "$PHPUNIT"; return
-  fi
-  if grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)' <<<"$out"; then
-    printf 'ERRORED\tdependencies not installed (run composer install)\n'; return
-  fi
-  if grep -qiE 'No tests executed|No tests found|Could not find|No filter matched' <<<"$out"; then
-    printf 'ERRORED\tsuite ran no tests for filter %s\n' "$FILTER"; return
-  fi
+  #
+  # The runner's OWN SUMMARY is read FIRST and outranks everything below it. The
+  # infrastructure guards scan the WHOLE captured output for generic English
+  # that ordinary PHP exception and assertion text routinely contains ("No such
+  # file or directory"), so consulting them ahead of the summary turned a
+  # genuine kill into an ERROR and refused a green tip at the baseline with a
+  # false "runner missing" diagnosis. They now speak only when the runner
+  # printed no summary at all -- which is the case where it really did not run.
 
   # Red markers (PHPUnit classic, PHPUnit 10/11 summary line, Pest).
   if grep -qE '^(FAILURES|ERRORS)!|Tests:.*(Failures|Errors): *[1-9]|Tests:.*[1-9][0-9]* +(failed|errored)' <<<"$out"; then
@@ -82,7 +81,43 @@ classify() {
   fi
 
   if [ -z "$marker" ]; then
+    if grep -qE 'No such file or directory|command not found|Permission denied' <<<"$out"; then
+      printf 'ERRORED\trunner missing or not executable (%s)\n' "$PHPUNIT"; return
+    fi
+    if grep -qiE 'please run composer|failed to open stream.*autoload|autoload\.php.*(not found|No such)' <<<"$out"; then
+      printf 'ERRORED\tdependencies not installed (run composer install)\n'; return
+    fi
+    # "No tests executed!" is the producer's own marker for numberOfTestsRun()
+    # == 0. "Could not find" used to sit in this list and is NOT a producer
+    # string at all -- it is ordinary exception English, so it is gone.
+    if grep -qiE 'No tests executed|No tests found|No filter matched' <<<"$out"; then
+      printf 'ERRORED\tsuite ran no tests for filter %s\n' "$FILTER"; return
+    fi
     printf 'ERRORED\tunrecognised runner output; no pass/fail summary found (status %s)\n' "$st"; return
+  fi
+
+  # A green BANNER is not proof that anything RAN. SummaryPrinter::print() emits
+  # "OK (N tests, M assertions)" only when nothing was skipped and there were no
+  # issues, so that banner alone proves execution; the bare "OK, but ..."
+  # banners carry NO counts. An all-skipped run prints "OK, but some tests were
+  # skipped!" and exits 0, which would satisfy the baseline precondition and
+  # then score every mutant against a suite that executed nothing. The counts
+  # live on the "Tests: N, Assertions: M, ..., Skipped: K." line printed
+  # directly beneath, so read that line and require one test to have run.
+  if [ "$marker" = GREEN ] && grep -qE '^OK, but' <<<"$out"; then
+    local counts ntests nskipped
+    counts=$(grep -m1 -E '^Tests: [0-9]+, Assertions: [0-9]+' <<<"$out")
+    ntests=$(grep -oE '^Tests: [0-9]+' <<<"$counts")
+    ntests=${ntests##* }
+    nskipped=$(grep -oE 'Skipped: [0-9]+' <<<"$counts")
+    nskipped=${nskipped##* }
+    [ -n "$nskipped" ] || nskipped=0
+    if [ -z "$ntests" ]; then
+      printf 'ERRORED\tgreen banner with no "Tests:" count line; cannot prove any test ran (status %s)\n' "$st"; return
+    fi
+    if [ "$ntests" -le "$nskipped" ]; then
+      printf 'ERRORED\tevery collected test was skipped (%s of %s); suite executed nothing for filter %s\n' "$nskipped" "$ntests" "$FILTER"; return
+    fi
   fi
   if [ "$marker" = RED ] && [ "$st" -eq 0 ]; then
     printf 'ERRORED\tsummary says failed but runner exited 0 (untrustworthy runner)\n'; return
