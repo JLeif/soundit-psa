@@ -36,6 +36,13 @@ class FinaliseStuckCallsCommandTest extends TestCase
 
         // Not fillable - assign directly.
         $call->ended_at = null;
+        // The sweep requires stored evidence the call ended, and every row in
+        // the measured population carries a recording - so every fixture here
+        // does too. The no-duration variant models a recording that landed
+        // with no length, NOT a row with no recording at all: that shape is
+        // out of the population by design and is controlled separately, in
+        // test_a_long_running_live_call_is_not_swept().
+        $call->recording_url = 'https://media.example.test/rec-'.$uuid.'.mp3';
         $call->recording_duration = $recordingDuration;
         $call->answered_at = $answeredAt;
         $call->save();
@@ -137,8 +144,9 @@ class FinaliseStuckCallsCommandTest extends TestCase
     }
 
     /**
-     * A stuck row with no duration anywhere still finalises - it just has no
-     * length to add, so the end time is the start.
+     * A stuck row whose recording landed with no length still finalises - the
+     * recording is the evidence it ended, and with nothing to add the end time
+     * is the start.
      */
     public function test_a_row_with_no_duration_is_finalised_at_its_start(): void
     {
@@ -189,6 +197,14 @@ class FinaliseStuckCallsCommandTest extends TestCase
      *
      * The aged row in the same run is the positive control: without it this
      * test would pass just as well against a command that could never write.
+     *
+     * A 20-second row is out of the population on BOTH bounds - too young, and
+     * no stored evidence it ended - so this is the scenario, not the pin for
+     * either bound. The floor is pinned by
+     * test_the_age_floor_cannot_be_lowered_below_an_hour(), whose recent row
+     * carries evidence and so is held out by the floor alone; the end-evidence
+     * filter is pinned by test_a_long_running_live_call_is_not_swept(), whose
+     * live row is older than every age bound.
      */
     public function test_a_call_that_is_still_live_is_not_swept(): void
     {
@@ -216,8 +232,11 @@ class FinaliseStuckCallsCommandTest extends TestCase
     }
 
     /**
-     * The floor is a floor. --min-age-hours can shorten the reach of a careful
-     * run but cannot be used to aim the sweep at live traffic.
+     * The floor is a floor: --min-age-hours cannot be lowered below an hour.
+     * Be exact about what that buys - it shortens the reach of a careful run,
+     * it does NOT keep the sweep off live traffic. Age cannot do that at any
+     * value (a four-hour call is in contract here); the end-evidence filter
+     * does, and test_a_long_running_live_call_is_not_swept() is its pin.
      */
     public function test_the_age_floor_cannot_be_lowered_below_an_hour(): void
     {
@@ -232,10 +251,59 @@ class FinaliseStuckCallsCommandTest extends TestCase
             'started_at' => now()->subMinutes(5),
         ]);
 
+        // It carries end evidence, so the ONLY thing holding it out of the
+        // population is the floor. Without this the end-evidence filter would
+        // be doing the floor's work and this control would pass just as well
+        // against a build with the clamp deleted.
+        $recent->recording_url = 'https://media.example.test/rec-floor-clamp.mp3';
+        $recent->recording_duration = 45;
+        $recent->save();
+
         $this->artisan('calls:finalise-stuck --apply --min-age-hours=0')->assertSuccessful();
 
         $this->assertNull($recent->fresh()->ended_at,
             '--min-age-hours=0 must be raised to the one-hour floor, not honoured');
+        $this->assertNotNull($aged->fresh()->ended_at,
+            'positive control: the aged row in the same run must still be finalised');
+    }
+
+    /**
+     * THE AGE FLOOR IS NOT A LIVENESS TEST, and this is the row that proves
+     * it. PlivoWebhookController emits <Record maxLength="14400" />, so a call
+     * still connected three hours in is an in-contract shape - older than the
+     * two-hour default AND older than the one-hour clamp. Age cannot separate
+     * it from a stuck row; only the absence of any stored evidence it ended
+     * can, which is what this pins. Delete the end-evidence filter and this
+     * row is swept: a zero-length ended_at and a final status written onto a
+     * conversation in progress.
+     *
+     * Its duration and recording columns are all null because that is exactly
+     * what a connected call looks like - duration lands at hangup, the
+     * recording columns land when the recording callback fires.
+     */
+    public function test_a_long_running_live_call_is_not_swept(): void
+    {
+        $aged = $this->stuckCall('sweep-longlive-aged', CallStatus::Ringing, 60);
+
+        $live = PhoneCall::create([
+            'call_uuid' => 'sweep-longlive',
+            'direction' => 'inbound',
+            'from_number' => '+15555550111',
+            'to_number' => '+15555550222',
+            'status' => CallStatus::Ringing,
+            'started_at' => now()->subHours(3),
+        ]);
+
+        $this->artisan('calls:finalise-stuck --apply')
+            ->expectsOutputToContain('1 row(s) with no stored evidence they ended')
+            ->assertSuccessful();
+
+        $storedLive = $live->fresh();
+        $this->assertNull($storedLive->ended_at,
+            'a call connected for three hours is past every age bound and is still not stuck');
+        $this->assertSame(CallStatus::Ringing, $storedLive->status,
+            'the sweep must not disposition a call it cannot prove ended');
+
         $this->assertNotNull($aged->fresh()->ended_at,
             'positive control: the aged row in the same run must still be finalised');
     }
