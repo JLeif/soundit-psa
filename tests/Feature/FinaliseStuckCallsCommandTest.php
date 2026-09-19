@@ -181,4 +181,62 @@ class FinaliseStuckCallsCommandTest extends TestCase
         $this->assertNotNull($first->fresh()->ended_at, 'the first row is within the limit');
         $this->assertNull($second->fresh()->ended_at, 'the second row is beyond it and must be untouched');
     }
+
+    /**
+     * A call that is ringing RIGHT NOW is shaped exactly like the defect - no
+     * ended_at - and is not the defect. Sweeping it would write a zero-length
+     * Missed record over a conversation in progress.
+     *
+     * The aged row in the same run is the positive control: without it this
+     * test would pass just as well against a command that could never write.
+     */
+    public function test_a_call_that_is_still_live_is_not_swept(): void
+    {
+        $aged = $this->stuckCall('sweep-floor-aged', CallStatus::Ringing, 60);
+
+        $live = PhoneCall::create([
+            'call_uuid' => 'sweep-live',
+            'direction' => 'inbound',
+            'from_number' => '+15555550111',
+            'to_number' => '+15555550222',
+            'status' => CallStatus::Ringing,
+            'started_at' => now()->subSeconds(20),
+        ]);
+
+        $this->artisan('calls:finalise-stuck --apply')->assertSuccessful();
+
+        $storedLive = $live->fresh();
+        $this->assertNull($storedLive->ended_at,
+            'a call that started 20 seconds ago is live, not stuck');
+        $this->assertSame(CallStatus::Ringing, $storedLive->status,
+            'a live call must keep the status the hangup webhook will finalise');
+
+        $this->assertNotNull($aged->fresh()->ended_at,
+            'positive control: the aged row in the same run must still be finalised');
+    }
+
+    /**
+     * The floor is a floor. --min-age-hours can shorten the reach of a careful
+     * run but cannot be used to aim the sweep at live traffic.
+     */
+    public function test_the_age_floor_cannot_be_lowered_below_an_hour(): void
+    {
+        $aged = $this->stuckCall('sweep-floor-clamp-aged', CallStatus::Ringing, 60);
+
+        $recent = PhoneCall::create([
+            'call_uuid' => 'sweep-floor-clamp-recent',
+            'direction' => 'inbound',
+            'from_number' => '+15555550111',
+            'to_number' => '+15555550222',
+            'status' => CallStatus::Ringing,
+            'started_at' => now()->subMinutes(5),
+        ]);
+
+        $this->artisan('calls:finalise-stuck --apply --min-age-hours=0')->assertSuccessful();
+
+        $this->assertNull($recent->fresh()->ended_at,
+            '--min-age-hours=0 must be raised to the one-hour floor, not honoured');
+        $this->assertNotNull($aged->fresh()->ended_at,
+            'positive control: the aged row in the same run must still be finalised');
+    }
 }
