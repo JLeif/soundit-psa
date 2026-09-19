@@ -411,10 +411,15 @@ class PhoneCallService
      *     no re-stamp or truncation required. The repo already documents that
      *     inbound recording callbacks "often don't reach our webhook", and the
      *     compensating API path (resolveRecordingFromPlivo) writes
-     *     recording_duration WITHOUT invoking the second look, and is itself
-     *     gated behind duration >= 1 - which is exactly the duration-null
-     *     population this branch is about. So for a meaningful share of the very
-     *     rows this fix targets, the ceiling is the permanent value. The status
+     *     recording_duration WITHOUT invoking the second look. (An earlier
+     *     version of this note said that path was "gated behind duration >= 1".
+     *     That was wrong and is corrected here: of its three callers, only the
+     *     BULK command ResolveCallRecordings carries `duration > 0`; the
+     *     singular ResolveCallRecording has no duration guard at all, and the
+     *     webhook caller is gated on `$recordingDuration >= 3` and a null
+     *     answered_at instead. What actually excludes these rows from both
+     *     commands is the recording_url guard.) So for a meaningful share of
+     *     the very rows this fix targets, the ceiling is the permanent value. The status
      *     is still corrected, which is the defect being fixed; the answer moment
      *     stays approximate.
      *  1. THE CEILING IS NOT RELIABLY TRANSIENT. handleCallEnded() re-stamps

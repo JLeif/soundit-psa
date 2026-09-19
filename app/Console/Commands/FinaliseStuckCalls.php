@@ -157,11 +157,13 @@ use Illuminate\Support\Facades\Log;
  *
  * One more thing this population is NOT: it is not "rows whose hangup webhook
  * never arrived". whereNull('ended_at') selects at least four classes - never
- * arrived; not arrived YET; calls still connected right now; and - the
- * measured MAJORITY - rows whose terminal webhook DID arrive and was discarded
- * unrecorded, because the controller's recording branch returned 200 without
- * falling through to the hangup handling. That last class is the 182 voicemail
- * rows named in handle() below. Collapsing these is how an operator talks
+ * arrived; not arrived YET; calls still connected right now; and the numerical
+ * majority - the 182 voicemail rows named in handle() below. Keep the two
+ * halves of that last one apart: the COUNT is measured in production, while
+ * the MECHANISM (their terminal webhook arrived and was discarded unrecorded,
+ * the controller's recording branch having returned 200 without falling
+ * through to the hangup handling) is read off the controller's own comment,
+ * not confirmed row by row. Collapsing these is how an operator talks
  * themselves into force-finalising a live call.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
