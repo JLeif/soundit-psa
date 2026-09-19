@@ -104,16 +104,23 @@ use Illuminate\Support\Facades\Log;
  * That same method is also what brings such a row back, if a later call writes
  * a shorter length: both arms then pass and the next rerun DOES take the row.
  * Its live caller is PlivoWebhookController, which invokes it on the delivery
- * it is already handling - behind `$recordingDuration >= 3` and a null
- * answered_at, neither of which a ceiling-length rollover trips over. Neither
- * resolve command can substitute: both skip a row that already has a
+ * it is already handling - but only for part of this subset. That call sits
+ * behind two gates: `$recordingDuration >= 3`, which a ceiling-length rollover
+ * clears, and `$call->answered_at === null`, which it does NOT. An answered
+ * call skips the branch entirely, and a recording that ran to a four-hour
+ * ceiling is overwhelmingly an answered call - a row does not sit ringing that
+ * long. So the rescue reaches the UNANSWERED members of this subset; for an
+ * answered row declined at the ceiling there is no live path back in at all.
+ *
+ * Neither resolve command can substitute: both skip a row that already has a
  * recording_url, and every row here has one BY CONSTRUCTION - the only two
  * writers of recording_duration in app/ each set recording_url in the same
  * block. It is that guard that excludes them, not a duration test: the bulk
  * command does carry duration > 0, but the singular one carries no duration
  * guard at all, so do not go looking for one there.
  *
- * Do not tell an operator this subset is beyond reach.
+ * So do not tell an operator the unanswered part of this subset is beyond
+ * reach - and do not tell them the answered part is coming back.
  *
  * What this exclusion is NOT: it is not a handoff to the hangup webhook. Do not
  * read a declined row as queued for one. But do not read the opposite into it
