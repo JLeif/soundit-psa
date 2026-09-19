@@ -203,10 +203,11 @@ if [ "${1:-}" = "--selftest" ]; then
     # ever planted, so that branch could never fire -- the review caught it and it
     # was a fair catch. The repair is to assert only what a regression can
     # actually turn red.
-    if cmp -s "$NEW" "$indented"; then
-        echo "SELFTEST FATAL: indented-brace fixture did not land; arm 3 measures nothing" >&2
-        exit 2
-    fi
+    # (No `cmp -s "$NEW" "$indented"` precondition here. Round 2's review showed
+    # it could never fire: the fixture always appends a trailing definition, so it
+    # differs from $NEW whether or not the indent landed. It LOOKED like a
+    # precondition and was not one. The two checks below are the real ones --
+    # each names a property a regression can actually remove.)
     if ! grep -q "^  }$" "$indented"; then
         echo "SELFTEST FATAL: the fixture's closing brace is not indented; arm 3 is not testing #2655" >&2
         exit 2
@@ -230,7 +231,37 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
     echo "selftest: a valid library whose closing brace is indented now sweeps cleanly (#2655 false-FAIL class removed)"
 
-    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the library does not define the parser, and no longer refusing a legitimate indented-brace definition. The baseline is SOURCED by design and must be a file you would run."
+    # ARM 4. THE TYPO-CATCHER MUST ACTUALLY FIRE ON THE REAL GATE.
+    #
+    # Round 2 tied the recognition to a line the gate prints -- and moved that
+    # very line in the same commit, with nothing pinning it. A guard keyed to an
+    # unpinned string in a file that is edited constantly is one refactor away
+    # from silently never firing again, which is how the BASENAME version came to
+    # miss its own documented typo. So the arm feeds the guard the SHIPPED gate
+    # (the real file, at whatever shape it currently has) under the redirected
+    # name that defeated the old check, and requires a refusal.
+    #
+    # It asserts the BEHAVIOUR, not the string: if someone renames the banner the
+    # arm goes red and says to re-aim the guard, instead of the guard quietly
+    # degrading to nothing.
+    gate_copy="$(mktemp /tmp/base-XXXXXX.sh)"   # the documented-mistake filename
+    cp "$HERE/../scripts/gc-verify.sh" "$gate_copy"
+    tc_err="$(mktemp)"
+    "$0" "$gate_copy" "$selftest_corpus" >/dev/null 2>"$tc_err"
+    tc_rc=$?
+    if [ "$tc_rc" -eq 0 ] || ! grep -q 'looks like the GATE' "$tc_err"; then
+        echo "SELFTEST FAILED: the sweep did not refuse a copy of the real gate (rc=$tc_rc)." >&2
+        echo "  The typo-catcher recognises gc-verify.sh by a line the gate prints; if that" >&2
+        echo "  line has been renamed, RE-AIM THE GUARD -- do not leave it matching nothing." >&2
+        echo "  stderr was:" >&2
+        sed 's/^/    /' "$tc_err" >&2
+        rm -f "$gate_copy" "$tc_err"
+        exit 1
+    fi
+    rm -f "$gate_copy" "$tc_err"
+    echo "selftest: the typo-catcher refuses a copy of the real gate even under a redirected filename"
+
+    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the library does not define the parser, no longer refusing a legitimate indented-brace definition, and still catching a redirected copy of the gate itself. The baseline is SOURCED by design and must be a file you would run."
     exit 0
 fi
 

@@ -263,6 +263,13 @@ case_result side-effects "$r" \
 # the probe, the sentinel is never printed, and the gate refuses.
 box6="$WORK/box6"; new_sandbox "$box6"
 { cat "$LIB"; echo 'exit 0'; } > "$box6/scripts/lib/gc-verify-summary.sh"
+# THE FIXTURE MUST BE PROVEN TO HAVE LANDED. Without this, a day when the append
+# silently stops working turns case 6 into a duplicate of case 7 that still
+# reports ok -- the same unfireable-control class this round exists to remove.
+if ! tail -1 "$box6/scripts/lib/gc-verify-summary.sh" | grep -qx 'exit 0'; then
+    echo "FATAL: case 6's top-level-exit fixture did not land; the case would prove nothing"
+    exit 2
+fi
 out6="$("$box6/scripts/gc-verify.sh" 2>&1)"; rc6=$?
 r=1; { [ "$rc6" -ne 0 ] && printf '%s' "$out6" | grep -q 'summary parser library did not load'; } && r=0
 case_result top-level-exit "$r" \
@@ -324,8 +331,24 @@ if [ "$MUTATE" = 1 ]; then
     for c in $want; do
         case " $FAILED_CASES " in *" $c "*) ;; *) missing_red="$missing_red $c" ;; esac
     done
+    # THE POSITIVE CONTROLS MUST STAY GREEN, and round 2's review was right that
+    # nothing required it. Removing the gate's refusals must break the NEGATIVE
+    # cases and leave the healthy paths untouched; a stub broken so thoroughly
+    # that cases 1, 4 and 5 also fail would otherwise still print SELFTEST OK,
+    # which is the "a shared outcome is not an assertion" shape one more time.
+    wrong_red=""
+    for c in healthy cwd side-effects; do
+        case " $FAILED_CASES " in *" $c "*) wrong_red="$wrong_red $c" ;; esac
+    done
+    if [ -n "$wrong_red" ]; then
+        echo "SELFTEST FAILED: the mutation broke positive controls too:$wrong_red"
+        echo "  Removing the refusals must not stop a healthy library from reaching belt two;"
+        echo "  a mutant that breaks everything proves nothing about the guards."
+        exit 1
+    fi
     if [ -z "$missing_red" ]; then
         echo "SELFTEST OK: with the gate's refusals removed, every negative control went red:$FAILED_CASES"
+        echo "  and the positive controls (healthy, cwd, side-effects) stayed green."
         exit 0
     fi
     echo "SELFTEST FAILED: these controls did NOT go red when the gate's refusals were removed:$missing_red"

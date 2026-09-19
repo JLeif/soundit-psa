@@ -144,19 +144,39 @@ fi
 # prints nothing; and `unset -f` inside the probe means a name that survives can
 # only have come from the file. The sentinel must be printed AFTER the source
 # returns, which is what makes "the source completed" observable at all.
-if [ "$( unset -f assert_no_warnings 2>/dev/null; . "$GC_VERIFY_LIB" >/dev/null 2>&1; declare -F assert_no_warnings >/dev/null 2>&1 && printf LOADED )" != LOADED ]; then
+# STDIN IS CLOSED FOR THE PROBE and the library's own stderr is KEPT.
+# Round 2's review measured both: the probe inherited the gate's stdin, so a
+# library containing `read` CONSUMED it and left the rest of the gate with
+# nothing; and `2>/dev/null` discarded the library's own diagnosis, so a file
+# that failed for a nameable reason reported only the generic cause-list below.
+# A guard that makes the verdict loud and the cause silent is half a guard.
+GC_VERIFY_PROBE_ERR="$(mktemp "${TMPDIR:-/tmp}/gc-verify-probe.XXXXXX")"
+if [ "$( unset -f assert_no_warnings 2>/dev/null; . "$GC_VERIFY_LIB" >/dev/null 2>"$GC_VERIFY_PROBE_ERR" </dev/null; declare -F assert_no_warnings >/dev/null 2>&1 && printf LOADED )" != LOADED ]; then
     echo "ERROR: sourcing $GC_VERIFY_LIB did not yield assert_no_warnings." >&2
     echo "       The file exists but does not load cleanly to a definition: it may be" >&2
     echo "       syntactically broken, partially written, or exit before defining it." >&2
+    if [ -s "$GC_VERIFY_PROBE_ERR" ]; then
+        echo "       The library said, on its own stderr:" >&2
+        sed 's/^/         /' "$GC_VERIFY_PROBE_ERR" >&2
+    else
+        echo "       It printed nothing on stderr." >&2
+    fi
+    rm -f "$GC_VERIFY_PROBE_ERR"
     echo "==> gc-verify: FAIL (summary parser library did not load)" >&2
     exit 1
 fi
+rm -f "$GC_VERIFY_PROBE_ERR"
 # An inherited definition must not survive into the real load either: the probe
 # proved THE FILE defines the parser, and this makes the file the only thing that
 # can have defined the one we are about to call.
 unset -f assert_no_warnings 2>/dev/null || true
+# THE REAL LOAD GETS `</dev/null` TOO, and that is not belt-and-braces. With it
+# only on the probe, a library containing `read` consumed ONE line of the gate's
+# stdin instead of two -- measured, L1 eaten, L2/L3 left. Halving a defect is not
+# closing it. A library is contracted to define a function and do nothing else;
+# neither load has any business reading the gate's input.
 # shellcheck source=lib/gc-verify-summary.sh
-. "$GC_VERIFY_LIB"
+. "$GC_VERIFY_LIB" </dev/null
 # Cheap backstop. After the unset above this can only be true because the file
 # defined it, so it now means what it always claimed to mean.
 if ! declare -F assert_no_warnings >/dev/null; then
