@@ -69,7 +69,20 @@ class PlivoWebhookController extends Controller
      * Duration closes both the display regression and the reversal.
      *
      * Precedence, most authoritative first:
-     *   1. Plivo's own Duration for the call.
+     *   1. Plivo's own Duration for the call, WHEN IT IS POSITIVE. The positivity
+     *      test is the same judgement applied to DialBLegDuration below, and for
+     *      the same reason: a presence test admits a zero. Measured at source on
+     *      this tree rather than reasoned about — posting Duration=0 (as the
+     *      string '0' or the integer 0) against a row carrying duration=180 and
+     *      recording_duration=0 wrote duration=0, which is precisely the state
+     *      that leaves effectiveDurationSeconds() with nothing and reverses the
+     *      client's debit. The empty string does NOT reach here (Laravel's
+     *      ConvertEmptyStringsToNull middleware turns it into null, and isset()
+     *      is false for null), but the zero does.
+     *
+     *      A zero-second call is not a fact this method needs to preserve: a row
+     *      that genuinely has no duration is better served by the stored value
+     *      or by no key at all than by a 0 that reads as "measured, and empty".
      *   2. DialBLegDuration when it is POSITIVE. That field is scoped to the
      *      DIALED (B) leg, and on the unanswered dial that produces a voicemail
      *      — the shape that dominates card 6aade104 — the B leg is exactly the
@@ -95,9 +108,16 @@ class PlivoWebhookController extends Controller
      */
     private function terminalPayloadPreservingDuration(array $data, ?PhoneCall $call): array
     {
-        if (isset($data['Duration'])) {
+        if (isset($data['Duration']) && (int) $data['Duration'] > 0) {
             return $data;
         }
+
+        // A present-but-zero Duration falls through to the same precedence a
+        // missing one gets. Without this the isset() above would hand
+        // handleCallEnded() a 0 and null out a recording-derived duration — the
+        // money defect this whole method exists to prevent, arriving through the
+        // one branch that was not value-tested.
+        unset($data['Duration']);
 
         $bLegDuration = isset($data['DialBLegDuration']) ? (int) $data['DialBLegDuration'] : null;
 

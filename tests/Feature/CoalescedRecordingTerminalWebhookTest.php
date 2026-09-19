@@ -332,12 +332,12 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * wanted: the duration assertion names the mechanism, the
      * surviving-transaction assertion names the harm.
      *
-     * NOT red at f4fa7452, and that is stated rather than left to be discovered:
-     * an unfixed controller never calls handleCallEnded() on this payload, so it
-     * never nulls the column and the debit survives by inaction. This test is
-     * aimed at the naive FIX, not at the base — which is why the spy assertion
-     * below is here too, so the test cannot be satisfied by a controller that
-     * simply does nothing.
+     * RED at the base too, but for a DIFFERENT reason than the harm it names, and
+     * the distinction is worth keeping straight: an unfixed controller never
+     * calls handleCallEnded() on this payload, so the spy assertion below fails
+     * there while the debit survives by inaction. The duration and
+     * surviving-transaction assertions are aimed at the naive FIX; the spy
+     * assertion is what stops a do-nothing controller passing.
      */
     public function test_a_coalesced_delivery_without_duration_does_not_reverse_the_prepay_debit(): void
     {
@@ -455,6 +455,55 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
         $call->refresh();
 
         $this->assertSame(47, (int) $call->duration, 'DialBLegDuration is Plivo reporting the call length and outranks the stored value.');
+        $this->assertNotNull($call->ended_at);
+    }
+
+    /**
+     * A PRESENT-BUT-ZERO Duration must not outrank the stored value either, and
+     * this is the sharpest remaining edge of the money guard.
+     *
+     * The helper's first branch was a presence test (`isset($data['Duration'])`),
+     * so a payload carrying Duration=0 was returned untouched and
+     * handleCallEnded() wrote `(int) 0` over a recording-derived duration. On the
+     * greeting-hangup row — recording_duration 0 — that leaves
+     * effectiveDurationSeconds() with nothing and PrepayService reverses the
+     * client's charge: the exact harm the whole helper exists to prevent,
+     * arriving through the one branch that tested presence rather than value.
+     *
+     * Measured at source before the fix: posting Duration=0 (string or integer)
+     * against a row holding duration=180 wrote duration=0. The empty string does
+     * NOT reach the helper — Laravel converts it to null upstream — so this test
+     * covers the shape that actually gets through.
+     *
+     * RED against a presence-tested first branch.
+     */
+    public function test_a_zero_payload_duration_does_not_overwrite_the_recording_derived_duration(): void
+    {
+        Queue::fake();
+        $service = $this->spyingPhoneCallService();
+        $call = $this->ringingCall();
+        $call->duration = 180;
+        $call->recording_duration = 0;
+        $call->save();
+
+        $this->postWebhook([
+            'CallUUID' => $call->call_uuid,
+            'CallStatus' => 'completed',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/zeroduration.mp3',
+            'RecordingDuration' => 0,
+            'Duration' => 0,
+        ])->assertOk();
+
+        $this->assertCount(1, $service->handleCallEndedPayloads, 'The coalesced payload must still reach handleCallEnded().');
+        $this->assertSame(
+            180,
+            (int) ($service->handleCallEndedPayloads[0]['Duration'] ?? null),
+            'A zero Duration is no-evidence, exactly as a zero DialBLegDuration is, and must not be handed over in place of the recording-derived value.'
+        );
+
+        $call->refresh();
+
+        $this->assertSame(180, (int) $call->duration, 'THE HARM: duration 0 with recording_duration 0 leaves effectiveDurationSeconds() nothing and reverses the debit.');
         $this->assertNotNull($call->ended_at);
     }
 
