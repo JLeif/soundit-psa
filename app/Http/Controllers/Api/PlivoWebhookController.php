@@ -72,20 +72,47 @@ class PlivoWebhookController extends Controller
      *
      * Precedence, most authoritative first:
      *   1. Plivo's own Duration for the call.
-     *   2. DialBLegDuration — the same fallback the hangup branch already uses.
+     *   2. DialBLegDuration when it is POSITIVE. That field is scoped to the
+     *      DIALED (B) leg, and on the unanswered dial that produces a voicemail
+     *      — the shape that dominates card 6aade104 — the B leg is exactly the
+     *      one that never connected, so Plivo reports 0 there (the repo's own
+     *      answerIsObserved() treats that zero as a real vendor value). A
+     *      presence test would inject that 0 ahead of the recording-derived
+     *      duration this method exists to preserve, zeroing a real voicemail's
+     *      length and, on a row whose recording_duration is also 0, re-opening
+     *      the very debit reversal described above. So a non-positive B-leg
+     *      duration does not outrank the stored value.
      *   3. The duration already stored on the row, which on this path is the one
      *      handleRecordingReady() just derived from the recording.
-     * If none of the three exists there is nothing to preserve and the key stays
-     * absent, which is the pre-existing behaviour for a Duration-less hangup.
+     *   4. Failing both of those, a non-positive DialBLegDuration is still passed
+     *      through when Plivo sent one — with nothing stored there is nothing to
+     *      protect, and this keeps the Duration-less hangup branch (which passes
+     *      no $call) behaving exactly as it did before.
+     * If none of those exists the key stays absent, which is the pre-existing
+     * behaviour for a Duration-less hangup.
      */
     private function terminalPayloadPreservingDuration(array $data, ?PhoneCall $call): array
     {
-        if (! isset($data['Duration']) && isset($data['DialBLegDuration'])) {
-            $data['Duration'] = $data['DialBLegDuration'];
+        if (isset($data['Duration'])) {
+            return $data;
         }
 
-        if (! isset($data['Duration']) && $call && $call->duration && $call->duration > 0) {
+        $bLegDuration = isset($data['DialBLegDuration']) ? (int) $data['DialBLegDuration'] : null;
+
+        if ($bLegDuration !== null && $bLegDuration > 0) {
+            $data['Duration'] = $data['DialBLegDuration'];
+
+            return $data;
+        }
+
+        if ($call && $call->duration && $call->duration > 0) {
             $data['Duration'] = $call->duration;
+
+            return $data;
+        }
+
+        if ($bLegDuration !== null) {
+            $data['Duration'] = $data['DialBLegDuration'];
         }
 
         return $data;
@@ -411,10 +438,19 @@ class PlivoWebhookController extends Controller
 
                 $call = $this->phoneCallService->handleCallEnded($callUuid, $data);
 
-                // resolveRecordingAfterEnd() is deliberately NOT called here. Its
-                // own first guard returns when recording_url is set, and on this
-                // path it always is — the recording is why we are in this branch.
-                // Calling it would spawn a shell process to do nothing.
+                // resolveRecordingAfterEnd() IS called here, exactly as the two
+                // terminal branches below do. "recording_url is always set on
+                // this path" is false: the branch predicate is RecordUrl being
+                // present in the PAYLOAD, while recording_url is written only by
+                // handleRecordingReady(), which runs only when RecordingDuration
+                // is >= 0. On Plivo's temporary-recording callback
+                // (RecordingDuration = -1) coalesced with a terminal marker the
+                // column is still NULL, and finalising without this call would
+                // leave the row ended with no recording and no remaining trigger
+                // to fetch one. Its own first guard returns when recording_url
+                // IS set, so on the ordinary coalesced delivery this costs a
+                // guard, not a process.
+                $this->resolveRecordingAfterEnd($call);
                 $this->emitCallReceived($call);
 
                 return response('OK', 200);

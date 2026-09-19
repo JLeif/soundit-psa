@@ -16,6 +16,7 @@ use App\Models\PrepayTransaction;
 use App\Models\Ticket;
 use App\Services\PrepayService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -296,6 +297,79 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
 
         $this->assertSame(47, (int) $call->duration, 'DialBLegDuration is Plivo reporting the call length and outranks the stored value.');
         $this->assertNotNull($call->ended_at);
+    }
+
+    /**
+     * THE OTHER HALF OF THAT PRECEDENCE, and the one the 47-second case cannot
+     * see. DialBLegDuration is scoped to the DIALED (B) leg, and on the
+     * unanswered dial that produces a voicemail — the shape that dominates the
+     * 182 rows — that leg is exactly the one that never connected, so Plivo
+     * reports 0. A presence test on the key would promote that 0 over the
+     * duration handleRecordingReady() derived from the recording seconds
+     * earlier, reporting a 95-second voicemail as a zero-length call.
+     *
+     * RED against a presence-tested fallback: duration comes back 0.
+     */
+    public function test_a_zero_b_leg_duration_does_not_overwrite_the_recording_derived_duration(): void
+    {
+        Queue::fake();
+        $call = $this->ringingCall();
+
+        $this->postWebhook([
+            'CallUUID' => $call->call_uuid,
+            'DialAction' => 'hangup',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/zerobleg.mp3',
+            'RecordingDuration' => 95,
+            'DialBLegDuration' => 0,
+            // NO Duration key — the coalesced voicemail shape.
+        ])->assertOk();
+
+        $call->refresh();
+
+        $this->assertSame(
+            95,
+            (int) $call->duration,
+            'A zero B-leg duration is the unanswered-dial shape and must not outrank the recording-derived duration the guard exists to preserve.'
+        );
+        $this->assertSame(95, $call->recording_duration);
+        $this->assertNotNull($call->ended_at);
+    }
+
+    /**
+     * THE SHAPE THE FIRST DRAFT ASSUMED AWAY. handleRecordingReady() — the only
+     * writer of recording_url — runs only when RecordingDuration >= 0, so on
+     * Plivo's temporary-recording callback (RecordingDuration = -1) the column
+     * is never written even though RecordUrl is in the payload and the branch is
+     * entered. Coalesce that callback with a terminal marker and the call is
+     * finalised with no recording; resolveRecordingAfterEnd() — which both
+     * sibling terminal branches call — is the only thing left that would fetch
+     * one, and its own guard passes precisely here because recording_url is NULL.
+     *
+     * RED against a version that skips resolveRecordingAfterEnd() on this path:
+     * no resolve process is ever scheduled and the recording is lost for good.
+     */
+    public function test_a_coalesced_temporary_recording_callback_still_schedules_recording_resolution(): void
+    {
+        Queue::fake();
+        Process::fake();
+        $call = $this->ringingCall();
+
+        $this->postWebhook([
+            'CallUUID' => $call->call_uuid,
+            'CallStatus' => 'completed',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/temp.mp3',
+            'RecordingDuration' => -1,
+            'Duration' => 40,
+        ])->assertOk();
+
+        $call->refresh();
+
+        $this->assertNull(
+            $call->recording_url,
+            'RecordingDuration=-1 is the temporary-recording callback, so handleRecordingReady() never runs and recording_url is never written — the premise that it is "always" set on this path is false.'
+        );
+        $this->assertNotNull($call->ended_at);
+        Process::assertRan(fn ($process) => str_contains($process->command, 'calls:resolve-recording '.$call->id));
     }
 
     /**
