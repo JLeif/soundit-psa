@@ -96,27 +96,57 @@ classify() {
     printf 'ERRORED\tunrecognised runner output; no pass/fail summary found (status %s)\n' "$st"; return
   fi
 
-  # A green BANNER is not proof that anything RAN. SummaryPrinter::print() emits
-  # "OK (N tests, M assertions)" only when nothing was skipped and there were no
-  # issues, so that banner alone proves execution; the bare "OK, but ..."
-  # banners carry NO counts. An all-skipped run prints "OK, but some tests were
-  # skipped!" and exits 0, which would satisfy the baseline precondition and
-  # then score every mutant against a suite that executed nothing. The counts
-  # live on the "Tests: N, Assertions: M, ..., Skipped: K." line printed
-  # directly beneath, so read that line and require one test to have run.
+  # A green BANNER is not proof that anything RAN, and "not skipped" is not the
+  # same as "asserted". SummaryPrinter::print() emits "OK (N tests, M
+  # assertions)" only when nothing was skipped and there were no issues, so that
+  # banner alone proves execution; the bare "OK, but ..." banners carry NO
+  # counts of their own.
+  #
+  # There are TWO of them, and an earlier revision of this guard only understood
+  # one. Read from the producer (vendor/phpunit/.../TextUI/Output/SummaryPrinter.php
+  # and Runner/TestResult/TestResult.php), not from output I happened to see:
+  #
+  #   wasSuccessful()      = no errored, no failed, no phpunit-error events.
+  #                          It IGNORES incomplete and risky entirely.
+  #   hasTestsWithIssues() = risky OR incomplete OR deprecations OR notices
+  #                          OR warnings.
+  #
+  # so a run in which every test calls markTestIncomplete() in its BODY is
+  # "successful with issues": it prints "OK, but there were issues!" with
+  # "Tests: 14, Assertions: 0, Incomplete: 14." and exits 0. Those tests were
+  # prepared and DID emit testFinished, so "No tests executed!" never fires and
+  # numberOfTestsRun() is 14 -- while zero assertions were made. Subtracting
+  # only "Skipped:" admits exactly that run, and the harness would then score 14
+  # mutants against a suite that asserted nothing and call them all SURVIVED.
+  #
+  # So: require at least one test to have run that was NOT skipped, incomplete
+  # or risky, AND require at least one assertion. Each bucket is printed under
+  # its own token by printCountString(), never folded into another.
   if [ "$marker" = GREEN ] && grep -qE '^OK, but' <<<"$out"; then
-    local counts ntests nskipped
+    local counts ntests nassert nskipped nincomplete nrisky nreal
     counts=$(grep -m1 -E '^Tests: [0-9]+, Assertions: [0-9]+' <<<"$out")
-    ntests=$(grep -oE '^Tests: [0-9]+' <<<"$counts")
-    ntests=${ntests##* }
-    nskipped=$(grep -oE 'Skipped: [0-9]+' <<<"$counts")
-    nskipped=${nskipped##* }
-    [ -n "$nskipped" ] || nskipped=0
-    if [ -z "$ntests" ]; then
+    if [ -z "$counts" ]; then
       printf 'ERRORED\tgreen banner with no "Tests:" count line; cannot prove any test ran (status %s)\n' "$st"; return
     fi
-    if [ "$ntests" -le "$nskipped" ]; then
-      printf 'ERRORED\tevery collected test was skipped (%s of %s); suite executed nothing for filter %s\n' "$nskipped" "$ntests" "$FILTER"; return
+    countof() { # token -> value, or 0 when the token is absent
+      local v
+      v=$(grep -oE "$1: [0-9]+" <<<"$counts" | head -1)
+      v=${v##* }
+      printf '%s' "${v:-0}"
+    }
+    ntests=$(countof 'Tests')
+    nassert=$(countof 'Assertions')
+    nskipped=$(countof 'Skipped')
+    nincomplete=$(countof 'Incomplete')
+    nrisky=$(countof 'Risky')
+    nreal=$(( ntests - nskipped - nincomplete - nrisky ))
+    if [ "$nreal" -le 0 ]; then
+      printf 'ERRORED\tno test actually executed: %s collected, %s skipped, %s incomplete, %s risky (filter %s)\n' \
+        "$ntests" "$nskipped" "$nincomplete" "$nrisky" "$FILTER"; return
+    fi
+    if [ "$nassert" -eq 0 ]; then
+      printf 'ERRORED\tsuite reported a green banner with ZERO assertions (%s tests); nothing was asserted for filter %s\n' \
+        "$ntests" "$FILTER"; return
     fi
   fi
   if [ "$marker" = RED ] && [ "$st" -eq 0 ]; then
