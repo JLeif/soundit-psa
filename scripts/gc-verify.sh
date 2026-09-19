@@ -95,6 +95,96 @@ if ! grep -qE '^APP_KEY=.+' .env; then
 fi
 echo "    .env present with APP_KEY"
 
+# --- belt two's parser is loaded HERE, before the expensive stages -----------
+# THE PARSER LIVES IN scripts/lib/gc-verify-summary.sh, and is sourced rather
+# than defined here. Both test harnesses need the SAME function; while it lived
+# inline they recovered it by regex and `eval`'d the text they recovered, which
+# is GitHub #2650/#2655/#2665 -- a sed range bounded by where it ends, not by
+# what it contains. Sourcing a file that defines the function and executes
+# nothing removes the extraction, the validation and the eval together. Ruled by
+# Jeeves on Trello card 6aadcd16 (2026-09-18): one definition, two consumers.
+#
+# This is the only source path, so a missing or unloadable library is a FAIL,
+# never a skipped belt: belt two silently not running is how a 7286-warning
+# floor passed as PASS in the first place.
+#
+# IT RUNS BEFORE STAGE 1 BY DELIBERATE ORDERING. In round 1 this block sat after
+# `php artisan test`, so "library missing" was reported only after a ~7800-test,
+# ~900s run had already completed. Loading the parser costs milliseconds and has
+# no dependency on any stage, so there is no reason for the discovery to be
+# expensive.
+GC_VERIFY_LIB="$GC_VERIFY_SCRIPT_DIR/lib/gc-verify-summary.sh"
+# -f as well as -r: `[ -r ]` is TRUE for a directory, and a directory at this
+# path used to reach the `.` below and abort the gate with bash's own "is a
+# directory" and no named verdict (review r1, contract:2/diff:7).
+if [ ! -f "$GC_VERIFY_LIB" ] || [ ! -r "$GC_VERIFY_LIB" ]; then
+    echo "ERROR: $GC_VERIFY_LIB is not a readable regular file; belt two (summary parsing) is unavailable." >&2
+    echo "==> gc-verify: FAIL (summary parser library missing)" >&2
+    exit 1
+fi
+# PROBE IN A SUBSHELL BEFORE SOURCING FOR REAL.
+#
+# This is not a lexical guard and it does not inspect the library's text: it
+# LOADS the file and asks whether loading it actually produced the parser. Three
+# r1 findings collapse into that one question, and all three were measured:
+#
+#   * a syntactically broken or partially-written library aborted the gate with a
+#     raw `syntax error` and NO named FAIL (it failed closed, but silently);
+#   * a library with a top-level `exit 0` terminated the gate at rc=0 with belt
+#     two, pint and the secret guard NEVER RUN -- a green gate that checked
+#     nothing, which is precisely the silent-skip class this wiring exists to
+#     close, arriving through the new source path;
+#   * `declare -F` alone was satisfied by an exported function INHERITED from the
+#     caller's environment, so an impostor could stand in for the parser while
+#     the library on disk was empty.
+#
+# The probe closes all three because it is an execution test, not a text test:
+# `$( )` is a subshell, so a top-level `exit` ends the PROBE rather than the
+# gate and simply fails to print the sentinel; a broken file fails to source and
+# prints nothing; and `unset -f` inside the probe means a name that survives can
+# only have come from the file. The sentinel must be printed AFTER the source
+# returns, which is what makes "the source completed" observable at all.
+# STDIN IS CLOSED FOR THE PROBE and the library's own stderr is KEPT.
+# Round 2's review measured both: the probe inherited the gate's stdin, so a
+# library containing `read` CONSUMED it and left the rest of the gate with
+# nothing; and `2>/dev/null` discarded the library's own diagnosis, so a file
+# that failed for a nameable reason reported only the generic cause-list below.
+# A guard that makes the verdict loud and the cause silent is half a guard.
+GC_VERIFY_PROBE_ERR="$(mktemp "${TMPDIR:-/tmp}/gc-verify-probe.XXXXXX")"
+if [ "$( unset -f assert_no_warnings 2>/dev/null; . "$GC_VERIFY_LIB" >/dev/null 2>"$GC_VERIFY_PROBE_ERR" </dev/null; declare -F assert_no_warnings >/dev/null 2>&1 && printf LOADED )" != LOADED ]; then
+    echo "ERROR: sourcing $GC_VERIFY_LIB did not yield assert_no_warnings." >&2
+    echo "       The file exists but does not load cleanly to a definition: it may be" >&2
+    echo "       syntactically broken, partially written, or exit before defining it." >&2
+    if [ -s "$GC_VERIFY_PROBE_ERR" ]; then
+        echo "       The library said, on its own stderr:" >&2
+        sed 's/^/         /' "$GC_VERIFY_PROBE_ERR" >&2
+    else
+        echo "       It printed nothing on stderr." >&2
+    fi
+    rm -f "$GC_VERIFY_PROBE_ERR"
+    echo "==> gc-verify: FAIL (summary parser library did not load)" >&2
+    exit 1
+fi
+rm -f "$GC_VERIFY_PROBE_ERR"
+# An inherited definition must not survive into the real load either: the probe
+# proved THE FILE defines the parser, and this makes the file the only thing that
+# can have defined the one we are about to call.
+unset -f assert_no_warnings 2>/dev/null || true
+# THE REAL LOAD GETS `</dev/null` TOO, and that is not belt-and-braces. With it
+# only on the probe, a library containing `read` consumed ONE line of the gate's
+# stdin instead of two -- measured, L1 eaten, L2/L3 left. Halving a defect is not
+# closing it. A library is contracted to define a function and do nothing else;
+# neither load has any business reading the gate's input.
+# shellcheck source=lib/gc-verify-summary.sh
+. "$GC_VERIFY_LIB" </dev/null
+# Cheap backstop. After the unset above this can only be true because the file
+# defined it, so it now means what it always claimed to mean.
+if ! declare -F assert_no_warnings >/dev/null; then
+    echo "ERROR: $GC_VERIFY_LIB did not define assert_no_warnings." >&2
+    echo "==> gc-verify: FAIL (summary parser library did not load)" >&2
+    exit 1
+fi
+
 echo "==> [1/3] php artisan test --fail-on-warning"
 if ! php artisan config:clear --ansi >/dev/null; then
     echo "==> gc-verify: FAIL (configuration clear)" >&2
@@ -115,31 +205,8 @@ fi
 
 # Belt two: the summary line must exist, be a dialect we recognise, and report
 # zero warnings. --fail-on-warning is known not to cover every warning class
-# (see the header), so a green exit code is not accepted on its own.
-# THE PARSER LIVES IN scripts/lib/gc-verify-summary.sh, and is sourced rather
-# than defined here. Both test harnesses need the SAME function; while it lived
-# inline they recovered it by regex and `eval`'d the text they recovered, which
-# is GitHub #2650/#2655/#2665 -- a sed range bounded by where it ends, not by
-# what it contains. Sourcing a file that defines the function and executes
-# nothing removes the extraction, the validation and the eval together. Ruled by
-# Jeeves on Trello card 6aadcd16 (2026-09-18): one definition, two consumers.
-#
-# This is the only source path, so a missing or unreadable library is a FAIL,
-# never a skipped belt: belt two silently not running is how a 7286-warning
-# floor passed as PASS in the first place.
-GC_VERIFY_LIB="$GC_VERIFY_SCRIPT_DIR/lib/gc-verify-summary.sh"
-if [ ! -r "$GC_VERIFY_LIB" ]; then
-    echo "ERROR: cannot read $GC_VERIFY_LIB; belt two (summary parsing) is unavailable." >&2
-    echo "==> gc-verify: FAIL (summary parser library missing)" >&2
-    exit 1
-fi
-# shellcheck source=lib/gc-verify-summary.sh
-. "$GC_VERIFY_LIB"
-if ! declare -F assert_no_warnings >/dev/null; then
-    echo "ERROR: $GC_VERIFY_LIB did not define assert_no_warnings." >&2
-    echo "==> gc-verify: FAIL (summary parser library did not load)" >&2
-    exit 1
-fi
+# (see the header), so a green exit code is not accepted on its own. The parser
+# itself was loaded and proved present BEFORE stage 1, above.
 if ! assert_no_warnings "$TEST_LOG"; then
     echo "==> gc-verify: FAIL (PHPUnit warnings, or an unreadable summary)" >&2
     exit 1

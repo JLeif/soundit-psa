@@ -157,15 +157,26 @@ if [ "${1:-}" = "--selftest" ]; then
     # at column 0 after an indented brace; B indents the smuggled line too, so a
     # column-0 test sees nothing).
     #
-    # Sourcing a file runs its top level, so the ONLY thing that keeps these
-    # fixtures from executing is that the smuggled statement is no longer inside
-    # anything the sweep reconstructs -- it is plain top-level script in a file we
-    # were told to load. So this arm asserts the honest property, and ONLY the
-    # honest property: the sweep no longer creates the marker from text that
-    # belongs to the function's own body, because it no longer guesses where that
-    # body ends. Fixture A's smuggled `touch` sits at top level and WILL run when
-    # sourced -- exactly as it would if you ran the file, which is the contract
-    # this sweep now states plainly rather than pretending to bound.
+    # Sourcing a file RUNS ITS TOP LEVEL, and this arm does not pretend
+    # otherwise: a statement written at top level in a baseline you pass WILL
+    # execute, exactly as it would if you ran the file. That is the sweep's
+    # stated contract, not a hole in it.
+    #
+    # THERE IS NO EXECUTION MARKER IN THIS ARM, and that is deliberate: no marker
+    # placement could discriminate, so any marker assertion here would be a
+    # control incapable of firing. Sourcing runs the WHOLE top level, while the
+    # extraction era eval'd only a sed range cut out of the same file -- so
+    # sourcing executes a SUPERSET of whatever the old eval could run. A marker at
+    # top level therefore fires under both and would make a correct sweep look
+    # red; a marker inside the trailing function body fires under neither, because
+    # a range ending at that function's column-0 brace hands eval a complete
+    # DEFINITION and nothing ever calls it. Round 1 asserted on a marker no
+    # fixture planted; asserting on one planted inside a function body would have
+    # been unfireable for a new reason rather than a repair.
+    #
+    # The difference that IS fireable is the VERDICT, and that is what this arm
+    # asserts: the extraction-era guards REFUSED this shape outright, so a
+    # regression to them turns the rc=0 assertion below red.
     #
     # What is therefore pinned here is the DIFFERENCE: a well-formed library whose
     # brace is indented is now used CORRECTLY (the function is defined and swept,
@@ -173,27 +184,45 @@ if [ "${1:-}" = "--selftest" ]; then
     # indented-brace shape was never actually dangerous -- bash closes a function
     # at an indented `}` exactly as at a column-0 one -- and refusing it was
     # GitHub #2655's false-FAIL class, which this lift deletes.
-    indented="$(mktemp)"; ind_err="$(mktemp)"; marker_i="$(mktemp -u)"
-    trap 'rm -f "$mutant" "$blind" "$blind_err" "$indented" "$ind_err" "$marker_i"' EXIT
+    indented="$(mktemp)"; ind_err="$(mktemp)"
+    trap 'rm -f "$mutant" "$blind" "$blind_err" "$indented" "$ind_err"' EXIT
     {
         # A faithful copy of the real library whose closing brace is INDENTED and
         # which defines a second function afterwards: valid shell, valid parser,
-        # refused outright by every extraction-era guard.
+        # refused outright by every extraction-era guard. The trailing definition
+        # is what made the shape refusable -- a range bounded by where it ends ran
+        # past the indented brace and swallowed it -- so it stays, empty of
+        # anything that pretends to be an execution probe.
         sed '$ s/^}$/  }/' "$NEW"
         echo 'other_function() {'
         echo '    :'
         echo '}'
     } > "$indented"
-    if cmp -s "$NEW" "$indented"; then
-        echo "SELFTEST FATAL: indented-brace fixture did not land; arm 3 measures nothing" >&2
+    # EVERY property of the fixture must be proven to have landed, or the
+    # assertion below measures nothing. Round 1 asserted on a marker no fixture
+    # ever planted, so that branch could never fire -- the review caught it and it
+    # was a fair catch. The repair is to assert only what a regression can
+    # actually turn red.
+    # (No `cmp -s "$NEW" "$indented"` precondition here. Round 2's review showed
+    # it could never fire: the fixture always appends a trailing definition, so it
+    # differs from $NEW whether or not the indent landed. It LOOKED like a
+    # precondition and was not one. The two checks below are the real ones --
+    # each names a property a regression can actually remove.)
+    if ! grep -q "^  }$" "$indented"; then
+        echo "SELFTEST FATAL: the fixture's closing brace is not indented; arm 3 is not testing #2655" >&2
+        exit 2
+    fi
+    if ! grep -q '^other_function() {$' "$indented"; then
+        echo "SELFTEST FATAL: the fixture carries no definition after the indented brace;" >&2
+        echo "  arm 3 is not testing the shape the extraction-era guards refused" >&2
+        exit 2
+    fi
+    if ! bash -n "$indented" 2>/dev/null; then
+        echo "SELFTEST FATAL: the indented-brace fixture is not valid shell; it is unfaithful" >&2
         exit 2
     fi
     "$0" "$indented" "$selftest_corpus" >/dev/null 2>"$ind_err"
     rc=$?
-    if [ -e "$marker_i" ]; then
-        echo "SELFTEST FAILED: arm 3 fixture executed a planted marker; it should contain none" >&2
-        exit 1
-    fi
     if [ "$rc" -ne 0 ]; then
         echo "SELFTEST FAILED: a valid library with an indented closing brace was refused (rc=$rc)." >&2
         echo "  That is the #2655 false-FAIL class this lift removes. stderr was:" >&2
@@ -202,7 +231,37 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
     echo "selftest: a valid library whose closing brace is indented now sweeps cleanly (#2655 false-FAIL class removed)"
 
-    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the library does not define the parser, and no longer refusing a legitimate indented-brace definition. The baseline is SOURCED by design and must be a file you would run."
+    # ARM 4. THE TYPO-CATCHER MUST ACTUALLY FIRE ON THE REAL GATE.
+    #
+    # Round 2 tied the recognition to a line the gate prints -- and moved that
+    # very line in the same commit, with nothing pinning it. A guard keyed to an
+    # unpinned string in a file that is edited constantly is one refactor away
+    # from silently never firing again, which is how the BASENAME version came to
+    # miss its own documented typo. So the arm feeds the guard the SHIPPED gate
+    # (the real file, at whatever shape it currently has) under the redirected
+    # name that defeated the old check, and requires a refusal.
+    #
+    # It asserts the BEHAVIOUR, not the string: if someone renames the banner the
+    # arm goes red and says to re-aim the guard, instead of the guard quietly
+    # degrading to nothing.
+    gate_copy="$(mktemp /tmp/base-XXXXXX.sh)"   # the documented-mistake filename
+    cp "$HERE/../scripts/gc-verify.sh" "$gate_copy"
+    tc_err="$(mktemp)"
+    "$0" "$gate_copy" "$selftest_corpus" >/dev/null 2>"$tc_err"
+    tc_rc=$?
+    if [ "$tc_rc" -eq 0 ] || ! grep -q 'looks like the GATE' "$tc_err"; then
+        echo "SELFTEST FAILED: the sweep did not refuse a copy of the real gate (rc=$tc_rc)." >&2
+        echo "  The typo-catcher recognises gc-verify.sh by a line the gate prints; if that" >&2
+        echo "  line has been renamed, RE-AIM THE GUARD -- do not leave it matching nothing." >&2
+        echo "  stderr was:" >&2
+        sed 's/^/    /' "$tc_err" >&2
+        rm -f "$gate_copy" "$tc_err"
+        exit 1
+    fi
+    rm -f "$gate_copy" "$tc_err"
+    echo "selftest: the typo-catcher refuses a copy of the real gate even under a redirected filename"
+
+    echo "selftest PASSED: red when the branch under review is disabled, fatal (and for the stated reason) when the library does not define the parser, no longer refusing a legitimate indented-brace definition, and still catching a redirected copy of the gate itself. The baseline is SOURCED by design and must be a file you would run."
     exit 0
 fi
 
@@ -229,19 +288,32 @@ require_defines_parser() {
     # scripts/gc-verify.sh, and that argument is what everyone's shell history
     # still holds. Sourcing the GATE executes it -- .env provisioning and ~7800
     # PHPUnit tests -- so the predictable mistake is expensive and silent rather
-    # than wrong-looking. Refusing the one filename catches it and says where the
-    # parser moved to.
+    # than wrong-looking.
     #
-    # This is NOT a boundary against a hostile or merely unlucky baseline: any
-    # other file is sourced as given, because sourcing IS how this sweep runs the
-    # real parser. Saying so plainly is the point -- three rounds of lexical
-    # guards on the old extraction each claimed a bound they did not have, and a
-    # check on a basename would be the fourth if it were described as safety.
-    if [ "$(basename "$lib")" = "gc-verify.sh" ]; then
+    # ROUND 1 GOT THIS WRONG AND THE REVIEW CAUGHT IT. The check tested the
+    # BASENAME against "gc-verify.sh", but the mistake it names is a REDIRECT:
+    # `git show origin/main:scripts/gc-verify.sh > /tmp/base.sh`. The basename is
+    # then base.sh, so the guard did not fire on the exact command in its own
+    # documentation -- measured, not theorised. A typo-catcher that misses the
+    # documented typo is worse than none, because it implies a coverage it has
+    # not got. It now recognises the gate by a line the GATE ITSELF prints, which
+    # survives being redirected to any filename.
+    #
+    # STILL NOT A BOUNDARY, and the wording stays deliberate. Any other file is
+    # sourced as given, because sourcing IS how this sweep runs the real parser
+    # and the baseline must be a file you would run. Three rounds of lexical
+    # guards on the old extraction each claimed a bound they did not have; this
+    # one claims only to recognise one known file by one known string, and a
+    # renamed or edited gate defeats it trivially. That is acceptable for a typo,
+    # and would not be for a boundary -- which is why it is not called one.
+    if [ "$(basename "$lib")" = "gc-verify.sh" ] || grep -q '^echo "==> \[1/3\] php artisan test' "$lib"; then
         echo "FATAL: $lib looks like the GATE, not the parser library." >&2
-        echo "  Sourcing it would RUN the gate. The parser moved to" >&2
-        echo "  scripts/lib/gc-verify-summary.sh; pass a checkout of that instead:" >&2
-        echo "    git show <ref>:scripts/lib/gc-verify-summary.sh > /tmp/base.sh" >&2
+        echo "  Sourcing it would RUN the gate. The parser lives in" >&2
+        echo "  scripts/lib/gc-verify-summary.sh; pass a checkout of that instead, e.g." >&2
+        echo "    git show HEAD:scripts/lib/gc-verify-summary.sh > /tmp/base.sh" >&2
+        echo "  (the library exists only at refs where this change has landed; before" >&2
+        echo "  that, the comparable baseline is the inline parser in the gate at that" >&2
+        echo "  ref, which is why this sweep's own gate run cuts it by line range.)" >&2
         exit 2
     fi
     # Load in a SUBSHELL for the check so this script's own shell keeps whatever
