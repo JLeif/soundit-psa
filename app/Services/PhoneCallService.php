@@ -414,20 +414,32 @@ class PhoneCallService
      *     recording_duration WITHOUT invoking the second look. (An earlier
      *     version of this note said that path was "gated behind duration >= 1";
      *     a later one withdrew that outright, and the withdrawal overshot. The
-     *     duration gate is real on every AUTOMATIC route into it: the bulk
+     *     duration gate is real on the two COMMAND routes into it: the bulk
      *     command ResolveCallRecordings selects `duration > 0`, and the
      *     singular ResolveCallRecording - which carries no duration guard in
      *     its own body - is spawned only by
      *     PlivoWebhookController::resolveRecordingAfterEnd(), which returns on
-     *     `! $call->duration || $call->duration < 1`. So on a duration-null row
-     *     no automatic path reaches this API at all. Do NOT read the
+     *     `! $call->duration || $call->duration < 1`. Do NOT read the
      *     recording_url guard as what excludes such a row: both commands select
      *     rows that LACK a recording_url, so that guard ADMITS it. The third
-     *     caller, the webhook's own in-delivery call, is gated on
-     *     `$recordingDuration >= 3` and a null answered_at instead.) So for a meaningful share of
-     *     the very rows this fix targets, the ceiling is the permanent value. The status
-     *     is still corrected, which is the defect being fixed; the answer moment
-     *     stays approximate.
+     *     caller, the webhook's own in-delivery call, is automatic and is NOT
+     *     duration-gated: it tests the PAYLOAD's `$recordingDuration >= 3` and
+     *     `$call->answered_at === null`, never the row's duration column. So
+     *     the gate above is a fact about the two commands, not about every
+     *     automatic route. On an ordinary delivery the row is not duration-null
+     *     by the time that call runs, but only via a step this note must name
+     *     rather than assume: the same delivery already passed the `>= 0`
+     *     branch above it, which calls handleRecordingReady(), which backfills
+     *     duration from any positive recording length before the row is re-read.
+     *     That backfill is not guaranteed - updateCallSafely() logs and
+     *     swallows a throw and returns null after the transaction rolls back,
+     *     while the voicemail branch re-reads the row independently and still
+     *     calls this API - so a duration-null row CAN reach it there. Do not
+     *     narrow that backfill on the strength of this paragraph without
+     *     reading this case.) So for a meaningful share of the very rows this
+     *     fix targets, the ceiling is the permanent value. The status is still
+     *     corrected, which is the defect being fixed; the answer moment stays
+     *     approximate.
      *  1. THE CEILING IS NOT RELIABLY TRANSIENT. handleCallEnded() re-stamps
      *     ended_at on EVERY delivery, and the controller routes two distinct
      *     callbacks to it (DialAction=hangup and CallStatus=completed). On a
