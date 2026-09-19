@@ -93,47 +93,19 @@ use Illuminate\Support\Facades\Log;
  * and no ended_at, and the controller calls it on the same delivery - but
  * nothing on that path lowers duration, so the conjunction keeps failing.
  *
- * Declined ONLY on recording_duration: duration is below the ceiling, which is
- * two situations - duration null, and duration non-null but under the ceiling.
+ * Declined ONLY on recording_duration: duration is below the ceiling. Earlier
+ * versions of this docblock traced how such a row is produced and how it might
+ * come back, and were wrong in several directions; that analysis is deleted
+ * rather than corrected again, because it derived a case from a route the code
+ * cannot take. What an operator needs is the reach, below, not the provenance.
  *
- * The NULL variant is NOT reachable through the webhook at all, and an earlier
- * version of this docblock was wrong to build its analysis on it. Trace the
- * controller: the resolve at :425 sits behind `$recordingDuration >= 3`, and
- * the `>= 0` branch at :407 has ALREADY called handleRecordingReady() with that
- * same value in the same request. That method backfills duration from any
- * positive value, so by the time any resolve runs, duration is set. Nor does a
- * "later delivery" escape this - a redelivery carries the same value through
- * the same two branches in the same order. Only the two console commands can
- * call the resolve without that backfill, and both skip a row that already has
- * a recording_url, which every row here has BY CONSTRUCTION.
- *
- * So the variant this exclusion actually produces in production is the
- * NON-NULL, SUB-CEILING one: recording_duration at the ceiling, duration
- * backfilled to the same ceiling value - which is the case above - or a
- * genuinely shorter duration recorded against a ceiling-length recording.
- * Those rows are declined on the recording arm alone.
- *
- * What could bring such a row back is a later write that lowers
- * recording_duration below the ceiling. resolveRecordingFromPlivo() is the only
- * method that rewrites it without touching duration, and it deliberately keeps
- * the LONGEST recording for the call, so a re-query normally rewrites the SAME
- * ceiling-length value; it writes something shorter only if the vendor's answer
- * has changed. Reached only by the two console commands, and only for a row
- * with no recording_url.
- *
- * And on a webhook REDELIVERY the resolve is mostly irrelevant, because
- * handleRecordingReady() has already acted one branch earlier: for any
- * sub-ceiling value it sets $recordingIsComplete and
- * finaliseCallTheHangupNeverClosed() writes ended_at, so the row leaves this
- * sweep's population before :425 is reached. The resolve matters only when the
- * new callback is ALSO at or above the ceiling. Treat recovery as the
- * exception, not the plan.
- * Its live caller is PlivoWebhookController, which invokes it on the delivery
- * it is already handling, and only for rows with a NULL answered_at: the call
- * sits behind `$recordingDuration >= 3`, which a ceiling-length rollover
- * clears, and `$call->answered_at === null`, which it clears only if nothing
- * has stamped that column. Do NOT reason about which rows those are from
- * `status`: an earlier version of this note argued a four-hour recording is
+ * resolveRecordingFromPlivo() has THREE live callers - ResolveCallRecording,
+ * ResolveCallRecordings, and PlivoWebhookController. The webhook one invokes it
+ * on the delivery it is already handling, and only for rows with a NULL
+ * answered_at: that call sits behind `$recordingDuration >= 3`, which a
+ * ceiling-length rollover clears, and `$call->answered_at === null`, which it
+ * clears only if nothing has stamped that column. Do NOT reason about which
+ * rows those are from `status`: an earlier version argued a four-hour recording is
  * "overwhelmingly an answered call" because "a row does not sit ringing that
  * long", which silently swapped the column under discussion. answerIsObserved()
  * documents that the two diverge - on an inbound call Plivo has already answered
@@ -164,7 +136,7 @@ use Illuminate\Support\Facades\Log;
  *     arrives as 0 (see the constant docblock in PhoneCallService) and reads as
  *     complete, which finalises the row this sweep declined;
  *   - a later run of THIS command, for the recording_duration-only subset
- *     described below, once a resolve has written a shorter length.
+ *     described above, once a resolve has written a shorter length.
  *
  * The first two act on a row this command passed over and neither is this
  * command; the third is this command, on a later run. The honest statement of
