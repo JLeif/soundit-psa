@@ -94,35 +94,54 @@ use Illuminate\Support\Facades\Log;
  * nothing on that path lowers duration, so the conjunction keeps failing.
  *
  * Declined ONLY on recording_duration: duration is below the ceiling, which is
- * two situations, not one - duration null, and duration non-null but under the
- * ceiling. Only the NULL variant is discussed below; a row carrying a real
- * sub-ceiling duration is declined for the recording arm alone and is not
- * analysed here.
+ * two situations - duration null, and duration non-null but under the ceiling.
  *
- * The null variant CAN come back. Note how it gets there, because the obvious
- * route does NOT produce it: handleRecordingReady() backfills duration from any
- * positive callback value, and a ceiling-length one is positive, so that path
- * sets BOTH columns to the ceiling and the row lands in the case above. The
- * subset therefore comes from resolveRecordingFromPlivo(), which writes
- * recording_duration and no duration at all - and it must be a resolve on a
- * LATER delivery, because on the delivery carrying the recording the controller
- * has already run handleRecordingReady() with the same value one branch
- * earlier.
+ * The NULL variant is NOT reachable through the webhook at all, and an earlier
+ * version of this docblock was wrong to build its analysis on it. Trace the
+ * controller: the resolve at :425 sits behind `$recordingDuration >= 3`, and
+ * the `>= 0` branch at :407 has ALREADY called handleRecordingReady() with that
+ * same value in the same request. That method backfills duration from any
+ * positive value, so by the time any resolve runs, duration is set. Nor does a
+ * "later delivery" escape this - a redelivery carries the same value through
+ * the same two branches in the same order. Only the two console commands can
+ * call the resolve without that backfill, and both skip a row that already has
+ * a recording_url, which every row here has BY CONSTRUCTION.
  *
- * That same method is also the only thing that can bring such a row back, and
- * it usually will not. It queries the vendor for this call's recordings and
- * deliberately keeps the LONGEST one, so a re-query normally rewrites the SAME
- * ceiling-length value. It writes a shorter length only if the vendor's answer
- * has changed. When that does happen both arms pass and the next rerun DOES
- * take the row.
+ * So the variant this exclusion actually produces in production is the
+ * NON-NULL, SUB-CEILING one: recording_duration at the ceiling, duration
+ * backfilled to the same ceiling value - which is the case above - or a
+ * genuinely shorter duration recorded against a ceiling-length recording.
+ * Those rows are declined on the recording arm alone.
+ *
+ * What could bring such a row back is a later write that lowers
+ * recording_duration below the ceiling. resolveRecordingFromPlivo() is the only
+ * method that rewrites it without touching duration, and it deliberately keeps
+ * the LONGEST recording for the call, so a re-query normally rewrites the SAME
+ * ceiling-length value; it writes something shorter only if the vendor's answer
+ * has changed. Reached only by the two console commands, and only for a row
+ * with no recording_url.
+ *
+ * And on a webhook REDELIVERY the resolve is mostly irrelevant, because
+ * handleRecordingReady() has already acted one branch earlier: for any
+ * sub-ceiling value it sets $recordingIsComplete and
+ * finaliseCallTheHangupNeverClosed() writes ended_at, so the row leaves this
+ * sweep's population before :425 is reached. The resolve matters only when the
+ * new callback is ALSO at or above the ceiling. Treat recovery as the
+ * exception, not the plan.
  * Its live caller is PlivoWebhookController, which invokes it on the delivery
- * it is already handling - but only for part of this subset. That call sits
- * behind two gates: `$recordingDuration >= 3`, which a ceiling-length rollover
- * clears, and `$call->answered_at === null`, which it does NOT. An answered
- * call skips the branch entirely, and a recording that ran to a four-hour
- * ceiling is overwhelmingly an answered call - a row does not sit ringing that
- * long. So the rescue reaches the UNANSWERED members of this subset; for an
- * answered row declined at the ceiling there is no live path back in at all.
+ * it is already handling, and only for rows with a NULL answered_at: the call
+ * sits behind `$recordingDuration >= 3`, which a ceiling-length rollover
+ * clears, and `$call->answered_at === null`, which it clears only if nothing
+ * has stamped that column. Do NOT reason about which rows those are from
+ * `status`: an earlier version of this note argued a four-hour recording is
+ * "overwhelmingly an answered call" because "a row does not sit ringing that
+ * long", which silently swapped the column under discussion. answerIsObserved()
+ * documents that the two diverge - on an inbound call Plivo has already answered
+ * the A leg, so CallStatus stays 'in-progress' while a tech's endpoint merely
+ * rings and while the call rings out to voicemail. A long-ringing inbound row
+ * can therefore hold a null answered_at and a non-ringing status at once. Which
+ * rows in this subset carry a null answered_at has NOT been measured; that is
+ * the open question, not a settled share.
  *
  * Neither resolve command can substitute: both skip a row that already has a
  * recording_url, and every row here has one BY CONSTRUCTION - the only two
@@ -204,7 +223,7 @@ class FinaliseStuckCalls extends Command
                             {--limit=0 : Process at most this many rows (0 = no limit).}
                             {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}';
 
-    protected $description = 'Finalise calls left with no ended_at, whatever their status (see the class docblock for the classes this mixes, one of which is calls still connected)';
+    protected $description = 'Finalise old calls left with no ended_at that carry positive evidence of having ended (any status; --min-age-hours floor, and rows at the recording-length ceiling are excluded) - see the class docblock, because one class this mixes is calls still connected';
 
     public function handle(): int
     {
