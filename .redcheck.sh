@@ -96,11 +96,19 @@ classify() {
     printf 'ERRORED\tunrecognised runner output; no pass/fail summary found (status %s)\n' "$st"; return
   fi
 
-  # A green BANNER is not proof that anything RAN, and "not skipped" is not the
-  # same as "asserted". SummaryPrinter::print() emits "OK (N tests, M
-  # assertions)" only when nothing was skipped and there were no issues, so that
-  # banner alone proves execution; the bare "OK, but ..." banners carry NO
-  # counts of their own.
+  # A green BANNER is not proof that anything was ASSERTED, and "not skipped"
+  # is not the same as "asserted". There are TWO green banner shapes and BOTH
+  # have to be counted -- not just the one that is followed by a "Tests:" line:
+  #
+  #   SummaryPrinter::print() emits "OK (N tests, M assertions)" when the run
+  #   was successful with nothing skipped and no issues. M is allowed to be 0
+  #   (#[DoesNotPerformAssertions], expectNotToPerformAssertions(), or
+  #   beStrictAboutTestsThatDoNotTestAnything="false"), so this banner is NOT
+  #   proof of assertion either -- and it IS that run's count line: no separate
+  #   "Tests: ..." line is printed alongside it.
+  #
+  #   The bare "OK, but there were issues!" banner carries NO counts of its own
+  #   and is always followed by the "Tests: N, Assertions: M, ..." line.
   #
   # There are TWO of them, and an earlier revision of this guard only understood
   # one. Read from the producer (vendor/phpunit/.../TextUI/Output/SummaryPrinter.php
@@ -119,14 +127,28 @@ classify() {
   # only "Skipped:" admits exactly that run, and the harness would then score 14
   # mutants against a suite that asserted nothing and call them all SURVIVED.
   #
-  # So: require at least one test to have run that was NOT skipped, incomplete
-  # or risky, AND require at least one assertion. Each bucket is printed under
-  # its own token by printCountString(), never folded into another.
-  if [ "$marker" = GREEN ] && grep -qE '^OK, but' <<<"$out"; then
-    local counts ntests nassert nskipped nincomplete nrisky nreal
+  # So: require at least one test to have run that was NOT skipped and NOT
+  # incomplete, AND require at least one assertion -- read from WHICHEVER of
+  # the two shapes the producer printed, so neither banner can bypass the
+  # check. Risky is NOT subtracted: a risky test RAN and its assertions ARE
+  # counted (the Collector only flags it), so subtracting it would refuse a
+  # healthy, asserting baseline; an all-risky run that asserted nothing is
+  # already caught by the zero-assertion check below. Skipped and Incomplete
+  # are printed under their own tokens by printCountString(), never folded
+  # into another.
+  if [ "$marker" = GREEN ] && grep -qE '^OK \(|^OK, but' <<<"$out"; then
+    local counts okline ntests nassert nskipped nincomplete nreal
     counts=$(grep -m1 -E '^Tests: [0-9]+, Assertions: [0-9]+' <<<"$out")
     if [ -z "$counts" ]; then
-      printf 'ERRORED\tgreen banner with no "Tests:" count line; cannot prove any test ran (status %s)\n' "$st"; return
+      # No "Tests:" line: normalise the "OK (N tests, M assertions)" banner
+      # into the same shape so ONE set of checks reads both.
+      okline=$(grep -m1 -oE '^OK \([0-9]+ tests?, [0-9]+ assertions?\)' <<<"$out")
+      if [ -n "$okline" ] && [[ "$okline" =~ ([0-9]+)\ tests?,\ ([0-9]+)\ assertion ]]; then
+        counts="Tests: ${BASH_REMATCH[1]}, Assertions: ${BASH_REMATCH[2]}"
+      fi
+    fi
+    if [ -z "$counts" ]; then
+      printf 'ERRORED\tgreen banner with no counts; cannot prove any test ran or asserted (status %s)\n' "$st"; return
     fi
     countof() { # token -> value, or 0 when the token is absent
       local v
@@ -138,11 +160,10 @@ classify() {
     nassert=$(countof 'Assertions')
     nskipped=$(countof 'Skipped')
     nincomplete=$(countof 'Incomplete')
-    nrisky=$(countof 'Risky')
-    nreal=$(( ntests - nskipped - nincomplete - nrisky ))
+    nreal=$(( ntests - nskipped - nincomplete ))
     if [ "$nreal" -le 0 ]; then
-      printf 'ERRORED\tno test actually executed: %s collected, %s skipped, %s incomplete, %s risky (filter %s)\n' \
-        "$ntests" "$nskipped" "$nincomplete" "$nrisky" "$FILTER"; return
+      printf 'ERRORED\tno test actually executed: %s collected, %s skipped, %s incomplete (filter %s)\n' \
+        "$ntests" "$nskipped" "$nincomplete" "$FILTER"; return
     fi
     if [ "$nassert" -eq 0 ]; then
       printf 'ERRORED\tsuite reported a green banner with ZERO assertions (%s tests); nothing was asserted for filter %s\n' \
