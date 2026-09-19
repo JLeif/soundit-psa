@@ -94,21 +94,26 @@ use Illuminate\Support\Facades\Log;
  * nothing on that path lowers duration, so the conjunction keeps failing.
  *
  * Declined ONLY on recording_duration, with duration null: that row CAN come
- * back. resolveRecordingFromPlivo() sets recording_duration to the vendor's
- * length or null, and the webhook caller in PlivoWebhookController invokes it
- * directly on the delivery it is already handling. That caller is the ONLY
- * path that reaches these rows. Neither resolve command can: both skip a row
- * that already has a recording_url, and every row here has one BY
- * CONSTRUCTION - the only two writers of recording_duration in app/ each set
- * recording_url in the same block, so a row declined on recording_duration
- * cannot exist without a URL. It is that guard that excludes them, not a
- * duration test: the bulk command does carry duration > 0, but the singular
- * one carries no duration guard at all, so do not go looking for one there.
- * handleRecordingReady() backfills duration only when the callback carries a
- * positive one, so a rollover callback that omits the field leaves it null. If
- * a later resolve writes a shorter recording_duration, both arms pass and the
- * next rerun DOES take the row. Do not tell an operator this subset is beyond
- * reach.
+ * back. Note how it gets there, because the obvious route does NOT produce it:
+ * handleRecordingReady() backfills duration from any positive callback value,
+ * and a ceiling-length one is positive, so that path sets BOTH columns to the
+ * ceiling and the row lands in the case above. The subset therefore comes from
+ * resolveRecordingFromPlivo(), which writes recording_duration and no duration
+ * at all.
+ *
+ * That same method is also what brings such a row back, if a later call writes
+ * a shorter length: both arms then pass and the next rerun DOES take the row.
+ * Its live caller is PlivoWebhookController, which invokes it on the delivery
+ * it is already handling - behind `$recordingDuration >= 3` and a null
+ * answered_at, neither of which a ceiling-length rollover trips over. Neither
+ * resolve command can substitute: both skip a row that already has a
+ * recording_url, and every row here has one BY CONSTRUCTION - the only two
+ * writers of recording_duration in app/ each set recording_url in the same
+ * block. It is that guard that excludes them, not a duration test: the bulk
+ * command does carry duration > 0, but the singular one carries no duration
+ * guard at all, so do not go looking for one there.
+ *
+ * Do not tell an operator this subset is beyond reach.
  *
  * What this exclusion is NOT: it is not a handoff to the hangup webhook. Do not
  * read a declined row as queued for one. But do not read the opposite into it
@@ -119,19 +124,25 @@ use Illuminate\Support\Facades\Log;
  *     which writes ended_at with no ceiling or age guard;
  *   - a redelivered recording callback, since an absent RecordingDuration
  *     arrives as 0 (see the constant docblock in PhoneCallService) and reads as
- *     complete, which finalises the row this sweep declined.
+ *     complete, which finalises the row this sweep declined;
+ *   - a later run of THIS command, for the recording_duration-only subset
+ *     described below, once a resolve has written a shorter length.
  *
- * Both act on a row this command passed over, and neither is this command. The
+ * The first two act on a row this command passed over, and neither is this
+ * command; the third is. The
  * honest statement of reach is the narrow one: THIS sweep declines these rows,
  * reports them, and leaves their disposition to whatever else arrives. Whether
  * the exclusion should be narrowed is an open question for the card owner; this
  * round states the reach rather than changes it.
  *
  * One more thing this population is NOT: it is not "rows whose hangup webhook
- * never arrived". whereNull('ended_at') selects three classes - never arrived,
- * not arrived YET, and calls still connected right now. That is the founding
- * bound stated above and in handle(), and collapsing the three is how an
- * operator talks themselves into force-finalising a live call.
+ * never arrived". whereNull('ended_at') selects at least four classes - never
+ * arrived; not arrived YET; calls still connected right now; and - the
+ * measured MAJORITY - rows whose terminal webhook DID arrive and was discarded
+ * unrecorded, because the controller's recording branch returned 200 without
+ * falling through to the hangup handling. That last class is the 182 voicemail
+ * rows named in handle() below. Collapsing these is how an operator talks
+ * themselves into force-finalising a live call.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -248,8 +259,10 @@ class FinaliseStuckCalls extends Command
         // costs the row that really did end with its recording at the
         // ceiling: declined, counted below, and left to whatever else may
         // reach it rather than risked here. Not "left for a later webhook" -
-        // this sweep hands off to nothing, and the population mixes calls
-        // whose webhook never came with ones still in progress.
+        // this sweep hands off to nothing. The population is a mix of several
+        // classes, enumerated once in the docblock above and deliberately not
+        // restated here, because three sites restating it is how they came to
+        // disagree.
         //
         // Ageing keys on the same anchor the derivation below uses -
         // started_at, else created_at - so a row can never be aged by one
@@ -345,7 +358,8 @@ class FinaliseStuckCalls extends Command
         // later resolve writes a shorter length, and a late hangup webhook or a
         // redelivered recording callback can finalise it independently of this
         // sweep (see the docblock above). Some of these rows are also still
-        // connected. So this run says out loud that it did not cover them, and
+        // connected - the docblock enumerates the classes; this comment does
+        // not restate them. So this run says out loud that it did not cover them, and
         // promises nothing about what will.
         $agedStuckWithEvidence = $agedStuck->clone()->where($endedEvidence);
         $declinedAtCeiling = $agedStuckWithEvidence->clone()->count()
