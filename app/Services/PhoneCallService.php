@@ -36,16 +36,10 @@ class PhoneCallService
      * why a control pins the value rather than only the behaviour).
      *
      * PUBLIC because there are two consumers, not one: the live guard below,
-     * and the FinaliseStuckCalls sweep. They share this NUMBER and nothing
-     * else. The guard reasons about a callback just received, where the
-     * ceiling is the likeliest reason that recording closed; the sweep reasons
-     * about stored rows, where a length at the ceiling is one hypothesis among
-     * several (see the docblock in FinaliseStuckCalls). The ceiling is a single
-     * external fact about the XML the controller emits, so a second copy of the
-     * number could drift from this one and re-open the hole the guard closes.
-     * The sweep reads this constant rather than restating the number; what it
-     * duplicates is the derivation - it re-implements its own ceiling test,
-     * deliberately, because it answers a different question.
+     * and the FinaliseStuckCalls sweep. The ceiling is a single external fact
+     * about the XML the controller emits, so a second copy of the number could
+     * drift from this one and re-open the hole the guard closes. The sweep
+     * duplicates the RULE deliberately; it does not duplicate the NUMBER.
      */
     public const RECORDING_MAX_LENGTH_SECONDS = 14400;
 
