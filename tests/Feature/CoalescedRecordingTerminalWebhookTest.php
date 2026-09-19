@@ -819,4 +819,63 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'ORDERING: the controller writes ended_at = now() and runs AFTER the service derived started_at + duration, so the observed end time must survive rather than the derived one.'
         );
     }
+
+    /**
+     * A VENDOR FIELD POSTED EMPTY IS NOT A MALFORMED PAYLOAD, and it must not
+     * 500 — least of all after the recording side effects have already run.
+     *
+     * `$request->input('CallStatus', '')` does not return '' for a key that is
+     * PRESENT and null: input() resolves through data_get(), which tests
+     * array_key_exists, so the default applies only to an ABSENT key. Laravel's
+     * global ConvertEmptyStringsToNull makes `CallStatus=` exactly that shape —
+     * present and null. Handed to non-nullable `string` parameters on
+     * payloadIsTerminal() that null is a TypeError, thrown after
+     * handleRecordingReady(), the voicemail path and its notification have
+     * already run. The request 500s, Plivo retries the identical POST, and every
+     * retry repeats that work. The same payload returned 200 before this branch,
+     * so this is a crash introduced by the fix, not a pre-existing one.
+     *
+     * Both directions are posted because each field feeds a different half of
+     * the predicate and a nullable fix applied to only one of them passes half
+     * of this test.
+     *
+     * RED against non-nullable parameters: the response is 500 rather than 200
+     * and the spy records nothing.
+     */
+    public function test_an_empty_vendor_field_beside_a_terminal_marker_does_not_crash_the_coalesced_branch(): void
+    {
+        Queue::fake();
+        $service = $this->spyingPhoneCallService();
+
+        // Empty CallStatus beside the hangup marker.
+        $hangup = $this->ringingCall();
+        $this->postWebhook([
+            'CallUUID' => $hangup->call_uuid,
+            'DialAction' => 'hangup',
+            'CallStatus' => '',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/emptystatus.mp3',
+            'RecordingDuration' => 11,
+            'Duration' => 13,
+        ])->assertOk();
+
+        // Empty DialAction beside the terminal CallStatus — the other half.
+        $completed = $this->ringingCall();
+        $this->postWebhook([
+            'CallUUID' => $completed->call_uuid,
+            'DialAction' => '',
+            'CallStatus' => 'completed',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/emptyaction.mp3',
+            'RecordingDuration' => 12,
+            'Duration' => 15,
+        ])->assertOk();
+
+        $this->assertCount(
+            2,
+            $service->handleCallEndedPayloads,
+            'Each payload carries a terminal marker beside an empty sibling field, so each must still reach handleCallEnded() rather than throwing on the way there.'
+        );
+
+        $this->assertSame(13, (int) $hangup->refresh()->duration);
+        $this->assertSame(15, (int) $completed->refresh()->duration);
+    }
 }

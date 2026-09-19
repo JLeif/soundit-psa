@@ -37,8 +37,22 @@ class PlivoWebhookController extends Controller
      * Does THIS payload say the call has ended? Independent of whether it also
      * carries a recording — Plivo coalesces the two, and that coalescing is the
      * whole of card 6aade104.
+     *
+     * BOTH PARAMETERS ARE NULLABLE, and that is not defensive decoration. The
+     * caller reads `$request->input('CallStatus', '')`, which does NOT guarantee
+     * a string: input() resolves through data_get(), which tests
+     * array_key_exists, so the '' default applies only to an ABSENT key. A field
+     * Plivo posts empty (`CallStatus=`) arrives PRESENT and null, because the
+     * global ConvertEmptyStringsToNull middleware already converted it. Declared
+     * `string`, that null is a TypeError — there is no declare(strict_types=1)
+     * in this file, but coercive mode still refuses null for a userland
+     * non-nullable string — and it would be thrown AFTER the recording work
+     * above has run, turning a payload that previously answered 200 into a 500
+     * that Plivo retries, repeating handleRecordingReady() and any voicemail
+     * notification on every retry. null is simply not terminal here: it matches
+     * neither comparison below.
      */
-    private function payloadIsTerminal(string $dialAction, string $callStatus): bool
+    private function payloadIsTerminal(?string $dialAction, ?string $callStatus): bool
     {
         return $dialAction === 'hangup' || in_array($callStatus, self::TERMINAL_CALL_STATUSES, true);
     }
