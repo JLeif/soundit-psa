@@ -22,19 +22,6 @@ class PlivoWebhookController extends Controller
     ) {}
 
     /**
-     * After a call ends, resolve the recording from Plivo's API if none arrived via callback.
-     * Plivo's inbound call recording callbacks often don't reach our webhook (configured in the
-     * Plivo application, not our code). This queries the API directly after a short delay to
-     * give Plivo time to finalize the recording.
-     *
-     * NOTE ON PLACEMENT: this docblock documents resolveRecordingAfterEnd(),
-     * which is now defined BELOW the three members added for card 6aade104. The
-     * members were spliced in here rather than after it so the card's additions
-     * read as one contiguous block; the cost is this separation, recorded so a
-     * reader does not mistake the docblock for a description of the const that
-     * immediately follows it.
-     */
-    /**
      * CallStatus values that mean the call is over. Named once because two call
      * sites now read this list — payloadIsTerminal(), used by the coalesced
      * branch, and the terminal-CallStatus branch's own in_array() — and a copy
@@ -133,6 +120,12 @@ class PlivoWebhookController extends Controller
         return $data;
     }
 
+    /**
+     * After a call ends, resolve the recording from Plivo's API if none arrived via callback.
+     * Plivo's inbound call recording callbacks often don't reach our webhook (configured in the
+     * Plivo application, not our code). This queries the API directly after a short delay to
+     * give Plivo time to finalize the recording.
+     */
     private function resolveRecordingAfterEnd(?PhoneCall $call): void
     {
         if (! $call || $call->recording_url || ! $call->duration || $call->duration < 1) {

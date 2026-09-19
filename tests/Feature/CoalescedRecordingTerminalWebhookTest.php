@@ -132,7 +132,18 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
         // create() silently drops them. Assign directly. (Learned the hard way
         // on the sibling leg: fixtures that lose columns make tests fail for the
         // wrong reason, and a red for the wrong reason reads as proof.)
-        $call->ended_at = null;
+        //
+        // All THREE are honoured from $overrides, not just ended_at. An earlier
+        // version assigned a hardcoded `ended_at = null` and silently dropped
+        // answered_at and duration overrides — the exact trap this comment warns
+        // about, reintroduced one line below the warning. Callers currently pass
+        // none of the three, so nothing was wrong on this branch; it was a
+        // loaded gun for the next caller.
+        $call->ended_at = $overrides['ended_at'] ?? null;
+        $call->answered_at = $overrides['answered_at'] ?? null;
+        if (array_key_exists('duration', $overrides)) {
+            $call->duration = $overrides['duration'];
+        }
         $call->save();
 
         return $call->refresh();
@@ -409,13 +420,19 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
      * coalesced path must honour the same precedence: Plivo's own Duration is
      * more authoritative than the stored one.
      *
-     * PASSES UNFIXED ONLY IN THE SENSE THAT main never reaches this code at all —
-     * it fails at 53829d85 on the ended_at assertion. Stated so the next reader
-     * does not treat it as a second red-check of the same thing.
+     * RED at the current base on the spy assertion: an unfixed controller never
+     * routes this payload to handleCallEnded() at all.
+     *
+     * This test was the last one in the file still citing the ORIGINAL base
+     * 53829d85 and the only one not installing the spy — which made its
+     * duration assertion the weakest kind of evidence, since 47 is a value only
+     * the fix can produce but nothing here proved the fix was what produced it.
+     * Both corrected.
      */
     public function test_a_coalesced_delivery_prefers_the_payload_duration_over_the_stored_one(): void
     {
         Queue::fake();
+        $service = $this->spyingPhoneCallService();
         $call = $this->ringingCall();
         $call->duration = 180;
         $call->save();
@@ -427,6 +444,13 @@ class CoalescedRecordingTerminalWebhookTest extends TestCase
             'RecordingDuration' => 12,
             'DialBLegDuration' => 47,
         ])->assertOk();
+
+        $this->assertCount(1, $service->handleCallEndedPayloads, 'The coalesced hangup must reach handleCallEnded() through the recording branch.');
+        $this->assertSame(
+            47,
+            (int) ($service->handleCallEndedPayloads[0]['Duration'] ?? null),
+            'The precedence acts on the payload handed over, so assert it there: the positive B-leg duration must outrank the stored 180.'
+        );
 
         $call->refresh();
 
