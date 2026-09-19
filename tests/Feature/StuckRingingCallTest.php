@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Services\PhoneCallService;
@@ -48,8 +49,12 @@ class StuckRingingCallTest extends TestCase
      * A call stuck exactly as the production rows are: ringing, no ended_at,
      * and (for the 25-row majority) a duration already backfilled.
      */
-    private function stuckRingingCall(string $uuid, ?int $duration = null, ?string $answeredAt = null): PhoneCall
-    {
+    private function stuckRingingCall(
+        string $uuid,
+        ?int $duration = null,
+        ?string $answeredAt = null,
+        string $direction = 'inbound',
+    ): PhoneCall {
         // ended_at, answered_at and duration are NOT in PhoneCall::$fillable,
         // so they must be assigned directly. Found the hard way: a create()
         // array carrying them silently DROPPED all three, and several tests in
@@ -58,7 +63,7 @@ class StuckRingingCallTest extends TestCase
         // one that fails loudly, because its red reads as proof.
         $call = PhoneCall::create([
             'call_uuid' => $uuid,
-            'direction' => 'inbound',
+            'direction' => $direction,
             'from_number' => '+15555550111',
             'to_number' => '+15555550222',
             'status' => CallStatus::Ringing,
@@ -275,11 +280,26 @@ class StuckRingingCallTest extends TestCase
      * reconcileAnsweredStateWithDuration() returns early on a null ended_at;
      * after it, the finalisation would have stamped ended_at and flipped the
      * status on a LIVE call.
+     *
+     * THE FIXTURE IS INBOUND, matching the production population: 220 of the
+     * 221 never-finalised rows are inbound. An earlier version of this test
+     * was re-aimed OUTBOUND on the theory that only outbound calls could hold
+     * a recording at the ceiling. That theory was wrong and is withdrawn: the
+     * predicate this guard protects carries no direction term at all, and
+     * inbound calls do carry recordings - 537 of 666 in production, the
+     * longest 9712s - because inbound recording is configured in the Plivo
+     * application rather than emitted by this code. Flipping the fixture
+     * outbound deleted the only executable inbound coverage of a guard whose
+     * real population is inbound.
      */
     public function test_a_maxlength_recording_does_not_finalise_a_still_connected_call(): void
     {
         Queue::fake();
         $call = $this->stuckRingingCall('stuck-ringing-maxlength');
+
+        $this->assertSame(CallDirection::Inbound, $call->fresh()->direction,
+            'this guard protects the inbound population the sweep actually acts on; '
+            .'an outbound fixture would leave that population uncovered');
 
         app(PhoneCallService::class)->handleRecordingReady(
             'stuck-ringing-maxlength',
@@ -290,7 +310,8 @@ class StuckRingingCallTest extends TestCase
         $stored = $call->fresh();
 
         $this->assertNull($stored->ended_at,
-            'a recording that hit its maxLength ceiling says the RECORDING stopped, not the call');
+            'a recording at the maxLength ceiling may have stopped while the call continued, '
+            .'so it is not treated as evidence the call ended');
         $this->assertSame(CallStatus::Ringing, $stored->status,
             'a call that may still be connected must not be finalised by its own recording rolling over');
         $this->assertSame(14400, $stored->recording_duration,
@@ -323,16 +344,44 @@ class StuckRingingCallTest extends TestCase
      * threshold no recording can reach - so pin the emitted value itself.
      * This is a source assertion on purpose: the number is a contract between
      * two files, and no behavioural test can observe a mismatch.
+     *
+     * SCOPED TO browserAnswer(). An earlier version of this control read the
+     * WHOLE controller file, so it could not tell which method emitted the
+     * element and would have been satisfied by a maxLength anywhere in the
+     * file. Scoping it to the emitting method is what makes it a contract
+     * between the constant and a specific line of XML.
+     *
+     * This control pins ONE fact and claims nothing beyond it: browserAnswer()
+     * emits the only <Record maxLength> element in this application. It does
+     * NOT establish which calls can hold a recording at that length. Inbound
+     * recording is configured in the Plivo application rather than emitted
+     * here - see resolveRecordingAfterEnd() - so the absence of a <Record>
+     * element on the inbound path says nothing about inbound recordings.
      */
-    public function test_the_recording_ceiling_matches_the_value_the_controller_emits(): void
+    public function test_the_recording_ceiling_matches_the_value_browser_answer_emits(): void
     {
         $controller = file_get_contents(base_path('app/Http/Controllers/Api/PlivoWebhookController.php'));
 
+        // Take browserAnswer()'s body only: from its signature to the start of
+        // the next method declaration at the same indentation.
+        $this->assertSame(
+            1,
+            preg_match(
+                '/\n    public function browserAnswer\(.*?\n(?=    (?:public|private|protected) function )/s',
+                $controller,
+                $m
+            ),
+            'browserAnswer() must be locatable in the controller for this contract to be checkable; '
+            .'if the method was renamed or removed, re-aim this control rather than deleting it'
+        );
+
         $this->assertMatchesRegularExpression(
             '/<Record[^>]*maxLength="14400"/',
-            $controller,
-            'the <Record> maxLength the controller emits must match RECORDING_MAX_LENGTH_SECONDS; '
-            .'if this fails, update both together or the mid-call guard stops firing'
+            $m[0],
+            'the <Record> maxLength browserAnswer() emits must match RECORDING_MAX_LENGTH_SECONDS; '
+            .'if this fails, update both together or the rollover guard stops firing. This control '
+            .'pins where the element is emitted; it says nothing about which calls can reach that '
+            .'length, because inbound recording is configured outside this codebase'
         );
     }
 

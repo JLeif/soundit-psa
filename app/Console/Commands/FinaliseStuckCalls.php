@@ -31,38 +31,56 @@ use Illuminate\Support\Facades\Log;
  * told apart from a conversation in progress, and a backfill that cannot tell
  * must not write.
  *
- * THAT BOUND IS NOT SUFFICIENT ALONE, and two earlier versions of this
- * docblock claimed otherwise, each wrongly. The first claimed 'none of the
- * three is ever written while a call is connected' - three review seats said
- * so and they were right: PlivoWebhookController emits
- * <Record ... maxLength="14400" />, and a Record element posts its callback
- * when the RECORDING stops - at that ceiling as well as at hangup - so on a
- * call still connected past four hours the recording columns ARE written
- * mid-call.
- *
- * The second claimed the live guard holds such a row out of here. It does
- * not. handleRecordingReady() writes recording_url, recording_duration and
- * (on a duration-less row) duration BEFORE
- * finaliseCallTheHangupNeverClosed() declines the maxLength case. The row it
+ * THAT BOUND IS NOT SUFFICIENT ALONE. End evidence can be written while a
+ * call is still connected: handleRecordingReady() writes recording_url,
+ * recording_duration and (on a duration-less row) duration before
+ * finaliseCallTheHangupNeverClosed() gets to decline anything. The row it
  * leaves behind carries a null ended_at, full end evidence, and at four hours
- * an age past every floor - it satisfied every predicate this command had.
- * The live guard moved the defect one command over rather than closing it.
+ * an age past every floor - it satisfies every other predicate here.
  *
- * So the second bound is that same ceiling test, applied HERE: a row whose
- * stored length is at or above
- * PhoneCallService::RECORDING_MAX_LENGTH_SECONDS is out of the population,
- * because that length says the RECORDING stopped, not the call. It reads the
- * service's constant instead of repeating the number, so the two cannot
- * drift apart and leave this predicate comparing against a threshold no
- * recording can reach.
+ * So the second bound is a length test: a row whose stored length is at or
+ * above PhoneCallService::RECORDING_MAX_LENGTH_SECONDS is out of the
+ * population, because a recording that long is more likely to have stopped at
+ * a ceiling than to describe a call that really ran that long. It reads the
+ * service's constant rather than repeating the number, so the two cannot
+ * drift apart.
  *
- * The trade is the same one the live path makes, and it is stated rather than
- * hidden: a call that really did end with its recording at the ceiling is
- * declined here too. That false negative is bought against a false positive
- * that would write an end time and a final status onto a live conversation,
- * and it is not a silent loss - those rows are COUNTED and reported on every
- * run, and a later hangup webhook, or a rerun after one arrives, still
- * reaches them.
+ * WHAT IS ESTABLISHED, and nothing beyond it: browserAnswer() emits the only
+ * <Record maxLength="14400"> element in this application. That is a fact
+ * about this repository, pinned by a source assertion in StuckRingingCallTest.
+ *
+ * It is NOT a fact about which calls can hold a recording at that length, and
+ * three earlier versions of this docblock overreached in three different
+ * directions trying to make it one. Inbound recording is configured in the
+ * Plivo application rather than emitted by this code - see
+ * PlivoWebhookController::resolveRecordingAfterEnd() - so the absence of a
+ * <Record> element on the inbound path implies nothing about inbound
+ * recordings. Measured in production: 537 of 666 inbound rows carry a
+ * recording, the longest 9712s against this 14400s ceiling. The predicate
+ * below carries no direction term and compares the ordinary duration column
+ * as well, so it applies to inbound and outbound rows alike.
+ *
+ * The margin is therefore 1.48x, not the 47.8x an earlier version of this
+ * docblock claimed. That figure was measured over the never-finalised rows
+ * alone - a population selected for short recordings, because they were
+ * interrupted - and so was measured on rows that cannot reach the limit. No
+ * row is at or above the ceiling today; that is a fact about today's data,
+ * not a property of the system.
+ *
+ * The predicate is KEPT, not deleted, because the shape it guards against is
+ * real: a row whose recording stopped at a ceiling may still be connected,
+ * and finalising it would write an end time and a final status onto a live
+ * conversation. What is withdrawn is the CLAIM that it bounds this population
+ * generally. The two bounds doing the work on every row here are the stored
+ * end-evidence filter and the age floor.
+ *
+ * The cost is stated rather than hidden: a call that really did end with a
+ * recording at or above the ceiling is declined here too, on either
+ * direction. That false negative is bought against a false positive on a live
+ * call, and it is not a silent loss - those rows are COUNTED and reported on
+ * every run, and a later hangup webhook, or a rerun after one arrives, still
+ * reaches them. Whether the exclusion should be narrowed is an open question
+ * for the card owner; this round states the reach rather than changes it.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -171,12 +189,13 @@ class FinaliseStuckCalls extends Command
         // ended_at and an age past the floor: every predicate satisfied by a
         // conversation in progress.
         //
-        // THE CEILING IS THE OTHER HALF. A stored length at or above the
-        // maxLength the controller emits says the RECORDING stopped, not the
-        // call, so the row is out of the population - the same discriminator
-        // the live path uses, reading the same constant so the two cannot
-        // drift. It costs the row that really did end with its recording at
-        // the ceiling: declined, counted below, and left for a later webhook
+        // THE CEILING IS THE OTHER HALF: a stored length at or above
+        // PhoneCallService::RECORDING_MAX_LENGTH_SECONDS puts the row out of
+        // the population, reading the service's constant so the two cannot
+        // drift. What such a length does and does not establish is stated
+        // once in the docblock above and deliberately not restated here. It
+        // costs the row that really did end with its recording at the
+        // ceiling: declined, counted below, and left for a later webhook
         // rather than risked.
         //
         // Ageing keys on the same anchor the derivation below uses -
@@ -197,6 +216,16 @@ class FinaliseStuckCalls extends Command
         // drops every row whose duration is null - which is most of this
         // population, including the 11 measured rows that carry a recording
         // and no duration.
+        // This tests a stored length at or above the ceiling in
+        // recording_duration OR in the ordinary duration column. There is no
+        // direction term and it needs none: inbound rows carry recordings too
+        // (537 of 666 in production, longest 9712s), and duration is written
+        // on inbound rows by the normal hangup path. A genuinely long call of
+        // either direction is excluded here - declined and counted by the
+        // ceiling warning below, not dropped silently.
+        // Retained because a length at the ceiling is weak evidence the call
+        // ended - not because it bounds this population, and not because it is
+        // free.
         $belowRecordingCeiling = function ($q) {
             $ceiling = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
 
@@ -256,8 +285,8 @@ class FinaliseStuckCalls extends Command
         // The second decline, reported for the same reason and derived the
         // same way - by subtracting the predicate from the population that
         // precedes it, so it cannot drift from the filter it reports on. These
-        // rows DID leave a trace; the trace is a recording that rolled over at
-        // the ceiling, which says the recording stopped and not the call. A
+        // rows DID leave a trace, but one at or above the ceiling, which the
+        // docblock above explains is not something this command will act on. A
         // genuinely ended call in this shape is reachable again as soon as a
         // hangup webhook lands, and until then this run says out loud that it
         // did not cover it.
@@ -268,8 +297,9 @@ class FinaliseStuckCalls extends Command
         if ($declinedAtCeiling > 0) {
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
-                .'population (a recording that rolled over says the RECORDING stopped, not '
-                .'the call - such a row may still be connected).',
+                .'population. A row counted here may have rolled over at a recording '
+                .'ceiling, or may be a genuinely long call or a backfilled duration; '
+                .'either way it is worth looking at directly.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));

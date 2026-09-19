@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Services\PhoneCallService;
@@ -295,6 +296,7 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * squarely in this population. That is what the maxLength ceiling
      * predicate excludes, and
      * test_a_call_declined_by_the_maxlength_guard_is_not_swept() is its pin.
+     *
      * The fixture below is the different, pre-callback shape - no columns at
      * all - which is the one the evidence filter is genuinely load-bearing
      * for.
@@ -356,6 +358,15 @@ class FinaliseStuckCallsCommandTest extends TestCase
 
         $live = PhoneCall::create([
             'call_uuid' => 'sweep-ceiling-live',
+            // INBOUND, matching the population the sweep actually acts on:
+            // 220 of the 221 never-finalised production rows are inbound. An
+            // earlier version of this fixture was re-aimed outbound on the
+            // theory that only outbound calls could hold a recording at the
+            // ceiling; that theory is withdrawn. The predicate below carries
+            // no direction term, and inbound calls do carry recordings
+            // (537 of 666 in production, longest 9712s) because inbound
+            // recording is configured in the Plivo application, not emitted
+            // by this code.
             'direction' => 'inbound',
             'from_number' => '+15555550111',
             'to_number' => '+15555550222',
@@ -380,6 +391,18 @@ class FinaliseStuckCallsCommandTest extends TestCase
         $live->recording_disk_path = 'call-recordings/pre-seeded-ceiling.mp3';
         $live->save();
 
+        // The ceiling exclusion has NO direction term, and this pins that
+        // rather than assuming it. Measured: re-aiming every fixture in this
+        // file to outbound leaves the whole suite green, which is exactly why
+        // an earlier round could flip these to outbound and see nothing break.
+        // An inbound fixture is therefore the honest one - it matches the 220
+        // of 221 never-finalised production rows this command acts on - and
+        // this assertion makes a silent re-flip fail instead of passing.
+        $this->assertSame(CallDirection::Inbound, $live->fresh()->direction,
+            'the ceiling exclusion applies to inbound rows too; this fixture represents the '
+            .'inbound population the sweep actually acts on, and must not be re-aimed outbound '
+            .'on the theory that only outbound calls can reach the ceiling');
+
         app(PhoneCallService::class)->handleRecordingReady(
             'sweep-ceiling-live',
             'https://media.example.test/rec-ceiling.mp3',
@@ -403,7 +426,7 @@ class FinaliseStuckCallsCommandTest extends TestCase
 
         $storedLive = $live->fresh();
         $this->assertNull($storedLive->ended_at,
-            'a recording that stopped at its ceiling is not evidence the call ended');
+            'a recording at or above the ceiling is too weak to treat as evidence the call ended');
         $this->assertSame(CallStatus::Ringing, $storedLive->status,
             'the sweep must not disposition a call that may still be connected');
 
