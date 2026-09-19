@@ -295,6 +295,15 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * squarely in this population. That is what the maxLength ceiling
      * predicate excludes, and
      * test_a_call_declined_by_the_maxlength_guard_is_not_swept() is its pin.
+     *
+     * A third correction, of scope rather than mechanism: that ceiling is
+     * emitted only by browserAnswer(), which serves OUTBOUND browser calls.
+     * The inbound handler emits no <Record> element, so the rolled-over shape
+     * above is an outbound-only shape and the predicate excludes nothing on
+     * the inbound rows that make up 220 of the 221 real never-finalised rows.
+     * The predicate is still correct where it applies; it is simply not a
+     * bound on THIS population, and the end-evidence filter and age floor are
+     * what actually hold it.
      * The fixture below is the different, pre-callback shape - no columns at
      * all - which is the one the evidence filter is genuinely load-bearing
      * for.
@@ -356,7 +365,15 @@ class FinaliseStuckCallsCommandTest extends TestCase
 
         $live = PhoneCall::create([
             'call_uuid' => 'sweep-ceiling-live',
-            'direction' => 'inbound',
+            // OUTBOUND on purpose. The <Record maxLength="14400"> element this
+            // test is about is emitted only by
+            // PlivoWebhookController::browserAnswer(), which serves outbound
+            // browser calls; the inbound handler emits no <Record> element at
+            // all, so an inbound row can never roll over at the ceiling. An
+            // earlier version of this fixture was inbound and so pinned the
+            // predicate against a row that could not exhibit the condition it
+            // names.
+            'direction' => 'outbound',
             'from_number' => '+15555550111',
             'to_number' => '+15555550222',
             'status' => CallStatus::Ringing,

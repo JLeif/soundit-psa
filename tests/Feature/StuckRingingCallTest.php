@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Services\PhoneCallService;
@@ -48,8 +49,12 @@ class StuckRingingCallTest extends TestCase
      * A call stuck exactly as the production rows are: ringing, no ended_at,
      * and (for the 25-row majority) a duration already backfilled.
      */
-    private function stuckRingingCall(string $uuid, ?int $duration = null, ?string $answeredAt = null): PhoneCall
-    {
+    private function stuckRingingCall(
+        string $uuid,
+        ?int $duration = null,
+        ?string $answeredAt = null,
+        string $direction = 'inbound',
+    ): PhoneCall {
         // ended_at, answered_at and duration are NOT in PhoneCall::$fillable,
         // so they must be assigned directly. Found the hard way: a create()
         // array carrying them silently DROPPED all three, and several tests in
@@ -58,7 +63,7 @@ class StuckRingingCallTest extends TestCase
         // one that fails loudly, because its red reads as proof.
         $call = PhoneCall::create([
             'call_uuid' => $uuid,
-            'direction' => 'inbound',
+            'direction' => $direction,
             'from_number' => '+15555550111',
             'to_number' => '+15555550222',
             'status' => CallStatus::Ringing,
@@ -275,11 +280,26 @@ class StuckRingingCallTest extends TestCase
      * reconcileAnsweredStateWithDuration() returns early on a null ended_at;
      * after it, the finalisation would have stamped ended_at and flipped the
      * status on a LIVE call.
+     *
+     * THE FIXTURE IS OUTBOUND ON PURPOSE, and that is the whole point of this
+     * guard. The only <Record maxLength> this application emits is in
+     * PlivoWebhookController::browserAnswer(), whose own docblock reads
+     * "Answer URL for OUTBOUND calls from browser endpoints"; the inbound
+     * handler returns a bare <Response></Response> with no <Record> element at
+     * all. An INBOUND row therefore cannot reach this ceiling by any path -
+     * the rollover this test describes is unreachable on it, and an earlier
+     * version of this test used an inbound fixture and so asserted a property
+     * of a call that could never exhibit it. A guard whose fixture cannot
+     * reach the condition it names passes for the wrong reason forever.
      */
-    public function test_a_maxlength_recording_does_not_finalise_a_still_connected_call(): void
+    public function test_a_maxlength_recording_does_not_finalise_a_still_connected_browser_call(): void
     {
         Queue::fake();
-        $call = $this->stuckRingingCall('stuck-ringing-maxlength');
+        $call = $this->stuckRingingCall('stuck-ringing-maxlength', direction: 'outbound');
+
+        $this->assertSame(CallDirection::Outbound, $call->fresh()->direction,
+            'the maxLength ceiling is emitted only by browserAnswer(), which serves OUTBOUND '
+            .'browser calls; an inbound fixture could never reach the rollover this test names');
 
         app(PhoneCallService::class)->handleRecordingReady(
             'stuck-ringing-maxlength',
@@ -323,16 +343,41 @@ class StuckRingingCallTest extends TestCase
      * threshold no recording can reach - so pin the emitted value itself.
      * This is a source assertion on purpose: the number is a contract between
      * two files, and no behavioural test can observe a mismatch.
+     *
+     * SCOPED TO browserAnswer(). An earlier version of this control read the
+     * WHOLE controller file, so it could not tell which method emitted the
+     * element and would have been satisfied by a maxLength anywhere in the
+     * file - including on a path where the ceiling has no jurisdiction. It
+     * also claimed in its failure message that a mismatch stops "the mid-call
+     * guard" firing on calls generally; there is no such guard on the inbound
+     * path, because there is no <Record> element there to roll over. The
+     * assertion now extracts browserAnswer()'s own body and requires the
+     * emission to be inside it.
      */
-    public function test_the_recording_ceiling_matches_the_value_the_controller_emits(): void
+    public function test_the_recording_ceiling_matches_the_value_browser_answer_emits(): void
     {
         $controller = file_get_contents(base_path('app/Http/Controllers/Api/PlivoWebhookController.php'));
 
+        // Take browserAnswer()'s body only: from its signature to the start of
+        // the next method declaration at the same indentation.
+        $this->assertSame(
+            1,
+            preg_match(
+                '/\n    public function browserAnswer\(.*?\n(?=    (?:public|private|protected) function )/s',
+                $controller,
+                $m
+            ),
+            'browserAnswer() must be locatable in the controller for this contract to be checkable; '
+            .'if the method was renamed or removed, re-aim this control rather than deleting it'
+        );
+
         $this->assertMatchesRegularExpression(
             '/<Record[^>]*maxLength="14400"/',
-            $controller,
-            'the <Record> maxLength the controller emits must match RECORDING_MAX_LENGTH_SECONDS; '
-            .'if this fails, update both together or the mid-call guard stops firing'
+            $m[0],
+            'the <Record> maxLength browserAnswer() emits must match RECORDING_MAX_LENGTH_SECONDS; '
+            .'if this fails, update both together or the rollover guard on OUTBOUND browser calls '
+            .'stops firing. This ceiling governs browserAnswer() alone - the inbound handler emits '
+            .'no <Record> element, so no inbound row can reach it'
         );
     }
 

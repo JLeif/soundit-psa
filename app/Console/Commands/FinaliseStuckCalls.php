@@ -56,10 +56,32 @@ use Illuminate\Support\Facades\Log;
  * drift apart and leave this predicate comparing against a threshold no
  * recording can reach.
  *
+ * THE CEILING BOUND HAS JURISDICTION OVER OUTBOUND BROWSER CALLS ONLY, and a
+ * THIRD version of this docblock - the one this paragraph corrects - was wrong
+ * about that in the opposite direction. It described the ceiling as one of the
+ * bounds holding this population safe, without saying which rows it can reach.
+ * The only <Record maxLength="14400"> this application emits is in
+ * PlivoWebhookController::browserAnswer(), which serves OUTBOUND calls from
+ * browser endpoints; the inbound handler returns a bare
+ * <Response></Response> carrying no <Record> element, so NO INBOUND ROW CAN
+ * EVER REACH THIS CEILING. Measured against production when this was written:
+ * 220 of the 221 rows with a null ended_at are inbound, and the single
+ * outbound row carries no recording at all - so this predicate excludes
+ * nothing in practice, and the largest recording in that population is 301s
+ * against a 14400s ceiling, a factor of 47.8.
+ *
+ * The predicate is KEPT, not deleted, because it is correct where it applies
+ * and free where it is not: an outbound browser call that rolls over at the
+ * ceiling is a real shape this command must not finalise. What is withdrawn is
+ * the CLAIM that it bounds this population generally. The two bounds actually
+ * doing the work on every row here are the stored end-evidence filter and the
+ * age floor.
+ *
  * The trade is the same one the live path makes, and it is stated rather than
- * hidden: a call that really did end with its recording at the ceiling is
- * declined here too. That false negative is bought against a false positive
- * that would write an end time and a final status onto a live conversation,
+ * hidden: an OUTBOUND BROWSER call that really did end with its recording at
+ * the ceiling is declined here too. That false negative is bought against a
+ * false positive that would write an end time and a final status onto a live
+ * conversation,
  * and it is not a silent loss - those rows are COUNTED and reported on every
  * run, and a later hangup webhook, or a rerun after one arrives, still
  * reaches them.
@@ -197,6 +219,15 @@ class FinaliseStuckCalls extends Command
         // drops every row whose duration is null - which is most of this
         // population, including the 11 measured rows that carry a recording
         // and no duration.
+        // Jurisdiction note, because the name reads broader than the reach:
+        // this excludes rows whose recording rolled over at the <Record>
+        // maxLength ceiling, and that element is emitted ONLY by
+        // PlivoWebhookController::browserAnswer() on OUTBOUND browser calls.
+        // An inbound row cannot reach the ceiling by any path, so on the
+        // measured population (220 of 221 null-ended_at rows inbound, max
+        // recording 301s against a 14400s ceiling) this predicate excludes
+        // nothing. Retained because it is correct where it applies and free
+        // where it is not - not because it bounds this population.
         $belowRecordingCeiling = function ($q) {
             $ceiling = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
 
@@ -269,7 +300,8 @@ class FinaliseStuckCalls extends Command
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
                 .'population (a recording that rolled over says the RECORDING stopped, not '
-                .'the call - such a row may still be connected).',
+                .'the call - such a row may still be connected). That ceiling is emitted only '
+                .'on OUTBOUND browser calls, so an inbound row is never declined for this reason.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));
