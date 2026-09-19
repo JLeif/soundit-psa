@@ -31,82 +31,56 @@ use Illuminate\Support\Facades\Log;
  * told apart from a conversation in progress, and a backfill that cannot tell
  * must not write.
  *
- * THAT BOUND IS NOT SUFFICIENT ALONE, and two earlier versions of this
- * docblock claimed otherwise, each wrongly. The first claimed 'none of the
- * three is ever written while a call is connected' - three review seats said
- * so and they were right: PlivoWebhookController emits
- * <Record ... maxLength="14400" />, and a Record element posts its callback
- * when the RECORDING stops - at that ceiling as well as at hangup - so on a
- * call still connected past four hours the recording columns ARE written
- * mid-call.
- *
- * The second claimed the live guard holds such a row out of here. It does
- * not. handleRecordingReady() writes recording_url, recording_duration and
- * (on a duration-less row) duration BEFORE
- * finaliseCallTheHangupNeverClosed() declines the maxLength case. The row it
+ * THAT BOUND IS NOT SUFFICIENT ALONE. End evidence can be written while a
+ * call is still connected: handleRecordingReady() writes recording_url,
+ * recording_duration and (on a duration-less row) duration before
+ * finaliseCallTheHangupNeverClosed() gets to decline anything. The row it
  * leaves behind carries a null ended_at, full end evidence, and at four hours
- * an age past every floor - it satisfied every predicate this command had.
- * The live guard moved the defect one command over rather than closing it.
+ * an age past every floor - it satisfies every other predicate here.
  *
- * So the second bound is that same ceiling test, applied HERE: a row whose
- * stored length is at or above
- * PhoneCallService::RECORDING_MAX_LENGTH_SECONDS is out of the population,
- * because that length says the RECORDING stopped, not the call. It reads the
- * service's constant instead of repeating the number, so the two cannot
- * drift apart and leave this predicate comparing against a threshold no
- * recording can reach.
+ * So the second bound is a length test: a row whose stored length is at or
+ * above PhoneCallService::RECORDING_MAX_LENGTH_SECONDS is out of the
+ * population, because a recording that long is more likely to have stopped at
+ * a ceiling than to describe a call that really ran that long. It reads the
+ * service's constant rather than repeating the number, so the two cannot
+ * drift apart.
  *
- * THE CEILING BOUND HAS JURISDICTION OVER OUTBOUND BROWSER CALLS ONLY, and a
- * THIRD version of this docblock - the one this paragraph corrects - was wrong
- * about that in the opposite direction. It described the ceiling as one of the
- * bounds holding this population safe, without saying which rows it can reach.
- * The only <Record maxLength="14400"> this application emits is in
- * PlivoWebhookController::browserAnswer(), which serves OUTBOUND calls from
- * browser endpoints; the inbound handler returns a bare
- * <Response></Response> carrying no <Record> element, so NO INBOUND RECORDING
- * CAN ROLL OVER AT THIS CEILING.
+ * WHAT IS ESTABLISHED, and nothing beyond it: browserAnswer() emits the only
+ * <Record maxLength="14400"> element in this application. That is a fact
+ * about this repository, pinned by a source assertion in StuckRingingCallTest.
  *
- * That is narrower than it sounds, and a FOURTH version of this paragraph -
- * the one these lines correct - overstated it as "no inbound row can ever
- * reach this ceiling". The predicate below is not a rollover test. It compares
- * the ordinary duration column against the ceiling as well as
- * recording_duration, and duration is written on inbound rows by the normal
- * hangup/answer path, not only by a recording callback. There is no direction
- * term. So an inbound conversation that really lasted four hours and one
- * minute - or a row whose duration was backfilled that long - DOES reach the
- * threshold and IS excluded here. What cannot happen on an inbound row is the
- * ROLLOVER the exclusion is reasoning about; the exclusion is therefore
- * over-broad on inbound rows rather than inapplicable to them. Such a row is
- * declined, counted and reported by the second warning below, not lost
- * silently.
+ * It is NOT a fact about which calls can hold a recording at that length, and
+ * three earlier versions of this docblock overreached in three different
+ * directions trying to make it one. Inbound recording is configured in the
+ * Plivo application rather than emitted by this code - see
+ * PlivoWebhookController::resolveRecordingAfterEnd() - so the absence of a
+ * <Record> element on the inbound path implies nothing about inbound
+ * recordings. Measured in production: 537 of 666 inbound rows carry a
+ * recording, the longest 9712s against this 14400s ceiling. The predicate
+ * below carries no direction term and compares the ordinary duration column
+ * as well, so it applies to inbound and outbound rows alike.
  *
- * Measured against production when this was written: 220 of the 221 rows with
- * a null ended_at are inbound, and the single outbound row carries no
- * recording at all - so this predicate excludes nothing on THAT population,
- * and the largest recording in it is 301s against a 14400s ceiling, a factor
- * of 47.8. That is a measurement of today's rows, not a bound on what a row
- * may carry.
+ * The margin is therefore 1.48x, not the 47.8x an earlier version of this
+ * docblock claimed. That figure was measured over the never-finalised rows
+ * alone - a population selected for short recordings, because they were
+ * interrupted - and so was measured on rows that cannot reach the limit. No
+ * row is at or above the ceiling today; that is a fact about today's data,
+ * not a property of the system.
  *
- * The predicate is KEPT, not deleted, because it is correct where it applies:
- * an outbound browser call that rolls over at the ceiling is a real shape this
- * command must not finalise. It is NOT free where it does not apply - a
- * four-hour-plus inbound call is declined by it too - but that cost is visible
- * rather than silent: no such row exists on the measured population, and any
- * that appears is counted and reported by the ceiling warning below. Whether
- * the exclusion should be narrowed to the rows whose rollover it reasons about
- * is an open question for the card owner; this round states the reach rather
- * than changes it. What is withdrawn is the CLAIM that it bounds this
- * population generally. The two bounds actually doing the work on every row
- * here are the stored end-evidence filter and the age floor.
+ * The predicate is KEPT, not deleted, because the shape it guards against is
+ * real: a row whose recording stopped at a ceiling may still be connected,
+ * and finalising it would write an end time and a final status onto a live
+ * conversation. What is withdrawn is the CLAIM that it bounds this population
+ * generally. The two bounds doing the work on every row here are the stored
+ * end-evidence filter and the age floor.
  *
- * The trade is the same one the live path makes, and it is stated rather than
- * hidden: an OUTBOUND BROWSER call that really did end with its recording at
- * the ceiling is declined here too. That false negative is bought against a
- * false positive that would write an end time and a final status onto a live
- * conversation,
- * and it is not a silent loss - those rows are COUNTED and reported on every
- * run, and a later hangup webhook, or a rerun after one arrives, still
- * reaches them.
+ * The cost is stated rather than hidden: a call that really did end with a
+ * recording at or above the ceiling is declined here too, on either
+ * direction. That false negative is bought against a false positive on a live
+ * call, and it is not a silent loss - those rows are COUNTED and reported on
+ * every run, and a later hangup webhook, or a rerun after one arrives, still
+ * reaches them. Whether the exclusion should be narrowed is an open question
+ * for the card owner; this round states the reach rather than changes it.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -241,20 +215,16 @@ class FinaliseStuckCalls extends Command
         // drops every row whose duration is null - which is most of this
         // population, including the 11 measured rows that carry a recording
         // and no duration.
-        // Jurisdiction note, and it has two halves that must not be collapsed
-        // into one. The shape this REASONS about is a recording that rolled
-        // over at the <Record> maxLength ceiling, and that element is emitted
-        // ONLY by PlivoWebhookController::browserAnswer() on OUTBOUND browser
-        // calls, so no inbound recording can roll over.
-        // What it TESTS is broader: a stored length at or above the ceiling in
-        // recording_duration OR in the ordinary duration column, with no
-        // direction term. duration is written on inbound rows by the normal
-        // hangup path, so a genuinely 4h+ inbound call is excluded here too -
-        // declined and counted by the ceiling warning below, not dropped.
-        // On the measured population (220 of 221 null-ended_at rows inbound,
-        // max recording 301s against a 14400s ceiling) it excludes nothing.
-        // Retained because it is correct where it applies - not because it
-        // bounds this population, and not because it is free elsewhere.
+        // This tests a stored length at or above the ceiling in
+        // recording_duration OR in the ordinary duration column. There is no
+        // direction term and it needs none: inbound rows carry recordings too
+        // (537 of 666 in production, longest 9712s), and duration is written
+        // on inbound rows by the normal hangup path. A genuinely long call of
+        // either direction is excluded here - declined and counted by the
+        // ceiling warning below, not dropped silently.
+        // Retained because a length at the ceiling is weak evidence the call
+        // ended - not because it bounds this population, and not because it is
+        // free.
         $belowRecordingCeiling = function ($q) {
             $ceiling = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
 
@@ -327,10 +297,9 @@ class FinaliseStuckCalls extends Command
             $this->warn(sprintf(
                 '%d row(s) at or above the maxLength recording ceiling (%ds) are NOT in the '
                 .'population (a recording that rolled over says the RECORDING stopped, not '
-                .'the call - such a row may still be connected). Only an OUTBOUND browser '
-                .'call can roll over at that ceiling; an inbound row counted here carries a '
-                .'stored length that long for some other reason - a genuinely long call, or a '
-                .'backfilled duration - and is worth looking at directly.',
+                .'the call - such a row may still be connected). A row counted here may have '
+                .'rolled over at a recording ceiling, or may be a genuinely long call or a '
+                .'backfilled duration; either way it is worth looking at directly.',
                 $declinedAtCeiling,
                 PhoneCallService::RECORDING_MAX_LENGTH_SECONDS
             ));

@@ -281,25 +281,25 @@ class StuckRingingCallTest extends TestCase
      * after it, the finalisation would have stamped ended_at and flipped the
      * status on a LIVE call.
      *
-     * THE FIXTURE IS OUTBOUND ON PURPOSE, and that is the whole point of this
-     * guard. The only <Record maxLength> this application emits is in
-     * PlivoWebhookController::browserAnswer(), whose own docblock reads
-     * "Answer URL for OUTBOUND calls from browser endpoints"; the inbound
-     * handler returns a bare <Response></Response> with no <Record> element at
-     * all. An INBOUND row therefore cannot reach this ceiling by any path -
-     * the rollover this test describes is unreachable on it, and an earlier
-     * version of this test used an inbound fixture and so asserted a property
-     * of a call that could never exhibit it. A guard whose fixture cannot
-     * reach the condition it names passes for the wrong reason forever.
+     * THE FIXTURE IS INBOUND, matching the production population: 220 of the
+     * 221 never-finalised rows are inbound. An earlier version of this test
+     * was re-aimed OUTBOUND on the theory that only outbound calls could hold
+     * a recording at the ceiling. That theory was wrong and is withdrawn: the
+     * predicate this guard protects carries no direction term at all, and
+     * inbound calls do carry recordings - 537 of 666 in production, the
+     * longest 9712s - because inbound recording is configured in the Plivo
+     * application rather than emitted by this code. Flipping the fixture
+     * outbound deleted the only executable inbound coverage of a guard whose
+     * real population is inbound.
      */
-    public function test_a_maxlength_recording_does_not_finalise_a_still_connected_browser_call(): void
+    public function test_a_maxlength_recording_does_not_finalise_a_still_connected_call(): void
     {
         Queue::fake();
-        $call = $this->stuckRingingCall('stuck-ringing-maxlength', direction: 'outbound');
+        $call = $this->stuckRingingCall('stuck-ringing-maxlength');
 
-        $this->assertSame(CallDirection::Outbound, $call->fresh()->direction,
-            'the maxLength ceiling is emitted only by browserAnswer(), which serves OUTBOUND '
-            .'browser calls; an inbound fixture could never reach the rollover this test names');
+        $this->assertSame(CallDirection::Inbound, $call->fresh()->direction,
+            'this guard protects the inbound population the sweep actually acts on; '
+            .'an outbound fixture would leave that population uncovered');
 
         app(PhoneCallService::class)->handleRecordingReady(
             'stuck-ringing-maxlength',
@@ -347,12 +347,15 @@ class StuckRingingCallTest extends TestCase
      * SCOPED TO browserAnswer(). An earlier version of this control read the
      * WHOLE controller file, so it could not tell which method emitted the
      * element and would have been satisfied by a maxLength anywhere in the
-     * file - including on a path where the ceiling has no jurisdiction. It
-     * also claimed in its failure message that a mismatch stops "the mid-call
-     * guard" firing on calls generally; there is no such guard on the inbound
-     * path, because there is no <Record> element there to roll over. The
-     * assertion now extracts browserAnswer()'s own body and requires the
-     * emission to be inside it.
+     * file. Scoping it to the emitting method is what makes it a contract
+     * between the constant and a specific line of XML.
+     *
+     * This control pins ONE fact and claims nothing beyond it: browserAnswer()
+     * emits the only <Record maxLength> element in this application. It does
+     * NOT establish which calls can hold a recording at that length. Inbound
+     * recording is configured in the Plivo application rather than emitted
+     * here - see resolveRecordingAfterEnd() - so the absence of a <Record>
+     * element on the inbound path says nothing about inbound recordings.
      */
     public function test_the_recording_ceiling_matches_the_value_browser_answer_emits(): void
     {
@@ -375,9 +378,9 @@ class StuckRingingCallTest extends TestCase
             '/<Record[^>]*maxLength="14400"/',
             $m[0],
             'the <Record> maxLength browserAnswer() emits must match RECORDING_MAX_LENGTH_SECONDS; '
-            .'if this fails, update both together or the rollover guard on OUTBOUND browser calls '
-            .'stops firing. This ceiling governs browserAnswer() alone - the inbound handler emits '
-            .'no <Record> element, so no inbound row can reach it'
+            .'if this fails, update both together or the rollover guard stops firing. This control '
+            .'pins where the element is emitted; it says nothing about which calls can reach that '
+            .'length, because inbound recording is configured outside this codebase'
         );
     }
 
