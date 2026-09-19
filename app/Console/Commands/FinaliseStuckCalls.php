@@ -78,9 +78,84 @@ use Illuminate\Support\Facades\Log;
  * recording at or above the ceiling is declined here too, on either
  * direction. That false negative is bought against a false positive on a live
  * call, and it is not a silent loss - those rows are COUNTED and reported on
- * every run, and a later hangup webhook, or a rerun after one arrives, still
- * reaches them. Whether the exclusion should be narrowed is an open question
- * for the card owner; this round states the reach rather than changes it.
+ * every run. What happens to them next depends on WHICH arm declined them, and
+ * earlier versions of this paragraph got that wrong in both directions - first
+ * by promising a later webhook would rescue them, then by promising nothing
+ * ever could. Neither is true of every declined row.
+ *
+ * The predicate is a conjunction: a row is kept only when recording_duration
+ * AND duration are each null-or-below the ceiling. So a row is declined when
+ * EITHER stored length reaches it, and the two cases differ.
+ *
+ * Declined on the duration column: that row stays declined on every pass. The
+ * stored length is not frozen in general - PhoneCallService::
+ * resolveRecordingFromPlivo() rewrites recording_duration, writing no duration
+ * and no ended_at, and the controller calls it on the same delivery - but
+ * nothing on that path lowers duration, so the conjunction keeps failing.
+ *
+ * Declined ONLY on recording_duration: duration is below the ceiling. Earlier
+ * versions of this docblock traced how such a row is produced and how it might
+ * come back, and were wrong in several directions; that analysis is deleted
+ * rather than corrected again, because it derived a case from a route the code
+ * cannot take. What an operator needs is the reach, below, not the provenance.
+ *
+ * resolveRecordingFromPlivo() has THREE live callers - ResolveCallRecording,
+ * ResolveCallRecordings, and PlivoWebhookController. The webhook one invokes it
+ * on the delivery it is already handling, and only for rows with a NULL
+ * answered_at: that call sits behind `$recordingDuration >= 3`, which a
+ * ceiling-length rollover clears, and `$call->answered_at === null`, which it
+ * clears only if nothing has stamped that column. Do NOT reason about which
+ * rows those are from `status`: an earlier version argued a four-hour recording is
+ * "overwhelmingly an answered call" because "a row does not sit ringing that
+ * long", which silently swapped the column under discussion. answerIsObserved()
+ * documents that the two diverge - on an inbound call Plivo has already answered
+ * the A leg, so CallStatus stays 'in-progress' while a tech's endpoint merely
+ * rings and while the call rings out to voicemail. A long-ringing inbound row
+ * can therefore hold a null answered_at and a non-ringing status at once. Which
+ * rows in this subset carry a null answered_at has NOT been measured; that is
+ * the open question, not a settled share.
+ *
+ * Neither resolve command can substitute: both skip a row that already has a
+ * recording_url, and every row here has one BY CONSTRUCTION - the only two
+ * writers of recording_duration in app/ each set recording_url in the same
+ * block. It is that guard that excludes them, not a duration test: the bulk
+ * command does carry duration > 0, but the singular one carries no duration
+ * guard at all, so do not go looking for one there.
+ *
+ * So do not tell an operator the unanswered part of this subset is beyond
+ * reach - and do not tell them the answered part is coming back.
+ *
+ * What this exclusion is NOT: it is not a handoff to the hangup webhook. Do not
+ * read a declined row as queued for one. But do not read the opposite into it
+ * either - this paragraph deliberately makes no claim that nothing reaches
+ * these rows, because several things can:
+ *
+ *   - a late or retried hangup webhook, via PhoneCallService::handleCallEnded(),
+ *     which writes ended_at with no ceiling or age guard;
+ *   - a redelivered recording callback, since an absent RecordingDuration
+ *     arrives as 0 (see the constant docblock in PhoneCallService) and reads as
+ *     complete, which finalises the row this sweep declined;
+ *   - a later run of THIS command, for the recording_duration-only subset
+ *     described above, once a resolve has written a shorter length.
+ *
+ * The first two act on a row this command passed over and neither is this
+ * command; the third is this command, on a later run. The honest statement of
+ * reach is the narrow one: THIS RUN declines these rows and reports them, and
+ * their disposition is left to whatever arrives next - including, for the
+ * narrow subset described above, a later run of this same sweep. Whether
+ * the exclusion should be narrowed is an open question for the card owner; this
+ * round states the reach rather than changes it.
+ *
+ * One more thing this population is NOT: it is not "rows whose hangup webhook
+ * never arrived". whereNull('ended_at') selects at least four classes - never
+ * arrived; not arrived YET; calls still connected right now; and the numerical
+ * majority - the 182 voicemail rows named in handle() below. Keep the two
+ * halves of that last one apart: the COUNT is measured in production, while
+ * the MECHANISM (their terminal webhook arrived and was discarded unrecorded,
+ * the controller's recording branch having returned 200 without falling
+ * through to the hangup handling) is read off the controller's own comment,
+ * not confirmed row by row. Collapsing these is how an operator talks
+ * themselves into force-finalising a live call.
  *
  * With both bounds in place the evidence filter's job is the narrow one it
  * always really did: it excludes rows that never finalised AND left no trace
@@ -120,7 +195,7 @@ class FinaliseStuckCalls extends Command
                             {--limit=0 : Process at most this many rows (0 = no limit).}
                             {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}';
 
-    protected $description = 'Finalise calls stuck at ringing/in-progress whose hangup webhook never arrived';
+    protected $description = 'Finalise old calls left with no ended_at that carry positive evidence of having ended (any status; --min-age-hours floor, and rows at the recording-length ceiling are excluded) - see the class docblock, because one class this mixes is calls still connected';
 
     public function handle(): int
     {
@@ -195,8 +270,12 @@ class FinaliseStuckCalls extends Command
         // drift. What such a length does and does not establish is stated
         // once in the docblock above and deliberately not restated here. It
         // costs the row that really did end with its recording at the
-        // ceiling: declined, counted below, and left for a later webhook
-        // rather than risked.
+        // ceiling: declined, counted below, and left to whatever else may
+        // reach it rather than risked here. Not "left for a later webhook" -
+        // this sweep hands off to nothing. The population is a mix of several
+        // classes, enumerated once in the docblock above and deliberately not
+        // restated here, because three sites restating it is how they came to
+        // disagree.
         //
         // Ageing keys on the same anchor the derivation below uses -
         // started_at, else created_at - so a row can never be aged by one
@@ -286,10 +365,15 @@ class FinaliseStuckCalls extends Command
         // same way - by subtracting the predicate from the population that
         // precedes it, so it cannot drift from the filter it reports on. These
         // rows DID leave a trace, but one at or above the ceiling, which the
-        // docblock above explains is not something this command will act on. A
-        // genuinely ended call in this shape is reachable again as soon as a
-        // hangup webhook lands, and until then this run says out loud that it
-        // did not cover it.
+        // docblock above explains is not something this command will act on.
+        // Do not read that as a promise in either direction: a rerun may take
+        // the row back if it was declined only on recording_duration and a
+        // later resolve writes a shorter length, and a late hangup webhook or a
+        // redelivered recording callback can finalise it independently of this
+        // sweep (see the docblock above). Some of these rows are also still
+        // connected - the docblock enumerates the classes; this comment does
+        // not restate them. So this run says out loud that it did not cover them, and
+        // promises nothing about what will.
         $agedStuckWithEvidence = $agedStuck->clone()->where($endedEvidence);
         $declinedAtCeiling = $agedStuckWithEvidence->clone()->count()
             - $agedStuckWithEvidence->clone()->where($belowRecordingCeiling)->count();
