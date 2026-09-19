@@ -339,9 +339,14 @@ class FinaliseStuckCallsCommandTest extends TestCase
      * The fixture is produced by running the real webhook path rather than by
      * hand, so it is the shape the service ACTUALLY leaves behind, not the
      * shape this test believes it leaves - the assumption that failed twice
-     * already. The three preconditions below pin that shape explicitly: if a
-     * future change stops writing those columns before declining, they go red
-     * and say why rather than leaving the sweep's predicate silently vacuous.
+     * already. The preconditions below pin that shape explicitly: if a future
+     * change stops writing those columns before declining, they go red and
+     * say why rather than leaving the sweep's predicate silently vacuous.
+     *
+     * Running the real path is also what makes this the one test in the file
+     * that could open a socket, so the fixture closes that off deliberately -
+     * see the comment on recording_disk_path below, and the precondition that
+     * pins the short-circuit actually held.
      */
     public function test_a_call_declined_by_the_maxlength_guard_is_not_swept(): void
     {
@@ -358,6 +363,23 @@ class FinaliseStuckCallsCommandTest extends TestCase
             'started_at' => now()->subHours(5),
         ]);
 
+        // NO LIVE SOCKET. handleRecordingReady() ends by calling
+        // downloadRecording(), which builds a raw Guzzle client (timeout 300,
+        // connect_timeout unset - i.e. wait forever) that Queue::fake(),
+        // Http::fake() and Storage::fake() all fail to intercept. On a runner
+        // whose egress is blackholed rather than refused, this one test would
+        // stall the suite up to five minutes or be killed by a shorter
+        // watchdog; on a resolver that answers for the reserved .test TLD it
+        // would write a third-party response body to the REAL local disk.
+        //
+        // A recording already on disk is downloadRecording()'s own documented
+        // no-op precondition, so pre-seeding the path keeps the socket closed
+        // without stubbing anything this test is about: the webhook path below
+        // is still the real one, and every column the assertions read is still
+        // written by it. Not fillable - assign directly.
+        $live->recording_disk_path = 'call-recordings/pre-seeded-ceiling.mp3';
+        $live->save();
+
         app(PhoneCallService::class)->handleRecordingReady(
             'sweep-ceiling-live',
             'https://media.example.test/rec-ceiling.mp3',
@@ -371,6 +393,9 @@ class FinaliseStuckCallsCommandTest extends TestCase
             'precondition: the recording columns ARE written on the declined row');
         $this->assertEquals(14400, $afterCallback->duration,
             'precondition: duration is backfilled too, so the declined row carries end evidence');
+        $this->assertSame('call-recordings/pre-seeded-ceiling.mp3', $afterCallback->recording_disk_path,
+            'precondition: the pre-seeded disk path is untouched, so downloadRecording() '
+            .'short-circuited and this test opened no socket');
 
         $this->artisan('calls:finalise-stuck --apply')
             ->expectsOutputToContain('at or above the maxLength recording ceiling')
