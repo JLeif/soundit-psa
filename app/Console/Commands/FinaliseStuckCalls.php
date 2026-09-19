@@ -93,16 +93,28 @@ use Illuminate\Support\Facades\Log;
  * and no ended_at, and the controller calls it on the same delivery - but
  * nothing on that path lowers duration, so the conjunction keeps failing.
  *
- * Declined ONLY on recording_duration, with duration null: that row CAN come
- * back. Note how it gets there, because the obvious route does NOT produce it:
- * handleRecordingReady() backfills duration from any positive callback value,
- * and a ceiling-length one is positive, so that path sets BOTH columns to the
- * ceiling and the row lands in the case above. The subset therefore comes from
- * resolveRecordingFromPlivo(), which writes recording_duration and no duration
- * at all.
+ * Declined ONLY on recording_duration: duration is below the ceiling, which is
+ * two situations, not one - duration null, and duration non-null but under the
+ * ceiling. Only the NULL variant is discussed below; a row carrying a real
+ * sub-ceiling duration is declined for the recording arm alone and is not
+ * analysed here.
  *
- * That same method is also what brings such a row back, if a later call writes
- * a shorter length: both arms then pass and the next rerun DOES take the row.
+ * The null variant CAN come back. Note how it gets there, because the obvious
+ * route does NOT produce it: handleRecordingReady() backfills duration from any
+ * positive callback value, and a ceiling-length one is positive, so that path
+ * sets BOTH columns to the ceiling and the row lands in the case above. The
+ * subset therefore comes from resolveRecordingFromPlivo(), which writes
+ * recording_duration and no duration at all - and it must be a resolve on a
+ * LATER delivery, because on the delivery carrying the recording the controller
+ * has already run handleRecordingReady() with the same value one branch
+ * earlier.
+ *
+ * That same method is also the only thing that can bring such a row back, and
+ * it usually will not. It queries the vendor for this call's recordings and
+ * deliberately keeps the LONGEST one, so a re-query normally rewrites the SAME
+ * ceiling-length value. It writes a shorter length only if the vendor's answer
+ * has changed. When that does happen both arms pass and the next rerun DOES
+ * take the row.
  * Its live caller is PlivoWebhookController, which invokes it on the delivery
  * it is already handling - but only for part of this subset. That call sits
  * behind two gates: `$recordingDuration >= 3`, which a ceiling-length rollover
@@ -135,10 +147,11 @@ use Illuminate\Support\Facades\Log;
  *   - a later run of THIS command, for the recording_duration-only subset
  *     described below, once a resolve has written a shorter length.
  *
- * The first two act on a row this command passed over, and neither is this
- * command; the third is. The
- * honest statement of reach is the narrow one: THIS sweep declines these rows,
- * reports them, and leaves their disposition to whatever else arrives. Whether
+ * The first two act on a row this command passed over and neither is this
+ * command; the third is this command, on a later run. The honest statement of
+ * reach is the narrow one: THIS RUN declines these rows and reports them, and
+ * their disposition is left to whatever arrives next - including, for the
+ * narrow subset described above, a later run of this same sweep. Whether
  * the exclusion should be narrowed is an open question for the card owner; this
  * round states the reach rather than changes it.
  *
@@ -189,7 +202,7 @@ class FinaliseStuckCalls extends Command
                             {--limit=0 : Process at most this many rows (0 = no limit).}
                             {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}';
 
-    protected $description = 'Finalise calls stuck at ringing/in-progress with no ended_at (webhook never arrived, not arrived yet, or still connected)';
+    protected $description = 'Finalise calls left with no ended_at, whatever their status (see the class docblock for the classes this mixes, one of which is calls still connected)';
 
     public function handle(): int
     {

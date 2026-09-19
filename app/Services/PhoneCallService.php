@@ -565,11 +565,14 @@ class PhoneCallService
      * be flipped. It is NOT coverage of production, because the sole production
      * caller passes $request->integer(), which cannot return null - so the
      * branch that test pins is one no delivery reaches. The value production
-     * actually emits for an absent field is 0, and that value IS covered:
-     * CoalescedRecordingTerminalWebhookTest posts RecordingDuration => 0
-     * through the real controller path in three places, so 0 arrives here and
-     * reads as complete. What is uncovered is the NULL arm's production
-     * counterpart, which does not exist.
+     * actually emits for an absent field is 0. That value does REACH this method
+     * in tests - CoalescedRecordingTerminalWebhookTest posts RecordingDuration
+     * => 0 through the real controller path in three places - but reaching is
+     * not pinning: all three also post CallStatus 'completed', so the terminal
+     * branch calls handleCallEnded() and writes ended_at regardless of what this
+     * flag decided. They would stay green if the 0 verdict flipped. So the flag's
+     * treatment of 0 is exercised and NOT pinned, and no test covers the NULL
+     * arm's production counterpart, which does not exist.
      *
      * Why the second look below could not do this job: it returns early when
      * ended_at === null, so the one webhook that DID arrive declined to act on
