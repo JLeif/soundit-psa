@@ -412,13 +412,19 @@ class PhoneCallService
      *     inbound recording callbacks "often don't reach our webhook", and the
      *     compensating API path (resolveRecordingFromPlivo) writes
      *     recording_duration WITHOUT invoking the second look. (An earlier
-     *     version of this note said that path was "gated behind duration >= 1".
-     *     That was wrong and is corrected here: of its three callers, only the
-     *     BULK command ResolveCallRecordings carries `duration > 0`; the
-     *     singular ResolveCallRecording has no duration guard at all, and the
-     *     webhook caller is gated on `$recordingDuration >= 3` and a null
-     *     answered_at instead. What actually excludes these rows from both
-     *     commands is the recording_url guard.) So for a meaningful share of
+     *     version of this note said that path was "gated behind duration >= 1";
+     *     a later one withdrew that outright, and the withdrawal overshot. The
+     *     duration gate is real on every AUTOMATIC route into it: the bulk
+     *     command ResolveCallRecordings selects `duration > 0`, and the
+     *     singular ResolveCallRecording - which carries no duration guard in
+     *     its own body - is spawned only by
+     *     PlivoWebhookController::resolveRecordingAfterEnd(), which returns on
+     *     `! $call->duration || $call->duration < 1`. So on a duration-null row
+     *     no automatic path reaches this API at all. Do NOT read the
+     *     recording_url guard as what excludes such a row: both commands select
+     *     rows that LACK a recording_url, so that guard ADMITS it. The third
+     *     caller, the webhook's own in-delivery call, is gated on
+     *     `$recordingDuration >= 3` and a null answered_at instead.) So for a meaningful share of
      *     the very rows this fix targets, the ceiling is the permanent value. The status
      *     is still corrected, which is the defect being fixed; the answer moment
      *     stays approximate.
