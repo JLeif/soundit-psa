@@ -65,14 +65,18 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             'to_number' => '+12065550199',
             'status' => CallStatus::Voicemail,
             'started_at' => now()->subMinutes(2),
-            'recording_url' => 'https://example.test/r.mp3',
-            'recording_duration' => 20,
             'recording_disk_path' => 'call-recordings/seeded.mp3',
         ], $overrides));
 
-        // ended_at / answered_at / duration are not fillable — assign directly
-        // or create() drops them silently and the test fails for the wrong
-        // reason. Same trap documented in the sibling coalesced-webhook suite.
+        // recording_url / recording_duration / ended_at / answered_at / duration
+        // are not fillable — assign directly or create() drops them silently and
+        // the test fails for the wrong reason. Same trap documented in the
+        // sibling coalesced-webhook suite, and it bit the two recording columns
+        // here: they are the stored end evidence FinaliseStuckCalls selects its
+        // population on, so a fixture that dropped them left the sweep control
+        // asserting against a row the sweep could never have seen.
+        $call->recording_url = $overrides['recording_url'] ?? 'https://example.test/r.mp3';
+        $call->recording_duration = $overrides['recording_duration'] ?? 20;
         $call->ended_at = $overrides['ended_at'] ?? null;
         $call->answered_at = $overrides['answered_at'] ?? null;
         $call->save();
@@ -229,7 +233,16 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
      * staff about end evidence the database can still discard, and a throw from
      * the queue at that point would roll back ended_at, the final status and
      * the prepay debit. Pinned by recording the transaction nesting level at
-     * the moment the release is called - 0 means the commit already happened.
+     * the moment the release is called and comparing it with the level outside
+     * handleCallEnded(): equal means the commit already happened.
+     *
+     * THE BASELINE IS NOT ZERO, and asserting zero pins nothing. RefreshDatabase
+     * opens a transaction on the connection before the test body runs and rolls
+     * it back afterwards, so the level is 1 throughout this method;
+     * updateCallSafely()'s DB::transaction() nests a savepoint to 2 and returns
+     * to 1 when that savepoint is released. No placement of the release could
+     * satisfy an assertion of 0, which is why it is compared against the level
+     * observed here instead.
      */
     public function test_the_release_runs_after_the_transaction_has_committed(): void
     {
@@ -254,9 +267,15 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             }
         });
 
+        $baseline = DB::transactionLevel();
+
         app(PhoneCallService::class)->handleCallEnded($call->call_uuid, ['Duration' => '20']);
 
-        $this->assertSame(0, $observed->transactionLevel, 'the release must be called with no transaction open');
+        $this->assertSame(
+            $baseline,
+            $observed->transactionLevel,
+            'the release must be called with no transaction open beyond the one the test harness holds'
+        );
         $this->assertSame(1, $this->voicemailJobsQueued(), 'and it must still send the withheld email');
     }
 
@@ -283,6 +302,37 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
         $this->assertNotNull($fresh->ended_at, 'the recording path finalised the row');
         $this->assertSame(1, $this->voicemailJobsQueued(), 'that writer must release the withheld email too');
         $this->assertNull($fresh->voicemail_notify_deferred_at, 'and claim the marker while doing it');
+    }
+
+    /**
+     * ONE EMAIL PER VOICEMAIL ACROSS TWO SENDERS THAT BOTH RUN IN ONE REQUEST.
+     * PlivoWebhookController's recording branch calls handleRecordingReady()
+     * first - which finalises the row and, once committed, releases the withheld
+     * email - and then, when transcription will not run, calls
+     * notifyNewVoicemail() on a refreshed row. That row now reads ended_at set,
+     * marker cleared, which the marker alone cannot tell apart from a call
+     * nothing was ever withheld for: without a record of the send, this sequence
+     * queues the same email twice.
+     *
+     * The same (ended, unmarked) row arrives across processes rather than across
+     * two lines: the transcription entrance writes the marker, a terminal webhook
+     * claims and sends it, and the transcription process's own re-read then sees
+     * it. One claim on the send covers both, so one control pins both.
+     */
+    public function test_a_release_followed_by_the_controller_entrance_sends_one_email(): void
+    {
+        Queue::fake();
+        $this->staffUser();
+        $call = $this->voicemailCall();
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+
+        // The controller's own order: the recording work, which releases, and
+        // then the immediate notification on a refreshed row.
+        app(PhoneCallService::class)->handleRecordingReady($call->call_uuid, 'https://media.example.test/r.mp3', 20);
+        app(NotificationService::class)->notifyNewVoicemail($call->refresh());
+
+        $this->assertSame(1, $this->voicemailJobsQueued(), 'one voicemail, one email, across both senders');
     }
 
     /**
