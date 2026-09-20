@@ -4,13 +4,16 @@ namespace Tests\Feature;
 
 use App\Enums\CallDirection;
 use App\Enums\CallStatus;
+use App\Enums\NotificationEventType;
 use App\Models\PhoneCall;
 use App\Models\Setting;
+use App\Models\User;
 use App\Services\NotificationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
@@ -623,6 +626,57 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $newer = $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
         $this->deferredCall(['deferred_at' => null]);
 
+        // Round 2 context:1, and the fixture is PART OF THE CONTROL. Every
+        // send-shaped mutant this guard exists to kill has to get past two
+        // early returns before it can reach a transport, and an empty fixture
+        // fails both of them:
+        //
+        //   NotificationService::dispatchVoicemailNotification() iterates
+        //   User::where('is_active', true)->whereNotNull('email')->get() --
+        //   an empty collection means the foreach body never runs.
+        //   SendTicketNotification::handle() returns on a missing recipient
+        //   (User::find(...) / no email) and returns AGAIN on a missing
+        //   graph_mailbox, logging '[Notification] Email not configured'.
+        //
+        // Without a recipient and a mailbox the raiser below is unreachable
+        // and this control is green by construction -- the exact false-green
+        // that made a round-1 dispatch_sync mutant look like a gap when it had
+        // in fact never dispatched, and the reason two mutants this round were
+        // reported NOT SCORED and re-aimed. The kill evidence was measured
+        // against a fixture with a recipient and a mailbox, so the committed
+        // fixture has to be that one.
+        //
+        // notification_preferences is left null deliberately:
+        // User::wantsNotification() then takes NotificationEventType's enabled
+        // default, which is the shape a real operator account has.
+        $recipient = User::factory()->create([
+            'email' => 'oncall@example.test',
+            'is_active' => true,
+            'notification_preferences' => null,
+        ]);
+        Setting::setValue('graph_mailbox', 'helpdesk@example.test');
+
+        // Round 2 c1:v3-replacement:1. Leaving preferences null buys realism
+        // at the cost of resting this control's reachability on an UNPINNED
+        // production default: NotificationEventType::defaultEnabled() is a
+        // hardcoded `return true`, and nothing else in this file asserts it.
+        // MEASURED, not argued -- flipping that one production line to
+        // `return false` leaves this whole control PASSING (9 assertions,
+        // green) while the Graph raiser below has become unreachable again.
+        // That is precisely the green-by-construction failure the round-2
+        // rework was written to close, restored through a back door.
+        //
+        // So the precondition is asserted rather than assumed. This is a
+        // statement about the fixture, not about product policy: if the
+        // default is ever deliberately flipped, this line fails loudly and
+        // whoever flips it has to give the fixture an explicit preference,
+        // instead of the guard quietly going hollow.
+        $this->assertTrue(
+            $recipient->wantsNotification(NotificationEventType::NewVoicemail),
+            'The fixture recipient does not want the notification, so no send-shaped '
+            .'mutant can reach the Graph raiser and this control is green by construction.'
+        );
+
         // The two marked rows are the stranded set by construction: both are
         // older than the default threshold and the third row carries no marker
         // at all. The ids come from the rows the helper returned -- the idiom
@@ -670,15 +724,187 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // perform. A mutant dispatching one job per stranded row and writing
         // nothing passed this control green. QUEUE_CONNECTION=sync and
         // MAIL_MAILER=array meant it was swallowed silently.
+        //
+        // #2935 (r6 diff:5), MEASURED RATHER THAN ACCEPTED. The finding says
+        // Queue::assertNothingPushed() misses dispatch_sync()/dispatchNow()
+        // as well as the Mail:: and Notification:: transports. Half of that
+        // is FALSE at laravel/framework 12.69.2 and half is TRUE, and only
+        // mutation separated them:
+        //
+        //   dispatch_sync(new SendTicketNotification(...))  -> KILLED
+        //       QueueFake routes the sync dispatch through its own record,
+        //       so assertNothingPushed() names the job.
+        //   Dispatcher::dispatchNow(...)                    -> SURVIVED
+        //       Round 1 diff:2 caught this against an earlier version of
+        //       THIS COMMENT, which named dispatchNow() in the same breath
+        //       as dispatch_sync() and declared both closed on one measured
+        //       kill. dispatchNow() runs the handler through the pipeline
+        //       inline and never touches the queue resolver, so QueueFake
+        //       records nothing; the mutant was instrumented and fired
+        //       twice while the control stayed green. Two verbs that look
+        //       like synonyms are not: one is closed, one was wide open.
+        //
+        //       Chasing that mutant found the bigger hole. The production
+        //       notification job does not send through the mail transport
+        //       at all: SendTicketNotification::handle() calls EmailService,
+        //       which posts users/{mailbox}/sendMail through GraphClient --
+        //       and GraphClient uses RAW GUZZLE, so neither Mail::, nor
+        //       Notification::, nor even Http::fake() can observe it. Run
+        //       inline with a real recipient it reaches a live outbound
+        //       request, stopped today only by the HTTP_PROXY pin at
+        //       phpunit.xml:22-23 -- a network accident, not an assertion.
+        //       So the Graph client is bound to a raiser below: the one
+        //       transport that actually carries production notifications is
+        //       the one a writes-nothing guard most needs to watch.
+        //   Notification::route('mail',...)->notify(...)    -> SURVIVED
+        //   Mail::to(...)->send(new Mailable)               -> SURVIVED
+        //   Mail::raw(...) / Mail::send('view', ...)        -> SURVIVED
+        //
+        // Notification:: is closed by faking that transport. Mail:: is NOT,
+        // and Mail::fake() actively makes it worse -- measured, not assumed:
+        //
+        //   Mail::raw() with Mail::fake()     -> array transport count 0
+        //   Mail::raw() without Mail::fake()  -> array transport count 1
+        //
+        // MailFake records MAILABLES only; its raw() and send() are empty
+        // stubs (MailFake.php:473+), so assertNothingSent() inspects a
+        // collection those verbs never populate AND the message never
+        // reaches a transport anyone can inspect. Mailer::raw()
+        // (Mailer.php:221) really does send. Faking mail here would hide
+        // exactly the shape that escapes.
+        //
+        // Round 1 context:1 (escalated as diff:5): asserting on the mailer
+        // NAMED 'array' while the command sends through the DEFAULT mailer
+        // ties the two together only via phpunit.xml, a file this test never
+        // reads -- and phpunit.xml:32 sets MAIL_MAILER WITHOUT force="true"
+        // (contrast :22-23, which use it), so a MAIL_MAILER already in the
+        // process environment silently wins. Measured:
+        //
+        //   default env        -> mail.default=array, named count after send 1
+        //   MAIL_MAILER=log    -> mail.default=log,   named count after send 0
+        //
+        // config/mail.php:78 always defines an 'array' mailer, so the
+        // instrument keeps returning a valid, EMPTY transport and the guard
+        // passes while real mail leaves by another route. Silent, not loud,
+        // which is the worst shape for a safety control. So assert the
+        // binding instead of trusting it, and inspect the DEFAULT mailer
+        // rather than one addressed by name.
+        //
+        // So Mail is deliberately NOT faked. Under MAIL_MAILER=array the
+        // real mailer delivers into ArrayTransport, which keeps every
+        // message whatever verb produced it -- an assertion about what LEFT
+        // rather than about which API was called. Nothing reaches a network:
+        // phpunit.xml pins MAIL_MAILER=array for the whole suite.
         Queue::fake();
+        Notification::fake();
+
+        // The real notification transport. Binding it to a double turns any
+        // send attempt into an observable event instead of an outbound
+        // request, and covers the inline paths that reach EmailService
+        // without ever touching the queue binding.
+        //
+        // Round 2 c1:v2:1: this sentence USED to name "dispatchNow()/
+        // dispatchSync()" together, which is the same conflation round 1
+        // diff:2 already caught 60 lines above -- and the measurement up
+        // there contradicts it: dispatch_sync() is KILLED by QueueFake,
+        // dispatchNow() SURVIVED it. Pairing them again here re-asserted a
+        // claim this file's own evidence refutes, so the pairing is gone:
+        // what this binding covers is the inline-handler route, whichever
+        // verb reaches it.
+        //
+        // Round 2 context:2: THE THROW ALONE IS NOT THE CONTROL. The
+        // production remediation path swallows it --
+        // NotificationService::sendVoicemailNotificationOnce() (:554-561)
+        // wraps its dispatch in catch (\Throwable) and logs '[Voicemail]
+        // Notification could not be queued and will not be retried', by
+        // design, because the claim is already taken by then. A
+        // \RuntimeException raised inside EmailService on that path therefore
+        // never reaches PHPUnit: the command still exits 0 and every
+        // assertion below still passes while a Graph send was attempted. So
+        // the attempt is RECORDED in a variable this test owns and asserted
+        // after the run; no production catch can reach that. The throw stays
+        // because it also stops a caller mid-loop rather than letting it walk
+        // the whole stranded set, and because on the paths that do NOT catch
+        // (a direct EmailService call, dispatchNow of the job -- whose own
+        // catch is on GraphClientException, not its \RuntimeException parent)
+        // it still fails loudly at the point of the send.
+        $graphSends = [];
+        $recordGraphSend = function (string $endpoint) use (&$graphSends): void {
+            $graphSends[] = $endpoint;
+        };
+
+        $this->app->bind(\App\Services\Graph\GraphClient::class, function () use ($recordGraphSend) {
+            return new class($recordGraphSend) extends \App\Services\Graph\GraphClient
+            {
+                private \Closure $record;
+
+                public function __construct(\Closure $record)
+                {
+                    $this->record = $record;
+                }
+
+                public function post(string $endpoint, array $data): array
+                {
+                    ($this->record)($endpoint);
+
+                    throw new \RuntimeException(
+                        'The command sent a Graph request to '.$endpoint.': it sent something.'
+                    );
+                }
+            };
+        });
+
+        $this->assertSame(
+            'array',
+            config('mail.default'),
+            'This guard inspects the mail transport directly and needs the array '
+                .'mailer to be the DEFAULT one. phpunit.xml sets MAIL_MAILER without '
+                .'force="true", so an inherited environment variable silently wins.'
+        );
+
+        $transport = app(\Illuminate\Mail\MailManager::class)
+            ->mailer()
+            ->getSymfonyTransport();
+
+        $this->assertInstanceOf(
+            \Illuminate\Mail\Transport\ArrayTransport::class,
+            $transport,
+            'The default mailer must resolve to an ArrayTransport, or nothing below '
+                .'can observe what the command sent.'
+        );
+
+        $transport->flush();
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->assertExitCode(0);
 
+        // The recorded half of the Graph guard, and the half a caught throw
+        // cannot silence -- see the binding above. A send attempt that
+        // sendVoicemailNotificationOnce() logs and swallows leaves the command
+        // exiting 0 and leaves nothing else in this test to fail, but it
+        // leaves an endpoint here.
+        $this->assertSame(
+            [],
+            $graphSends,
+            'The command reached the Graph send transport: it sent something.'
+        );
+
         $this->assertSame($before, $snapshot());
 
-        // The third prohibited act: no notification may leave the box.
+        // The third prohibited act: no notification may leave the box, by any
+        // transport. Each assertion below has its own kill-mutant recorded
+        // above; none is decorative.
         Queue::assertNothingPushed();
+        Notification::assertNothingSent();
+
+        // The transport-level check that covers every mail verb, including
+        // the two MailFake cannot record. Kill-mutants: Mail::raw(...),
+        // Mail::send([...], ...), and Mail::to(...)->send(new Mailable).
+        $this->assertSame(
+            [],
+            $transport->messages()->all(),
+            'The command put a message on the mail transport: it sent something.'
+        );
 
         // Precondition, on the production surface: the command must actually
         // have reported the two stranded rows, or every assertion above is
