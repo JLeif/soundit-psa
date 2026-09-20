@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Enums\CallDirection;
 use App\Enums\CallStatus;
+use App\Enums\NotificationEventType;
 use App\Models\PhoneCall;
 use App\Models\Setting;
 use App\Models\User;
@@ -648,12 +649,33 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // notification_preferences is left null deliberately:
         // User::wantsNotification() then takes NotificationEventType's enabled
         // default, which is the shape a real operator account has.
-        User::factory()->create([
+        $recipient = User::factory()->create([
             'email' => 'oncall@example.test',
             'is_active' => true,
             'notification_preferences' => null,
         ]);
         Setting::setValue('graph_mailbox', 'helpdesk@example.test');
+
+        // Round 2 c1:v3-replacement:1. Leaving preferences null buys realism
+        // at the cost of resting this control's reachability on an UNPINNED
+        // production default: NotificationEventType::defaultEnabled() is a
+        // hardcoded `return true`, and nothing else in this file asserts it.
+        // MEASURED, not argued -- flipping that one production line to
+        // `return false` leaves this whole control PASSING (9 assertions,
+        // green) while the Graph raiser below has become unreachable again.
+        // That is precisely the green-by-construction failure the round-2
+        // rework was written to close, restored through a back door.
+        //
+        // So the precondition is asserted rather than assumed. This is a
+        // statement about the fixture, not about product policy: if the
+        // default is ever deliberately flipped, this line fails loudly and
+        // whoever flips it has to give the fixture an explicit preference,
+        // instead of the guard quietly going hollow.
+        $this->assertTrue(
+            $recipient->wantsNotification(NotificationEventType::NewVoicemail),
+            'The fixture recipient does not want the notification, so no send-shaped '
+            .'mutant can reach the Graph raiser and this control is green by construction.'
+        );
 
         // The two marked rows are the stranded set by construction: both are
         // older than the default threshold and the third row carries no marker
@@ -778,8 +800,17 @@ class StrandedVoicemailDeferralReportTest extends TestCase
 
         // The real notification transport. Binding it to a double turns any
         // send attempt into an observable event instead of an outbound
-        // request, and covers the dispatchNow()/dispatchSync() paths that
-        // reach EmailService without ever touching the queue binding.
+        // request, and covers the inline paths that reach EmailService
+        // without ever touching the queue binding.
+        //
+        // Round 2 c1:v2:1: this sentence USED to name "dispatchNow()/
+        // dispatchSync()" together, which is the same conflation round 1
+        // diff:2 already caught 60 lines above -- and the measurement up
+        // there contradicts it: dispatch_sync() is KILLED by QueueFake,
+        // dispatchNow() SURVIVED it. Pairing them again here re-asserted a
+        // claim this file's own evidence refutes, so the pairing is gone:
+        // what this binding covers is the inline-handler route, whichever
+        // verb reaches it.
         //
         // Round 2 context:2: THE THROW ALONE IS NOT THE CONTROL. The
         // production remediation path swallows it --
