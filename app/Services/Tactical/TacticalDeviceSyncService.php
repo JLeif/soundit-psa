@@ -310,6 +310,21 @@ class TacticalDeviceSyncService
                 return null;
             }
 
+            // The floor bounds the input from BELOW only, and the modular wrap this
+            // class of bug turns on maps an out-of-range float onto the WHOLE int
+            // range — not only onto values under the floor. 2^64 + 1789616128 (a
+            // finite double the producer's FloatField can carry) clears the floor,
+            // casts to 1789616128, is a plausible past instant, and would be written
+            // as a fabricated boot time that also wins the never-backwards
+            // arbitration — which a populated column cannot mask (r4 diff:1,
+            // context:1). A value PHP's int cannot carry is not an observation of
+            // any instant, so refuse it BEFORE the cast rather than ranking whatever
+            // the wrap happens to produce. (float) PHP_INT_MAX is exactly 2^63, so
+            // everything reaching the cast below truncates exactly.
+            if ($epoch >= (float) PHP_INT_MAX) {
+                return null;
+            }
+
             try {
                 // Truncate to whole seconds. The column is second-precision, so a
                 // FRACTIONAL epoch is written as ...:00 and re-read as ...:00.000000,

@@ -47,6 +47,11 @@ class TacticalNumericBootFloorTest extends TestCase
         return [
             '2^64 float wraps below floor' => [1.8446744073709552e19, null],
             '2^64 numeric string wraps below floor' => ['18446744073709551616', null],
+            // Same modular wrap, landing ABOVE the floor and in the past: without a
+            // pre-cast range refusal this is a fabricated 2026-09-17 boot instant
+            // that the floor, the future check and never-backwards all accept.
+            '2^64+1789616128 float wraps into the plausible window' => [1.8446744075499168e19, null],
+            '2^64+1789616128 numeric string wraps into the plausible window' => ['18446744075499167744', null],
             'just below floor' => [999999999.9, null],
             'below floor numeric string' => ['999999999.9', null],
             'floor integer accepted' => [1000000000, '2001-09-09 01:46:40'],
