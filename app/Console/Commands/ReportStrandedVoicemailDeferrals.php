@@ -268,12 +268,12 @@ class ReportStrandedVoicemailDeferrals extends Command
         // routine hourly line on a gauge whose whole subject is rows awaiting
         // a human: an unmappable status folded into it reads as part of the
         // expected report. This fires only when a row is genuinely corrupt,
-        // and it says why that matters beyond this command -- the divergence
-        // breaks every other surface that hydrates these rows.
+        // and it says why that matters beyond this command -- any surface
+        // that READS ->status on one of these rows dies on it.
         if ($unmapped !== []) {
             Log::error('[Voicemail] phone_calls rows carry a status no enum case maps', [
                 'unmapped_statuses' => $unmapped,
-                'detail' => 'CallStatus::from() throws on these values. Every surface hydrating these rows is affected; this gauge degrades the cell so its own count stays truthful.',
+                'detail' => 'CallStatus::from() throws on these values. Hydration and getRawOriginal() both survive; the ValueError is raised on reading ->status, so any surface that touches that attribute is affected. This gauge degrades the cell for exactly that reason, so its own count stays truthful.',
             ]);
         }
 
