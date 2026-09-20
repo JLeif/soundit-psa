@@ -345,6 +345,58 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->once();
     }
 
+    public function test_an_unmapped_status_reaches_the_log_not_only_the_discarded_table(): void
+    {
+        // #2906 (round 4 diff:4). Degrading the cell fixed the hourly crash
+        // but put the ONLY evidence of a corrupt row on stdout, which the
+        // schedule entry's runInBackground() discards -- so in production the
+        // divergence produced a normal-looking warning and exit 0, forever.
+        // A silent gauge and a dead gauge must not be byte-identical.
+        //
+        // Asserted on the LOG RECORD rather than on output, because output is
+        // precisely the surface that does not survive a scheduled run.
+        $call = $this->deferredCall();
+        DB::table('phone_calls')->where('id', $call->id)->update(['status' => 'legacy_unmapped']);
+
+        Log::spy();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        // The routine count line carries the bad value, keyed by row.
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['unmapped_statuses'] === [$call->id => 'legacy_unmapped'])
+            ->once();
+
+        // And a distinct error-level record exists, so the corrupt row is not
+        // read as part of the expected hourly report.
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn (string $m, array $c) => str_contains($m, 'no enum case maps')
+                && $c['unmapped_statuses'] === [$call->id => 'legacy_unmapped'])
+            ->once();
+    }
+
+    public function test_a_healthy_run_logs_no_unmapped_status_and_no_error(): void
+    {
+        // Positive control for the assertion above: if the error record fired
+        // on every run, or unmapped_statuses were never empty, the control
+        // would pass while telling an operator nothing. A healthy stranded
+        // row must produce the warning WITHOUT the corruption signal.
+        $call = $this->deferredCall();
+
+        Log::spy();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['count'] === 1
+                && $c['unmapped_statuses'] === [])
+            ->once();
+
+        Log::shouldNotHaveReceived('error');
+
+        $this->assertNotNull($call->id);
+    }
+
     public function test_the_raw_status_is_still_named_so_the_bad_row_can_be_found(): void
     {
         // A placeholder that hid WHICH value was unmappable would trade a

@@ -93,9 +93,16 @@ class ReportStrandedVoicemailDeferrals extends Command
         try {
             return $call->status->value;
         } catch (\ValueError $e) {
-            return sprintf('unmapped:%s', (string) $call->getRawOriginal('status'));
+            return self::UNMAPPED_PREFIX.(string) $call->getRawOriginal('status');
         }
     }
+
+    /**
+     * Named rather than inlined because handle() detects a degraded label by
+     * this prefix; two copies of the literal could drift apart and silently
+     * stop the log record reporting a corrupt row.
+     */
+    private const UNMAPPED_PREFIX = 'unmapped:';
 
     /** ~10 years. Beyond this, Carbon underflows or wraps instead of erroring. */
     private const MAX_MINUTES = 5256000;
@@ -217,6 +224,28 @@ class ReportStrandedVoicemailDeferrals extends Command
             self::forDisplay($oldest)
         ));
 
+        // Status labels are resolved HERE, before the log record is written,
+        // rather than inside the table map below. The ordering is the whole
+        // point (#2906, round 4 diff:4): degrading an unmappable status to a
+        // placeholder kept the listing alive but left the only trace of a
+        // corrupt row on stdout, which runInBackground() discards -- so a real
+        // enum/column divergence went from a loud uncaught ValueError to no
+        // production signal at all. A silent gauge and a dead gauge became
+        // byte-identical, which is the fault this command exists to remove.
+        // Resolving first lets the unmappable values travel in the log record,
+        // the one surface a scheduled run actually produces.
+        $labels = [];
+        $unmapped = [];
+
+        foreach ($sample as $c) {
+            $label = self::statusLabel($c);
+            $labels[$c->id] = $label;
+
+            if (str_starts_with($label, self::UNMAPPED_PREFIX)) {
+                $unmapped[$c->id] = (string) $c->getRawOriginal('status');
+            }
+        }
+
         // THE LOG LINE IS THE ONLY PRODUCTION OUTPUT. The schedule entry uses
         // runInBackground() with no output redirection, so everything written
         // to stdout below is discarded on every run that actually happens.
@@ -229,7 +258,24 @@ class ReportStrandedVoicemailDeferrals extends Command
             'oldest_deferred_at' => self::forDisplay($oldest),
             'call_ids' => $sample->pluck('id')->all(),
             'call_ids_truncated' => $truncated,
+            // Keyed by call id, carrying the RAW value: the record names which
+            // row and which string, not merely that something was wrong. An
+            // empty array on every healthy run.
+            'unmapped_statuses' => $unmapped,
         ]);
+
+        // A SEPARATE record at error level, because the warning above is a
+        // routine hourly line on a gauge whose whole subject is rows awaiting
+        // a human: an unmappable status folded into it reads as part of the
+        // expected report. This fires only when a row is genuinely corrupt,
+        // and it says why that matters beyond this command -- the divergence
+        // breaks every other surface that hydrates these rows.
+        if ($unmapped !== []) {
+            Log::error('[Voicemail] phone_calls rows carry a status no enum case maps', [
+                'unmapped_statuses' => $unmapped,
+                'detail' => 'CallStatus::from() throws on these values. Every surface hydrating these rows is affected; this gauge degrades the cell so its own count stays truthful.',
+            ]);
+        }
 
         $this->table(
             ['call id', 'deferred at', 'status', 'started at'],
@@ -252,7 +298,7 @@ class ReportStrandedVoicemailDeferrals extends Command
                     // while the count kept being logged (round 3 context:3).
                     // The gauge degrades to a named placeholder instead: the
                     // count stays truthful and the row stays visible.
-                    self::statusLabel($c),
+                    $labels[$c->id],
                     self::forDisplay($c->started_at),
                 ])
                 ->all()
