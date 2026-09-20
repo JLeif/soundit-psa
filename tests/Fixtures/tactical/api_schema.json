@@ -91,6 +91,11 @@
       "format": "date-time",
       "nullable": true
      },
+     "boot_time": {
+      "type": "number",
+      "nullable": true,
+      "description": "Epoch seconds; agents/models.py Agents.boot_time FloatField and agents/serializers.py AgentTableSerializer at the pinned upstream commit."
+     },
      "needs_reboot": {
       "type": "boolean"
      },
