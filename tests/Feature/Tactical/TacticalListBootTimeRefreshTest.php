@@ -14,6 +14,7 @@ use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -162,6 +163,45 @@ class TacticalListBootTimeRefreshTest extends TestCase
         $this->assertSame(1, $result->errors);
         $this->assertNull($bad->fresh()->last_boot_at);
         $this->assertSame('2026-09-20 10:00:00', $good->fresh()->last_boot_at?->toDateTimeString());
+    }
+
+    public function test_escaping_boot_prologue_preserves_same_agent_connectivity(): void
+    {
+        $asset = $this->linked('THROWING', null, [
+            'rmm_online' => false,
+            'last_seen_at' => '2026-09-19 10:00:00',
+            'last_user' => 'before',
+            'ninja_id' => null,
+            'level_id' => null,
+        ]);
+        $later = $this->linked('LATER', null);
+
+        // Drive the real private helper through syncDevices. Its future-refusal
+        // log is outside its inner try: throwing here escapes the boot call,
+        // unlike a stored-value fault swallowed inside that helper.
+        Log::spy();
+        Log::shouldReceive('debug')
+            ->once()
+            ->with('Tactical boot_time refused: future value.', \Mockery::on(
+                fn (array $context) => $context['agent_id'] === 'THROWING'
+            ))
+            ->andThrow(new \RuntimeException('synthetic boot prologue failure'));
+
+        $result = $this->service([
+            $this->row('THROWING', [
+                'boot_time' => 1789905601,
+                'logged_username' => 'synthetic-user',
+            ]),
+            $this->row('LATER'),
+        ])->syncDevices();
+
+        $this->assertSame(1, $result->errors, 'The real per-agent catch must observe the injected escape.');
+        $fresh = $asset->fresh();
+        $this->assertTrue($fresh->rmm_online);
+        $this->assertSame('2026-09-20 11:00:00', $fresh->last_seen_at?->toDateTimeString());
+        $this->assertSame('synthetic-user', $fresh->last_user);
+        $this->assertNull($fresh->last_boot_at);
+        $this->assertSame('2026-09-20 10:00:00', $later->fresh()->last_boot_at?->toDateTimeString());
     }
 
     public function test_corrupt_stored_boot_is_contained_and_later_row_still_refreshes(): void

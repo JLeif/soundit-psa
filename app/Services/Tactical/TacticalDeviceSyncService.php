@@ -641,12 +641,6 @@ class TacticalDeviceSyncService
                     $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
                 }
 
-                // AgentTableSerializer.Meta.fields in upstream agents/serializers.py
-                // (pinned in upstream_producers.json) includes boot_time on GET agents/.
-                // Consume THIS live list observation after linking, inside per-agent
-                // containment, using the detail path's parser and guards unchanged.
-                $this->refreshAssetBootTime($tacticalAsset, $agent['boot_time'] ?? null);
-
                 // Refresh the linked asset from THIS run's snapshot. rmm_online
                 // and last_seen_at are read as CURRENT truth by the Assets list
                 // badge and AssetHealthService::connectivityFactor(), so writing
@@ -704,6 +698,13 @@ class TacticalDeviceSyncService
                         Asset::where('id', $linkedAsset->id)->update($refresh);
                     }
                 }
+
+                // AgentTableSerializer.Meta.fields in upstream agents/serializers.py
+                // (pinned in upstream_producers.json) includes boot_time on GET agents/.
+                // Keep opportunistic boot work AFTER connectivity, as on the detail
+                // path: an escaping prologue must not suppress this agent's refresh.
+                // Reuse the parser and guards unchanged, inside per-agent containment.
+                $this->refreshAssetBootTime($tacticalAsset, $agent['boot_time'] ?? null);
             } catch (\Throwable $e) {
                 $safe = $this->safeFailure($e, 'write');
                 Log::warning('[TacticalSync] Agent skipped after a write failure', [
