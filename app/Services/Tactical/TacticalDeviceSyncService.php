@@ -152,18 +152,8 @@ class TacticalDeviceSyncService
         // wrote and reads as a months-old uptime forever, which AssetHealthService::
         // patchFactor() then scores as "up {N}d (patches may be pending)".
         //
-        // NOTE on where boot_time comes from: our list mapper (mapAgentToTacticalAsset)
-        // does not read boot_time, but that is a fact about OUR MAPPER, not about the
-        // vendor payload — the pinned upstream capture in
-        // tests/Fixtures/tactical/upstream_producers.json lists boot_time in the
-        // agents/ LIST row too (agent_table_serializer_fields, beside last_seen).
-        // So refreshing here is a choice, not the only possibility; widening it to the
-        // list sync is a separate change with its own fleet-wide blast radius.
-        //
-        // Deliberately forward-only: it corrects a row when someone refreshes that
-        // device, and does NOT backfill history. Rows never refreshed stay stale —
-        // see the card for the backfill decision, which is a data migration and not
-        // part of this change.
+        // Both detail and scheduled list sync consume a live boot_time observation
+        // through this same guard. Neither path backfills unobserved history.
         $this->refreshAssetBootTime($ta, $agent['boot_time'] ?? null);
 
         return DetailSyncResult::success($ta->status, $ta->synced_at);
@@ -246,8 +236,10 @@ class TacticalDeviceSyncService
 
             // Never drag the column backwards. NOTE this is deliberately
             // one-directional and therefore cannot repair a wrong stored value written
-            // by another integration — the arbitration question ("strictly newer wins"
-            // vs "most recent observation wins") is on the card for a product ruling.
+            // by another integration. "Strictly newer wins" is deliberate on both
+            // detail and scheduled list paths, including Ninja/Level co-maintenance;
+            // neither most-recent-observation arbitration nor a drift tolerance is
+            // introduced by widening the caller.
             if ($asset->last_boot_at && ! $observed->gt($asset->last_boot_at)) {
                 return;
             }
@@ -648,6 +640,12 @@ class TacticalDeviceSyncService
                 if (! $tacticalAsset->asset_id) {
                     $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
                 }
+
+                // AgentTableSerializer.Meta.fields in upstream agents/serializers.py
+                // (pinned in upstream_producers.json) includes boot_time on GET agents/.
+                // Consume THIS live list observation after linking, inside per-agent
+                // containment, using the detail path's parser and guards unchanged.
+                $this->refreshAssetBootTime($tacticalAsset, $agent['boot_time'] ?? null);
 
                 // Refresh the linked asset from THIS run's snapshot. rmm_online
                 // and last_seen_at are read as CURRENT truth by the Assets list
