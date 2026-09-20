@@ -623,6 +623,17 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
         $this->deferredCall(['deferred_at' => null]);
 
+        // The two marked rows are the stranded set by construction: both are
+        // older than the default threshold and the third row carries no marker
+        // at all. Read back from the table rather than from the helper so the
+        // expectation is the ids the command will actually see.
+        $strandedIds = DB::table('phone_calls')
+            ->whereNotNull('deferred_at')
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
         $snapshot = fn () => DB::table('phone_calls')
             ->orderBy('id')
             ->get()
@@ -664,8 +675,23 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // Precondition, on the production surface: the command must actually
         // have reported the two stranded rows, or every assertion above is
         // satisfied by a command that did nothing and this control is hollow.
+        // Round 6 diff:3 + diff:4: pinning only the count left the record
+        // itself unpinned -- any warning carrying a key named count equal to 2
+        // (a truncation or refusal line, say) satisfied it -- and the call_ids
+        // the comment above promises were never read, so only cardinality was
+        // held, not row identity. Pin all three: the message, the exact count,
+        // and the id set a remediating mutant would have acted on.
         Log::shouldHaveReceived('warning')
-            ->withArgs(fn (string $message, array $context) => $context['count'] === 2)
+            ->withArgs(function (string $message, array $context) use ($strandedIds) {
+                $logged = is_array($context['call_ids'] ?? null)
+                    ? array_map('intval', $context['call_ids'])
+                    : [];
+                sort($logged);
+
+                return $message === '[Voicemail] Stranded notification deferrals outstanding'
+                    && ($context['count'] ?? null) === 2
+                    && $logged === $strandedIds;
+            })
             ->once();
     }
 }
