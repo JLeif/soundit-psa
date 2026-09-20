@@ -267,13 +267,18 @@ class ReportStrandedVoicemailDeferrals extends Command
         // A SEPARATE record at error level, because the warning above is a
         // routine hourly line on a gauge whose whole subject is rows awaiting
         // a human: an unmappable status folded into it reads as part of the
-        // expected report. This fires only when a row is genuinely corrupt,
-        // and it says why that matters beyond this command -- any surface
-        // that READS ->status on one of these rows dies on it.
+        // expected report. This fires only when a row is genuinely corrupt.
+        //
+        // The record deliberately carries no explanation of WHICH surfaces
+        // the bad value breaks. Three drafts of that sentence were each
+        // falsified by execution (rounds 1-3 on this leg), because no test
+        // asserts its contents and so nothing can hold it true. The row id
+        // and the raw value below are what an operator needs; statusLabel()
+        // above is the executable statement of how the cast behaves.
         if ($unmapped !== []) {
             Log::error('[Voicemail] phone_calls rows carry a status no enum case maps', [
                 'unmapped_statuses' => $unmapped,
-                'detail' => 'CallStatus::from() throws on these values. Hydration and getRawOriginal() both survive; the ValueError is raised on reading ->status, so any surface that touches that attribute is affected. This gauge degrades the cell for exactly that reason, so its own count stays truthful.',
+                'detail' => 'CallStatus::from() throws on these values.',
             ]);
         }
 
@@ -283,21 +288,20 @@ class ReportStrandedVoicemailDeferrals extends Command
                 ->map(fn (PhoneCall $c) => [
                     $c->id,
                     self::forDisplay($c->voicemail_notify_deferred_at),
-                    // MEASURED, correcting my own earlier claim (round 3
-                    // diff:3): Eloquent casts LAZILY in getAttributeValue(),
-                    // not in newFromBuilder(). Hydration of an unmodelled
-                    // status survives; the ValueError is thrown BY this line.
-                    // Probed directly: newFromBuilder(['status' =>
-                    // 'legacy_unmapped']) returns without throwing, and the
-                    // throw happens on first attribute access.
+                    // This reads an ALREADY-RESOLVED label. The map was built
+                    // before the Log::warning above, by commit af4917ba --
+                    // round 1's own commit, which moved label resolution out
+                    // of this line. The comment that used to sit here still
+                    // described the old ordering and claimed the ValueError
+                    // was thrown BY this line; round 1 converged with a
+                    // comment its own reorder had falsified (round 2
+                    // context:1). Nothing here can throw on an unmapped
+                    // status.
                     //
-                    // That matters because the Log::warning above has ALREADY
-                    // been written by the time this runs, and a stranded row
-                    // sorts to the front of the sample on every later run --
-                    // so one bad row killed the listing hourly, forever,
-                    // while the count kept being logged (round 3 context:3).
-                    // The gauge degrades to a named placeholder instead: the
-                    // count stays truthful and the row stays visible.
+                    // The ordering is the fix: before af4917ba a stranded row
+                    // sorted to the front of the sample on every run, so one
+                    // bad row killed the listing hourly, forever, while the
+                    // count kept being logged (round 3 context:3).
                     $labels[$c->id],
                     self::forDisplay($c->started_at),
                 ])
