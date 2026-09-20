@@ -105,12 +105,13 @@ class StrandedVoicemailDeferralReportTest extends TestCase
     {
         // Pins the guard above: a control that silently built a default row
         // would be green for the wrong reason.
-        try {
-            $this->deferredCall(['notifed_at' => now()]);
-            $this->fail('deferredCall() accepted a mistyped override key.');
-        } catch (AssertionFailedError $e) {
-            $this->assertStringContainsString('notifed_at', $e->getMessage());
-        }
+        // NOT wrapped in a try that catches AssertionFailedError: $this->fail()
+        // throws that exact type, so a catch-all would swallow its own
+        // diagnostic and report the guard as present when it had been removed.
+        $this->expectException(AssertionFailedError::class);
+        $this->expectExceptionMessage('notifed_at');
+
+        $this->deferredCall(['notifed_at' => now()]);
     }
 
     public function test_reported_timestamps_are_converted_to_the_app_timezone(): void
@@ -198,6 +199,78 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->expectsOutputToContain('23 voicemail notification(s)')
             ->expectsOutputToContain('Showing the 20 oldest of 23')
             ->assertExitCode(0);
+    }
+
+    public function test_an_absurdly_large_minutes_value_is_refused(): void
+    {
+        // Measured at this tip: subMinutes(999999999999) gives year -1899298
+        // and subMinutes(PHP_INT_MAX) WRAPS back to now, reporting nothing
+        // while looking healthy. A silent wrong answer is the worst outcome
+        // for a gauge, so the upper end is refused.
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => '999999999999'])
+            ->expectsOutputToContain('--minutes must not exceed')
+            ->assertExitCode(1);
+    }
+
+    public function test_php_int_max_minutes_is_refused_rather_than_wrapping(): void
+    {
+        $this->deferredCall();
+
+        // Without the ceiling this WRAPS to the present and reports zero
+        // stranded rows -- green, silent, and wrong.
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => (string) PHP_INT_MAX])
+            ->expectsOutputToContain('--minutes must not exceed')
+            ->assertExitCode(1);
+    }
+
+    public function test_the_largest_accepted_threshold_still_works(): void
+    {
+        // Positive control for the ceiling: the boundary value itself must be
+        // accepted and must actually run, or the guard is just an off-by-one.
+        $this->deferredCall();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => '5256000'])
+            ->expectsOutputToContain('No voicemail deferral has been outstanding')
+            ->assertExitCode(0);
+    }
+
+    public function test_the_truncation_flag_is_true_in_the_log_when_capped(): void
+    {
+        // The flag's TRUE branch was pinned by nothing: hard-coding it false
+        // killed no test, because the only control reading the log used 2 rows.
+        Log::spy();
+
+        for ($i = 0; $i < 22; $i++) {
+            $this->deferredCall();
+        }
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['call_ids_truncated'] === true
+                && $c['count'] === 22
+                && count($c['call_ids']) === 20)
+            ->once();
+    }
+
+    public function test_an_unmodelled_status_value_fails_loudly_at_hydration(): void
+    {
+        // MEASURED, not assumed: PhoneCall casts status to CallStatus, so a
+        // row holding a value outside the enum throws ValueError while
+        // Eloquent hydrates it -- BEFORE this command formats anything. The
+        // old `$c->status?->value ?? (string) $c->status` fallback was
+        // therefore unreachable via the model in either form: it could not
+        // rescue a bad value, and the only path to it was a PHP warning that
+        // G-4 fails the gate on. It has been removed rather than dressed up,
+        // and this control pins where the real failure occurs so nobody
+        // reinstates a safety net that cannot fire.
+        $call = $this->deferredCall();
+
+        DB::table('phone_calls')->where('id', $call->id)->update(['status' => 'legacy_unmapped']);
+
+        $this->expectException(\ValueError::class);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->run();
     }
 
     private function deferredCall(array $overrides = []): PhoneCall

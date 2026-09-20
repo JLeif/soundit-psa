@@ -42,6 +42,11 @@ use Illuminate\Support\Facades\Log;
  * defect the guard exists to prevent, so the remedy for a stranded row is a
  * human reading a call that may still have been connected — not this command.
  *
+ * THE THRESHOLD IS BOUNDED AT BOTH ENDS. Carbon does not error on an absurd
+ * --minutes: it underflows to a negative year, and at PHP_INT_MAX it wraps
+ * back to the present, which would silently report nothing while looking
+ * healthy. Both ends are therefore refused explicitly.
+ *
  * TIMEZONE. Stored values are UTC; every timestamp printed or logged is
  * converted with toAppTz() and carries its zone abbreviation (C-14).
  *
@@ -71,6 +76,9 @@ class ReportStrandedVoicemailDeferrals extends Command
 
     /** Most rows listed individually; the count reported is always the true total. */
     private const SAMPLE_LIMIT = 20;
+
+    /** ~10 years. Beyond this, Carbon underflows or wraps instead of erroring. */
+    private const MAX_MINUTES = 5256000;
 
     /**
      * C-14: the database stores UTC and every display surface converts through
@@ -103,6 +111,19 @@ class ReportStrandedVoicemailDeferrals extends Command
 
         if ($minutes < 0) {
             $this->error('--minutes must not be negative.');
+
+            return self::FAILURE;
+        }
+
+        // An upper bound as well as a lower one. Measured at this tip:
+        // now()->subMinutes(999999999999) yields year -1899298, and
+        // subMinutes(PHP_INT_MAX) silently WRAPS back to the present -- a
+        // wrong answer rather than an error, which is the worse failure for a
+        // gauge. A threshold beyond the age of the table cannot express a
+        // real question, so it is refused rather than quietly carried into a
+        // nonsense cutoff.
+        if ($minutes > self::MAX_MINUTES) {
+            $this->error(sprintf('--minutes must not exceed %d (about 10 years).', self::MAX_MINUTES));
 
             return self::FAILURE;
         }
@@ -173,7 +194,11 @@ class ReportStrandedVoicemailDeferrals extends Command
                 ->map(fn (PhoneCall $c) => [
                     $c->id,
                     self::forDisplay($c->voicemail_notify_deferred_at),
-                    $c->status?->value ?? (string) $c->status,
+                    // No ?? fallback: PhoneCall casts status to CallStatus, so
+                    // a value outside the enum throws at hydration and never
+                    // reaches this line. A fallback here would be unreachable
+                    // code implying a resilience the model does not have.
+                    $c->status->value,
                     self::forDisplay($c->started_at),
                 ])
                 ->all()
