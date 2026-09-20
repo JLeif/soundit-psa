@@ -494,6 +494,16 @@ class PhoneCallService
                 app(PrepayService::class)->debitFromPhoneCall($call);
             }
 
+            // End evidence has just been recorded, so a voicemail email that
+            // was withheld for want of it can go out now. This runs on EVERY
+            // terminal delivery, not only the first: the release is a no-op
+            // unless a deferral marker is actually outstanding, so a repeated
+            // hangup callback cannot produce a second email. On a coalesced
+            // recording+terminal delivery the recording block above has already
+            // run in this same request, so the deferral it created is released
+            // microseconds later rather than waiting for another callback.
+            app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
+
             return $call;
         });
     }
