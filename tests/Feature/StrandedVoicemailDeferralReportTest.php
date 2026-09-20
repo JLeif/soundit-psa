@@ -619,20 +619,28 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // population it will actually report on, and require byte-identity.
         // The mutation that makes this fail is any write at all: releasing a
         // marker, claiming a send, or stamping a row as seen.
-        $this->deferredCall(['deferred_at' => now()->subMinutes(180)]);
-        $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
+        $older = $this->deferredCall(['deferred_at' => now()->subMinutes(180)]);
+        $newer = $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
         $this->deferredCall(['deferred_at' => null]);
 
         // The two marked rows are the stranded set by construction: both are
         // older than the default threshold and the third row carries no marker
-        // at all. Read back from the table rather than from the helper so the
-        // expectation is the ids the command will actually see.
-        $strandedIds = DB::table('phone_calls')
-            ->whereNotNull('deferred_at')
-            ->orderBy('id')
-            ->pluck('id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
+        // at all. The ids come from the rows the helper returned -- the idiom
+        // the sibling control at the top of this file already uses.
+        //
+        // The previous revision read them back with
+        // DB::table('phone_calls')->whereNotNull('deferred_at'), and there is
+        // no deferred_at column: 'deferred_at' is only an override key of
+        // deferredCall(), which writes voicemail_notify_deferred_at. Under
+        // SQLite that did not even error -- an unresolvable double-quoted
+        // identifier degrades to a string literal, so the predicate read
+        // 'deferred_at' IS NOT NULL, was always true, and the expectation
+        // became every row in the table including the unmarked one. The
+        // precondition below then matched nothing and this whole control
+        // errored, so the model layer's own ids are used instead of a column
+        // name a typo can silently reinterpret.
+        $strandedIds = [$older->id, $newer->id];
+        sort($strandedIds);
 
         $snapshot = fn () => DB::table('phone_calls')
             ->orderBy('id')
