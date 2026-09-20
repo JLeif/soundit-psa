@@ -41,6 +41,18 @@ use Illuminate\Support\Facades\Log;
  * defect the guard exists to prevent, so the remedy for a stranded row is a
  * human reading a call that may still have been connected — not this command.
  *
+ * WHERE THE OUTPUT GOES. The scheduled entry runs in the background with no
+ * output redirection, so the printed table exists only for an operator running
+ * the command by hand. The log record is the production signal and therefore
+ * carries the call ids, not just the count.
+ *
+ * WHAT THE AGE MEASURES. The clock runs from the marker column itself, so a
+ * row whose marker is re-stamped is aged from the newest stamp. If a later
+ * notify entrance can re-mark an already-marked call, a permanently stranded
+ * row could keep resetting its own clock and stay below the threshold; nothing
+ * here pins that the marker is written once, and that is a property of
+ * NotificationService rather than of this command.
+ *
  * THE LIMIT. It reports rows the guard marked. It cannot see a voicemail that
  * was never marked, and rows predating the guard carry a NULL marker and are
  * invisible here by construction; that pre-existing pool is card 6aade104's,
@@ -53,9 +65,24 @@ class ReportStrandedVoicemailDeferrals extends Command
 
     protected $description = 'Count voicemail notifications deferred for want of end evidence and never released.';
 
+    /** Most rows listed individually; the count above is always the true total. */
+    private const SAMPLE_LIMIT = 20;
+
     public function handle(): int
     {
-        $minutes = (int) $this->option('minutes');
+        $raw = $this->option('minutes');
+
+        // Validated for SHAPE before value: (int) 'soon' is 0, which is a
+        // valid-looking zero-minute threshold that would report every marker
+        // in flight as a fault. A typo must refuse, not silently widen the
+        // gauge to its most alarming setting.
+        if (! is_numeric($raw) || (string) (int) $raw !== (string) $raw) {
+            $this->error('--minutes must be a whole number of minutes.');
+
+            return self::FAILURE;
+        }
+
+        $minutes = (int) $raw;
 
         if ($minutes < 0) {
             $this->error('--minutes must not be negative.');
@@ -78,25 +105,39 @@ class ReportStrandedVoicemailDeferrals extends Command
             return self::SUCCESS;
         }
 
-        $oldest = (clone $stranded)->min('voicemail_notify_deferred_at');
+        // ONE read of the rows, reused for the table, the oldest and the log.
+        // Three separate queries against live data could disagree with each
+        // other mid-run (a release landing between them), and "Oldest
+        // outstanding since ." with an empty value is a worse report than a
+        // slightly stale one. The cap is deliberate and is stated in the
+        // output below rather than left for the reader to infer.
+        $sample = (clone $stranded)
+            ->orderBy('voicemail_notify_deferred_at')
+            ->limit(self::SAMPLE_LIMIT)
+            ->get(['id', 'voicemail_notify_deferred_at', 'status', 'started_at']);
+
+        $oldest = optional($sample->first())->voicemail_notify_deferred_at;
 
         $this->warn("{$count} voicemail notification(s) withheld for want of end evidence and never released.");
         $this->warn("Oldest outstanding since {$oldest}. These rows were withheld because the call showed no sign of having ended; read them before assuming the voicemail is complete.");
 
-        // Logged as well as printed: a scheduled run has no terminal attached,
-        // and this count is the whole reason the command exists.
+        // THE LOG LINE IS THE ONLY PRODUCTION OUTPUT. The schedule entry uses
+        // runInBackground() with no output redirection, so everything written
+        // to stdout below is discarded on every run that actually happens.
+        // The ids therefore have to travel in the log record, not just in the
+        // table -- a count with no ids tells an operator a problem exists and
+        // nothing about which calls to read.
         Log::warning('[Voicemail] Stranded notification deferrals outstanding', [
             'count' => $count,
             'threshold_minutes' => $minutes,
             'oldest_deferred_at' => (string) $oldest,
+            'call_ids' => $sample->pluck('id')->all(),
+            'call_ids_truncated' => $count > $sample->count(),
         ]);
 
         $this->table(
             ['call id', 'deferred at', 'status', 'started at'],
-            (clone $stranded)
-                ->orderBy('voicemail_notify_deferred_at')
-                ->limit(20)
-                ->get(['id', 'voicemail_notify_deferred_at', 'status', 'started_at'])
+            $sample
                 ->map(fn (PhoneCall $c) => [
                     $c->id,
                     (string) $c->voicemail_notify_deferred_at,
@@ -105,6 +146,14 @@ class ReportStrandedVoicemailDeferrals extends Command
                 ])
                 ->all()
         );
+
+        if ($count > $sample->count()) {
+            $this->warn(sprintf(
+                'Showing the %d oldest of %d; the list above is not the whole set.',
+                $sample->count(),
+                $count
+            ));
+        }
 
         // A report that found something still exits 0: this is a gauge, and a
         // nonzero exit here would read as a broken scheduled command rather

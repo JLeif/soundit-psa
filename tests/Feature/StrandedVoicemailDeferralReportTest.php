@@ -6,6 +6,8 @@ use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
+use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
 
 /**
@@ -32,8 +34,93 @@ class StrandedVoicemailDeferralReportTest extends TestCase
      * pass for the wrong reason. That trap is GitHub #2883, found in the
      * sibling suite; it is not being reproduced here.
      */
+    public function test_the_log_record_carries_the_count_and_the_call_ids(): void
+    {
+        // THE LOG LINE IS THE PRODUCTION OUTPUT. The schedule entry uses
+        // runInBackground() with no redirection, so every expectsOutputToContain
+        // assertion in this file exercises a path that does not run in
+        // production. Deleting Log::warning entirely left all 8 original
+        // controls green -- measured, which is why this control exists.
+        Log::spy();
+
+        $a = $this->deferredCall();
+        $b = $this->deferredCall();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(function (string $message, array $context) use ($a, $b) {
+                return $message === '[Voicemail] Stranded notification deferrals outstanding'
+                    && $context['count'] === 2
+                    && in_array($a->id, $context['call_ids'], true)
+                    && in_array($b->id, $context['call_ids'], true)
+                    && $context['call_ids_truncated'] === false;
+            })
+            ->once();
+    }
+
+    public function test_nothing_is_logged_when_no_deferral_is_outstanding(): void
+    {
+        // Positive control against the one above: if the warning fired
+        // unconditionally, the control above could not fail.
+        Log::spy();
+
+        $this->deferredCall(['deferred_at' => null]);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldNotHaveReceived('warning');
+    }
+
+    public function test_a_non_numeric_minutes_option_is_refused(): void
+    {
+        // (int) 'soon' is 0, a valid-looking zero-minute threshold that would
+        // report every in-flight marker as a fault. Shape is checked before
+        // value so a typo refuses rather than silently widening the gauge.
+        $this->deferredCall(['deferred_at' => now()->subSeconds(5)]);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => 'soon'])
+            ->expectsOutputToContain('--minutes must be a whole number of minutes.')
+            ->assertExitCode(1);
+    }
+
+    public function test_the_table_is_capped_and_says_so(): void
+    {
+        // The cap is a real bound on the listing; an operator must not read 20
+        // rows as the whole set.
+        for ($i = 0; $i < 22; $i++) {
+            $this->deferredCall();
+        }
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('22 voicemail notification(s)')
+            ->expectsOutputToContain('Showing the 20 oldest of 22')
+            ->assertExitCode(0);
+    }
+
+    public function test_the_fixture_helper_refuses_an_unknown_override_key(): void
+    {
+        // Pins the guard above: a control that silently built a default row
+        // would be green for the wrong reason.
+        try {
+            $this->deferredCall(['notifed_at' => now()]);
+            $this->fail('deferredCall() accepted a mistyped override key.');
+        } catch (AssertionFailedError $e) {
+            $this->assertStringContainsString('notifed_at', $e->getMessage());
+        }
+    }
+
     private function deferredCall(array $overrides = []): PhoneCall
     {
+        // A mistyped override key must not silently yield the default row:
+        // that is #2883's "passes for the wrong reason" hazard relocated from
+        // ?? to key names, and a control that builds the wrong fixture proves
+        // nothing while looking green.
+        $unknown = array_diff(array_keys($overrides), ['deferred_at', 'notified_at', 'ended_at']);
+        if ($unknown !== []) {
+            $this->fail('deferredCall() got unknown override key(s): '.implode(', ', $unknown));
+        }
+
         $call = PhoneCall::create([
             'call_uuid' => 'vm-'.uniqid(),
             'direction' => CallDirection::Inbound,
