@@ -11,6 +11,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
 
@@ -603,5 +604,102 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->expectsOutputToContain('2 voicemail notification(s) withheld')
             ->assertExitCode(0);
+    }
+
+    public function test_the_command_writes_nothing_to_any_call(): void
+    {
+        // Round 3 contract:5, upheld: the docblock asserts in capitals that
+        // THIS COMMAND WRITES NOTHING TO A CALL -- the card's central safety
+        // property, the whole reason a gauge was built instead of a resend --
+        // and no control pinned it. A gauge that quietly remediates is the one
+        // failure this leg exists to prevent, and "I read the code and saw no
+        // update()" is not a control.
+        //
+        // Snapshot every column of every row, run the command over a
+        // population it will actually report on, and require byte-identity.
+        // The mutation that makes this fail is any write at all: releasing a
+        // marker, claiming a send, or stamping a row as seen.
+        $older = $this->deferredCall(['deferred_at' => now()->subMinutes(180)]);
+        $newer = $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
+        $this->deferredCall(['deferred_at' => null]);
+
+        // The two marked rows are the stranded set by construction: both are
+        // older than the default threshold and the third row carries no marker
+        // at all. The ids come from the rows the helper returned -- the idiom
+        // the sibling control at the top of this file already uses.
+        //
+        // The previous revision read them back with
+        // DB::table('phone_calls')->whereNotNull('deferred_at'), and there is
+        // no deferred_at column: 'deferred_at' is only an override key of
+        // deferredCall(), which writes voicemail_notify_deferred_at. Under
+        // SQLite that did not even error -- an unresolvable double-quoted
+        // identifier degrades to a string literal, so the predicate read
+        // 'deferred_at' IS NOT NULL, was always true, and the expectation
+        // became every row in the table including the unmarked one. The
+        // precondition below then matched nothing and this whole control
+        // errored, so the model layer's own ids are used instead of a column
+        // name a typo can silently reinterpret.
+        $strandedIds = [$older->id, $newer->id];
+        sort($strandedIds);
+
+        $snapshot = fn () => DB::table('phone_calls')
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($r) => (array) $r)
+            ->toArray();
+
+        $before = $snapshot();
+
+        // Round 5 contract:6 + context:5, upheld: the precondition used to
+        // assert on stdout -- the surface this same file documents at lines
+        // 43-47 as discarded by runInBackground(), and the surface a sibling
+        // control was already re-aimed off. It fired in-test, so the control
+        // was not hollow, but it was coupled to the one output this leg has
+        // decided is deletable. The log record is the production surface and
+        // it carries call_ids, so the precondition now pins WHICH rows the
+        // command held -- exactly the set a remediating mutant would act on --
+        // rather than only how many.
+        Log::spy();
+
+        // Round 5 contract:1, upheld and PROVEN BY MUTATION: byte-identity on
+        // phone_calls covers two of the three prohibited acts. A resend leaves
+        // no row behind -- dispatchVoicemailNotification() (NotificationService
+        // :564-590) only dispatches SendTicketNotification per user, and the
+        // only phone_calls write on that path is the separate claim in
+        // sendVoicemailNotificationOnce() (:542-545), which a mutant need not
+        // perform. A mutant dispatching one job per stranded row and writing
+        // nothing passed this control green. QUEUE_CONNECTION=sync and
+        // MAIL_MAILER=array meant it was swallowed silently.
+        Queue::fake();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->assertExitCode(0);
+
+        $this->assertSame($before, $snapshot());
+
+        // The third prohibited act: no notification may leave the box.
+        Queue::assertNothingPushed();
+
+        // Precondition, on the production surface: the command must actually
+        // have reported the two stranded rows, or every assertion above is
+        // satisfied by a command that did nothing and this control is hollow.
+        // Round 6 diff:3 + diff:4: pinning only the count left the record
+        // itself unpinned -- any warning carrying a key named count equal to 2
+        // (a truncation or refusal line, say) satisfied it -- and the call_ids
+        // the comment above promises were never read, so only cardinality was
+        // held, not row identity. Pin all three: the message, the exact count,
+        // and the id set a remediating mutant would have acted on.
+        Log::shouldHaveReceived('warning')
+            ->withArgs(function (string $message, array $context) use ($strandedIds) {
+                $logged = is_array($context['call_ids'] ?? null)
+                    ? array_map('intval', $context['call_ids'])
+                    : [];
+                sort($logged);
+
+                return $message === '[Voicemail] Stranded notification deferrals outstanding'
+                    && ($context['count'] ?? null) === 2
+                    && $logged === $strandedIds;
+            })
+            ->once();
     }
 }
