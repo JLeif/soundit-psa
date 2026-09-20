@@ -83,6 +83,20 @@ class ReportStrandedVoicemailDeferrals extends Command
      */
     private const SAMPLE_LIMIT = 20;
 
+    /**
+     * The status column for display, without letting one unmappable value
+     * abort a report whose count has already been logged. Reading the raw
+     * attribute bypasses the enum cast that throws.
+     */
+    private static function statusLabel(PhoneCall $call): string
+    {
+        try {
+            return $call->status->value;
+        } catch (\ValueError $e) {
+            return sprintf('unmapped:%s', (string) $call->getRawOriginal('status'));
+        }
+    }
+
     /** ~10 years. Beyond this, Carbon underflows or wraps instead of erroring. */
     private const MAX_MINUTES = 5256000;
 
@@ -115,8 +129,15 @@ class ReportStrandedVoicemailDeferrals extends Command
 
         $minutes = (int) $raw;
 
-        if ($minutes < 0) {
-            $this->error('--minutes must not be negative.');
+        // Zero is refused, not merely negatives. The shape check above rejects
+        // 'soon' precisely BECAUSE (int) 'soon' is 0 and a zero-minute
+        // threshold reports every marker in flight as a fault -- so accepting
+        // an explicit --minutes=0 admitted by the front door exactly what the
+        // shape check exists to keep out (round 3 diff:4). A cutoff of now()
+        // matches a marker written microseconds ago by a deferral whose
+        // release has not run yet, which is a healthy row, not a stranded one.
+        if ($minutes < 1) {
+            $this->error('--minutes must be at least 1: a zero-minute threshold reports deferrals that are still in flight.');
 
             return self::FAILURE;
         }
@@ -216,11 +237,22 @@ class ReportStrandedVoicemailDeferrals extends Command
                 ->map(fn (PhoneCall $c) => [
                     $c->id,
                     self::forDisplay($c->voicemail_notify_deferred_at),
-                    // No ?? fallback: PhoneCall casts status to CallStatus, so
-                    // a value outside the enum throws at hydration and never
-                    // reaches this line. A fallback here would be unreachable
-                    // code implying a resilience the model does not have.
-                    $c->status->value,
+                    // MEASURED, correcting my own earlier claim (round 3
+                    // diff:3): Eloquent casts LAZILY in getAttributeValue(),
+                    // not in newFromBuilder(). Hydration of an unmodelled
+                    // status survives; the ValueError is thrown BY this line.
+                    // Probed directly: newFromBuilder(['status' =>
+                    // 'legacy_unmapped']) returns without throwing, and the
+                    // throw happens on first attribute access.
+                    //
+                    // That matters because the Log::warning above has ALREADY
+                    // been written by the time this runs, and a stranded row
+                    // sorts to the front of the sample on every later run --
+                    // so one bad row killed the listing hourly, forever,
+                    // while the count kept being logged (round 3 context:3).
+                    // The gauge degrades to a named placeholder instead: the
+                    // count stays truthful and the row stays visible.
+                    self::statusLabel($c),
                     self::forDisplay($c->started_at),
                 ])
                 ->all()

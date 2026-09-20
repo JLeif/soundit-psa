@@ -311,24 +311,46 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->once();
     }
 
-    public function test_an_unmodelled_status_value_fails_loudly_at_hydration(): void
+    public function test_an_unmapped_status_does_not_kill_the_report(): void
     {
-        // MEASURED, not assumed: PhoneCall casts status to CallStatus, so a
-        // row holding a value outside the enum throws ValueError while
-        // Eloquent hydrates it -- BEFORE this command formats anything. The
-        // old `$c->status?->value ?? (string) $c->status` fallback was
-        // therefore unreachable via the model in either form: it could not
-        // rescue a bad value, and the only path to it was a PHP warning that
-        // G-4 fails the gate on. It has been removed rather than dressed up,
-        // and this control pins where the real failure occurs so nobody
-        // reinstates a safety net that cannot fire.
+        // My earlier comment and this test's former name both said the cast
+        // throws "at hydration, before this command formats anything".
+        // MEASURED and FALSE (round 3 diff:3): Eloquent casts lazily in
+        // getAttributeValue(), so newFromBuilder() returns without throwing
+        // and the ValueError fires on attribute ACCESS -- inside the table
+        // map, which runs AFTER Log::warning has already recorded the count.
+        //
+        // So the old behaviour logged the warning and then died, every hour,
+        // on a row that sorts to the front of the sample forever (context:3).
+        // The count must stay truthful and the row must stay visible.
         $call = $this->deferredCall();
 
         DB::table('phone_calls')->where('id', $call->id)->update(['status' => 'legacy_unmapped']);
 
-        $this->expectException(\ValueError::class);
+        Log::spy();
 
-        $this->artisan('calls:report-stranded-voicemail-deferrals')->run();
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('unmapped:legacy_unmapped')
+            ->assertExitCode(0);
+
+        // The gauge still counted it: degrading the LABEL must not silently
+        // drop the row from the number an operator acts on.
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['count'] === 1
+                && $c['call_ids'] === [$call->id])
+            ->once();
+    }
+
+    public function test_the_raw_status_is_still_named_so_the_bad_row_can_be_found(): void
+    {
+        // A placeholder that hid WHICH value was unmappable would trade a
+        // hard failure for an unactionable one.
+        $call = $this->deferredCall();
+        DB::table('phone_calls')->where('id', $call->id)->update(['status' => 'weird_legacy']);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('weird_legacy')
+            ->assertExitCode(0);
     }
 
     public function test_the_real_guard_marks_and_releases_the_columns_the_gauge_reads(): void
@@ -533,8 +555,29 @@ class StrandedVoicemailDeferralReportTest extends TestCase
     public function test_a_negative_threshold_is_refused(): void
     {
         $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => -5])
-            ->expectsOutputToContain('--minutes must not be negative')
+            ->expectsOutputToContain('--minutes must be at least 1')
             ->assertExitCode(1);
+    }
+
+    public function test_a_zero_threshold_is_refused(): void
+    {
+        // Round 3 diff:4: the shape check refuses 'soon' BECAUSE (int) 'soon'
+        // is 0, yet an explicit --minutes=0 walked through both gates and set
+        // the cutoff to now(), reporting in-flight deferrals as faults. The
+        // boundary between the refused and accepted ranges had no control at
+        // all; 0 and 1 are both pinned now.
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => 0])
+            ->expectsOutputToContain('--minutes must be at least 1')
+            ->assertExitCode(1);
+    }
+
+    public function test_a_one_minute_threshold_is_accepted(): void
+    {
+        $this->deferredCall(['deferred_at' => now()->subMinutes(5)]);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals', ['--minutes' => 1])
+            ->expectsOutputToContain('1 voicemail notification(s)')
+            ->assertExitCode(0);
     }
 
     /**
