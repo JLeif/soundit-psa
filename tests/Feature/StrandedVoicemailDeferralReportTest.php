@@ -604,4 +604,38 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->expectsOutputToContain('2 voicemail notification(s) withheld')
             ->assertExitCode(0);
     }
+
+    public function test_the_command_writes_nothing_to_any_call(): void
+    {
+        // Round 3 contract:5, upheld: the docblock asserts in capitals that
+        // THIS COMMAND WRITES NOTHING TO A CALL -- the card's central safety
+        // property, the whole reason a gauge was built instead of a resend --
+        // and no control pinned it. A gauge that quietly remediates is the one
+        // failure this leg exists to prevent, and "I read the code and saw no
+        // update()" is not a control.
+        //
+        // Snapshot every column of every row, run the command over a
+        // population it will actually report on, and require byte-identity.
+        // The mutation that makes this fail is any write at all: releasing a
+        // marker, claiming a send, or stamping a row as seen.
+        $this->deferredCall(['deferred_at' => now()->subMinutes(180)]);
+        $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
+        $this->deferredCall(['deferred_at' => null]);
+
+        $snapshot = fn () => DB::table('phone_calls')
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($r) => (array) $r)
+            ->toArray();
+
+        $before = $snapshot();
+
+        // Precondition: the command must actually have something to report,
+        // or byte-identity is free and this control is hollow.
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('2 voicemail notification(s)')
+            ->assertExitCode(0);
+
+        $this->assertSame($before, $snapshot());
+    }
 }
