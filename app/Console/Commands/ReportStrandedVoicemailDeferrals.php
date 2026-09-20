@@ -74,7 +74,13 @@ class ReportStrandedVoicemailDeferrals extends Command
 
     protected $description = 'Count voicemail notifications deferred for want of end evidence and never released.';
 
-    /** Most rows listed individually; the count reported is always the true total. */
+    /**
+     * Most rows listed individually. Under the cap the reported count is the
+     * exact total and is derived from the same read as the listing. Above the
+     * cap it comes from a second, later query floored at the rows the listing
+     * read saw, so it is a lower bound on a moving set -- never an exact total,
+     * and never smaller than the rows printed beside it.
+     */
     private const SAMPLE_LIMIT = 20;
 
     /** ~10 years. Beyond this, Carbon underflows or wraps instead of erroring. */
@@ -150,6 +156,11 @@ class ReportStrandedVoicemailDeferrals extends Command
         // the difference between an exact total and a floor.
         $rows = (clone $stranded)
             ->orderBy('voicemail_notify_deferred_at')
+            // Tiebreak: markers written in the same second are common (one
+            // release pass touches many rows), and without a second key
+            // "the 20 oldest" is whatever the engine happens to return, so
+            // consecutive runs can disagree about which rows they name.
+            ->orderBy('id')
             ->limit(self::SAMPLE_LIMIT + 1)
             ->get(['id', 'voicemail_notify_deferred_at', 'status', 'started_at']);
 
@@ -162,9 +173,20 @@ class ReportStrandedVoicemailDeferrals extends Command
         $truncated = $rows->count() > self::SAMPLE_LIMIT;
         $sample = $rows->take(self::SAMPLE_LIMIT);
 
-        // Only when the listing is truncated is a second query needed, and by
-        // then the report is explicitly approximate anyway.
-        $count = $truncated ? (clone $stranded)->count() : $rows->count();
+        // Only when the listing is truncated is a second query needed, and it
+        // runs LATER than the read the listing came from. A burst of releases
+        // in between can make it return FEWER rows than are listed, which would
+        // print "Showing the 20 oldest of 5" and log a count contradicting its
+        // own id list -- the same count/rows disagreement the single read above
+        // exists to prevent, relocated above the cap. The total is therefore
+        // floored at the number of rows the listing read actually saw
+        // (SAMPLE_LIMIT + 1), which is a lower bound held in evidence rather
+        // than an assumption about what the later query should have returned.
+        // Above the cap the reported total is that floor; under the cap no
+        // second query runs and the total is exact.
+        $count = $truncated
+            ? max((clone $stranded)->count(), $rows->count())
+            : $rows->count();
 
         $oldest = $sample->first()->voicemail_notify_deferred_at;
 

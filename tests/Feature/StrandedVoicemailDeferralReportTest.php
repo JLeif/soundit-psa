@@ -6,6 +6,7 @@ use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Models\Setting;
+use App\Services\NotificationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -188,9 +189,12 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->assertExitCode(0);
     }
 
-    public function test_the_total_is_exact_and_not_capped_when_the_listing_truncates(): void
+    public function test_the_total_is_not_bounded_by_the_cap_when_the_listing_truncates(): void
     {
         // The cap bounds the LISTING; it must never bound the reported total.
+        // Named as a bound rather than as exactness: above the cap the total is
+        // a second read floored at the rows listed, and the control below is
+        // the one that pins what happens when those two reads disagree.
         for ($i = 0; $i < 23; $i++) {
             $this->deferredCall();
         }
@@ -199,6 +203,60 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             ->expectsOutputToContain('23 voicemail notification(s)')
             ->expectsOutputToContain('Showing the 20 oldest of 23')
             ->assertExitCode(0);
+    }
+
+    public function test_the_reported_total_is_never_smaller_than_the_rows_listed(): void
+    {
+        // The truncated branch takes its total from a SECOND query that runs
+        // after the listing read, so a burst of releases in between produced
+        // "Showing the 20 oldest of 5" -- a report contradicting itself -- and a
+        // log record whose count was smaller than its own 20-id list.
+        //
+        // The race is FORCED, not waited for: DB::listen fires the instant the
+        // listing read completes, which is exactly the window the count query
+        // sits in, so releasing 16 of the 21 rows there is the real interleaving
+        // rather than a simulation of it. Without the floor the count query
+        // returns 5 and both assertions below fail.
+        Log::spy();
+
+        for ($i = 0; $i < 21; $i++) {
+            $this->deferredCall();
+        }
+
+        $released = false;
+        DB::listen(function ($q) use (&$released) {
+            if ($released
+                || ! str_starts_with(strtolower(ltrim($q->sql)), 'select')
+                || ! str_contains($q->sql, 'voicemail_notify_deferred_at')) {
+                return;
+            }
+
+            // Set before the queries below so this listener cannot re-enter on
+            // its own reads.
+            $released = true;
+
+            $ids = PhoneCall::query()
+                ->whereNotNull('voicemail_notify_deferred_at')
+                ->orderBy('id')
+                ->take(16)
+                ->pluck('id');
+
+            // What a release leaves behind: marker cleared, send claimed.
+            PhoneCall::whereIn('id', $ids)->update([
+                'voicemail_notify_deferred_at' => null,
+                'voicemail_notified_at' => now(),
+            ]);
+        });
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('21 voicemail notification(s)')
+            ->expectsOutputToContain('Showing the 20 oldest of 21')
+            ->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['count'] >= count($c['call_ids'])
+                && $c['call_ids_truncated'] === true)
+            ->once();
     }
 
     public function test_an_absurdly_large_minutes_value_is_refused(): void
@@ -271,6 +329,95 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $this->expectException(\ValueError::class);
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')->run();
+    }
+
+    public function test_the_real_guard_marks_and_releases_the_columns_the_gauge_reads(): void
+    {
+        // Round 2 diff:12, upheld: every other control in this file models the
+        // column states by hand. If NotificationService ever writes a shape
+        // this fixture does not, the whole suite passes while the gauge is
+        // blind. This control drives the REAL service so the model is
+        // derived, not asserted.
+        $service = app(NotificationService::class);
+
+        // Built through the same helper, then reset to a genuinely UNMARKED
+        // row so the guard itself does the first write.
+        $call = $this->deferredCall(['deferred_at' => null]);
+
+        $service->notifyNewVoicemail($call);
+        $call->refresh();
+
+        // The marker the gauge selects on is what the guard actually writes.
+        $this->assertNotNull($call->voicemail_notify_deferred_at);
+        $this->assertNull($call->voicemail_notified_at);
+
+        // Round 2 diff:4 claimed a re-stamp resets the age clock. REFUTED at
+        // source and now by execution: the marking UPDATE is guarded by
+        // whereNull on the same column, so a second entrance cannot re-stamp
+        // an already-marked row.
+        $firstMark = $call->voicemail_notify_deferred_at;
+        $this->travel(90)->minutes();
+        $service->notifyNewVoicemail($call);
+        $call->refresh();
+        $this->assertEquals(
+            $firstMark->timestamp,
+            $call->voicemail_notify_deferred_at->timestamp,
+            'A second deferral re-stamped the marker and reset the gauge age clock.'
+        );
+        $this->travelBack();
+
+        // And the release clears the marker in the SAME statement that claims
+        // the send -- the docblock's central argument, now executed.
+        $call->ended_at = now();
+        $call->save();
+        $service->releaseDeferredVoicemailNotification($call);
+        $call->refresh();
+
+        $this->assertNull($call->voicemail_notify_deferred_at);
+        $this->assertNotNull($call->voicemail_notified_at);
+
+        // A row in that state is exactly what the gauge must NOT report.
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('No voicemail deferral has been outstanding')
+            ->assertExitCode(0);
+    }
+
+    public function test_the_listed_rows_are_stable_when_markers_share_a_timestamp(): void
+    {
+        // Round 2 context:13: the cap control creates 22 rows all carrying the
+        // same marker and asserts only counts, so it passes under ANY
+        // ordering. With no tiebreak "the 20 oldest" is engine-dependent and
+        // two runs a second apart can name different calls.
+        //
+        // Asserted on the LOG record, not stdout: the schedule entry is
+        // runInBackground() with no redirection, so stdout is discarded in
+        // production and an assertion there tests a surface nobody reads.
+        //
+        // HONEST LIMIT, measured: removing the ->orderBy('id') tiebreak does
+        // NOT fail this control, because SQLite returns rows in rowid order
+        // for this query and rowid tracks insertion here. The mutant SURVIVES.
+        // No fixture can kill it on SQLite -- the defect is a MariaDB/engine
+        // property, and prod is MariaDB. The tiebreak is kept as a correctness
+        // guarantee this suite cannot pin; do not read this test as proof of
+        // it. Disclosed rather than dressed up with an assertion that only
+        // looks like coverage.
+        Log::spy();
+
+        $shared = now()->subHours(2);
+        $ids = [];
+        for ($i = 0; $i < 22; $i++) {
+            $ids[] = $this->deferredCall(['deferred_at' => $shared])->id;
+        }
+        sort($ids);
+        $expected = array_slice($ids, 0, 20);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => $c['call_ids'] === $expected
+                && $c['call_ids_truncated'] === true
+                && $c['count'] === 22)
+            ->once();
     }
 
     private function deferredCall(array $overrides = []): PhoneCall
