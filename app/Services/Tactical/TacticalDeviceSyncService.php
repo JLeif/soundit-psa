@@ -304,10 +304,24 @@ class TacticalDeviceSyncService
                 return null;
             }
 
-            // A plausibility floor, not just a 0 sentinel: 0, 1, -1 and other small
-            // or negative values are "no reading", not a machine that booted in 1970
-            // (review 01a0b1a7 contract:5).
+            // Preserve refusal of small/negative input before an out-of-range cast
+            // can wrap it upward. This is not sufficient to validate the instant.
             if ($epoch < self::BOOT_TIME_EPOCH_FLOOR) {
+                return null;
+            }
+
+            // The floor bounds the input from BELOW only, and the modular wrap this
+            // class of bug turns on maps an out-of-range float onto the WHOLE int
+            // range — not only onto values under the floor. 2^64 + 1789616128 (a
+            // finite double the producer's FloatField can carry) clears the floor,
+            // casts to 1789616128, is a plausible past instant, and would be written
+            // as a fabricated boot time that also wins the never-backwards
+            // arbitration — which a populated column cannot mask (r4 diff:1,
+            // context:1). A value PHP's int cannot carry is not an observation of
+            // any instant, so refuse it BEFORE the cast rather than ranking whatever
+            // the wrap happens to produce. (float) PHP_INT_MAX is exactly 2^63, so
+            // everything reaching the cast below truncates exactly.
+            if ($epoch >= (float) PHP_INT_MAX) {
                 return null;
             }
 
@@ -321,7 +335,17 @@ class TacticalDeviceSyncService
                 // write was in fact an unconditional write of the whole Tactical fleet,
                 // bumping assets.updated_at forever. Comparing at the precision the
                 // column actually stores is what makes the guard's promise true.
-                return Carbon::createFromTimestamp((int) $epoch);
+                $parsed = Carbon::createFromTimestamp((int) $epoch);
+
+                // Validate the instant we will write, just as the string branch does.
+                // A finite float outside PHP's int range can cast below the floor
+                // (2^64 casts to 0 here); checking the pre-cast float admitted 1970
+                // on an empty column, where never-backwards cannot mask it (#2492).
+                if ($parsed->getTimestamp() < self::BOOT_TIME_EPOCH_FLOOR) {
+                    return null;
+                }
+
+                return $parsed;
             } catch (\Throwable) {
                 return null;
             }
