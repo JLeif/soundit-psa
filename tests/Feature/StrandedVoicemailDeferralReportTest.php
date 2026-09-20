@@ -11,6 +11,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
 
@@ -630,12 +631,41 @@ class StrandedVoicemailDeferralReportTest extends TestCase
 
         $before = $snapshot();
 
-        // Precondition: the command must actually have something to report,
-        // or byte-identity is free and this control is hollow.
+        // Round 5 contract:6 + context:5, upheld: the precondition used to
+        // assert on stdout -- the surface this same file documents at lines
+        // 43-47 as discarded by runInBackground(), and the surface a sibling
+        // control was already re-aimed off. It fired in-test, so the control
+        // was not hollow, but it was coupled to the one output this leg has
+        // decided is deletable. The log record is the production surface and
+        // it carries call_ids, so the precondition now pins WHICH rows the
+        // command held -- exactly the set a remediating mutant would act on --
+        // rather than only how many.
+        Log::spy();
+
+        // Round 5 contract:1, upheld and PROVEN BY MUTATION: byte-identity on
+        // phone_calls covers two of the three prohibited acts. A resend leaves
+        // no row behind -- dispatchVoicemailNotification() (NotificationService
+        // :564-590) only dispatches SendTicketNotification per user, and the
+        // only phone_calls write on that path is the separate claim in
+        // sendVoicemailNotificationOnce() (:542-545), which a mutant need not
+        // perform. A mutant dispatching one job per stranded row and writing
+        // nothing passed this control green. QUEUE_CONNECTION=sync and
+        // MAIL_MAILER=array meant it was swallowed silently.
+        Queue::fake();
+
         $this->artisan('calls:report-stranded-voicemail-deferrals')
-            ->expectsOutputToContain('2 voicemail notification(s)')
             ->assertExitCode(0);
 
         $this->assertSame($before, $snapshot());
+
+        // The third prohibited act: no notification may leave the box.
+        Queue::assertNothingPushed();
+
+        // Precondition, on the production surface: the command must actually
+        // have reported the two stranded rows, or every assertion above is
+        // satisfied by a command that did nothing and this control is hollow.
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $message, array $context) => $context['count'] === 2)
+            ->once();
     }
 }
