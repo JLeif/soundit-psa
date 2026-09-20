@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
+use App\Services\NotificationService;
 use App\Services\PhoneCallService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -462,6 +463,13 @@ class FinaliseStuckCalls extends Command
                     'derived_ended_at' => $endedAt->toDateTimeString(),
                     'status' => $newStatus->value,
                 ]);
+
+                // The third writer of ended_at releases too. A voicemail whose
+                // email was withheld and which only this sweep ever finalises
+                // would otherwise keep its marker forever, with nothing that
+                // queries the column to find it again. Outside any transaction
+                // here, and a no-op unless a marker is outstanding.
+                app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
             }
         }
 

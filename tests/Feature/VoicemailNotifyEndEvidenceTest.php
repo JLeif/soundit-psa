@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\NotificationService;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -219,5 +220,119 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
         app(PhoneCallService::class)->handleCallEnded($call->call_uuid, ['Duration' => '20']);
 
         Queue::assertNotPushed(SendTicketNotification::class);
+    }
+
+    /**
+     * THE DISPATCH MUST NOT HAPPEN INSIDE THE TRANSACTION. handleCallEnded()
+     * does its work in updateCallSafely()'s DB::transaction, and a queued job
+     * is not rolled back with one: a dispatch made before the commit emails
+     * staff about end evidence the database can still discard, and a throw from
+     * the queue at that point would roll back ended_at, the final status and
+     * the prepay debit. Pinned by recording the transaction nesting level at
+     * the moment the release is called - 0 means the commit already happened.
+     */
+    public function test_the_release_runs_after_the_transaction_has_committed(): void
+    {
+        Queue::fake();
+        $this->staffUser();
+        $call = $this->voicemailCall();
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+
+        $observed = new \stdClass;
+        $observed->transactionLevel = null;
+
+        $this->app->bind(NotificationService::class, fn () => new class($observed) extends NotificationService
+        {
+            public function __construct(private \stdClass $observed) {}
+
+            public function releaseDeferredVoicemailNotification(PhoneCall $call): void
+            {
+                $this->observed->transactionLevel = DB::transactionLevel();
+
+                parent::releaseDeferredVoicemailNotification($call);
+            }
+        });
+
+        app(PhoneCallService::class)->handleCallEnded($call->call_uuid, ['Duration' => '20']);
+
+        $this->assertSame(0, $observed->transactionLevel, 'the release must be called with no transaction open');
+        $this->assertSame(1, $this->voicemailJobsQueued(), 'and it must still send the withheld email');
+    }
+
+    /**
+     * handleCallEnded() is NOT the only writer of ended_at. The recording
+     * callback finalises a call whose hangup webhook never arrived, and on an
+     * ordinary voicemail that is the writer a deferral is most likely waiting
+     * on. Without a release here the email is stranded: nothing queries the
+     * marker, and the row leaves the sweep's whereNull('ended_at') population
+     * the moment this path writes.
+     */
+    public function test_end_evidence_from_the_recording_path_releases_the_withheld_email(): void
+    {
+        Queue::fake();
+        $this->staffUser();
+        $call = $this->voicemailCall();
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+        Queue::assertNotPushed(SendTicketNotification::class);
+
+        app(PhoneCallService::class)->handleRecordingReady($call->call_uuid, 'https://media.example.test/r.mp3', 20);
+
+        $fresh = $call->refresh();
+        $this->assertNotNull($fresh->ended_at, 'the recording path finalised the row');
+        $this->assertSame(1, $this->voicemailJobsQueued(), 'that writer must release the withheld email too');
+        $this->assertNull($fresh->voicemail_notify_deferred_at, 'and claim the marker while doing it');
+    }
+
+    /**
+     * The third writer: the FinaliseStuckCalls sweep, which keeps Voicemail
+     * rows in its population by design.
+     */
+    public function test_end_evidence_from_the_sweep_releases_the_withheld_email(): void
+    {
+        Queue::fake();
+        $this->staffUser();
+        // Past the sweep's --min-age-hours floor; recording evidence is already
+        // on the fixture, which is what puts the row in the population.
+        $call = $this->voicemailCall(['started_at' => now()->subDays(30)]);
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+        Queue::assertNotPushed(SendTicketNotification::class);
+
+        $this->artisan('calls:finalise-stuck --apply')->assertSuccessful();
+
+        $fresh = $call->refresh();
+        $this->assertNotNull($fresh->ended_at, 'the sweep finalised the row');
+        $this->assertSame(1, $this->voicemailJobsQueued(), 'the sweep must release the withheld email too');
+        $this->assertNull($fresh->voicemail_notify_deferred_at);
+    }
+
+    /**
+     * THE LOST WAKEUP. Neither entrance holds the row lock handleCallEnded()
+     * takes, and the transcription entrance runs in a detached process, so end
+     * evidence can commit between the read of ended_at and the write of the
+     * marker. A marker written after that commit would be released by nobody -
+     * every writer had already run - and the email would be lost silently.
+     *
+     * The committed row is written directly here because that is exactly what
+     * the other process's COMMIT looks like from this one: the row has ended,
+     * the in-memory model does not know it.
+     */
+    public function test_end_evidence_landing_during_the_deferral_window_still_emails(): void
+    {
+        Queue::fake();
+        $this->staffUser();
+        $call = $this->voicemailCall();
+
+        PhoneCall::whereKey($call->id)->update(['ended_at' => now()]);
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+
+        $this->assertSame(1, $this->voicemailJobsQueued(), 'the email must not be lost to the race');
+        $this->assertNull(
+            $call->refresh()->voicemail_notify_deferred_at,
+            'and no marker may be left outstanding on a row that has already ended'
+        );
     }
 }
