@@ -5,7 +5,10 @@ namespace Tests\Feature;
 use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
+use App\Models\Setting;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
@@ -108,6 +111,93 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         } catch (AssertionFailedError $e) {
             $this->assertStringContainsString('notifed_at', $e->getMessage());
         }
+    }
+
+    public function test_reported_timestamps_are_converted_to_the_app_timezone(): void
+    {
+        // C-14: stored UTC, displayed via toAppTz(). An unlabelled UTC time in
+        // a report read by a human deciding which call to listen to is an
+        // hours-wrong answer to "how long has this been sitting?".
+        Setting::setValue('app_timezone', 'America/Los_Angeles');
+
+        $deferred = CarbonImmutable::parse('2026-09-20 02:30:00', 'UTC');
+        $this->deferredCall(['deferred_at' => $deferred]);
+
+        // The zone marker is asserted, not just the converted digits: a
+        // converted time with no marker is the same "hours-wrong answer"
+        // trap one step further on, and without this the abbreviation could
+        // be dropped with every test still green (measured: mutant M4).
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('2026-09-19 19:30:00 PDT')
+            ->assertExitCode(0);
+    }
+
+    public function test_the_logged_oldest_is_also_converted(): void
+    {
+        Setting::setValue('app_timezone', 'America/Los_Angeles');
+        Log::spy();
+
+        $this->deferredCall(['deferred_at' => CarbonImmutable::parse('2026-09-20 02:30:00', 'UTC')]);
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')->assertExitCode(0);
+
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn (string $m, array $c) => str_contains($c['oldest_deferred_at'], '2026-09-19 19:30:00 PDT'))
+            ->once();
+    }
+
+    public function test_the_count_and_the_listed_rows_come_from_one_read(): void
+    {
+        // The previous revision read the count and the rows as TWO queries
+        // while a comment claimed one read. A release landing between them
+        // could yield a non-zero count with an empty row set and print
+        // "Oldest outstanding since ." with nothing after it. Under the cap
+        // the count is now derived from the rows themselves, so exactly one
+        // query decides both.
+        $this->deferredCall();
+        $this->deferredCall();
+
+        // Listener registered AFTER the fixtures: their INSERT/UPDATE
+        // statements also mention the marker column and would otherwise be
+        // counted as reads.
+        $reads = [];
+        DB::listen(function ($q) use (&$reads) {
+            if (str_starts_with(strtolower(ltrim($q->sql)), 'select')
+                && str_contains($q->sql, 'voicemail_notify_deferred_at')) {
+                $reads[] = $q->sql;
+            }
+        });
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('2 voicemail notification(s)')
+            ->assertExitCode(0);
+
+        $this->assertCount(1, $reads, 'the gauge must read the stranded rows exactly once when under the cap; got: '.implode(' | ', $reads));
+        $this->assertStringNotContainsStringIgnoringCase('count(', $reads[0] ?? '', 'the total must be derived from the rows read, not a second aggregate query');
+    }
+
+    public function test_an_oldest_is_never_reported_empty_when_a_count_is_reported(): void
+    {
+        // The defect the "one read" claim was supposed to close, pinned
+        // directly rather than by proxy.
+        $this->deferredCall();
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->doesntExpectOutputToContain('Oldest outstanding since .')
+            ->assertExitCode(0);
+    }
+
+    public function test_the_total_is_exact_and_not_capped_when_the_listing_truncates(): void
+    {
+        // The cap bounds the LISTING; it must never bound the reported total.
+        for ($i = 0; $i < 23; $i++) {
+            $this->deferredCall();
+        }
+
+        $this->artisan('calls:report-stranded-voicemail-deferrals')
+            ->expectsOutputToContain('23 voicemail notification(s)')
+            ->expectsOutputToContain('Showing the 20 oldest of 23')
+            ->assertExitCode(0);
     }
 
     private function deferredCall(array $overrides = []): PhoneCall

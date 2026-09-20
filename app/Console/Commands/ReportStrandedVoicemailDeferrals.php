@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\PhoneCall;
+use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -41,6 +42,9 @@ use Illuminate\Support\Facades\Log;
  * defect the guard exists to prevent, so the remedy for a stranded row is a
  * human reading a call that may still have been connected — not this command.
  *
+ * TIMEZONE. Stored values are UTC; every timestamp printed or logged is
+ * converted with toAppTz() and carries its zone abbreviation (C-14).
+ *
  * WHERE THE OUTPUT GOES. The scheduled entry runs in the background with no
  * output redirection, so the printed table exists only for an operator running
  * the command by hand. The log record is the production signal and therefore
@@ -65,8 +69,21 @@ class ReportStrandedVoicemailDeferrals extends Command
 
     protected $description = 'Count voicemail notifications deferred for want of end evidence and never released.';
 
-    /** Most rows listed individually; the count above is always the true total. */
+    /** Most rows listed individually; the count reported is always the true total. */
     private const SAMPLE_LIMIT = 20;
+
+    /**
+     * C-14: the database stores UTC and every display surface converts through
+     * toAppTz(). A console table and a log record are both read by a human
+     * deciding which call to listen to, so an unlabelled UTC timestamp here is
+     * an hours-wrong answer to "how long has this been sitting?". The zone
+     * abbreviation is printed because a converted time with no marker is the
+     * same trap one step further on.
+     */
+    private static function forDisplay(?CarbonInterface $at): string
+    {
+        return $at?->toAppTz()->format('Y-m-d H:i:s T') ?? '';
+    }
 
     public function handle(): int
     {
@@ -97,29 +114,44 @@ class ReportStrandedVoicemailDeferrals extends Command
             ->whereNull('voicemail_notified_at')
             ->where('voicemail_notify_deferred_at', '<=', $cutoff);
 
-        $count = (clone $stranded)->count();
+        // ONE read, and the count is DERIVED from it rather than queried
+        // separately. The previous revision read the count first and the rows
+        // second and claimed in this comment to be a single read; it was two,
+        // so a release landing between them could still produce a non-zero
+        // count with an empty row set and print "Oldest outstanding since ."
+        // with nothing after it. Reading rows first and counting them closes
+        // that window for real instead of describing it as closed.
+        //
+        // The cap applies to the LISTING only, so the reported total cannot
+        // come from the capped set. SAMPLE_LIMIT + 1 rows are fetched: the
+        // extra row is never displayed and exists only to distinguish "exactly
+        // SAMPLE_LIMIT outstanding" from "more than SAMPLE_LIMIT", which is
+        // the difference between an exact total and a floor.
+        $rows = (clone $stranded)
+            ->orderBy('voicemail_notify_deferred_at')
+            ->limit(self::SAMPLE_LIMIT + 1)
+            ->get(['id', 'voicemail_notify_deferred_at', 'status', 'started_at']);
 
-        if ($count === 0) {
+        if ($rows->isEmpty()) {
             $this->info("No voicemail deferral has been outstanding longer than {$minutes} minute(s).");
 
             return self::SUCCESS;
         }
 
-        // ONE read of the rows, reused for the table, the oldest and the log.
-        // Three separate queries against live data could disagree with each
-        // other mid-run (a release landing between them), and "Oldest
-        // outstanding since ." with an empty value is a worse report than a
-        // slightly stale one. The cap is deliberate and is stated in the
-        // output below rather than left for the reader to infer.
-        $sample = (clone $stranded)
-            ->orderBy('voicemail_notify_deferred_at')
-            ->limit(self::SAMPLE_LIMIT)
-            ->get(['id', 'voicemail_notify_deferred_at', 'status', 'started_at']);
+        $truncated = $rows->count() > self::SAMPLE_LIMIT;
+        $sample = $rows->take(self::SAMPLE_LIMIT);
 
-        $oldest = optional($sample->first())->voicemail_notify_deferred_at;
+        // Only when the listing is truncated is a second query needed, and by
+        // then the report is explicitly approximate anyway.
+        $count = $truncated ? (clone $stranded)->count() : $rows->count();
+
+        $oldest = $sample->first()->voicemail_notify_deferred_at;
 
         $this->warn("{$count} voicemail notification(s) withheld for want of end evidence and never released.");
-        $this->warn("Oldest outstanding since {$oldest}. These rows were withheld because the call showed no sign of having ended; read them before assuming the voicemail is complete.");
+        $this->warn(sprintf(
+            'Oldest outstanding since %s. These rows were withheld because the call showed no sign of having ended; read them before assuming the voicemail is complete.',
+            self::forDisplay($oldest)
+        ));
 
         // THE LOG LINE IS THE ONLY PRODUCTION OUTPUT. The schedule entry uses
         // runInBackground() with no output redirection, so everything written
@@ -130,9 +162,9 @@ class ReportStrandedVoicemailDeferrals extends Command
         Log::warning('[Voicemail] Stranded notification deferrals outstanding', [
             'count' => $count,
             'threshold_minutes' => $minutes,
-            'oldest_deferred_at' => (string) $oldest,
+            'oldest_deferred_at' => self::forDisplay($oldest),
             'call_ids' => $sample->pluck('id')->all(),
-            'call_ids_truncated' => $count > $sample->count(),
+            'call_ids_truncated' => $truncated,
         ]);
 
         $this->table(
@@ -140,14 +172,14 @@ class ReportStrandedVoicemailDeferrals extends Command
             $sample
                 ->map(fn (PhoneCall $c) => [
                     $c->id,
-                    (string) $c->voicemail_notify_deferred_at,
+                    self::forDisplay($c->voicemail_notify_deferred_at),
                     $c->status?->value ?? (string) $c->status,
-                    (string) $c->started_at,
+                    self::forDisplay($c->started_at),
                 ])
                 ->all()
         );
 
-        if ($count > $sample->count()) {
+        if ($truncated) {
             $this->warn(sprintf(
                 'Showing the %d oldest of %d; the list above is not the whole set.',
                 $sample->count(),
