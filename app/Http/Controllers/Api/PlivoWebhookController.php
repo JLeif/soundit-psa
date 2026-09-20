@@ -417,6 +417,21 @@ class PlivoWebhookController extends Controller
             // produce 0-second recordings that aren't real voicemails.
             if ($recordingDuration >= 3) {
                 $call = PhoneCall::where('call_uuid', $callUuid)->first();
+                // WHAT THE answered_at TEST DOES AND DOES NOT ESTABLISH. It
+                // asks whether this call was ANSWERED, which is not the same
+                // question as whether it has ENDED, and only the second one
+                // makes it safe to tell staff about a voicemail. The two come
+                // apart on this vendor: the comment on handleCallAnswered()
+                // records that Plivo's DialAction=answer fires at end-of-dial
+                // and can arrive AFTER the hangup callback, so a genuinely
+                // answered call can still read answered_at === null here.
+                //
+                // Measured on production at the time of writing: of the
+                // voicemail rows then present, every one had answered_at NULL,
+                // so this condition excluded none of them. It is a voicemail
+                // DETECTOR, and a sound one; it is not end evidence. The end
+                // evidence check lives in NotificationService, which both
+                // entrances to the voicemail email pass through.
                 if ($call && $call->answered_at === null) {
                     $this->phoneCallService->markAsVoicemail($callUuid);
 

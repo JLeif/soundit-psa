@@ -16,6 +16,7 @@ use App\Models\TicketNote;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use App\Support\TriageConfig;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class NotificationService
@@ -368,7 +369,199 @@ class NotificationService
     /**
      * Notify all opted-in users when a voicemail is left.
      */
+    /**
+     * Email staff about a new voicemail, provided the call has end evidence.
+     *
+     * WHY THE GUARD IS HERE AND NOT AT THE CALL SITES. There are two entrances
+     * to this email and they partition the traffic by recording length: the
+     * controller sends immediately when transcription will NOT run, and
+     * TranscriptionService sends from a `finally` block when it will. With the
+     * transcription settings in use at the time of writing, the deferred path
+     * carried the large majority of voicemails, so a guard placed on the
+     * controller entrance alone would have left most of this traffic ungated
+     * while reading like a fix. Guarding the method both entrances call covers
+     * both of them in one place; it does not bind a future caller that reaches
+     * SendTicketNotification some other way.
+     *
+     * WHAT THE GUARD TESTS, AND WHAT THAT IS WORTH. It tests `ended_at !== null`
+     * and nothing else. It is NOT a liveness check and NOT proof the caller hung
+     * up, and it does NOT mean a terminal webhook was processed — an earlier
+     * draft of this docblock said it did, and that was false. Three writers can
+     * put a value in that column and they do not establish the same fact:
+     *  1. handleCallEnded() — a terminal webhook was processed; ended_at = now().
+     *  2. finaliseCallTheHangupNeverClosed(), reached from the recording
+     *     callback — a value DERIVED from started_at + duration for a recording
+     *     that completed below the maxLength ceiling. That service treats a
+     *     below-ceiling recording as evidence the CALL stopped and not merely
+     *     the recording; this guard inherits that reading rather than
+     *     second-guessing it.
+     *  3. The FinaliseStuckCalls sweep — the same derivation, run later, behind
+     *     an age floor, and only when a human runs it.
+     *
+     * SO WHAT IS ACTUALLY WITHHELD, stated because the guard is weaker than "a
+     * hangup was observed". On an ordinary voicemail the recording block in
+     * PlivoWebhookController runs BEFORE either entrance is reached, writer 2
+     * has usually already stamped ended_at, and the guard passes in the same
+     * request — that traffic is unchanged by this method. What it withholds is
+     * the row carrying no end evidence of any kind: a recording at the ceiling,
+     * a duration=-1 callback, a recording finalisation whose transaction failed
+     * and was swallowed. Those are the rows that may still be connected.
+     *
+     * WHY DEFERRAL AND NOT SUPPRESSION. A withheld voicemail email is worse
+     * than an early one if it never arrives, so withholding marks the row via
+     * `voicemail_notify_deferred_at`, and EVERY writer listed above calls
+     * `releaseDeferredVoicemailNotification()` once its own write has committed.
+     * On a coalesced recording+terminal delivery that release happens in the
+     * SAME request, microseconds later.
+     *
+     * THE BOUND, stated rather than implied: if none of the three writers above
+     * ever records end evidence, this email is never sent, and nothing sweeps
+     * for a marker left outstanding. That is deliberate — the alternative is
+     * emailing about a call that may still be connected — but it is a real
+     * cost, and rows predating this change are not retro-notified: they carry a
+     * NULL marker, were already notified under the old behaviour, and nothing
+     * here revisits them.
+     *
+     * WHY THE MARKER IS WRITTEN CONDITIONALLY AND THE ROW RE-READ. Neither
+     * entrance holds the row lock handleCallEnded() takes, and the transcription
+     * entrance runs in a detached process, so end evidence can commit between
+     * the read at the top of this method and the write below. A marker written
+     * after that commit would be released by nobody, every writer having already
+     * run. The conditional UPDATE declines to mark a row that has since ended,
+     * and the re-read sends the email from here when that is what happened.
+     *
+     * WHY THE RE-READ IS NOT ENOUGH ON ITS OWN. A row reading (ended_at set,
+     * marker NULL) at that re-read is not distinguishable from a row whose
+     * marker a release claimed and SENT an instant earlier: clearing a marker
+     * destroys the evidence it ever existed. Two orderings reach this method in
+     * exactly that state with the email already gone out. In one request:
+     * PlivoWebhookController runs handleRecordingReady(), which releases after
+     * its commit, and then calls this method on a refreshed row. Across
+     * processes: a terminal webhook can claim the marker this method just wrote
+     * before the fresh() below returns. So the SEND is claimed too, against
+     * `voicemail_notified_at`, which a completed send leaves behind. Both
+     * dispatch paths in this class take that claim; it does not bind a future
+     * caller that reaches SendTicketNotification some other way.
+     */
     public function notifyNewVoicemail(PhoneCall $call): void
+    {
+        if ($call->ended_at === null) {
+            // Marks only a row that still carries no end evidence, that has
+            // nothing outstanding on it already, and that has not already been
+            // emailed about.
+            PhoneCall::whereKey($call->getKey())
+                ->whereNull('ended_at')
+                ->whereNull('voicemail_notify_deferred_at')
+                ->whereNull('voicemail_notified_at')
+                ->update(['voicemail_notify_deferred_at' => now()]);
+
+            $call = $call->fresh() ?? $call;
+
+            if ($call->ended_at === null) {
+                Log::info('[Voicemail] Notification deferred pending end evidence', [
+                    'call_id' => $call->id,
+                ]);
+
+                return;
+            }
+        }
+
+        // End evidence is present, so the email can go out from here - but only
+        // if nobody has sent it yet. That question is decided by the claim below
+        // and read off the record of the send, not off the marker, which by now
+        // may have been cleared by whoever sent it.
+        $this->sendVoicemailNotificationOnce($call, requireOutstandingDeferral: false);
+    }
+
+    /**
+     * Send a voicemail email that was withheld for want of end evidence.
+     *
+     * Called by every writer of `ended_at`, once that write has COMMITTED. It
+     * must not be called from inside an open transaction: the job it queues is
+     * not rolled back with one, so a dispatch made before the commit can email
+     * staff about end evidence the database then discards — and a queue failure
+     * at that point would take call finalisation and the prepay debit down with
+     * it. All three callers sit outside their transaction for that reason.
+     *
+     * CLAIMING, not merely clearing. One conditional UPDATE both clears the
+     * marker and stamps `voicemail_notified_at`, and only the caller whose
+     * UPDATE changed a row dispatches. A redelivered terminal callback, or a
+     * second writer reaching the same row, loses that claim and sends nothing.
+     * The stamp is the half a later notifyNewVoicemail() reads: a cleared marker
+     * on its own would look to that method exactly like a call nothing was ever
+     * withheld for, and it would send a second copy.
+     *
+     * It sends only where a deferral is outstanding, which is what keeps it from
+     * emailing about every ended call: a row nothing withheld an email for is
+     * left alone here.
+     *
+     * The cost of claiming before dispatching is the reverse failure: if the
+     * dispatch throws, the claim is already taken and the email is not retried.
+     * That is the chosen direction for an outbound email to a client's
+     * technicians — at most once rather than at least once — and the throw is
+     * logged here rather than left to fail the webhook that triggered it, which
+     * would otherwise re-stamp ended_at and re-run the debit on redelivery.
+     */
+    public function releaseDeferredVoicemailNotification(PhoneCall $call): void
+    {
+        if ($call->ended_at === null) {
+            return;
+        }
+
+        $this->sendVoicemailNotificationOnce($call, requireOutstandingDeferral: true);
+    }
+
+    /**
+     * Queue the voicemail email, at most once for a given call.
+     *
+     * The claim is a single conditional UPDATE against `voicemail_notified_at`,
+     * so two processes racing on one row cannot both take it, and it clears any
+     * outstanding deferral marker in the same statement - a row is never left
+     * claimed and still marked.
+     *
+     * $requireOutstandingDeferral separates the two entrances. A release sends
+     * only what was withheld; notifyNewVoicemail() sends whether or not anything
+     * was withheld, and leans on the claim alone.
+     *
+     * A throw from the dispatch is logged and swallowed for both callers,
+     * because by then the claim is taken: letting it out would fail the webhook
+     * that triggered it - re-stamping ended_at and re-running the debit on
+     * redelivery - without making the email retryable.
+     */
+    private function sendVoicemailNotificationOnce(PhoneCall $call, bool $requireOutstandingDeferral): void
+    {
+        $query = PhoneCall::whereKey($call->getKey())
+            ->whereNull('voicemail_notified_at');
+
+        if ($requireOutstandingDeferral) {
+            $query->whereNotNull('voicemail_notify_deferred_at');
+        }
+
+        $claimedAt = now();
+
+        $claimed = $query->update([
+            'voicemail_notify_deferred_at' => null,
+            'voicemail_notified_at' => $claimedAt,
+        ]) === 1;
+
+        if (! $claimed) {
+            return;
+        }
+
+        $call->voicemail_notify_deferred_at = null;
+        $call->voicemail_notified_at = $claimedAt;
+
+        try {
+            $this->dispatchVoicemailNotification($call);
+        } catch (\Throwable $e) {
+            Log::error('[Voicemail] Notification could not be queued and will not be retried', [
+                'call_id' => $call->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function dispatchVoicemailNotification(PhoneCall $call): void
     {
         $call->loadMissing(['person', 'client']);
 

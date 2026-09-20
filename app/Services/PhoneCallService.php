@@ -467,7 +467,7 @@ class PhoneCallService
      */
     public function handleCallEnded(string $callUuid, array $data): ?PhoneCall
     {
-        return $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($data) {
+        $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($data) {
             $call->ended_at = now();
             $call->duration = isset($data['Duration']) ? (int) $data['Duration'] : null;
 
@@ -496,6 +496,25 @@ class PhoneCallService
 
             return $call;
         });
+
+        // End evidence has just been COMMITTED, so a voicemail email withheld
+        // for want of it can go out now. Deliberately OUTSIDE the closure above,
+        // which updateCallSafely() runs in a transaction: a queued job is not
+        // rolled back with the transaction, so dispatching inside would email
+        // staff about an ended_at the database could still discard, and a queue
+        // failure there would roll back ended_at, the final status and the
+        // prepay debit - losing call and money-path work because an email could
+        // not be sent.
+        //
+        // This runs on EVERY terminal delivery, not only the first. The release
+        // claims the deferral marker with a conditional UPDATE and dispatches
+        // only when that claim wins, so a redelivered hangup callback finds
+        // nothing to claim.
+        if ($call !== null) {
+            app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
+        }
+
+        return $call;
     }
 
     /**
@@ -598,6 +617,14 @@ class PhoneCallService
             if ($call->ticket_id && $call->is_billable) {
                 app(PrepayService::class)->debitFromPhoneCall($call);
             }
+
+            // This path is a writer of ended_at too - finaliseCallTheHangupNeverClosed()
+            // may have just derived one inside the closure above - and on an
+            // ordinary voicemail it is the writer a deferral is most likely to
+            // be waiting on. Same placement rule as handleCallEnded(): after the
+            // commit, never inside the transaction. A no-op when the row carries
+            // no withheld email.
+            app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
         }
 
         return $call;

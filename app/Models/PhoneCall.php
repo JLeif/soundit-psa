@@ -78,6 +78,8 @@ class PhoneCall extends Model
             'ended_at' => 'datetime',
             'followed_up_at' => 'datetime',
             'transcribed_at' => 'datetime',
+            'voicemail_notify_deferred_at' => 'datetime',
+            'voicemail_notified_at' => 'datetime',
         ];
     }
 
