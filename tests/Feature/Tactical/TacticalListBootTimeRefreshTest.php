@@ -81,9 +81,9 @@ class TacticalListBootTimeRefreshTest extends TestCase
         $asset = $this->linked('EXISTING', '2026-06-24 01:00:00');
         $result = $this->service([$this->row('EXISTING'), $this->row('NEW')])->syncDevices();
         $this->assertSame(0, $result->errors);
-        $this->assertSame('2026-09-20 10:00:00', $asset->fresh()->last_boot_at->toDateTimeString());
+        $this->assertSame('2026-09-20 10:00:00', $asset->fresh()->last_boot_at?->toDateTimeString());
         $new = Asset::where('hostname', 'NEW')->firstOrFail();
-        $this->assertSame('2026-09-20 10:00:00', $new->last_boot_at->toDateTimeString());
+        $this->assertSame('2026-09-20 10:00:00', $new->last_boot_at?->toDateTimeString());
     }
 
     #[DataProvider('arbitration')]
@@ -91,7 +91,7 @@ class TacticalListBootTimeRefreshTest extends TestCase
     {
         $asset = $this->linked('ONE', $stored, $other);
         $this->service([$this->row('ONE')])->syncDevices();
-        $this->assertSame($expected, $asset->fresh()->last_boot_at->toDateTimeString());
+        $this->assertSame($expected, $asset->fresh()->last_boot_at?->toDateTimeString());
     }
 
     public static function arbitration(): array
@@ -121,7 +121,7 @@ class TacticalListBootTimeRefreshTest extends TestCase
         $result = $this->service($rows)->syncDevices();
         $this->assertSame(0, $result->errors);
         $this->assertNull($empty->fresh()->last_boot_at);
-        $this->assertSame('2026-06-24 01:00:00', $populated->fresh()->last_boot_at->toDateTimeString());
+        $this->assertSame('2026-06-24 01:00:00', $populated->fresh()->last_boot_at?->toDateTimeString());
     }
 
     public static function refusals(): array
@@ -161,7 +161,7 @@ class TacticalListBootTimeRefreshTest extends TestCase
         ])->syncDevices();
         $this->assertSame(1, $result->errors);
         $this->assertNull($bad->fresh()->last_boot_at);
-        $this->assertSame('2026-09-20 10:00:00', $good->fresh()->last_boot_at->toDateTimeString());
+        $this->assertSame('2026-09-20 10:00:00', $good->fresh()->last_boot_at?->toDateTimeString());
     }
 
     public function test_corrupt_stored_boot_is_contained_and_later_row_still_refreshes(): void
@@ -172,6 +172,6 @@ class TacticalListBootTimeRefreshTest extends TestCase
         $result = $this->service([$this->row('BAD'), $this->row('GOOD')])->syncDevices();
         $this->assertSame(0, $result->errors, 'The shared boot refresh is opportunistic.');
         $this->assertSame('not-a-date', DB::table('assets')->where('id', $bad->id)->value('last_boot_at'));
-        $this->assertSame('2026-09-20 10:00:00', $good->fresh()->last_boot_at->toDateTimeString());
+        $this->assertSame('2026-09-20 10:00:00', $good->fresh()->last_boot_at?->toDateTimeString());
     }
 }
