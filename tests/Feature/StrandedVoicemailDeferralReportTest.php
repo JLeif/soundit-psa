@@ -6,6 +6,7 @@ use App\Enums\CallDirection;
 use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Models\Setting;
+use App\Models\User;
 use App\Services\NotificationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -624,6 +625,36 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $newer = $this->deferredCall(['deferred_at' => now()->subMinutes(120)]);
         $this->deferredCall(['deferred_at' => null]);
 
+        // Round 2 context:1, and the fixture is PART OF THE CONTROL. Every
+        // send-shaped mutant this guard exists to kill has to get past two
+        // early returns before it can reach a transport, and an empty fixture
+        // fails both of them:
+        //
+        //   NotificationService::dispatchVoicemailNotification() iterates
+        //   User::where('is_active', true)->whereNotNull('email')->get() --
+        //   an empty collection means the foreach body never runs.
+        //   SendTicketNotification::handle() returns on a missing recipient
+        //   (User::find(...) / no email) and returns AGAIN on a missing
+        //   graph_mailbox, logging '[Notification] Email not configured'.
+        //
+        // Without a recipient and a mailbox the raiser below is unreachable
+        // and this control is green by construction -- the exact false-green
+        // that made a round-1 dispatch_sync mutant look like a gap when it had
+        // in fact never dispatched, and the reason two mutants this round were
+        // reported NOT SCORED and re-aimed. The kill evidence was measured
+        // against a fixture with a recipient and a mailbox, so the committed
+        // fixture has to be that one.
+        //
+        // notification_preferences is left null deliberately:
+        // User::wantsNotification() then takes NotificationEventType's enabled
+        // default, which is the shape a real operator account has.
+        User::factory()->create([
+            'email' => 'oncall@example.test',
+            'is_active' => true,
+            'notification_preferences' => null,
+        ]);
+        Setting::setValue('graph_mailbox', 'helpdesk@example.test');
+
         // The two marked rows are the stranded set by construction: both are
         // older than the default threshold and the third row carries no marker
         // at all. The ids come from the rows the helper returned -- the idiom
@@ -745,17 +776,46 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         Queue::fake();
         Notification::fake();
 
-        // The real notification transport. Binding it to a double that
-        // throws turns any send attempt into a loud failure instead of an
-        // outbound request, and covers dispatchNow()/dispatchSync() paths
-        // that reach EmailService without ever touching the queue binding.
-        $this->app->bind(\App\Services\Graph\GraphClient::class, function () {
-            return new class extends \App\Services\Graph\GraphClient
+        // The real notification transport. Binding it to a double turns any
+        // send attempt into an observable event instead of an outbound
+        // request, and covers the dispatchNow()/dispatchSync() paths that
+        // reach EmailService without ever touching the queue binding.
+        //
+        // Round 2 context:2: THE THROW ALONE IS NOT THE CONTROL. The
+        // production remediation path swallows it --
+        // NotificationService::sendVoicemailNotificationOnce() (:554-561)
+        // wraps its dispatch in catch (\Throwable) and logs '[Voicemail]
+        // Notification could not be queued and will not be retried', by
+        // design, because the claim is already taken by then. A
+        // \RuntimeException raised inside EmailService on that path therefore
+        // never reaches PHPUnit: the command still exits 0 and every
+        // assertion below still passes while a Graph send was attempted. So
+        // the attempt is RECORDED in a variable this test owns and asserted
+        // after the run; no production catch can reach that. The throw stays
+        // because it also stops a caller mid-loop rather than letting it walk
+        // the whole stranded set, and because on the paths that do NOT catch
+        // (a direct EmailService call, dispatchNow of the job -- whose own
+        // catch is on GraphClientException, not its \RuntimeException parent)
+        // it still fails loudly at the point of the send.
+        $graphSends = [];
+        $recordGraphSend = function (string $endpoint) use (&$graphSends): void {
+            $graphSends[] = $endpoint;
+        };
+
+        $this->app->bind(\App\Services\Graph\GraphClient::class, function () use ($recordGraphSend) {
+            return new class($recordGraphSend) extends \App\Services\Graph\GraphClient
             {
-                public function __construct() {}
+                private \Closure $record;
+
+                public function __construct(\Closure $record)
+                {
+                    $this->record = $record;
+                }
 
                 public function post(string $endpoint, array $data): array
                 {
+                    ($this->record)($endpoint);
+
                     throw new \RuntimeException(
                         'The command sent a Graph request to '.$endpoint.': it sent something.'
                     );
@@ -786,6 +846,17 @@ class StrandedVoicemailDeferralReportTest extends TestCase
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->assertExitCode(0);
+
+        // The recorded half of the Graph guard, and the half a caught throw
+        // cannot silence -- see the binding above. A send attempt that
+        // sendVoicemailNotificationOnce() logs and swallows leaves the command
+        // exiting 0 and leaves nothing else in this test to fail, but it
+        // leaves an endpoint here.
+        $this->assertSame(
+            [],
+            $graphSends,
+            'The command reached the Graph send transport: it sent something.'
+        );
 
         $this->assertSame($before, $snapshot());
 
