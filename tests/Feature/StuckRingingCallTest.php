@@ -429,19 +429,53 @@ class StuckRingingCallTest extends TestCase
     }
 
     /**
-     * The recording_duration arm of the guard, stated honestly.
+     * A row whose STORED recording_duration is already at the ceiling must not
+     * be finalised by a later short callback either.
      *
-     * This arm CANNOT be reached through handleRecordingReady(): that method
-     * overwrites recording_duration with the incoming value before the flag is
-     * computed, so a seeded over-ceiling recording_duration is gone by the time
-     * the guard runs. My first version of this test seeded the column and
-     * asserted the row stayed open; it failed, and the failure was correct -
-     * the premise was wrong, not the fix.
+     * This arm is reachable, and an earlier version of this branch could not
+     * see it: handleRecordingReady() writes the incoming length into
+     * recording_duration as its first statement, so a guard that read the
+     * column afterwards tested the incoming value twice. The row shape is real
+     * - resolveRecordingFromPlivo() backfills recording_duration from the
+     * longest recording Plivo holds, writing no duration and no ended_at,
+     * which is precisely what FinaliseStuckCalls declines to touch. A later
+     * short callback (a redelivery, a second segment, or an omitted
+     * RecordingDuration) must not finalise it from a length the ceiling exists
+     * to distrust.
+     */
+    public function test_a_stored_recording_duration_at_the_ceiling_is_not_finalised_by_a_later_short_callback(): void
+    {
+        Queue::fake();
+        $call = $this->stuckRingingCall('stuck-ringing-stored-recording-at-ceiling');
+        $call->recording_duration = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
+        $call->save();
+
+        $this->assertNull($call->fresh()->ended_at,
+            'precondition: the row starts unfinalised');
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-ringing-stored-recording-at-ceiling',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-stored-recording-ceiling.mp3',
+            30,
+        );
+
+        $stored = $call->fresh();
+
+        $this->assertNull($stored->ended_at,
+            'a stored recording_duration at the ceiling must withhold finalisation, '
+            .'however short the later callback - the guard must read the column '
+            .'before this method overwrites it');
+        $this->assertSame(CallStatus::Ringing, $stored->status);
+    }
+
+    /**
+     * The shared predicate, at its boundary and on null.
      *
-     * The arm is still worth holding, because effectiveDurationSeconds() falls
-     * back to recording_duration and any future caller that does not rewrite
-     * the column would reach it. It is pinned here at the level it is real:
-     * the predicate, exercised directly through the ceiling constant.
+     * The two controls above pin the stored operands through the live path.
+     * This pins the predicate they both rest on: at the ceiling and above it
+     * is false, one second under is true, and null - no length recorded - is
+     * not evidence of a rollover, the same reading the sweep's
+     * $belowRecordingCeiling predicate gives a null column.
      */
     public function test_the_ceiling_predicate_rejects_an_over_ceiling_recording_duration(): void
     {

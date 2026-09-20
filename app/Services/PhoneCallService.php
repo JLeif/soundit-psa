@@ -517,6 +517,15 @@ class PhoneCallService
     public function handleRecordingReady(string $callUuid, string $url, ?int $duration): ?PhoneCall
     {
         $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($url, $duration) {
+            // Read the STORED recording length before the write below replaces
+            // it. The ceiling guard further down tests the operands the
+            // finalisation will use; reading the column after this method has
+            // overwritten it would test the incoming $duration twice and could
+            // never see a stored rollover - which is exactly what
+            // resolveRecordingFromPlivo() leaves behind when it backfills
+            // recording_duration with no duration and no ended_at.
+            $storedRecordingDuration = $call->recording_duration;
+
             $call->recording_url = $url;
             $call->recording_duration = $duration;
 
@@ -540,10 +549,12 @@ class PhoneCallService
             // later callback finalise a row whose stored length is already at
             // or above the ceiling, deriving ended_at from the very number the
             // guard exists to distrust. The sweep in FinaliseStuckCalls has
-            // always tested both stored columns; this now agrees with it.
+            // always tested both stored columns; this now agrees with it -
+            // which is why the stored recording length is captured at the top
+            // of this closure, before the write above replaces it.
             $recordingIsComplete = $this->lengthIsBelowRecordingCeiling($duration)
                 && $this->lengthIsBelowRecordingCeiling($call->duration)
-                && $this->lengthIsBelowRecordingCeiling($call->recording_duration);
+                && $this->lengthIsBelowRecordingCeiling($storedRecordingDuration);
 
             $this->finaliseCallTheHangupNeverClosed($call, $recordingIsComplete);
             $this->reconcileAnsweredStateWithDuration($call);
