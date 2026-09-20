@@ -377,9 +377,21 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         $this->assertNotNull($call->voicemail_notified_at);
 
         // A row in that state is exactly what the gauge must NOT report.
+        //
+        // Round 3 c1:v1:1, UPHELD against me and proven by execution: the
+        // marker here was written at the current test clock (travelBack()
+        // undid the 90-minute jump), so at ~0 minutes old it fell below the
+        // 60-minute threshold and this block passed with the release DELETED
+        // ENTIRELY -- marker still set, send never claimed. It asserted
+        // nothing and its comment said it did. The gauge must be asked about
+        // a row old enough to be reported, or the answer is free.
+        $this->travel(120)->minutes();
+
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->expectsOutputToContain('No voicemail deferral has been outstanding')
             ->assertExitCode(0);
+
+        $this->travelBack();
     }
 
     public function test_the_listed_rows_are_stable_when_markers_share_a_timestamp(): void
