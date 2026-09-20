@@ -517,8 +517,8 @@ class PhoneCallService
     public function handleRecordingReady(string $callUuid, string $url, ?int $duration): ?PhoneCall
     {
         $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($url, $duration) {
-            // Read the STORED recording length before the write below replaces
-            // it. The ceiling guard further down tests the operands the
+            // Read the STORED recording length before the write below can
+            // replace it. The ceiling guard further down tests the operands the
             // finalisation will use; reading the column after this method has
             // overwritten it would test the incoming $duration twice and could
             // never see a stored rollover - which is exactly what
@@ -527,7 +527,29 @@ class PhoneCallService
             $storedRecordingDuration = $call->recording_duration;
 
             $call->recording_url = $url;
-            $call->recording_duration = $duration;
+
+            // DO NOT LOWER AN AT-CEILING STORED LENGTH TO A SHORTER INCOMING
+            // ONE. That column is the only durable record of the rollover: the
+            // guard below re-reads it on every delivery, and FinaliseStuckCalls
+            // re-reads it on every sweep. Overwriting it here would make the
+            // withholding last exactly one delivery - a Plivo redelivery of the
+            // same short callback (or one whose absent RecordingDuration the
+            // controller turned into 0) would then read only the short value,
+            // pass all three arms below, and finalise from a length the ceiling
+            // exists to distrust; the same write would also move the row INTO
+            // the sweep's population, which tests the same column.
+            //
+            // Nothing else is held back. A stored length below the ceiling - or
+            // absent - is not rollover evidence, so the incoming value is the
+            // better record and still lands, as does an incoming length at or
+            // above the ceiling, which is itself the evidence and the fresher of
+            // the two.
+            $wouldLowerAnAtCeilingLength = ! $this->lengthIsBelowRecordingCeiling($storedRecordingDuration)
+                && $this->lengthIsBelowRecordingCeiling($duration);
+
+            if (! $wouldLowerAnAtCeilingLength) {
+                $call->recording_duration = $duration;
+            }
 
             // Plivo occasionally omits Duration from the hangup webhook. When
             // the recording webhook arrives afterward, use its duration as the
@@ -549,9 +571,10 @@ class PhoneCallService
             // later callback finalise a row whose stored length is already at
             // or above the ceiling, deriving ended_at from the very number the
             // guard exists to distrust. The sweep in FinaliseStuckCalls has
-            // always tested both stored columns; this now agrees with it -
-            // which is why the stored recording length is captured at the top
-            // of this closure, before the write above replaces it.
+            // always tested both stored columns; this now agrees with it, and
+            // keeps agreeing with it ACROSS DELIVERIES - which is why the stored
+            // recording length is captured at the top of this closure, before
+            // the write above, and why that write declines to lower it.
             $recordingIsComplete = $this->lengthIsBelowRecordingCeiling($duration)
                 && $this->lengthIsBelowRecordingCeiling($call->duration)
                 && $this->lengthIsBelowRecordingCeiling($storedRecordingDuration);
@@ -667,8 +690,11 @@ class PhoneCallService
      * ended_at.
      *
      * DECLINING IS NOT THE WHOLE FIX, because the caller has already written
-     * recording_url, recording_duration and (on a duration-less row) duration
-     * by the time this returns. The row left behind - null ended_at, full end
+     * recording_url and (on a duration-less row) duration by the time this
+     * returns - and recording_duration too, EXCEPT where the stored length was
+     * already at or above the ceiling, which the caller declines to lower so
+     * the rollover evidence outlives the delivery it declined rather than being
+     * erased by it. The row left behind - null ended_at, full end
      * evidence, hours old - is exactly the shape FinaliseStuckCalls sweeps, so
      * that command applies this same ceiling test to its population and counts
      * what it declines. Both halves read RECORDING_MAX_LENGTH_SECONDS above;

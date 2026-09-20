@@ -442,12 +442,26 @@ class StuckRingingCallTest extends TestCase
      * short callback (a redelivery, a second segment, or an omitted
      * RecordingDuration) must not finalise it from a length the ceiling exists
      * to distrust.
+     *
+     * AND THE WITHHOLDING MUST OUTLIVE THE DELIVERY THAT EARNED IT. The
+     * declining path still writes the recording columns, so a version that let
+     * it lower recording_duration to its own short incoming value destroyed the
+     * evidence the guard rests on: the next redelivery - routine for Plivo -
+     * would have read only the short value, passed every arm, and finalised the
+     * row, and FinaliseStuckCalls would have swept it in the meantime for the
+     * same reason. The second delivery below is that redelivery.
      */
     public function test_a_stored_recording_duration_at_the_ceiling_is_not_finalised_by_a_later_short_callback(): void
     {
         Queue::fake();
         $call = $this->stuckRingingCall('stuck-ringing-stored-recording-at-ceiling');
         $call->recording_duration = PhoneCallService::RECORDING_MAX_LENGTH_SECONDS;
+        // handleRecordingReady() ends in downloadRecording(), which builds a raw
+        // Guzzle client that Queue::fake() does not intercept. A recording
+        // already on disk is that method's own documented no-op precondition;
+        // this test delivers TWICE, so the short-circuit is seeded rather than
+        // left to the proxy env. Not fillable - assign directly.
+        $call->recording_disk_path = 'call-recordings/pre-seeded-stored-ceiling.mp3';
         $call->save();
 
         $this->assertNull($call->fresh()->ended_at,
@@ -466,6 +480,27 @@ class StuckRingingCallTest extends TestCase
             .'however short the later callback - the guard must read the column '
             .'before this method overwrites it');
         $this->assertSame(CallStatus::Ringing, $stored->status);
+        $this->assertSame(PhoneCallService::RECORDING_MAX_LENGTH_SECONDS, (int) $stored->recording_duration,
+            'the declining delivery must not lower the at-ceiling stored length to its own short '
+            .'value: that column is the only durable record of the rollover, and erasing it would '
+            .'make the withholding last exactly one delivery');
+
+        // THE REDELIVERY. Plivo re-delivers webhooks, so the same short callback
+        // arriving again is routine rather than exotic, and it must reach the
+        // same verdict from the same evidence.
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-ringing-stored-recording-at-ceiling',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-stored-recording-ceiling.mp3',
+            30,
+        );
+
+        $redelivered = $call->fresh();
+
+        $this->assertNull($redelivered->ended_at,
+            'the withholding must survive a redelivery, not expire with the delivery that earned it');
+        $this->assertSame(CallStatus::Ringing, $redelivered->status);
+        $this->assertSame(PhoneCallService::RECORDING_MAX_LENGTH_SECONDS, (int) $redelivered->recording_duration,
+            'and the evidence must still be on the row for the sweep, which re-reads this column');
     }
 
     /**
