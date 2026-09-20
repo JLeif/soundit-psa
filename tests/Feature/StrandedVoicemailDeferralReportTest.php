@@ -11,6 +11,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
@@ -670,15 +671,66 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // perform. A mutant dispatching one job per stranded row and writing
         // nothing passed this control green. QUEUE_CONNECTION=sync and
         // MAIL_MAILER=array meant it was swallowed silently.
+        //
+        // #2935 (r6 diff:5), MEASURED RATHER THAN ACCEPTED. The finding says
+        // Queue::assertNothingPushed() misses dispatch_sync()/dispatchNow()
+        // as well as the Mail:: and Notification:: transports. Half of that
+        // is FALSE at laravel/framework 12.69.2 and half is TRUE, and only
+        // mutation separated them:
+        //
+        //   dispatch_sync(new SendTicketNotification(...))  -> KILLED
+        //       QueueFake routes the sync dispatch through its own record,
+        //       so assertNothingPushed() names the job. The finding's
+        //       headline escape is already closed on this version.
+        //   Notification::route('mail',...)->notify(...)    -> SURVIVED
+        //   Mail::to(...)->send(new Mailable)               -> SURVIVED
+        //   Mail::raw(...) / Mail::send('view', ...)        -> SURVIVED
+        //
+        // Notification:: is closed by faking that transport. Mail:: is NOT,
+        // and Mail::fake() actively makes it worse -- measured, not assumed:
+        //
+        //   Mail::raw() with Mail::fake()     -> array transport count 0
+        //   Mail::raw() without Mail::fake()  -> array transport count 1
+        //
+        // MailFake records MAILABLES only; its raw() and send() are empty
+        // stubs (MailFake.php:473+), so assertNothingSent() inspects a
+        // collection those verbs never populate AND the message never
+        // reaches a transport anyone can inspect. Mailer::raw()
+        // (Mailer.php:221) really does send. Faking mail here would hide
+        // exactly the shape that escapes.
+        //
+        // So Mail is deliberately NOT faked. Under MAIL_MAILER=array the
+        // real mailer delivers into ArrayTransport, which keeps every
+        // message whatever verb produced it -- an assertion about what LEFT
+        // rather than about which API was called. Nothing reaches a network:
+        // phpunit.xml pins MAIL_MAILER=array for the whole suite.
         Queue::fake();
+        Notification::fake();
+
+        $transport = app(\Illuminate\Mail\MailManager::class)
+            ->mailer('array')
+            ->getSymfonyTransport();
+        $transport->flush();
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->assertExitCode(0);
 
         $this->assertSame($before, $snapshot());
 
-        // The third prohibited act: no notification may leave the box.
+        // The third prohibited act: no notification may leave the box, by any
+        // transport. Each assertion below has its own kill-mutant recorded
+        // above; none is decorative.
         Queue::assertNothingPushed();
+        Notification::assertNothingSent();
+
+        // The transport-level check that covers every mail verb, including
+        // the two MailFake cannot record. Kill-mutants: Mail::raw(...),
+        // Mail::send([...], ...), and Mail::to(...)->send(new Mailable).
+        $this->assertSame(
+            [],
+            $transport->messages()->all(),
+            'The command put a message on the mail transport: it sent something.'
+        );
 
         // Precondition, on the production surface: the command must actually
         // have reported the two stranded rows, or every assertion above is
