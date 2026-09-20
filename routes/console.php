@@ -332,6 +332,16 @@ Schedule::command('calls:resolve-recordings')
     ->withoutOverlapping(5)
     ->runInBackground();
 
+// Calls — report voicemail notifications withheld for want of end evidence and
+// never released. Read-only: it counts and logs, and deliberately does NOT
+// resend, because releasing a withheld email without end evidence is the defect
+// the notify guard exists to prevent. Ordinary deferrals clear in the same
+// request, so only markers older than the default 60-minute threshold count.
+Schedule::command('calls:report-stranded-voicemail-deferrals')
+    ->hourly()
+    ->withoutOverlapping(5)
+    ->runInBackground();
+
 // Prepay — forfeit unconsumed remainder of expired prepaid-time credits (daily,
 // before reconcile/billing). No-op until a contract sets prepay_expiry_months.
 Schedule::command('prepay:expire')
