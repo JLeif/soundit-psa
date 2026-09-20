@@ -84,6 +84,7 @@ class TacticalSchemaDriftTest extends TestCase
         'status',
         'version',
         'last_seen',
+        'boot_time',
         'needs_reboot',
         'has_patches_pending',
         'monitoring_type',
