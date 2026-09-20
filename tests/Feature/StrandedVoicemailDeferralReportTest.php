@@ -680,8 +680,29 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         //
         //   dispatch_sync(new SendTicketNotification(...))  -> KILLED
         //       QueueFake routes the sync dispatch through its own record,
-        //       so assertNothingPushed() names the job. The finding's
-        //       headline escape is already closed on this version.
+        //       so assertNothingPushed() names the job.
+        //   Dispatcher::dispatchNow(...)                    -> SURVIVED
+        //       Round 1 diff:2 caught this against an earlier version of
+        //       THIS COMMENT, which named dispatchNow() in the same breath
+        //       as dispatch_sync() and declared both closed on one measured
+        //       kill. dispatchNow() runs the handler through the pipeline
+        //       inline and never touches the queue resolver, so QueueFake
+        //       records nothing; the mutant was instrumented and fired
+        //       twice while the control stayed green. Two verbs that look
+        //       like synonyms are not: one is closed, one was wide open.
+        //
+        //       Chasing that mutant found the bigger hole. The production
+        //       notification job does not send through the mail transport
+        //       at all: SendTicketNotification::handle() calls EmailService,
+        //       which posts users/{mailbox}/sendMail through GraphClient --
+        //       and GraphClient uses RAW GUZZLE, so neither Mail::, nor
+        //       Notification::, nor even Http::fake() can observe it. Run
+        //       inline with a real recipient it reaches a live outbound
+        //       request, stopped today only by the HTTP_PROXY pin at
+        //       phpunit.xml:22-23 -- a network accident, not an assertion.
+        //       So the Graph client is bound to a raiser below: the one
+        //       transport that actually carries production notifications is
+        //       the one a writes-nothing guard most needs to watch.
         //   Notification::route('mail',...)->notify(...)    -> SURVIVED
         //   Mail::to(...)->send(new Mailable)               -> SURVIVED
         //   Mail::raw(...) / Mail::send('view', ...)        -> SURVIVED
@@ -699,6 +720,23 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // (Mailer.php:221) really does send. Faking mail here would hide
         // exactly the shape that escapes.
         //
+        // Round 1 context:1 (escalated as diff:5): asserting on the mailer
+        // NAMED 'array' while the command sends through the DEFAULT mailer
+        // ties the two together only via phpunit.xml, a file this test never
+        // reads -- and phpunit.xml:32 sets MAIL_MAILER WITHOUT force="true"
+        // (contrast :22-23, which use it), so a MAIL_MAILER already in the
+        // process environment silently wins. Measured:
+        //
+        //   default env        -> mail.default=array, named count after send 1
+        //   MAIL_MAILER=log    -> mail.default=log,   named count after send 0
+        //
+        // config/mail.php:78 always defines an 'array' mailer, so the
+        // instrument keeps returning a valid, EMPTY transport and the guard
+        // passes while real mail leaves by another route. Silent, not loud,
+        // which is the worst shape for a safety control. So assert the
+        // binding instead of trusting it, and inspect the DEFAULT mailer
+        // rather than one addressed by name.
+        //
         // So Mail is deliberately NOT faked. Under MAIL_MAILER=array the
         // real mailer delivers into ArrayTransport, which keeps every
         // message whatever verb produced it -- an assertion about what LEFT
@@ -707,9 +745,43 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         Queue::fake();
         Notification::fake();
 
+        // The real notification transport. Binding it to a double that
+        // throws turns any send attempt into a loud failure instead of an
+        // outbound request, and covers dispatchNow()/dispatchSync() paths
+        // that reach EmailService without ever touching the queue binding.
+        $this->app->bind(\App\Services\Graph\GraphClient::class, function () {
+            return new class extends \App\Services\Graph\GraphClient
+            {
+                public function __construct() {}
+
+                public function post(string $endpoint, array $data): array
+                {
+                    throw new \RuntimeException(
+                        'The command sent a Graph request to '.$endpoint.': it sent something.'
+                    );
+                }
+            };
+        });
+
+        $this->assertSame(
+            'array',
+            config('mail.default'),
+            'This guard inspects the mail transport directly and needs the array '
+                .'mailer to be the DEFAULT one. phpunit.xml sets MAIL_MAILER without '
+                .'force="true", so an inherited environment variable silently wins.'
+        );
+
         $transport = app(\Illuminate\Mail\MailManager::class)
-            ->mailer('array')
+            ->mailer()
             ->getSymfonyTransport();
+
+        $this->assertInstanceOf(
+            \Illuminate\Mail\Transport\ArrayTransport::class,
+            $transport,
+            'The default mailer must resolve to an ArrayTransport, or nothing below '
+                .'can observe what the command sent.'
+        );
+
         $transport->flush();
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')
