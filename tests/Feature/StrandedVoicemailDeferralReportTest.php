@@ -899,18 +899,85 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // claim about which verb a future defect will choose.
         //
         // So the instrument moved from the VERB to the WIRE. GraphClient's
-        // constructor has a documented Guzzle `handler` seam (config['handler'],
-        // honoured at every one of its three client-construction sites);
-        // production config never sets it. A real, fully-constructed client is
-        // built here with a handler that records and refuses EVERY outbound
-        // request, whatever verb or helper reaches it. The token cache is
-        // pre-seeded because getToken() posts through `authHttp`, which has no
-        // handler seam -- without the seed a token request would be the thing
-        // that escapes, which is this same finding one layer down.
+        // constructor has a documented Guzzle `handler` seam (config['handler'])
+        // honoured at THREE OF ITS FOUR client-construction sites -- :43 ($http),
+        // :457 (requestJsonAbsolute) and :550 (requestAbsolute) read it; :45
+        // ($authHttp, the token leg) DOES NOT. Round 1 context:3 corrected an
+        // earlier draft of this comment that said "every one of its three": the
+        // site it left out of the count was precisely the unseamed one. State the
+        // denominator, because the gap IS the fourth site.
+        //
+        // Production config never sets the seam. A real, fully-constructed client
+        // is built here with a handler that records and refuses every outbound
+        // request that REACHES IT -- whatever verb or helper does the reaching.
+        // That is a property of these three sites today, not an invariant of the
+        // class: a fifth construction site, a second HTTP client, or a sender
+        // building Guzzle directly would be invisible again.
+        //
+        // The token cache is pre-seeded because getToken() posts through the
+        // unseamed $authHttp. MEASURED, and NOT the way an earlier draft of this
+        // leg reported it: with the seed deleted and a post() mutant injected on
+        // the command's success path, THIS TEST ALONE PASSES (1 passed, 10
+        // assertions) while the mutant sends. The suite-wide failure that draft
+        // cited -- InvalidCountException on Log::error -- comes from the sibling
+        // test_a_healthy_run_logs_no_unmapped_status_and_no_error (:395), not
+        // from here. This test installs Log::spy() and expects only warning();
+        // a spy does not fail on unexpected calls. So an unseeded token cache
+        // makes this guard SILENT, not loud: the token request escapes first,
+        // GraphClientException is swallowed upstream, and $graphSends stays [].
+        // The seed is load-bearing for the instrument's liveness, and the
+        // assertion below exists so its absence fails HERE rather than elsewhere.
         cache()->put('graph_api_token', 'test-token-not-a-real-credential', 3600);
 
+        // Round 1 contract:1 / context:1, upheld: without this the instrument has
+        // no positive control. On a healthy run nothing reaches Graph, so the
+        // handler closure never executes and $graphSends is populated only by a
+        // defect -- meaning a seam that stopped being honoured, a renamed cache
+        // key, or a provider that stopped resolving GraphClient would all leave
+        // this guard green forever. Pin the three things the instrument rests on.
+        $this->assertTrue(
+            cache()->has('graph_api_token'),
+            'The wire instrument depends on a seeded token so the unseamed '
+                .'$authHttp leg (GraphClient:45) is never the thing that escapes. '
+                .'If this key drifts from the one getToken() reads, the guard goes '
+                .'silent rather than red.'
+        );
+        // The seam itself, proven by EXECUTION rather than by reflection on a
+        // signature: build a client exactly as the binding below does, drive one
+        // request through it, and require the probe handler to have been reached.
+        // If GraphClient stops honouring config['handler'], this fails HERE with
+        // a named cause instead of leaving the real guard silently green.
+        $seamReached = false;
+        $probeStack = \GuzzleHttp\HandlerStack::create(function () use (&$seamReached) {
+            $seamReached = true;
+
+            throw new \RuntimeException('probe');
+        });
+
+        try {
+            (new \App\Services\Graph\GraphClient(
+                array_merge(config('services.graph'), ['handler' => $probeStack]),
+                app(\Illuminate\Contracts\Cache\Repository::class),
+            ))->get('users/probe');
+        } catch (\Throwable $e) {
+            // Expected: the probe handler refuses. Only liveness is asserted.
+        }
+
+        $this->assertTrue(
+            $seamReached,
+            'GraphClient did not route a request through config[\'handler\']. The '
+                .'wire instrument below binds through that seam, so if it stops '
+                .'being honoured the guard reports green while sends escape.'
+        );
+
+        // Round 1 contract:9, upheld: record the VERB, not only the path. The
+        // whole point of moving off post() is that the instrument must not be a
+        // claim about which verb a defect chooses -- so when it fires, the
+        // operator must be able to tell a POST sendMail from a PATCH from a GET.
+        // Recording the path alone made the patch and get mutants produce
+        // indistinguishable failure text for the same URI.
         $graphHandler = \GuzzleHttp\HandlerStack::create(function ($request) use ($recordGraphSend) {
-            $target = $request->getUri()->getPath();
+            $target = $request->getMethod().' '.$request->getUri()->getPath();
             $recordGraphSend($target);
 
             throw new \RuntimeException(
