@@ -23,6 +23,14 @@ class OperatorReceiptCallersTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        foreach ([OperatorDelivery::class, EscalationNotifier::class, OperatorNotifier::class, WikiRedactor::class] as $class) {
+            $this->assertStringStartsWith(base_path('app/'), (new \ReflectionClass($class))->getFileName());
+        }
+    }
+
     public static function transports(): array
     {
         return [[true, null], [false, null], [true, 'Open the cockpit'], [false, 'Open the cockpit']];
@@ -76,6 +84,7 @@ class OperatorReceiptCallersTest extends TestCase
         $meta = $run->fresh()->proposed_meta['escalation'];
         $this->assertSame('judgment', $meta['category']);
         $this->assertSame(2, $meta['step']);
+        $this->assertArrayHasKey('delivery_receipt', $meta);
         $this->assertSame([
             'posted' => false, 'posted_to_chat' => false,
             'scan_status' => 'assessed', 'text_withheld' => $withheld,
