@@ -27,6 +27,10 @@ You need the PHP extensions CI installs — `mbstring`, `pdo_sqlite`, `sqlite3`,
 
 The steps above are the whole contributor path. [`docs/INSTALL.md`](docs/INSTALL.md) is a different document — a production deployment guide for standing up your own instance on a VPS (domain, TLS, nginx, queue workers); reach for it when you are deploying, not when you are contributing. The [README](README.md) covers the stack and architecture, and [`docs/DOCKER.md`](docs/DOCKER.md) documents the Docker Compose path.
 
+### After dependency lock changes
+
+Remote deployment does not refresh your local `vendor/`. Before tests or vendor-source citations, follow [local vendor freshness and reversible recovery](docs/LOCAL-VENDOR.md): preserve dev/no-dev shape, verify bytes and app boot, and do not trust installed metadata alone. Shared trees require owner-controlled consumer exclusion.
+
 ### Getting logged in
 
 That leaves you a running app with an empty database and **no way into the staff application**: its routes are all behind auth, and the staff `/login` offers Microsoft Entra ID SSO only — no username/password form. (The separate client portal does ship its own email/password login at `portal/login`; that is not a way into the staff side.) On a local machine:
