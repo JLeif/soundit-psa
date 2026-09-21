@@ -885,26 +885,121 @@ class StrandedVoicemailDeferralReportTest extends TestCase
             $graphSends[] = $endpoint;
         };
 
-        $this->app->bind(\App\Services\Graph\GraphClient::class, function () use ($recordGraphSend) {
-            return new class($recordGraphSend) extends \App\Services\Graph\GraphClient
-            {
-                private \Closure $record;
+        // Round 3 contract:1, MEASURED BEFORE IT WAS ACCEPTED. This binding used
+        // to be an anonymous GraphClient subclass that skipped the parent
+        // constructor and overrode post() ONLY. That instrument was broken in
+        // the exact direction it was added to detect: a send-shaped mutant
+        // calling patch() (or get/delete/createEvent/getRaw/...) never reached
+        // the override, hit a half-constructed parent, and raised
+        //   Error: Typed property GraphClient::$cache must not be accessed
+        //   before initialization
+        // which NotificationService's catch (\Throwable) then swallowed. The
+        // mutant SURVIVED with the marker showing it fired: a Graph send was
+        // attempted and this guard reported green. Overriding one verb is a
+        // claim about which verb a future defect will choose.
+        //
+        // So the instrument moved from the VERB to the WIRE. GraphClient's
+        // constructor has a documented Guzzle `handler` seam (config['handler'])
+        // honoured at THREE OF ITS FOUR client-construction sites -- :43 ($http),
+        // :457 (requestJsonAbsolute) and :550 (requestAbsolute) read it; :45
+        // ($authHttp, the token leg) DOES NOT. Round 1 context:3 corrected an
+        // earlier draft of this comment that said "every one of its three": the
+        // site it left out of the count was precisely the unseamed one. State the
+        // denominator, because the gap IS the fourth site.
+        //
+        // Production config never sets the seam. A real, fully-constructed client
+        // is built here with a handler that records and refuses every outbound
+        // request that REACHES IT -- whatever verb or helper does the reaching.
+        // That is a property of these three sites today, not an invariant of the
+        // class: a fifth construction site, a second HTTP client, or a sender
+        // building Guzzle directly would be invisible again.
+        //
+        // The token cache is pre-seeded because getToken() posts through the
+        // unseamed $authHttp. MEASURED, and NOT the way an earlier draft of this
+        // leg reported it: with the seed deleted and a post() mutant injected on
+        // the command's success path, THIS TEST ALONE PASSES (1 passed, 10
+        // assertions) while the mutant sends. The suite-wide failure that draft
+        // cited -- InvalidCountException on Log::error -- comes from the sibling
+        // test_a_healthy_run_logs_no_unmapped_status_and_no_error (:395), not
+        // from here. This test installs Log::spy() and expects only warning();
+        // a spy does not fail on unexpected calls. So an unseeded token cache
+        // makes this guard SILENT, not loud: the token request escapes first,
+        // GraphClientException is swallowed upstream, and $graphSends stays [].
+        // The seed is load-bearing for the instrument's liveness, and the
+        // assertion below exists so its absence fails HERE rather than elsewhere.
+        cache()->put('graph_api_token', 'test-token-not-a-real-credential', 3600);
 
-                public function __construct(\Closure $record)
-                {
-                    $this->record = $record;
-                }
+        // Round 1 contract:1 / context:1, upheld: without this the instrument has
+        // no positive control. On a healthy run nothing reaches Graph, so the
+        // handler closure never executes and $graphSends is populated only by a
+        // defect -- meaning a seam that stopped being honoured, a renamed cache
+        // key, or a provider that stopped resolving GraphClient would all leave
+        // this guard green forever. Pin the three things the instrument rests on:
+        // the cache key here, and the seam plus the container route together, by a
+        // deliberate probe driven AFTER the binding below.
+        $this->assertTrue(
+            cache()->has('graph_api_token'),
+            'The wire instrument depends on a seeded token so the unseamed '
+                .'$authHttp leg (GraphClient:45) is never the thing that escapes. '
+                .'If this key drifts from the one getToken() reads, the guard goes '
+                .'silent rather than red.'
+        );
 
-                public function post(string $endpoint, array $data): array
-                {
-                    ($this->record)($endpoint);
+        // Round 1 contract:9, upheld: record the VERB, not only the path. The
+        // whole point of moving off post() is that the instrument must not be a
+        // claim about which verb a defect chooses -- so when it fires, the
+        // operator must be able to tell a POST sendMail from a PATCH from a GET.
+        // Recording the path alone made the patch and get mutants produce
+        // indistinguishable failure text for the same URI.
+        $graphHandler = \GuzzleHttp\HandlerStack::create(function ($request) use ($recordGraphSend) {
+            $target = $request->getMethod().' '.$request->getUri()->getPath();
+            $recordGraphSend($target);
 
-                    throw new \RuntimeException(
-                        'The command sent a Graph request to '.$endpoint.': it sent something.'
-                    );
-                }
-            };
+            throw new \RuntimeException(
+                'The command sent a Graph request to '.$target.': it sent something.'
+            );
         });
+
+        $this->app->bind(\App\Services\Graph\GraphClient::class, function () use ($graphHandler) {
+            return new \App\Services\Graph\GraphClient(
+                array_merge(config('services.graph'), ['handler' => $graphHandler]),
+                app(\Illuminate\Contracts\Cache\Repository::class),
+            );
+        });
+
+        // Round 2 context:1, upheld: the seam proof did not pin the thing it exists
+        // to pin. An earlier draft proved the seam by constructing its OWN
+        // GraphClient and never touched the container -- so deleting the bind above
+        // left every assertion green while the command resolved the production
+        // singleton (AppServiceProvider:111, which never sets the handler) and
+        // nothing reached the recorder. A control that survives deletion of the
+        // instrument it controls is theatre.
+        //
+        // So the probe goes THROUGH the container, which is the route consumers
+        // take (constructor injection and app(GraphClient::class) inside
+        // EmailService). One request, driven deliberately, must land in
+        // $graphSends -- which proves in a single step that config['handler'] is
+        // still honoured AND that the container hands out the instrumented client.
+        // It still proves nothing about a sender that builds Guzzle directly, or a
+        // second client class: nothing here can.
+        try {
+            app(\App\Services\Graph\GraphClient::class)->get('users/probe');
+        } catch (\Throwable $e) {
+            // Expected: the instrument records the request and then refuses it.
+        }
+
+        $this->assertSame(
+            ['GET /v1.0/users/probe'],
+            $graphSends,
+            'A GraphClient resolved from the container did not reach the recording '
+                .'handler. Either the binding above stopped taking effect or '
+                .'GraphClient stopped honouring config[\'handler\'] -- either way the '
+                .'guard below reports green while real sends escape.'
+        );
+
+        // The probe is the only send this test authorises; everything recorded from
+        // here on is the command's doing.
+        $graphSends = [];
 
         $this->assertSame(
             'array',
