@@ -934,40 +934,15 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // handler closure never executes and $graphSends is populated only by a
         // defect -- meaning a seam that stopped being honoured, a renamed cache
         // key, or a provider that stopped resolving GraphClient would all leave
-        // this guard green forever. Pin the three things the instrument rests on.
+        // this guard green forever. Pin the three things the instrument rests on:
+        // the cache key here, and the seam plus the container route together, by a
+        // deliberate probe driven AFTER the binding below.
         $this->assertTrue(
             cache()->has('graph_api_token'),
             'The wire instrument depends on a seeded token so the unseamed '
                 .'$authHttp leg (GraphClient:45) is never the thing that escapes. '
                 .'If this key drifts from the one getToken() reads, the guard goes '
                 .'silent rather than red.'
-        );
-        // The seam itself, proven by EXECUTION rather than by reflection on a
-        // signature: build a client exactly as the binding below does, drive one
-        // request through it, and require the probe handler to have been reached.
-        // If GraphClient stops honouring config['handler'], this fails HERE with
-        // a named cause instead of leaving the real guard silently green.
-        $seamReached = false;
-        $probeStack = \GuzzleHttp\HandlerStack::create(function () use (&$seamReached) {
-            $seamReached = true;
-
-            throw new \RuntimeException('probe');
-        });
-
-        try {
-            (new \App\Services\Graph\GraphClient(
-                array_merge(config('services.graph'), ['handler' => $probeStack]),
-                app(\Illuminate\Contracts\Cache\Repository::class),
-            ))->get('users/probe');
-        } catch (\Throwable $e) {
-            // Expected: the probe handler refuses. Only liveness is asserted.
-        }
-
-        $this->assertTrue(
-            $seamReached,
-            'GraphClient did not route a request through config[\'handler\']. The '
-                .'wire instrument below binds through that seam, so if it stops '
-                .'being honoured the guard reports green while sends escape.'
         );
 
         // Round 1 contract:9, upheld: record the VERB, not only the path. The
@@ -991,6 +966,40 @@ class StrandedVoicemailDeferralReportTest extends TestCase
                 app(\Illuminate\Contracts\Cache\Repository::class),
             );
         });
+
+        // Round 2 context:1, upheld: the seam proof did not pin the thing it exists
+        // to pin. An earlier draft proved the seam by constructing its OWN
+        // GraphClient and never touched the container -- so deleting the bind above
+        // left every assertion green while the command resolved the production
+        // singleton (AppServiceProvider:111, which never sets the handler) and
+        // nothing reached the recorder. A control that survives deletion of the
+        // instrument it controls is theatre.
+        //
+        // So the probe goes THROUGH the container, which is the route consumers
+        // take (constructor injection and app(GraphClient::class) inside
+        // EmailService). One request, driven deliberately, must land in
+        // $graphSends -- which proves in a single step that config['handler'] is
+        // still honoured AND that the container hands out the instrumented client.
+        // It still proves nothing about a sender that builds Guzzle directly, or a
+        // second client class: nothing here can.
+        try {
+            app(\App\Services\Graph\GraphClient::class)->get('users/probe');
+        } catch (\Throwable $e) {
+            // Expected: the instrument records the request and then refuses it.
+        }
+
+        $this->assertSame(
+            ['GET /v1.0/users/probe'],
+            $graphSends,
+            'A GraphClient resolved from the container did not reach the recording '
+                .'handler. Either the binding above stopped taking effect or '
+                .'GraphClient stopped honouring config[\'handler\'] -- either way the '
+                .'guard below reports green while real sends escape.'
+        );
+
+        // The probe is the only send this test authorises; everything recorded from
+        // here on is the command's doing.
+        $graphSends = [];
 
         $this->assertSame(
             'array',
