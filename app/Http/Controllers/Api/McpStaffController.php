@@ -19,6 +19,7 @@ use App\Services\Chet\OperatorBridgeTextSanitizer;
 use App\Services\Chet\OperatorBridgeToolExecutor;
 use App\Services\Chet\OperatorBridgeTools;
 use App\Services\Cipp\CippMcpDynamicToolExecutor;
+use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Services\Mcp\StaffCippAdminToolExecutor;
 use App\Services\Mcp\StaffCippWriteToolExecutor;
@@ -2570,7 +2571,17 @@ class McpStaffController extends Controller
             || $this->isTaxonomyTool($name)
             || OperatorBridgeTools::handles($name)
             || in_array($name, self::ACCEPT_AND_IGNORE_TOOLS, true)
-            || CippMcpTool::handles($name);
+            // App\Models\CippMcpTool::handles() - the DB-backed dynamic tools,
+            // present only while cipp_mcp_enabled is set.
+            || CippMcpTool::handles($name)
+            // ...and the RELAY's own static map, which is a DIFFERENT class and
+            // a different set. CippMcpToolRelay::unknownArguments() already
+            // answers "Unsupported CIPP MCP argument(s): ..." naming the keys,
+            // so the generic guard must defer or it DISPLACES the better
+            // message - the regression CippMcpRelayTest pins. The two CIPP
+            // predicates read alike and are not interchangeable: the model asks
+            // the registry, the relay asks its own TOOL_MAP.
+            || CippMcpToolRelay::handles($name);
     }
 
     /**

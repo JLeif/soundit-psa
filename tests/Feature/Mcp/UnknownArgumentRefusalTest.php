@@ -257,6 +257,43 @@ class UnknownArgumentRefusalTest extends TestCase
      * be disturbed. Written because widening the guard to cover it was the
      * first thing I tried, and the full suite caught it.
      */
+    /**
+     * The two CIPP predicates read alike and cover DIFFERENT sets.
+     *
+     * App\Models\CippMcpTool::handles() asks the registry for DB-backed
+     * dynamic tools; App\Services\Cipp\CippMcpToolRelay::handles() asks its
+     * own static TOOL_MAP. Exempting only the first left every relay-mapped
+     * tool to the generic guard, which fired first and DISPLACED the relay's
+     * specific "Unsupported CIPP MCP argument(s): ..." refusal with a generic
+     * one - a strictly worse message on a tool that already refuses correctly.
+     * The FULL suite caught it; a --filter=Mcp run stayed green.
+     *
+     * Names the relay directly so the exemption cannot be dropped without a
+     * failure that says why.
+     */
+    public function test_a_relay_mapped_cipp_tool_keeps_its_own_refusal(): void
+    {
+        $relayMapped = null;
+        foreach (['cipp_list_users', 'cipp_list_sign_ins'] as $candidate) {
+            if (\App\Services\Cipp\CippMcpToolRelay::handles($candidate)) {
+                $relayMapped = $candidate;
+                break;
+            }
+        }
+
+        $this->assertNotNull($relayMapped, 'precondition: the relay must map at least one tool');
+
+        $controller = app(\App\Http\Controllers\Api\McpStaffController::class);
+        $method = (new \ReflectionClass($controller))->getMethod('selfValidatingTool');
+        $method->setAccessible(true);
+
+        $this->assertTrue(
+            (bool) $method->invoke($controller, $relayMapped, false),
+            $relayMapped.' is refused by the CIPP relay itself; the generic guard must defer '
+                .'or it replaces a specific refusal with a worse one'
+        );
+    }
+
     public function test_a_deliberate_accept_and_ignore_contract_is_not_disturbed(): void
     {
         $token = $this->token();
