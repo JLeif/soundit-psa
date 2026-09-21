@@ -1165,6 +1165,58 @@ class McpStaffController extends Controller
             ]);
         }
 
+        // UNKNOWN-ARGUMENT REFUSAL (card Z4PdzEZ1, PSA ticket T-22846).
+        //
+        // Until now an argument the tool does not declare was simply carried
+        // into the executor, which read the keys it knew and ignored the rest.
+        // On a SEARCH tool that is the worst possible shape: the unrecognised
+        // filter is dropped, the search runs UNFILTERED, and what comes back is
+        // well-formed data rather than an error. A caller mistake is then
+        // indistinguishable from a real result - it reads as "the filter is
+        // broken" or, far worse, as "no matching records found", which is an
+        // absence claim nothing ever tested.
+        //
+        // This is the same rule execute_at already follows a few hundred lines
+        // above ("on every other tool it is a named refusal, never a silently-
+        // ignored key that runs now") and the same rule the CIPP relay applies
+        // with "Unsupported CIPP MCP argument(s): ...". It generalises that
+        // treatment to every tool on this boundary instead of the handful whose
+        // executors happened to hand-roll an allow-list.
+        //
+        // It runs HERE, after the boundary has consumed and unset its own keys
+        // (staged, execute_at, client_id), so those are never mistaken for
+        // unknown arguments; and before dispatch, so no executor ever sees a
+        // key its schema did not advertise.
+        //
+        // The comparison is against the PUBLISHED schema - the exact text a
+        // caller was handed by tools/list - so the contract being enforced is
+        // the one the caller could actually read. A tool whose schema we cannot
+        // resolve, or which declares no properties block at all, is left alone:
+        // this refuses a key known to be undeclared, never a key we merely
+        // failed to look up. Fail open on ignorance, closed on knowledge.
+        if ($this->selfValidatingTool((string) $name, $stageable)) {
+            // Left to its own validator on purpose - see selfValidatingTool().
+        } elseif (($unknown = $this->undeclaredArguments((string) $name, $arguments)) !== []) {
+            $declared = $this->declaredArgumentNames((string) $name);
+            $message = 'Unsupported MCP argument(s): '.implode(', ', $unknown).'. '
+                .$name.' accepts '.($declared === []
+                    ? 'no arguments.'
+                    : 'only: '.implode(', ', $declared).'.')
+                .' The argument was REFUSED, not ignored - this call ran nothing. '
+                .'Re-read the tool schema and retry with a declared argument; do not '
+                .'treat this as a result.';
+            $this->audit('tools/call', $requestedName, $auditArguments, 'error', $message, $start, $request);
+
+            return response()->json([
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'result' => [
+                    'content' => [['type' => 'text', 'text' => $message]],
+                    'isError' => true,
+                ],
+            ]);
+        }
+
         $activity = new \App\Services\Mcp\TicketToolActivityContext;
         $request->attributes->set(\App\Services\Mcp\TicketToolActivityContext::class, $activity);
         try {
@@ -2460,6 +2512,125 @@ class McpStaffController extends Controller
         }
 
         return mb_substr($safe, 0, 1000);
+    }
+
+    /**
+     * Does this tool already refuse an undeclared argument in its own executor?
+     *
+     * The write, action and admin families hand-roll per-tool allow-lists and
+     * refuse with messages that teach the SEMANTICS of the mistake - "upstream
+     * CIPP identifiers are not accepted", "for a PSA-mapped person use
+     * cipp_assign_user_license". Those are strictly more useful than a generic
+     * "unsupported argument" and, on a mutating tool, they are also a safety
+     * surface with their own controls. Pre-empting them would REPLACE a good
+     * message with a worse one and move a refusal those tests pin.
+     *
+     * So the generic guard deliberately covers the READ surface only, which is
+     * exactly where the defect this fixes was found: a search tool that drops
+     * an unrecognised filter and answers unfiltered. Reads also carry no
+     * side-effect risk, so refusing one late is free.
+     *
+     * A tool that gains its own allow-list later does not need this list
+     * updated: the worst case is a generic refusal instead of a specific one,
+     * never a silently-ignored argument.
+     */
+    private function selfValidatingTool(string $name, bool $stageable): bool
+    {
+        return $stageable
+            || McpToolModes::isStageable($name)
+            || $this->isPsaActionTool($name)
+            || $this->isCippWriteTool($name)
+            || $this->isCippAdminTool($name)
+            || $this->isTacticalActionTool($name)
+            || $this->isTacticalAdminTool($name)
+            || $this->isTaxonomyTool($name)
+            || CippMcpTool::handles($name);
+    }
+
+    /**
+     * Argument names the tool's own schema declares, as published to callers.
+     *
+     * Resolved from the SAME assemblies listTools() publishes, so the contract
+     * enforced on dispatch is the contract the caller was handed. Returns null
+     * - distinct from an empty array - when the tool is unknown here or
+     * declares no usable properties block; the caller treats null as "do not
+     * judge this call" and an empty array as "this tool declares no arguments".
+     *
+     * The boundary's own keys are added deliberately. client_id, staged and
+     * execute_at are injected into the published schema (or consumed by the
+     * boundary) rather than declared by the executor, so a caller who passes
+     * one is following the advertised surface and must not be refused. They
+     * are unset from $arguments before this runs, so listing them here is
+     * belt-and-braces against a future reordering, not a live dependency.
+     *
+     * @return list<string>|null
+     */
+    private function declaredArgumentNamesOrNull(string $name): ?array
+    {
+        static $cache = [];
+
+        if (array_key_exists($name, $cache)) {
+            return $cache[$name];
+        }
+
+        $schema = null;
+        foreach (array_merge(
+            McpToolSurface::liveGeneralToolDefinitions(),
+            McpToolSurface::liveClientScopedToolDefinitions(),
+            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition(), $this->searchToolsToolDefinition()],
+        ) as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                $schema = $tool['input_schema'] ?? null;
+                break;
+            }
+        }
+
+        if (! is_array($schema) || ! is_array($properties = $schema['properties'] ?? null)) {
+            return $cache[$name] = null;
+        }
+
+        $declared = array_values(array_filter(array_keys($properties), 'is_string'));
+        foreach (['client_id', 'staged', 'execute_at'] as $boundaryKey) {
+            if (! in_array($boundaryKey, $declared, true)) {
+                $declared[] = $boundaryKey;
+            }
+        }
+        sort($declared);
+
+        return $cache[$name] = $declared;
+    }
+
+    /**
+     * The declared names, for an operator-facing message. Empty when unknown.
+     *
+     * @return list<string>
+     */
+    private function declaredArgumentNames(string $name): array
+    {
+        $declared = $this->declaredArgumentNamesOrNull($name) ?? [];
+
+        return array_values(array_diff($declared, ['staged', 'execute_at']));
+    }
+
+    /**
+     * Supplied argument names the tool does not declare.
+     *
+     * Empty when the schema could not be resolved: an unrecognised argument is
+     * only refusable against a contract we can actually read.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return list<string>
+     */
+    private function undeclaredArguments(string $name, array $arguments): array
+    {
+        if ($arguments === [] || ($declared = $this->declaredArgumentNamesOrNull($name)) === null) {
+            return [];
+        }
+
+        $unknown = array_values(array_diff(array_keys($arguments), $declared));
+        sort($unknown);
+
+        return array_slice($unknown, 0, 10);
     }
 
     private function positiveIntegerArgument(mixed $value): ?int
