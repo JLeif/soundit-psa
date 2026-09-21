@@ -34,6 +34,7 @@ use App\Services\Signals\SignalNudgeNotice;
 use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Technician\Scheduled\ExecuteAt;
 use App\Services\Technician\Scheduled\ScheduledClock;
+use App\Support\CippConfig;
 use App\Support\McpInputSchema;
 use App\Support\McpStaffToken;
 use App\Support\McpToolInstructions;
@@ -2541,6 +2542,16 @@ class McpStaffController extends Controller
      * updated: the worst case is a generic refusal instead of a specific one,
      * never a silently-ignored argument.
      *
+     * Membership is a claim about the EXECUTOR, not about a family name, and
+     * the operator bridge never met it: none of OperatorBridgeToolExecutor's
+     * five bodies carries an allow-list, so find_staff read `query`/`limit`
+     * and dropped everything else - including an `is_active` filter its own
+     * description invites by advertising that field in the result. Exempting
+     * that family preserved THIS defect, on a read, inside the change that
+     * exists to close it. The question to ask of any arm added here is the one
+     * that arm failed: name the refusal it defers to, and name the state in
+     * which that refusal actually runs.
+     *
      * ACCEPT_AND_IGNORE_TOOLS are excluded for a DIFFERENT and stronger
      * reason than the write families: for them, dropping an undeclared key IS
      * the security contract. send_reply deliberately does not declare `to`,
@@ -2569,7 +2580,6 @@ class McpStaffController extends Controller
             || $this->isTacticalActionTool($name)
             || $this->isTacticalAdminTool($name)
             || $this->isTaxonomyTool($name)
-            || OperatorBridgeTools::handles($name)
             || in_array($name, self::ACCEPT_AND_IGNORE_TOOLS, true)
             // App\Models\CippMcpTool::handles() - the DB-backed dynamic tools,
             // present only while cipp_mcp_enabled is set.
@@ -2581,7 +2591,20 @@ class McpStaffController extends Controller
             // message - the regression CippMcpRelayTest pins. The two CIPP
             // predicates read alike and are not interchangeable: the model asks
             // the registry, the relay asks its own TOOL_MAP.
-            || CippMcpToolRelay::handles($name);
+            //
+            // Gated on the predicate that decides whether the relay RUNS, not
+            // on its map alone. handles() is static and carries no config, but
+            // the refusal it defers to is reachable ONLY through
+            // AssistantToolExecutor::cippMcpRelay(), which returns null unless
+            // isMcpRelayEnabled(). With cipp_enabled on and cipp_mcp_enabled
+            // off - the documented fallback (psa-dbrw, psa-idii) - these static
+            // CIPP reads are still published under the WIDER REST predicate
+            // (isEnabled() && isConfigured()) and dispatch straight to
+            // CippClient, which inspects no keys at all. Exempting them there
+            // deferred to a validator that does not run and reopened the silent
+            // drop on a read. Publish and dispatch must answer ONE question
+            // (psa-wzjzz); so must exempt and refuse.
+            || (CippConfig::isMcpRelayEnabled() && CippMcpToolRelay::handles($name));
     }
 
     /**

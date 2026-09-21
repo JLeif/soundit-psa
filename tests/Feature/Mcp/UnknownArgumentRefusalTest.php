@@ -269,7 +269,10 @@ class UnknownArgumentRefusalTest extends TestCase
      * The FULL suite caught it; a --filter=Mcp run stayed green.
      *
      * Names the relay directly so the exemption cannot be dropped without a
-     * failure that says why.
+     * failure that says why - and pins its CONDITION, because the relay's
+     * refusal only exists while the relay runs. handles() is a static map;
+     * isMcpRelayEnabled() is what decides whether CippMcpToolRelay ever sees
+     * the call at all.
      */
     public function test_a_relay_mapped_cipp_tool_keeps_its_own_refusal(): void
     {
@@ -283,6 +286,13 @@ class UnknownArgumentRefusalTest extends TestCase
 
         $this->assertNotNull($relayMapped, 'precondition: the relay must map at least one tool');
 
+        \App\Models\Setting::setValue('cipp_enabled', '1');
+        \App\Models\Setting::setValue('cipp_api_url', 'https://cipp.example.test');
+        \App\Models\Setting::setValue('cipp_tenant_id', 'tenant-1');
+        \App\Models\Setting::setValue('cipp_mcp_client_id', 'mcp-client');
+        \App\Models\Setting::setEncrypted('cipp_mcp_client_secret', 'mcp-secret');
+        \App\Models\Setting::setValue('cipp_mcp_enabled', '1');
+
         $controller = app(\App\Http\Controllers\Api\McpStaffController::class);
         $method = (new \ReflectionClass($controller))->getMethod('selfValidatingTool');
         $method->setAccessible(true);
@@ -292,6 +302,124 @@ class UnknownArgumentRefusalTest extends TestCase
             $relayMapped.' is refused by the CIPP relay itself; the generic guard must defer '
                 .'or it replaces a specific refusal with a worse one'
         );
+
+        // The paired NEGATIVE half, and the whole reason this arm carries a
+        // config conjunct: with the sub-switch off the relay never runs, so
+        // there is no better message to defer TO and the guard must not stand
+        // down. Without this half the assertion above passes on a predicate
+        // that exempts the tool in a state where nothing refuses.
+        \App\Models\Setting::setValue('cipp_mcp_enabled', '0');
+
+        $this->assertFalse(
+            (bool) $method->invoke($controller, $relayMapped, false),
+            'with cipp_mcp_enabled off the call goes straight to CippClient, which inspects '
+                .'no keys; deferring there is a silent drop on a read'
+        );
+    }
+
+    /**
+     * The behavioural half of the arm above, in the state the unconditional
+     * exemption used to cover: CIPP REST on, MCP relay sub-switch off - the
+     * documented fallback (psa-dbrw / psa-idii).
+     *
+     * cipp_list_users is published under isEnabled() && isConfigured(), a
+     * STRICTLY WIDER predicate than isMcpRelayEnabled(), so it is live here.
+     * cippDispatch() gets null from cippMcpRelay() and takes the direct
+     * CippClient path, which never calls unknownArguments(). An undeclared
+     * graphFilter would come back as the FULL enabled+disabled user list
+     * rendered as a filtered answer - this card's originating defect.
+     */
+    public function test_a_cipp_read_refuses_an_undeclared_filter_when_the_relay_is_off(): void
+    {
+        \App\Models\Setting::setValue('cipp_enabled', '1');
+        \App\Models\Setting::setValue('cipp_api_url', 'https://cipp.example.test');
+        \App\Models\Setting::setValue('cipp_tenant_id', 'tenant-1');
+        \App\Models\Setting::setValue('cipp_client_id', 'client-1');
+        \App\Models\Setting::setEncrypted('cipp_client_secret', 'secret');
+        // cipp_mcp_enabled deliberately left unset: REST live, relay off.
+
+        $client = Client::factory()->create(['cipp_tenant_domain' => 'acme.example']);
+        $token = $this->token();
+
+        $cipp = \Mockery::mock(\App\Services\Cipp\CippClient::class);
+        $cipp->shouldNotReceive('get');
+        $this->app->instance(\App\Services\Cipp\CippClient::class, $cipp);
+
+        $response = $this->invoke($token, 'cipp_list_users', [
+            'client_id' => $client->id,
+            'graphFilter' => 'accountEnabled eq false',
+        ]);
+
+        $text = (string) $response->json('result.content.0.text');
+
+        $this->assertTrue((bool) $response->json('result.isError'), $text);
+        $this->assertStringContainsString('graphFilter', $text,
+            'the refusal must NAME the dropped filter, or an unfiltered list reads as a filtered one');
+        $this->assertStringContainsString('REFUSED, not ignored', $text);
+    }
+
+    /** Paired positive control: the same read, declared, still reaches CIPP. */
+    public function test_a_cipp_read_still_runs_on_the_direct_path_with_declared_arguments_only(): void
+    {
+        \App\Models\Setting::setValue('cipp_enabled', '1');
+        \App\Models\Setting::setValue('cipp_api_url', 'https://cipp.example.test');
+        \App\Models\Setting::setValue('cipp_tenant_id', 'tenant-1');
+        \App\Models\Setting::setValue('cipp_client_id', 'client-1');
+        \App\Models\Setting::setEncrypted('cipp_client_secret', 'secret');
+
+        $client = Client::factory()->create(['cipp_tenant_domain' => 'acme.example']);
+        $token = $this->token();
+
+        $cipp = \Mockery::mock(\App\Services\Cipp\CippClient::class);
+        $cipp->shouldReceive('get')->andReturn([
+            [
+                'id' => 'user-1',
+                'userPrincipalName' => 'alex@acme.example',
+                'displayName' => 'Alex Acme',
+                'accountEnabled' => true,
+            ],
+        ]);
+        $this->app->instance(\App\Services\Cipp\CippClient::class, $cipp);
+
+        $response = $this->invoke($token, 'cipp_list_users', ['client_id' => $client->id]);
+
+        $this->assertFalse((bool) $response->json('result.isError'),
+            'positive control: with the relay off a declared CIPP read must still run - '
+                .(string) $response->json('result.content.0.text'));
+    }
+
+    /**
+     * The exemption list is a claim about the EXECUTOR, and the operator
+     * bridge never made it: OperatorBridgeToolExecutor::findStaff() reads
+     * `query` and `limit`, refuses nothing, and find_staff's own description
+     * advertises is_active in the result shape - so an is_active filter is
+     * exactly the mistake a caller makes. Dropped, the caller cannot tell
+     * "no inactive staff matched" from "the filter was discarded".
+     */
+    public function test_a_read_on_the_operator_bridge_refuses_an_undeclared_filter(): void
+    {
+        $token = $this->token();
+
+        $response = $this->invoke($token, 'find_staff', ['query' => 'smith', 'is_active' => true]);
+
+        $text = (string) $response->json('result.content.0.text');
+
+        $this->assertTrue((bool) $response->json('result.isError'),
+            'find_staff declares only query and limit, and nothing downstream refuses the rest');
+        $this->assertStringContainsString('is_active', $text,
+            'the refusal must NAME the dropped filter, or the caller reads the result as filtered');
+        $this->assertStringContainsString('REFUSED, not ignored', $text);
+    }
+
+    /** Paired positive control: the declared search still answers. */
+    public function test_an_operator_bridge_read_still_runs_with_only_declared_arguments(): void
+    {
+        $token = $this->token();
+
+        $response = $this->invoke($token, 'find_staff', ['query' => 'smith', 'limit' => 5]);
+
+        $this->assertFalse((bool) $response->json('result.isError'),
+            'positive control: find_staff must still answer a fully declared call');
     }
 
     public function test_a_deliberate_accept_and_ignore_contract_is_not_disturbed(): void
