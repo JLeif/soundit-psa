@@ -180,6 +180,20 @@ use Illuminate\Support\Facades\Log;
  * of a backfill. Rows whose start is younger than --min-age-hours (default 2,
  * never less than 1) are not in the population at all.
  *
+ * --max-age-hours is the floor's other half, and it is what makes this command
+ * safe to put on a clock. Default 0 = no ceiling, which is the historical
+ * behaviour and the right shape for a deliberate, attended backfill. A
+ * SCHEDULED run is expected to pass one: without it the query has no upper
+ * bound on row age and --limit defaults to 0, so the first cadenced --apply
+ * run would sweep the entire history in one unattended minute. Measured in
+ * production 2026-09-21: 219 eligible rows back to May, 36 of them moving
+ * ringing -> missed, and Missed (unlike Ringing) is in
+ * PhoneCall::scopeUnfollowedUp() and needsFollowUp() - so those rows land in
+ * the technicians' follow-up queue and the triage client context, back-dated,
+ * unannounced. Rows the ceiling excludes are counted and reported, never
+ * silently dropped: the backlog must stay visible, because clearing it is a
+ * separate decision that belongs to a human.
+ *
  * It reuses no service method. The one thing it takes from the service is the
  * maxLength constant - a single external fact about the XML the controller
  * emits, which must not exist in two places. The derivation is duplicated
@@ -194,9 +208,10 @@ class FinaliseStuckCalls extends Command
     protected $signature = 'calls:finalise-stuck
                             {--apply : Write the changes. Without this flag nothing is modified.}
                             {--limit=0 : Process at most this many rows (0 = no limit).}
-                            {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}';
+                            {--min-age-hours=2 : Only consider calls that started at least this many hours ago. Never less than 1.}
+                            {--max-age-hours=0 : Only consider calls that started at most this many hours ago (0 = no ceiling). Rows older than this are counted and reported, never silently dropped.}';
 
-    protected $description = 'Finalise old calls left with no ended_at that carry positive evidence of having ended (any status; --min-age-hours floor, and rows at the recording-length ceiling are excluded) - see the class docblock, because one class this mixes is calls still connected';
+    protected $description = 'Finalise old calls left with no ended_at that carry positive evidence of having ended (any status; --min-age-hours floor, optional --max-age-hours ceiling, and rows at the recording-length ceiling are excluded) - see the class docblock, because one class this mixes is calls still connected';
 
     public function handle(): int
     {
@@ -230,6 +245,38 @@ class FinaliseStuckCalls extends Command
         // hour.
         $minAgeHours = max(1, (int) $this->option('min-age-hours'));
         $cutoff = now()->subHours($minAgeHours);
+
+        // The CEILING is the floor's missing half, and it exists so that
+        // scheduling this command and deciding its backlog are two decisions
+        // rather than one. Without it the query has no upper bound on row age
+        // (--limit defaults to 0), so the FIRST cadenced run with --apply
+        // processes the entire historical population - measured 2026-09-21 in
+        // production: 219 rows reaching back to May, of which 36 transition
+        // ringing -> missed. That transition is not invisible: Missed is in
+        // PhoneCall::scopeUnfollowedUp() and needsFollowUp() while Ringing is
+        // not, so those rows would enter the technicians' follow-up queue and
+        // the triage client context in one unattended minute, back-dated, with
+        // nothing saying why.
+        //
+        // 0 means no ceiling, which preserves the historical behaviour for a
+        // deliberate attended backfill. A scheduled run is expected to pass
+        // one. Rows excluded by it are COUNTED AND REPORTED below rather than
+        // filtered away, because the backlog staying visible is what keeps the
+        // decision about it alive.
+        $maxAgeHours = max(0, (int) $this->option('max-age-hours'));
+
+        if ($maxAgeHours > 0 && $maxAgeHours <= $minAgeHours) {
+            $this->error(sprintf(
+                '--max-age-hours (%d) must be greater than the effective --min-age-hours (%d), '
+                .'or the population is empty by construction.',
+                $maxAgeHours,
+                $minAgeHours
+            ));
+
+            return self::FAILURE;
+        }
+
+        $ceilingCutoff = $maxAgeHours > 0 ? now()->subHours($maxAgeHours) : null;
 
         // The population is defined by the DEFECT, not by the symptom: a row
         // that never finalised is one with no ended_at, whatever its status
@@ -329,17 +376,68 @@ class FinaliseStuckCalls extends Command
                 });
         };
 
+        // The ceiling MIRRORS $agedEnough on the same anchor - started_at,
+        // else created_at - so a row can never be admitted by one clock and
+        // refused by another. A row with NEITHER anchor stays IN, exactly as
+        // the floor leaves it in: it cannot be aged in either direction, the
+        // no-anchor branch below is what skips it, and excluding it here would
+        // make that branch unreachable - the vacuous-control mistake the status
+        // filter already made once in this file.
+        $youngEnough = function ($q) use ($ceilingCutoff) {
+            $q->where('started_at', '>=', $ceilingCutoff)
+                ->orWhere(function ($q) use ($ceilingCutoff) {
+                    $q->whereNull('started_at')
+                        ->where(function ($q) use ($ceilingCutoff) {
+                            $q->where('created_at', '>=', $ceilingCutoff)
+                                ->orWhereNull('created_at');
+                        });
+                });
+        };
+
         $query = PhoneCall::whereNull('ended_at')
             ->where($endedEvidence)
             ->where($belowRecordingCeiling)
             ->where($agedEnough)
             ->orderBy('id');
 
+        if ($ceilingCutoff !== null) {
+            $query->where($youngEnough);
+        }
+
         if ($limit > 0) {
             $query->limit($limit);
         }
 
         $calls = $query->get();
+
+        // Reported in the same style as the at-ceiling warning: reach this run
+        // does not have, not reach it chose. Derived by re-running the
+        // population's own predicates with the ceiling dropped and subtracting,
+        // so it cannot drift from them.
+        if ($ceilingCutoff !== null) {
+            // Both terms are built from the predicates, NOT by cloning $query:
+            // $query may carry --limit, and Eloquent's limit(0) emits a literal
+            // `limit 0` (verified at source, not assumed), so clearing it by
+            // cloning is not available. Counted without --limit on purpose -
+            // this is the backlog's true size, not the slice this run took.
+            $inPopulation = PhoneCall::whereNull('ended_at')
+                ->where($endedEvidence)
+                ->where($belowRecordingCeiling)
+                ->where($agedEnough);
+
+            $excludedByCeiling = $inPopulation->clone()->count()
+                - $inPopulation->clone()->where($youngEnough)->count();
+
+            if ($excludedByCeiling > 0) {
+                $this->warn(sprintf(
+                    '%d row(s) older than the %dh ceiling are NOT in this run\'s population. '
+                    .'They remain unfinalised and are the standing backlog - clearing them is a '
+                    .'separate, attended decision, not something a cadenced run should do unwatched.',
+                    $excludedByCeiling,
+                    $maxAgeHours
+                ));
+            }
+        }
 
         // Rows that never finalised and carry no stored evidence they ended.
         // They are out of the population on purpose - that shape cannot be

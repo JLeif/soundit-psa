@@ -342,6 +342,28 @@ Schedule::command('calls:report-stranded-voicemail-deferrals')
     ->withoutOverlapping(5)
     ->runInBackground();
 
+// Calls — finalise rows left with no ended_at that carry stored evidence they
+// ended. Registered since its own leg landed but never scheduled, so every run
+// has been by hand and the ongoing exposure never closed.
+//
+// --max-age-hours=48 is load-bearing, not tuning. The command's age filter is a
+// FLOOR and --limit defaults to unlimited, so without a ceiling the first
+// cadenced --apply run would sweep the entire history in one unattended minute:
+// measured in production 2026-09-21, 219 rows back to May, 36 of them moving
+// ringing -> missed, which puts them in the technicians' follow-up queue and the
+// triage client context (Missed is in PhoneCall::scopeUnfollowedUp(); Ringing is
+// not) - back-dated, unannounced. The window keeps this entry to fresh rows; the
+// historical backlog is a separate, attended decision and the command reports
+// the rows it excludes so that backlog stays visible.
+//
+// 48h sits well past the 2h floor and past a weekend-length redelivery gap.
+// withoutOverlapping matters more than usual: an unbounded query on an hourly
+// tick is the shape that overlaps.
+Schedule::command('calls:finalise-stuck --apply --max-age-hours=48')
+    ->hourly()
+    ->withoutOverlapping(5)
+    ->runInBackground();
+
 // Prepay — forfeit unconsumed remainder of expired prepaid-time credits (daily,
 // before reconcile/billing). No-op until a contract sets prepay_expiry_months.
 Schedule::command('prepay:expire')
