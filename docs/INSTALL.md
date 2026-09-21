@@ -1592,6 +1592,8 @@ Every tool is **client-locked** to the resolved contact's client (and, for ticke
 
 ## 10. Updating
 
+**Local checkout is separate:** the repository's remote deploy script installs dependencies on the remote target, not in the invoking local checkout. After a lock bump, see [local vendor freshness](LOCAL-VENDOR.md) for development-only refresh, stale installed-metadata recovery, mode preservation and byte/boot acceptance. That procedure grants no production repair or deployment authority; the production update instructions below are a separate workflow.
+
 When a new version is available:
 
 ```bash
