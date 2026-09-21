@@ -433,4 +433,109 @@ class FinaliseStuckCallsCommandTest extends TestCase
         $this->assertNotNull($aged->fresh()->ended_at,
             'positive control: the aged row in the same run must still be finalised');
     }
+
+    /**
+     * The ceiling's whole purpose: a cadenced run must not reach the backlog.
+     * Both arms asserted in ONE run so the fixture cannot be blamed - the old
+     * row must survive untouched while the fresh row is finalised beside it.
+     */
+    public function test_a_max_age_ceiling_excludes_the_backlog_and_still_sweeps_fresh_rows(): void
+    {
+        $old = $this->stuckCall('ceiling-old', CallStatus::Ringing, 12);
+
+        $fresh = $this->stuckCall('ceiling-fresh', CallStatus::Ringing, 12);
+        $fresh->started_at = now()->subHours(5);
+        $fresh->save();
+
+        $this->assertNull($old->fresh()->ended_at, 'precondition: old row starts unfinalised');
+        $this->assertNull($fresh->fresh()->ended_at, 'precondition: fresh row starts unfinalised');
+
+        $this->artisan('calls:finalise-stuck --apply --max-age-hours=48')->assertSuccessful();
+
+        $this->assertNull($old->fresh()->ended_at,
+            'a row older than the ceiling must be left for an attended backfill, not swept by a cadenced run');
+        $this->assertSame(CallStatus::Ringing, $old->fresh()->status,
+            'the excluded row must not have its status rewritten either - ringing -> missed moves it into the follow-up queue');
+
+        $this->assertNotNull($fresh->fresh()->ended_at,
+            'positive control: a row inside the window must still be finalised, or the ceiling has simply disabled the command');
+    }
+
+    /**
+     * The excluded rows must be REPORTED. A ceiling that filters silently
+     * turns a visible backlog into an invisible one, which is the opposite of
+     * what it is for.
+     */
+    public function test_rows_excluded_by_the_ceiling_are_counted_in_the_output(): void
+    {
+        $this->stuckCall('ceiling-report-a', CallStatus::Ringing, 12);
+        $this->stuckCall('ceiling-report-b', CallStatus::Voicemail, 30);
+
+        $this->artisan('calls:finalise-stuck --max-age-hours=48')
+            ->expectsOutputToContain('2 row(s) older than the 48h ceiling')
+            ->assertSuccessful();
+    }
+
+    /**
+     * Default 0 means no ceiling: the historical behaviour an attended
+     * backfill depends on must be unchanged by this option existing.
+     */
+    public function test_without_the_option_the_whole_backlog_is_still_in_scope(): void
+    {
+        $old = $this->stuckCall('ceiling-absent', CallStatus::Ringing, 12);
+
+        $this->artisan('calls:finalise-stuck --apply')->assertSuccessful();
+
+        $this->assertNotNull($old->fresh()->ended_at,
+            'with no --max-age-hours the 30-day-old row must still be swept, exactly as before');
+    }
+
+    /**
+     * The ceiling must treat an un-ageable row exactly as the floor does: leave
+     * it IN, so the no-anchor branch that skips it stays reachable. Written
+     * because a mutation making the ceiling asymmetric here survived every
+     * other control in this file - no fixture had ever built the shape.
+     *
+     * Zero such rows exist in production (measured 2026-09-21, 887 rows, 0 with
+     * a null started_at), so this is a latent contract, not a live case. It is
+     * controlled anyway: the comment beside $youngEnough asserts the symmetry,
+     * and an asserted property with no control is how the status filter in this
+     * same file went vacuous once already.
+     */
+    public function test_the_ceiling_keeps_an_un_ageable_row_in_the_population(): void
+    {
+        $call = $this->stuckCall('ceiling-no-anchor', CallStatus::Ringing, 12);
+
+        // Null BOTH anchors: the row can be aged by neither clock.
+        PhoneCall::withoutTimestamps(fn () => $call->forceFill([
+            'started_at' => null,
+            'created_at' => null,
+        ])->save());
+
+        $this->assertNull($call->fresh()->started_at, 'precondition: no start anchor');
+        $this->assertNull($call->fresh()->created_at, 'precondition: no created anchor');
+
+        $this->artisan('calls:finalise-stuck --apply --max-age-hours=48')
+            ->expectsOutputToContain('no anchor')
+            ->assertSuccessful();
+
+        $this->assertNull($call->fresh()->ended_at,
+            'the no-anchor row must be SKIPPED by the no-anchor branch, not filtered out before it - '
+            .'if the ceiling excludes it the skip branch becomes unreachable and its control vacuous');
+    }
+
+    /**
+     * A ceiling at or below the floor is an empty population by construction.
+     * Refusing loudly beats running successfully over nothing.
+     */
+    public function test_a_ceiling_below_the_floor_is_refused(): void
+    {
+        $call = $this->stuckCall('ceiling-inverted', CallStatus::Ringing, 12);
+
+        $this->artisan('calls:finalise-stuck --apply --min-age-hours=48 --max-age-hours=2')
+            ->assertFailed();
+
+        $this->assertNull($call->fresh()->ended_at,
+            'a refused run must write nothing');
+    }
 }
