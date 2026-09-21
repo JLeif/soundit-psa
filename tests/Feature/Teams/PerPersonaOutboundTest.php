@@ -208,11 +208,11 @@ class PerPersonaOutboundTest extends TestCase
     private function mockDeliveryCapture(?array &$captured): void
     {
         $this->mock(OperatorDelivery::class, function (MockInterface $m) use (&$captured) {
-            $m->shouldReceive('sanitizeMessage')->andReturnUsing(fn (string $msg): string => $msg);
+            $m->shouldReceive('sanitizeMessageWithMeta')->andReturnUsing(fn (string $msg): array => ['text' => $msg, 'meta' => new \App\Services\Agent\Escalation\OperatorScanMetadata(false, false, mb_strlen($msg), [])]);
             $m->shouldReceive('send')->once()->andReturnUsing(function (...$args) use (&$captured): OperatorDeliveryResult {
                 $captured = $args;
 
-                return new OperatorDeliveryResult(posted: true, postedToChat: true, remoteMessageId: null);
+                return new OperatorDeliveryResult(posted: true, postedToChat: true, remoteMessageId: null, scanMetadata: $args[6]);
             });
         });
     }
