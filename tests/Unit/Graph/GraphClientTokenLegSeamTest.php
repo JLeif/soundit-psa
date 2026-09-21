@@ -108,21 +108,34 @@ class GraphClientTokenLegSeamTest extends TestCase
         $method = new \ReflectionMethod($client, 'getToken');
         $method->setAccessible(true);
 
+        // Capture only; assert AFTER the try. PHPUnit's fail()/assert* throw AssertionFailedError,
+        // which is a \Throwable, so a fail() inside the try would be caught by this very catch and
+        // the control would report green on the one regression it exists to detect: getToken()
+        // NOT surfacing the refusal.
+        $exception = null;
+
         try {
             $method->invoke($client);
-            $this->fail('The refused token request did not surface as an exception.');
-        } catch (\Throwable $exception) {
-            $this->assertNotEmpty(
-                $this->history,
-                'The refusal came from somewhere other than the injected handler, so the seam '
-                .'is not carrying the token leg.'
-            );
-            $this->assertStringNotContainsString(
-                'cURL error',
-                $exception->getMessage(),
-                'The token leg attempted a REAL connection: the handler seam is not applied, so '
-                .'this request left the test harness.'
-            );
+        } catch (\Throwable $caught) {
+            $exception = $caught;
         }
+
+        $this->assertNotNull(
+            $exception,
+            'The refused token request did not surface as an exception.'
+        );
+
+        $this->assertNotEmpty(
+            $this->history,
+            'The refusal came from somewhere other than the injected handler, so the seam '
+            .'is not carrying the token leg.'
+        );
+
+        $this->assertStringNotContainsString(
+            'cURL error',
+            $exception->getMessage(),
+            'The token leg attempted a REAL connection: the handler seam is not applied, so '
+            .'this request left the test harness.'
+        );
     }
 }
