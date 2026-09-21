@@ -131,7 +131,8 @@ class EscalationNotifier
         int $step,
     ): string {
         // ── 1. Cap → scan → Teams-escape the blocker ────────────────────────────
-        $blocker = $this->delivery->sanitize($blocker, '[escalation detail withheld - open the ticket]');
+        $sanitized = $this->delivery->sanitizeWithMeta($blocker, '[escalation detail withheld - open the ticket]');
+        $blocker = $sanitized['text'];
 
         // ── 2. Build the message ─────────────────────────────────────────────────
         // client / subject are UNTRUSTED (operator-set, client-typed) — escape
@@ -149,7 +150,7 @@ class EscalationNotifier
         // ── 3. Deliver to the Day-to-Day chat ────────────────────────────────────
         $convId = TeamsBotConfig::escalationConversationId();
         $serviceUrl = TeamsBotConfig::escalationServiceUrl();
-        $result = $this->delivery->send($recipient, $convId, $serviceUrl, $subject, $body);
+        $result = $this->delivery->send($recipient, $convId, $serviceUrl, $subject, $body, scanMetadata: $sanitized['meta']);
 
         // Record only the initial successful bot post in the teammate transcript.
         if ($result->postedToChat && $step === 0 && $convId !== null) {
@@ -158,14 +159,19 @@ class EscalationNotifier
 
         // ── 5. Record escalation state on the run (merge — no migration) ─────────
         // MERGE with existing escalation dict so that keys stamped by notify() (category)
-        // and by Task 3 are preserved across re-pings. Only the three mutable keys are
-        // overwritten: who got paged, when, and which chain step we're at.
+        // and by Task 3 are preserved across re-pings. Refresh recipient, time, step
+        // and the latest delivery receipt (scan covers the blocker fragment only).
         $meta = $flagRun->proposed_meta ?? [];
         $existing = $meta['escalation'] ?? [];
         $meta['escalation'] = array_merge($existing, [
             'recipient_user_id' => $recipient?->id,
             'notified_at' => now()->toIso8601String(),
             'step' => $step,
+            'delivery_receipt' => [
+                'posted' => $result->posted,
+                'posted_to_chat' => $result->postedToChat,
+                ...$result->scanReceipt(),
+            ],
         ]);
         $flagRun->proposed_meta = $meta;
         $flagRun->save();

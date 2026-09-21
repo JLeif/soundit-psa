@@ -116,9 +116,10 @@ class OperatorBridgeToolExecutor
 
         $actorName = $persona?->display_name ?? TechnicianConfig::aiActorName();
         $actorLabel = TeamsText::escape($actorName);
-        $safeMessage = $this->delivery->sanitizeMessage(
+        $sanitized = $this->delivery->sanitizeMessageWithMeta(
             $this->stripTrailingPersonaSignatures($message, $actorName),
         );
+        $safeMessage = $sanitized['text'];
         $label = $category->label();
         $ticketContext = null;
         if ($ticket !== null) {
@@ -155,11 +156,13 @@ class OperatorBridgeToolExecutor
             $subject,
             $body,
             $persona,
+            $sanitized['meta'],
         );
 
         return [
             'posted' => $result->posted,
             'remote_message_id' => $result->remoteMessageId,
+            ...$result->scanReceipt(),
         ];
     }
 
