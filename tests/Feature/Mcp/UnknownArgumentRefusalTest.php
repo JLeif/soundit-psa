@@ -338,4 +338,71 @@ class UnknownArgumentRefusalTest extends TestCase
         $this->assertSame([], $rejected,
             'the server must never refuse an argument it publishes');
     }
+
+    /**
+     * The mirror of the sweep above, on the MESSAGE side: every argument the
+     * server PUBLISHES must also be NAMED by that tool's refusal.
+     *
+     * The message drops the boundary's own keys, because naming one reads as
+     * an invitation and lands the retry back in the silent-drop shape. But a
+     * key is the BOUNDARY'S only where the tool did not declare it itself.
+     * The general PSA reads declare client_id in their own properties -
+     * REQUIRED on get_contract and list_client_contracts, an optional filter
+     * on list_mislinked_assets and list_invoices, where an ABSENT client_id
+     * means a fleet-wide sweep. Dropping it by name concealed a required
+     * argument on one and steered a retry across the tenant fence on the
+     * other, which is worse than a failed call.
+     */
+    public function test_the_refusal_names_every_argument_the_tool_publishes(): void
+    {
+        $token = $this->token();
+
+        $listed = $this->withHeaders(['Authorization' => 'Bearer '.$token])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => [],
+            ])->json('result.tools') ?? [];
+
+        $controller = app(\App\Http\Controllers\Api\McpStaffController::class);
+        $quotedNames = new \ReflectionMethod($controller, 'declaredArgumentNames');
+        $quotedNames->setAccessible(true);
+        $selfValidating = new \ReflectionMethod($controller, 'selfValidatingTool');
+        $selfValidating->setAccessible(true);
+        $injectsClientId = new \ReflectionMethod($controller, 'publishesClientId');
+        $injectsClientId->setAccessible(true);
+
+        $missing = [];
+        $checked = 0;
+        $declaresOwnClientId = [];
+
+        foreach ($listed as $tool) {
+            $name = (string) $tool['name'];
+
+            if ($selfValidating->invoke($controller, $name, false)) {
+                continue; // its own validator answers; this message never runs
+            }
+
+            $published = array_keys($tool['inputSchema']['properties'] ?? []);
+            $quoted = $quotedNames->invoke($controller, $name);
+
+            if (in_array('client_id', $published, true) && ! $injectsClientId->invoke($controller, $name)) {
+                $declaresOwnClientId[] = $name;
+            }
+
+            foreach ($published as $property) {
+                $checked++;
+                if (! in_array($property, $quoted, true)) {
+                    $missing[] = $name.'.'.$property;
+                }
+            }
+        }
+
+        $this->assertGreaterThan(50, $checked,
+            'denominator control: the sweep must cover the guarded surface, '
+            .'or an empty $missing proves nothing');
+        $this->assertNotSame([], $declaresOwnClientId,
+            'denominator control: at least one guarded tool must declare client_id in its OWN '
+            .'schema rather than have it injected, or this control never exercises the case');
+        $this->assertSame([], $missing,
+            'the refusal must name every argument the server published for that tool');
+    }
 }

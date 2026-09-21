@@ -2598,6 +2598,40 @@ class McpStaffController extends Controller
      */
     private function declaredArgumentNamesOrNull(string $name): ?array
     {
+        if (($declared = $this->publishedPropertyNamesOrNull($name)) === null) {
+            return null;
+        }
+
+        $boundaryKeys = McpToolModes::isStageable($name)
+            ? ['client_id', 'staged', 'execute_at']
+            : ['client_id', 'execute_at'];
+        foreach ($boundaryKeys as $boundaryKey) {
+            if (! in_array($boundaryKey, $declared, true)) {
+                $declared[] = $boundaryKey;
+            }
+        }
+        sort($declared);
+
+        return $declared;
+    }
+
+    /**
+     * The property names the tool's OWN schema carries - exactly the keys
+     * tools/list published for it, before any boundary key is added.
+     *
+     * Split out from the acceptance set above because the MESSAGE has to tell
+     * the two apart. A boundary key is the BOUNDARY'S only where the tool did
+     * not declare it itself: the general PSA reads declare client_id in their
+     * own properties, so subtracting it by name quoted a contract the caller
+     * was never handed.
+     *
+     * Returns null on the same terms as the caller above - an unresolved name
+     * or no properties block at all - and an empty array for an empty map.
+     *
+     * @return list<string>|null
+     */
+    private function publishedPropertyNamesOrNull(string $name): ?array
+    {
         static $cache = [];
 
         if (array_key_exists($name, $cache)) {
@@ -2636,18 +2670,7 @@ class McpStaffController extends Controller
             return $cache[$name] = null;
         }
 
-        $declared = array_values(array_filter(array_keys($properties), 'is_string'));
-        $boundaryKeys = McpToolModes::isStageable($name)
-            ? ['client_id', 'staged', 'execute_at']
-            : ['client_id', 'execute_at'];
-        foreach ($boundaryKeys as $boundaryKey) {
-            if (! in_array($boundaryKey, $declared, true)) {
-                $declared[] = $boundaryKey;
-            }
-        }
-        sort($declared);
-
-        return $cache[$name] = $declared;
+        return $cache[$name] = array_values(array_filter(array_keys($properties), 'is_string'));
     }
 
     /**
@@ -2669,9 +2692,19 @@ class McpStaffController extends Controller
     private function declaredArgumentNames(string $name): array
     {
         $declared = $this->declaredArgumentNamesOrNull($name) ?? [];
+        $ownProperties = $this->publishedPropertyNamesOrNull($name) ?? [];
 
+        // Subtract client_id only where it is genuinely the BOUNDARY'S key.
+        // tools/list injects it into client-scoped schemas, but the general
+        // PSA reads declare it in their own properties - REQUIRED on
+        // get_contract and list_client_contracts, an optional filter on the
+        // fleet-capable reads (list_mislinked_assets, list_invoices) where an
+        // ABSENT client_id means "every client". Subtracting it by name there
+        // hid a published argument and pointed the retry straight off a
+        // cross-client scope fence: the message must never under-promise the
+        // published contract any more than it may over-promise it.
         $unpublished = ['staged', 'execute_at'];
-        if (! $this->publishesClientId($name)) {
+        if (! $this->publishesClientId($name) && ! in_array('client_id', $ownProperties, true)) {
             $unpublished[] = 'client_id';
         }
 
