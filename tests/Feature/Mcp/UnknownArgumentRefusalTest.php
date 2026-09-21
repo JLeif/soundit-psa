@@ -101,21 +101,117 @@ class UnknownArgumentRefusalTest extends TestCase
     }
 
     /**
-     * Refusing must happen BEFORE the tool runs. A refusal that arrives after
-     * the work is not a refusal, and on a read it would still burn the query.
+     * A tool whose properties map is EMPTY declares no arguments, and an
+     * argument handed to it is refused like any other.
+     *
+     * The definitions render an empty map as `(object) []` so it encodes as {}
+     * rather than []. That is an encoding artifact, not a contract, and
+     * listTools() normalises it with `(array)` before publishing. Read raw it
+     * failed `is_array` and the tool fell out of the guard entirely - fail
+     * open by ACCIDENT, on reads (whoami, get_queue_stats, get_client,
+     * wiki_list_pages), which is the surface this change exists to protect.
      */
-    public function test_the_refusal_precedes_execution(): void
+    public function test_a_tool_publishing_an_empty_properties_map_still_refuses(): void
     {
         $token = $this->token();
 
-        $response = $this->invoke($token, 'get_queue_stats', ['bogus_filter' => 'zzz']);
+        $response = $this->invoke($token, 'whoami', ['bogus_filter' => 'zzz']);
 
-        // get_queue_stats declares no properties, so its schema cannot be
-        // resolved and the guard deliberately stands off: fail OPEN on
-        // ignorance. Asserting the CURRENT behaviour rather than the behaviour
-        // I would prefer - this is the documented bound, not an oversight.
+        $text = (string) $response->json('result.content.0.text');
+
+        $this->assertTrue((bool) $response->json('result.isError'),
+            'an empty properties map is a contract ("no arguments"), not an unresolved schema');
+        $this->assertStringContainsString('bogus_filter', $text,
+            'the refusal must NAME the offending argument, or the caller cannot self-correct');
+        $this->assertStringContainsString('accepts no arguments', $text,
+            'the zero-argument arm of the message must be reachable, not dead code');
+    }
+
+    /** Paired positive control: the same tool, called correctly, still runs. */
+    public function test_a_zero_argument_tool_still_runs_when_called_with_none(): void
+    {
+        $token = $this->token();
+
+        $response = $this->invoke($token, 'whoami', []);
+
         $this->assertFalse((bool) $response->json('result.isError'),
-            'a tool whose schema declares no properties is left alone by the guard');
+            'positive control: a zero-argument tool must still answer an empty call');
+    }
+
+    /**
+     * Fail OPEN on ignorance - the bound this guard keeps. A name no assembly
+     * here resolves yields null ("do not judge this call") and is never
+     * refused. Distinct from the empty map above, which IS a contract.
+     */
+    public function test_an_unresolvable_schema_is_never_judged(): void
+    {
+        $controller = app(\App\Http\Controllers\Api\McpStaffController::class);
+        $method = new \ReflectionMethod($controller, 'declaredArgumentNamesOrNull');
+        $method->setAccessible(true);
+
+        $this->assertNull($method->invoke($controller, 'no_such_tool_on_this_boundary'),
+            'an unresolved schema must stay null, so the guard stands off rather than refusing');
+    }
+
+    /**
+     * `staged` is the boundary's key only where the boundary can stage.
+     *
+     * callTool() unsets it on the alias and stageable paths and NOWHERE else,
+     * so on a non-stageable read it arrives as a live undeclared key. Dropping
+     * it silently is this defect on its highest-stakes argument: the caller
+     * records that it filed a proposal for human approval, and the call has
+     * already run.
+     */
+    public function test_staged_on_a_non_stageable_tool_is_refused(): void
+    {
+        $token = $this->token();
+
+        $response = $this->invoke($token, 'find_clients', ['query' => 'acme', 'staged' => true]);
+
+        $text = (string) $response->json('result.content.0.text');
+
+        $this->assertTrue((bool) $response->json('result.isError'),
+            'find_clients cannot stage anything, so `staged` must be refused, not dropped');
+        $this->assertStringContainsString('staged', $text,
+            'the refusal must name `staged`, so the caller learns nothing was held');
+    }
+
+    /**
+     * The message is this change's deliverable, so it must quote the PUBLISHED
+     * contract exactly. Naming a key the caller was never handed steers the
+     * retry back into the silent-drop shape: client_id on a general tool is
+     * accepted, unset by the boundary, never seen by the executor - a second
+     * invisible no-op, recommended by the refusal itself.
+     */
+    public function test_the_refusal_names_only_what_the_tool_publishes(): void
+    {
+        $token = $this->token();
+
+        $listed = $this->withHeaders(['Authorization' => 'Bearer '.$token])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => [],
+            ])->json('result.tools') ?? [];
+
+        $published = null;
+        foreach ($listed as $tool) {
+            if ($tool['name'] === 'find_clients') {
+                $published = array_keys($tool['inputSchema']['properties'] ?? []);
+            }
+        }
+
+        $this->assertNotNull($published, 'precondition: find_clients must be on the published surface');
+        $this->assertNotContains('client_id', $published,
+            'precondition: find_clients is general, so tools/list injects no client_id');
+
+        $text = (string) $this->invoke($token, 'find_clients', ['bogus_filter' => 'zzz'])
+            ->json('result.content.0.text');
+
+        foreach ($published as $property) {
+            $this->assertStringContainsString($property, $text,
+                'every argument the server publishes must appear in the refusal');
+        }
+        $this->assertStringNotContainsString('client_id', $text,
+            'the refusal must not advertise an argument this tool does not publish');
     }
 
     /**

@@ -1183,16 +1183,22 @@ class McpStaffController extends Controller
         // treatment to every tool on this boundary instead of the handful whose
         // executors happened to hand-roll an allow-list.
         //
-        // It runs HERE, after the boundary has consumed and unset its own keys
-        // (staged, execute_at, client_id), so those are never mistaken for
-        // unknown arguments; and before dispatch, so no executor ever sees a
-        // key its schema did not advertise.
+        // It runs HERE, after the boundary has consumed its own keys and
+        // before dispatch, so no executor ever sees a key its schema did not
+        // advertise. client_id is consumed on every tool and stays acceptable;
+        // execute_at carries its own named refusal further up. `staged` is NOT
+        // unconditionally consumed - callTool() unsets it on the alias and
+        // stageable paths and nowhere else - so on a non-stageable tool it is
+        // a genuinely undeclared key and is refused like any other. Accepting
+        // it there would be this defect on its highest-stakes argument: a
+        // caller told it held a proposal for approval, by a call that ran.
         //
         // The comparison is against the PUBLISHED schema - the exact text a
         // caller was handed by tools/list - so the contract being enforced is
-        // the one the caller could actually read. A tool whose schema we cannot
-        // resolve, or which declares no properties block at all, is left alone:
-        // this refuses a key known to be undeclared, never a key we merely
+        // the one the caller could actually read. An EMPTY properties map is a
+        // contract ("this tool declares no arguments") and is enforced as one;
+        // only a tool whose schema cannot be resolved at all is left alone.
+        // This refuses a key known to be undeclared, never a key we merely
         // failed to look up. Fail open on ignorance, closed on knowledge.
         if ($this->selfValidatingTool((string) $name, $stageable)) {
             // Left to its own validator on purpose - see selfValidatingTool().
@@ -2572,16 +2578,21 @@ class McpStaffController extends Controller
      *
      * Resolved from the SAME assemblies listTools() publishes, so the contract
      * enforced on dispatch is the contract the caller was handed. Returns null
-     * - distinct from an empty array - when the tool is unknown here or
-     * declares no usable properties block; the caller treats null as "do not
-     * judge this call" and an empty array as "this tool declares no arguments".
+     * - distinct from an empty array - only when no assembly here knows the
+     * tool, or it carries no properties block at all; the caller treats null
+     * as "do not judge this call" and an empty array as "this tool declares no
+     * arguments". An empty MAP - `(object) []`, which is how the definitions
+     * render {} - is the second of those, not the first.
      *
-     * The boundary's own keys are added deliberately. client_id, staged and
-     * execute_at are injected into the published schema (or consumed by the
-     * boundary) rather than declared by the executor, so a caller who passes
-     * one is following the advertised surface and must not be refused. They
-     * are unset from $arguments before this runs, so listing them here is
-     * belt-and-braces against a future reordering, not a live dependency.
+     * The boundary's own keys are added deliberately, but only where they are
+     * genuinely the boundary's. client_id is consumed on every tool, and
+     * execute_at is refused by name further up, so both stay acceptable here.
+     * `staged` is accepted ONLY on a stageable tool: callTool() unsets it on
+     * the alias and stageable paths and NOWHERE else, so on a non-stageable
+     * tool it reaches this guard as a live, undeclared key. Whitelisting it
+     * there would silently drop the one argument that means "hold this for a
+     * human", and the caller would record an approval request for work that
+     * already ran - this defect, on the key that can least afford it.
      *
      * @return list<string>|null
      */
@@ -2605,12 +2616,31 @@ class McpStaffController extends Controller
             }
         }
 
-        if (! is_array($schema) || ! is_array($properties = $schema['properties'] ?? null)) {
+        if (! is_array($schema)) {
+            return $cache[$name] = null;
+        }
+
+        // The definitions render a properties map as a stdClass so it encodes
+        // as {} rather than []; listTools() normalises with `(array)` before
+        // injecting client_id, and this guard reads the SAME definitions, so
+        // it must normalise identically. Read raw, the cast failed is_array
+        // and the tool dropped out of the guard over an encoding artifact
+        // rather than a decision - fail-open by ACCIDENT, on exactly the read
+        // surface this exists to protect.
+        $properties = $schema['properties'] ?? null;
+        if ($properties instanceof \stdClass) {
+            $properties = (array) $properties;
+        }
+
+        if (! is_array($properties)) {
             return $cache[$name] = null;
         }
 
         $declared = array_values(array_filter(array_keys($properties), 'is_string'));
-        foreach (['client_id', 'staged', 'execute_at'] as $boundaryKey) {
+        $boundaryKeys = McpToolModes::isStageable($name)
+            ? ['client_id', 'staged', 'execute_at']
+            : ['client_id', 'execute_at'];
+        foreach ($boundaryKeys as $boundaryKey) {
             if (! in_array($boundaryKey, $declared, true)) {
                 $declared[] = $boundaryKey;
             }
@@ -2621,7 +2651,18 @@ class McpStaffController extends Controller
     }
 
     /**
-     * The declared names, for an operator-facing message. Empty when unknown.
+     * The names to QUOTE back to the caller: what tools/list actually
+     * published for this tool, and nothing else.
+     *
+     * This is the operator-facing half and it must not over-promise. The
+     * acceptance set above carries the boundary's own keys so a caller is
+     * never REFUSED for one; naming them here would do the opposite of this
+     * change's purpose, because it reads as an invitation. A caller that
+     * retries with client_id on a general tool lands straight back in the
+     * silent-drop shape - the boundary unsets it, the executor never declared
+     * it, the tool answers, and nothing says the key did nothing. So the
+     * message names the published properties, plus client_id only where it is
+     * published. Empty - a real "accepts no arguments" - when none are.
      *
      * @return list<string>
      */
@@ -2629,7 +2670,42 @@ class McpStaffController extends Controller
     {
         $declared = $this->declaredArgumentNamesOrNull($name) ?? [];
 
-        return array_values(array_diff($declared, ['staged', 'execute_at']));
+        $unpublished = ['staged', 'execute_at'];
+        if (! $this->publishesClientId($name)) {
+            $unpublished[] = 'client_id';
+        }
+
+        return array_values(array_diff($declared, $unpublished));
+    }
+
+    /**
+     * Does tools/list inject client_id into this tool's published schema?
+     *
+     * Mirrors listTools(): the general assembly wins on a duplicate name, and
+     * a PSA ticket-scoped tool is scoped by its ticket rather than by an
+     * injected client_id. listTools() also treats the action, write and
+     * add_ticket_note families as client-scoped; every one of those is
+     * self-validating or accept-and-ignore, so none can reach this message and
+     * none is re-derived here. Governs the MESSAGE only, never acceptance.
+     */
+    private function publishesClientId(string $name): bool
+    {
+        foreach (array_merge(
+            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition(), $this->searchToolsToolDefinition()],
+            McpToolSurface::liveGeneralToolDefinitions(),
+        ) as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                return false;
+            }
+        }
+
+        foreach (McpToolSurface::liveClientScopedToolDefinitions() as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                return ! $this->isPsaTicketScopedTool($name);
+            }
+        }
+
+        return false;
     }
 
     /**
