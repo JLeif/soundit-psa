@@ -42,10 +42,20 @@ class GraphClient
 
         $this->http = new Client($httpOptions);
 
-        $this->authHttp = new Client([
+        // The token leg honours the SAME `handler` seam as the three Graph clients above.
+        // It is the only request that carries `client_secret`, so leaving it unseamed made
+        // the one credential-bearing call the one no test could observe or refuse. Production
+        // config never sets `handler`; the seam is test-only in effect (see :35-36).
+        $authOptions = [
             'base_uri' => 'https://login.microsoftonline.com/',
             'timeout' => $this->config['token_timeout'],
-        ]);
+        ];
+
+        if (isset($this->config['handler'])) {
+            $authOptions['handler'] = $this->config['handler'];
+        }
+
+        $this->authHttp = new Client($authOptions);
     }
 
     /**

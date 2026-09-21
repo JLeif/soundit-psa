@@ -21,6 +21,7 @@
         <!-- Block raw Guzzle/vendor traffic as well as Laravel HTTP clients in tests. -->
         <env name="HTTP_PROXY" value="http://127.0.0.1:9" force="true"/>
         <env name="HTTPS_PROXY" value="http://127.0.0.1:9" force="true"/>
+        <env name="NO_PROXY" value="" force="true"/>
         <env name="APP_ENV" value="testing"/>
         <env name="APP_KEY" value="base64:AckfSECXIvnK5r28GVIWUAxmbBSjTsmF/aAvxCFV0MU="/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
