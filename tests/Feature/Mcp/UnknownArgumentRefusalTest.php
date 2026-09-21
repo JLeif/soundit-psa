@@ -151,6 +151,53 @@ class UnknownArgumentRefusalTest extends TestCase
     }
 
     /**
+     * Where dropping an undeclared key IS the security contract, it must keep
+     * dropping it.
+     *
+     * send_reply deliberately does not declare `to`: a prompt-injected
+     * recipient must be IGNORED, not obeyed, and not converted into a failed
+     * call. This is the boundary between the accident this change fixes (a
+     * read tool dropping a filter) and a deliberate containment that must not
+     * be disturbed. Written because widening the guard to cover it was the
+     * first thing I tried, and the full suite caught it.
+     */
+    public function test_a_deliberate_accept_and_ignore_contract_is_not_disturbed(): void
+    {
+        $token = $this->token();
+
+        $listed = $this->withHeaders(['Authorization' => 'Bearer '.$token])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => [],
+            ])->json('result.tools') ?? [];
+
+        $sendReply = null;
+        foreach ($listed as $tool) {
+            if ($tool['name'] === 'send_reply') {
+                $sendReply = $tool;
+            }
+        }
+
+        $this->assertNotNull($sendReply, 'precondition: send_reply must be on the published surface');
+        $this->assertArrayNotHasKey('to', $sendReply['inputSchema']['properties'] ?? [],
+            'send_reply must never advertise a caller-supplied recipient');
+
+        // The paired half - that supplying `to` anyway is ignored rather than
+        // refused, and the reply still lands as a held run - is pinned by
+        // ChetSendReplyTest. This control exists so that widening the generic
+        // guard over this tool fails HERE, next to the reason, rather than in
+        // a distant suite.
+        $this->assertTrue(
+            (new \ReflectionMethod(\App\Http\Controllers\Api\McpStaffController::class, 'selfValidatingTool'))
+                ->getDeclaringClass()->getConstant('ACCEPT_AND_IGNORE_TOOLS') !== false,
+            'the accept-and-ignore set must remain declared'
+        );
+        $this->assertContains('send_reply',
+            (new \ReflectionClass(\App\Http\Controllers\Api\McpStaffController::class))
+                ->getConstant('ACCEPT_AND_IGNORE_TOOLS'),
+            'send_reply must stay exempt from the generic unknown-argument refusal');
+    }
+
+    /**
      * Every argument the server PUBLISHES must be one the server ACCEPTS.
      *
      * This is the control against the guard drifting away from the advertised

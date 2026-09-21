@@ -2533,7 +2533,25 @@ class McpStaffController extends Controller
      * A tool that gains its own allow-list later does not need this list
      * updated: the worst case is a generic refusal instead of a specific one,
      * never a silently-ignored argument.
+     *
+     * ACCEPT_AND_IGNORE_TOOLS are excluded for a DIFFERENT and stronger
+     * reason than the write families: for them, dropping an undeclared key IS
+     * the security contract. send_reply deliberately does not declare `to`,
+     * and ChetSendReplyTest pins BOTH halves - the schema must not advertise
+     * it, AND a caller who supplies it must be ignored rather than obeyed, so
+     * a prompt-injected recipient cannot redirect a client-facing reply.
+     * Refusing there would turn a contained injection attempt into a failed
+     * call: louder, but it changes a behaviour a control asserts, and the
+     * containment is the point. These tools drop the key BY DESIGN; the read
+     * surface dropped it BY ACCIDENT, and only the accident is in scope.
      */
+    private const ACCEPT_AND_IGNORE_TOOLS = [
+        'send_reply',
+        'add_ticket_note',
+        'propose_close',
+        'request_tool',
+    ];
+
     private function selfValidatingTool(string $name, bool $stageable): bool
     {
         return $stageable
@@ -2544,6 +2562,8 @@ class McpStaffController extends Controller
             || $this->isTacticalActionTool($name)
             || $this->isTacticalAdminTool($name)
             || $this->isTaxonomyTool($name)
+            || OperatorBridgeTools::handles($name)
+            || in_array($name, self::ACCEPT_AND_IGNORE_TOOLS, true)
             || CippMcpTool::handles($name);
     }
 
