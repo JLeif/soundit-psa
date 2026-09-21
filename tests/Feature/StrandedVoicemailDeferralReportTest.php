@@ -927,7 +927,33 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         // GraphClientException is swallowed upstream, and $graphSends stays [].
         // The seed is load-bearing for the instrument's liveness, and the
         // assertion below exists so its absence fails HERE rather than elsewhere.
-        cache()->put('graph_api_token', 'test-token-not-a-real-credential', 3600);
+        // Round 2 (Jeeves, 18:32 and 01:53 rulings): seed FOREVER, deliberately
+        // diverging from production, which caches for ($data['expires_in'] ?? 3600)
+        // minus TOKEN_SAFETY_MARGIN (GraphClient:614-615). A fixed TTL made this
+        // instrument depend on wall-clock: any test that travels past it -- or any
+        // future edit that does -- leaves the guard GREEN while a send escapes,
+        // because getToken() then takes the unseamed $authHttp leg (GraphClient:45)
+        // and the exception is swallowed upstream. The divergence is the point:
+        // possession here must not expire, so the seam is the only variable.
+        //
+        // Round 1 diff:2: the store premise is checked BEFORE the seed is written,
+        // not after. phpunit.xml:29 sets CACHE_STORE without force="true", so an
+        // inherited environment variable silently wins and the seed could land in a
+        // store GraphClient never reads. forever() has no TTL to bound that: written
+        // first, a mis-stored seed left a never-expiring bogus graph_api_token in a
+        // real file/redis store and only then failed. Asserting first means the
+        // write never happens unless the store is the one getToken() reads. Pin it
+        // on BOTH sides -- the same class of unasserted premise as the mail binding
+        // below.
+        $this->assertSame(
+            'array',
+            config('cache.default'),
+            'The token seed and GraphClient::getToken() must use the same cache '
+                .'store, or the seed is written somewhere the client never reads '
+                .'and the guard goes silent rather than red.'
+        );
+
+        cache()->forever('graph_api_token', 'test-token-not-a-real-credential');
 
         // Round 1 contract:1 / context:1, upheld: without this the instrument has
         // no positive control. On a healthy run nothing reaches Graph, so the
@@ -966,6 +992,32 @@ class StrandedVoicemailDeferralReportTest extends TestCase
                 app(\Illuminate\Contracts\Cache\Repository::class),
             );
         });
+
+        // Round 1 diff:1: this guard runs BEFORE the probe, not after it. Below the
+        // probe it could only report an egress that had already left the process --
+        // and in the bind-regression case the $graphSends assertion would fail first,
+        // so it never executed at all. Here it stops the test before any request is
+        // driven, which is the difference between a control and a post-mortem.
+        //
+        // Round 2 c1:v1:1, UPHELD by Jeeves against two discard votes and measured
+        // off the wire: with the binding above deleted, the probe below resolves the
+        // production singleton and a real CONNECT graph.microsoft.com:443 leaves
+        // the process. The discard votes rested on phpunit.xml's forced proxy pin,
+        // but GuzzleHttp\Utils::getenv() reads $_SERVER FIRST and PHPUnit's
+        // force="true" writes only $_ENV/putenv() -- so an ambient proxy variable
+        // in the runner's environment beats the pin at the one reader that decides
+        // where the packet goes. Containment today is harness-wide, not a control.
+        //
+        // Assert the config cannot reach a real tenant, so "no secret left the box"
+        // is a property this test enforces rather than an accident of an empty
+        // environment. The suite-wide half of that finding is card 3EUxsP13.
+        $this->assertEmpty(
+            config('services.graph.client_secret'),
+            'A real Graph client_secret is loaded. If the container binding above '
+                .'ever regresses, the probe below reaches the live Graph endpoint and '
+                .'the 401 branch (GraphClient:505-510) purges the token cache and '
+                .'re-POSTs that secret through the unseamed $authHttp leg.'
+        );
 
         // Round 2 context:1, upheld: the seam proof did not pin the thing it exists
         // to pin. An earlier draft proved the seam by constructing its OWN
@@ -1021,6 +1073,17 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         );
 
         $transport->flush();
+
+        // Re-assert possession at the MOMENT OF USE. The assertion far above runs
+        // before the probe and before any clock travel; presence at T says nothing
+        // about possession at the instant the command runs. A presence check is not
+        // a liveness check.
+        $this->assertTrue(
+            cache()->has('graph_api_token'),
+            'The seeded token is gone by the time the command runs. Without it '
+                .'getToken() takes the unseamed $authHttp leg and the guard below '
+                .'reports green while the send escapes.'
+        );
 
         $this->artisan('calls:report-stranded-voicemail-deferrals')
             ->assertExitCode(0);
