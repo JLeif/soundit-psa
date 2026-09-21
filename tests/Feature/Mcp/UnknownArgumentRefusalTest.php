@@ -318,6 +318,59 @@ class UnknownArgumentRefusalTest extends TestCase
     }
 
     /**
+     * The config conjunct above must not be able to take the boundary down
+     * with it.
+     *
+     * isMcpRelayEnabled() is two uncached Setting reads plus a
+     * Crypt::decryptString of cipp_mcp_client_secret, so a rotated APP_KEY -
+     * or a settings table restored from another environment - makes it THROW,
+     * not return false. selfValidatingTool() runs before dispatch and OUTSIDE
+     * callTool()'s try, so an escape is a -32603 on that call.
+     *
+     * One assertion per half of the guard. ORDER: a general read must never
+     * reach the config at all, because the static map answers first - that is
+     * what keeps the fault off whoami / list_tool_surface / search_tools,
+     * which toolAllowed() passes before the liveness check precisely so a
+     * caller can find out why something was refused. CATCH: on a relay-mapped
+     * name the relay is not going to run, so the generic guard applies rather
+     * than the call failing.
+     *
+     * Asserted on the predicate rather than over HTTP deliberately:
+     * McpToolSurface::liveClientScopedToolDefinitions() reads
+     * isMcpRelayEnabled() unguarded too, one frame EARLIER on the same
+     * request via toolAllowed()'s liveness conjunct. That is a separate gap,
+     * outside this change, and a behavioural assertion here would be
+     * measuring it instead of this arm.
+     */
+    public function test_a_cipp_config_fault_cannot_take_down_the_generic_guard(): void
+    {
+        \App\Models\Setting::setValue('cipp_enabled', '1');
+        \App\Models\Setting::setValue('cipp_api_url', 'https://cipp.example.test');
+        \App\Models\Setting::setValue('cipp_tenant_id', 'tenant-1');
+        \App\Models\Setting::setValue('cipp_mcp_client_id', 'mcp-client');
+        \App\Models\Setting::setValue('cipp_mcp_enabled', '1');
+        // setValue, NOT setEncrypted: a stored value this APP_KEY cannot open,
+        // exactly as a key rotation leaves one. getEncrypted() throws on read.
+        \App\Models\Setting::setValue('cipp_mcp_client_secret', 'not-a-payload-this-key-can-open');
+
+        $controller = app(\App\Http\Controllers\Api\McpStaffController::class);
+        $method = (new \ReflectionClass($controller))->getMethod('selfValidatingTool');
+        $method->setAccessible(true);
+
+        $this->assertFalse(
+            (bool) $method->invoke($controller, 'find_clients', false),
+            'a general read must not evaluate the CIPP relay config at all; the static map '
+                .'answering first is what keeps a decrypt fault off this path'
+        );
+
+        $this->assertFalse(
+            (bool) $method->invoke($controller, 'cipp_list_users', false),
+            'a relay-mapped tool whose config cannot be read is not self-validating: the '
+                .'relay will not run, so the generic guard must apply rather than throw'
+        );
+    }
+
+    /**
      * The behavioural half of the arm above, in the state the unconditional
      * exemption used to cover: CIPP REST on, MCP relay sub-switch off - the
      * documented fallback (psa-dbrw / psa-idii).

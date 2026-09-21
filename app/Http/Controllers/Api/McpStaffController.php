@@ -2604,7 +2604,47 @@ class McpStaffController extends Controller
             // deferred to a validator that does not run and reopened the silent
             // drop on a read. Publish and dispatch must answer ONE question
             // (psa-wzjzz); so must exempt and refuse.
-            || (CippConfig::isMcpRelayEnabled() && CippMcpToolRelay::handles($name));
+            //
+            // ORDERED map-first and GUARDED - see cippMcpRelayIsLive(). The
+            // relay's handles() is a pure static map; the predicate gating it
+            // is I/O that can THROW, and this method runs on the pre-dispatch
+            // path of every call.
+            || (CippMcpToolRelay::handles($name) && $this->cippMcpRelayIsLive());
+    }
+
+    /**
+     * isMcpRelayEnabled(), read the way every other consumer of these settings
+     * reads it: guarded, and only for a name that could possibly care.
+     *
+     * The predicate is two uncached Setting reads and, once cipp_mcp_enabled
+     * is set, a Crypt::decryptString of cipp_mcp_client_secret - so a rotated
+     * APP_KEY, or a settings table restored from another environment, makes it
+     * THROW rather than return false. selfValidatingTool() is evaluated before
+     * dispatch and OUTSIDE callTool()'s try, so an escape there is a -32603 on
+     * the call, not a CIPP degradation.
+     *
+     * ORDER carries the first half of that. Gated behind the static map, the
+     * read happens only for a relay-mapped name; every other tool never
+     * touches it - including whoami / list_tool_surface / search_tools, which
+     * toolAllowed() passes BEFORE the liveness check precisely so a caller can
+     * still ask why something was refused. Those three are the names for which
+     * this arm was the first config read on the path at all.
+     *
+     * The CATCH carries the second. On a relay-mapped name a config fault
+     * means the relay is not going to run, so there is no better refusal to
+     * defer TO and the generic guard must apply - the same answer the
+     * cipp_mcp_enabled='0' arm gives, for the same reason. Degrade CIPP, never
+     * the boundary: CippMcpTool::handles() already catches \Throwable here,
+     * as do TriageToolDefinitions::isCippAvailable() and
+     * Setting::settingOrConfig(); this arm was the one that did not.
+     */
+    private function cippMcpRelayIsLive(): bool
+    {
+        try {
+            return CippConfig::isMcpRelayEnabled();
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
