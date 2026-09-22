@@ -38,7 +38,22 @@ class TacticalAssetRebindService
                 || Asset::withTrashed()->where('tactical_asset_id', $agent->id)->whereKeyNot($fromId)->exists()) {
                 $this->refuse('The current binding is missing or inconsistent; reconcile it before rebinding.');
             }
-            if ($target->tactical_asset_id !== null || TacticalAsset::where('asset_id', $targetId)->exists()) {
+            $displaced = null;
+            if ($target->tactical_asset_id !== null) {
+                $displaced = TacticalAsset::whereKey($target->tactical_asset_id)->lockForUpdate()->first();
+                if (! $displaced || $displaced->asset_id !== $targetId
+                    || ! $this->hasFreshDeadEvidence($displaced)
+                    || Asset::withTrashed()->where('tactical_asset_id', $displaced->id)->whereKeyNot($targetId)->exists()) {
+                    $this->refuse('The target is already bound to a Tactical agent.');
+                }
+            }
+            // Only the proven reciprocal pair is exempt. Any OTHER reverse
+            // pointer still refuses, including when the target has no forward FK.
+            $reverse = TacticalAsset::where('asset_id', $targetId);
+            if ($displaced) {
+                $reverse->whereKeyNot($displaced->id);
+            }
+            if ($reverse->exists()) {
                 $this->refuse('The target is already bound to a Tactical agent.');
             }
             if (trim($actorLabel) === '') {
@@ -57,11 +72,21 @@ class TacticalAssetRebindService
             // correct it. Release them here, unless another RMM still maintains this
             // row (Ninja/Level write these same columns on their own cadence and
             // would be the remaining source of truth).
-            $release = ['tactical_asset_id' => null];
-            if ($from->ninja_id === null && $from->level_id === null) {
-                $release += ['rmm_online' => false, 'last_seen_at' => null, 'last_user' => null, 'last_boot_at' => null];
+            $this->release($from);
+            if ($displaced) {
+                $this->release($target);
+                $displaced->update(['asset_id' => null]);
+                TacticalActionLog::create([
+                    'actor_label' => $actorLabel,
+                    'action_key' => 'tactical.release_dead_binding',
+                    'agent_id' => $displaced->agent_id,
+                    'asset_id' => $targetId,
+                    'target_label' => 'Asset #'.$targetId,
+                    'params' => ['from_asset_id' => $targetId, 'to_asset_id' => null],
+                    'result_status' => 'success',
+                    'correlation_id' => (string) Str::uuid(),
+                ]);
             }
-            $from->update($release);
             $target->update(['tactical_asset_id' => $agent->id]);
             $agent->update(['asset_id' => $targetId]);
             $log = TacticalActionLog::create([
@@ -77,6 +102,54 @@ class TacticalAssetRebindService
 
             return ['success' => true, 'from_asset_id' => $fromId, 'to_asset_id' => $targetId, 'audit_id' => $log->id];
         });
+    }
+
+    private function release(Asset $asset): void
+    {
+        $release = ['tactical_asset_id' => null];
+        if ($asset->ninja_id === null && $asset->level_id === null) {
+            // No longer observed is Unknown, not a permanent Offline / -30.
+            $release += ['rmm_online' => null, 'last_seen_at' => null, 'last_user' => null, 'last_boot_at' => null];
+        }
+        $asset->update($release);
+    }
+
+    private function hasFreshDeadEvidence(TacticalAsset $agent): bool
+    {
+        // last_seen_at freezes when the OBSERVER stops too. Without a fresh
+        // snapshot, a 30-day sync outage would authorize displacement fleet-wide
+        // exactly when our evidence is worthless. Freshness makes this evidence
+        // about the device, not our observer; never-stamped means age-unknown.
+        // Reuse the public guard's shared 48h, not the read tool's private constant.
+        // Thirty days is conservative versus EndpointInsight::LONG_OFFLINE_AFTER_DAYS
+        // (7): the ruling's census found 24 vs 29 candidates, leaving the five in
+        // the 7–30-day band refused. Eligibility is not proof it can never return.
+        $seen = $this->persistedTimestamp($agent->getRawOriginal('last_seen_at'));
+        $synced = $this->persistedTimestamp($agent->getRawOriginal('synced_at'));
+        // Persisted timestamps have second precision; compare at that precision
+        // so exactly 30 days cannot slip through on the clock's microseconds.
+        $now = now()->startOfSecond();
+
+        return $seen !== null && $synced !== null
+            && $seen < $now->copy()->subDays(30)
+            && $synced > $now->copy()->subHours(TacticalCheckPlatformGuard::FRESH_EVIDENCE_MAX_HOURS)
+            && $synced <= $now;
+    }
+
+    private function persistedTimestamp(mixed $raw): ?\DateTimeImmutable
+    {
+        // Do not let permissive date parsing turn malformed persisted evidence
+        // (relative strings or normalized invalid dates) into authorization.
+        if (! is_string($raw)) {
+            return null;
+        }
+        try {
+            $date = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $raw, new \DateTimeZone(config('app.timezone')));
+
+            return $date && $date->format('Y-m-d H:i:s') === $raw ? $date : null;
+        } catch (\ValueError) {
+            return null;
+        }
     }
 
     private function refuse(string $message): never
