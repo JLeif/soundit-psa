@@ -73,6 +73,36 @@ class AutoElevateAssetSyncService
         return is_array($outcome) ? $outcome : null;
     }
 
+    /**
+     * Which of the asset page's explicit states applies (C-56 — an unlinked asset says WHY):
+     *   linked        the asset carries an AutoElevate computer id
+     *   not_mapped    its client has no AutoElevate company, so nothing was ever read
+     *   read_failed   the client's last sync read failed (reason = the fixed read label)
+     *   no_match      the last read succeeded and no computer matched this asset
+     *   not_synced    mapped, but no sync outcome is recorded for the client yet
+     *
+     * @return array{state: string, reason: ?string}
+     */
+    public static function assetLinkState(Asset $asset): array
+    {
+        if ($asset->autoelevate_computer_id !== null && $asset->autoelevate_computer_id !== '') {
+            return ['state' => 'linked', 'reason' => null];
+        }
+        $companyId = $asset->client?->autoelevate_company_id;
+        if ($companyId === null || $companyId === '') {
+            return ['state' => 'not_mapped', 'reason' => null];
+        }
+        $outcome = $asset->client_id ? self::lastClientOutcome($asset->client_id) : null;
+        if ($outcome === null) {
+            return ['state' => 'not_synced', 'reason' => null];
+        }
+        if (! $outcome['ok']) {
+            return ['state' => 'read_failed', 'reason' => $outcome['reason']];
+        }
+
+        return ['state' => 'no_match', 'reason' => null];
+    }
+
     public function sync(): AutoElevateAssetSyncReport
     {
         $report = new AutoElevateAssetSyncReport;
