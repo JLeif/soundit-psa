@@ -85,6 +85,11 @@ class Asset extends Model
         'screenconnect_last_seen_at',
         'screenconnect_synced_at',
         'tactical_asset_id',
+        'autoelevate_computer_id',
+        'autoelevate_elevation_mode',
+        'autoelevate_agent_version',
+        'autoelevate_last_checked_in_at',
+        'autoelevate_synced_at',
     ];
 
     protected function casts(): array
@@ -122,6 +127,8 @@ class Asset extends Model
             'screenconnect_online' => 'boolean',
             'screenconnect_last_seen_at' => 'datetime',
             'screenconnect_synced_at' => 'datetime',
+            'autoelevate_last_checked_in_at' => 'datetime',
+            'autoelevate_synced_at' => 'datetime',
         ];
     }
 
