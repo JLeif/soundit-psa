@@ -141,8 +141,8 @@ class CockpitQuery
 
     /**
      * Held intake suggestions awaiting operator review (psa-xcyo Task 3).
-     * Surfaces intake_route AwaitingApproval runs so the operator can calibrate
-     * the auto-attach threshold. Visibility only — no merge action (deferred).
+     * Surfaces intake_route AwaitingApproval runs with history-ranked survivor
+     * choices for a confirmed merge, or an independent visibility-only dismissal.
      */
     public function intakeReview(): Collection
     {
@@ -156,7 +156,8 @@ class CockpitQuery
         $emails = \App\Models\Email::query()->whereIn('ticket_id', $ids)
             ->selectRaw('ticket_id, count(*) as aggregate')->groupBy('ticket_id')->pluck('aggregate', 'ticket_id');
         foreach ($runs as $run) {
-            $options = collect([$run->ticket_id, $run->proposed_meta['suggested_ticket_id'] ?? null])
+            // Stable descending sort keeps the suggested existing ticket first on a tie.
+            $options = collect([$run->proposed_meta['suggested_ticket_id'] ?? null, $run->ticket_id])
                 ->unique()->map(fn ($id) => $tickets->get($id))
                 ->filter(fn ($ticket) => $ticket && $ticket->client_id === $run->client_id)
                 ->map(fn (Ticket $ticket) => [

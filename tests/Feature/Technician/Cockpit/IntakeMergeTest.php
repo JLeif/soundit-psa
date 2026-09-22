@@ -220,6 +220,18 @@ class IntakeMergeTest extends TestCase
         $this->assertSame(TechnicianRunState::AwaitingApproval, $this->run->fresh()->state);
     }
 
+    public function test_equal_history_defaults_to_suggested_existing_ticket(): void
+    {
+        $this->references($this->older);
+        $this->references($this->newer);
+        $options = app(CockpitQuery::class)->intakeReview()->first()->intake_merge_options;
+        $this->assertSame([3, 3], $options->pluck('references')->all());
+        $this->assertSame($this->older->id, $options->first()['id']);
+        $response = $this->get(route('cockpit.index'))->assertOk();
+        preg_match('~<form[^>]*intake-merge.*?</form>~s', $response->getContent(), $form);
+        $this->assertStringContainsString('value="'.$this->older->id.'" selected', $form[0]);
+    }
+
     public function test_default_is_history_not_age(): void
     {
         $this->references($this->newer);
