@@ -57,6 +57,151 @@ class TacticalAssetRebindTest extends TestCase
         $this->assertSame(0, TacticalActionLog::where('action_key', 'tactical.rebind_asset')->count());
     }
 
+    private function occupyTarget(): TacticalAsset
+    {
+        $this->freezeTime();
+        $dead = TacticalAsset::create([
+            'agent_id' => 'fixture-displaced', 'hostname' => 'fixture-displaced',
+            'asset_id' => $this->target->id,
+            'last_seen_at' => now()->subDays(31), 'synced_at' => now()->subHour(),
+        ]);
+        $this->target->update([
+            'tactical_asset_id' => $dead->id, 'rmm_online' => false,
+            'last_seen_at' => now()->subDays(31), 'last_user' => 'fixture-old-user',
+            'last_boot_at' => now()->subDays(40),
+        ]);
+
+        return $dead;
+    }
+
+    public function test_dead_reciprocal_target_is_released_and_audited_atomically(): void
+    {
+        $dead = $this->occupyTarget();
+        $evidence = $dead->getRawOriginal();
+        $result = $this->runRebind();
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $this->assertNull($dead->fresh()->asset_id);
+        $this->assertSame($evidence['last_seen_at'], $dead->fresh()->getRawOriginal('last_seen_at'));
+        $this->assertSame($evidence['synced_at'], $dead->fresh()->getRawOriginal('synced_at'));
+        $this->assertSame($this->agent->id, $this->target->fresh()->tactical_asset_id);
+        $this->assertSame($this->target->id, $this->agent->fresh()->asset_id);
+        foreach ([$this->from->fresh(), $this->target->fresh()] as $asset) {
+            foreach (['rmm_online', 'last_seen_at', 'last_user', 'last_boot_at'] as $field) {
+                $this->assertNull($asset->$field, $field);
+            }
+        }
+        $this->assertNull($this->from->fresh()->tactical_asset_id);
+        $this->assertSame(2, TacticalActionLog::count());
+        $log = TacticalActionLog::where('action_key', 'tactical.release_dead_binding')->sole();
+        $this->assertSame($dead->agent_id, $log->agent_id);
+        $this->assertSame($this->target->id, $log->asset_id);
+        $this->assertSame('mcp:fixture-operator', $log->actor_label);
+        $this->assertSame(['from_asset_id' => $this->target->id, 'to_asset_id' => null], $log->params);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('refusedEvidence')]
+    public function test_occupied_target_requires_valid_dead_and_fresh_evidence(string $field, ?string $value): void
+    {
+        $dead = $this->occupyTarget();
+        $raw = $value === null || str_starts_with($value, 'invalid')
+            ? $value : now()->modify($value)->format('Y-m-d H:i:s');
+        // Raw update exercises malformed persisted data without a model cast
+        // rejecting the fixture before it reaches the production guard.
+        \Illuminate\Support\Facades\DB::table('tactical_assets')->where('id', $dead->id)->update([$field => $raw]);
+        $this->assertStringContainsString('already bound', $this->runRebind()['error'] ?? '');
+        $this->assertUnchanged();
+        $this->assertSame($dead->id, $this->target->fresh()->tactical_asset_id);
+        $this->assertSame($this->target->id, $dead->fresh()->asset_id);
+        $this->assertSame(0, TacticalActionLog::count());
+    }
+
+    public static function refusedEvidence(): array
+    {
+        return [
+            'fresh device' => ['last_seen_at', '-1 day'],
+            'exactly thirty days' => ['last_seen_at', '-30 days'],
+            'seven to thirty band' => ['last_seen_at', '-10 days'],
+            'future device' => ['last_seen_at', '+1 second'],
+            'unknown device' => ['last_seen_at', null],
+            'malformed device' => ['last_seen_at', 'invalid-date'],
+            'stale observer' => ['synced_at', '-49 hours'],
+            'exactly forty eight hours' => ['synced_at', '-48 hours'],
+            'unknown observer' => ['synced_at', null],
+            'malformed observer' => ['synced_at', 'invalid-date'],
+            'future observer' => ['synced_at', '+1 second'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('inconsistentTargets')]
+    public function test_dead_target_still_requires_exclusive_reciprocity(string $shape): void
+    {
+        $dead = $this->occupyTarget();
+        if ($shape === 'forward only') {
+            $dead->update(['asset_id' => null]);
+        } elseif ($shape === 'wrong reverse') {
+            $dead->update(['asset_id' => Asset::factory()->create()->id]);
+        } elseif ($shape === 'extra reverse') {
+            TacticalAsset::create(['agent_id' => 'fixture-extra', 'hostname' => 'fixture-extra', 'asset_id' => $this->target->id]);
+        } else {
+            $duplicate = Asset::factory()->create(['tactical_asset_id' => $dead->id]);
+            $duplicate->delete();
+        }
+        $before = $dead->fresh()->asset_id;
+        $this->assertStringContainsString('already bound', $this->runRebind()['error'] ?? '');
+        $this->assertUnchanged();
+        $this->assertSame($dead->id, $this->target->fresh()->tactical_asset_id);
+        $this->assertSame($before, $dead->fresh()->asset_id);
+        $this->assertSame(0, TacticalActionLog::count());
+    }
+
+    public static function inconsistentTargets(): array
+    {
+        return array_map(fn ($shape) => [$shape], ['forward only', 'wrong reverse', 'extra reverse', 'retired duplicate']);
+    }
+
+    public function test_displacement_rolls_back_on_second_audit_failure(): void
+    {
+        $dead = $this->occupyTarget();
+        $before = $this->target->fresh()->getRawOriginal();
+        $event = 'eloquent.creating: '.TacticalActionLog::class;
+        $writes = 0;
+        \Illuminate\Support\Facades\Event::listen($event, function () use (&$writes): void {
+            if (++$writes === 2) {
+                throw new \RuntimeException('fixture second audit failure');
+            }
+        });
+        try {
+            $this->runRebind();
+            $this->fail('Expected second audit failure');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('fixture second audit failure', $e->getMessage());
+        } finally {
+            \Illuminate\Support\Facades\Event::forget($event);
+        }
+        $this->assertSame(2, $writes);
+        $this->assertUnchanged();
+        $this->assertSame($before, $this->target->fresh()->getRawOriginal());
+        $this->assertSame($this->target->id, $dead->fresh()->asset_id);
+        $this->assertSame(0, TacticalActionLog::count());
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('otherRmm')]
+    public function test_displacement_preserves_observations_maintained_by_other_rmm(string $field): void
+    {
+        $this->occupyTarget();
+        $this->target->update([$field => '123']);
+        $before = $this->target->fresh()->getRawOriginal();
+        $this->assertTrue($this->runRebind()['success'] ?? false);
+        foreach (['rmm_online', 'last_seen_at', 'last_user', 'last_boot_at'] as $column) {
+            $this->assertSame($before[$column], $this->target->fresh()->getRawOriginal($column));
+        }
+    }
+
+    public static function otherRmm(): array
+    {
+        return [['ninja_id'], ['level_id']];
+    }
+
     public function test_staff_mcp_publishes_and_executes_only_with_explicit_grant(): void
     {
         $token = \App\Support\McpConfig::rotateStaffToken(allowedTools: ['rebind_tactical_asset'], label: 'fixture-operator');
@@ -132,7 +277,7 @@ class TacticalAssetRebindTest extends TestCase
         // The agent's own observations must not stay behind on the source: after the
         // repoint no writer touches them there, so they would assert another
         // machine's connectivity and logged-in user indefinitely.
-        $this->assertFalse((bool) $stranded->rmm_online);
+        $this->assertNull($stranded->rmm_online);
         $this->assertNull($stranded->last_seen_at);
         $this->assertNull($stranded->last_user);
         $this->assertNull($stranded->last_boot_at);
@@ -190,6 +335,7 @@ class TacticalAssetRebindTest extends TestCase
         $syncResult = $sync->syncDevices();
         $this->assertSame(0, $syncResult->errors);
         $this->target->refresh();
+        $this->assertSame($this->agent->id, $this->target->tactical_asset_id);
         $this->assertTrue((bool) $this->target->rmm_online);
         $this->assertSame('2026-09-22 03:00:00', $this->target->last_seen_at->format('Y-m-d H:i:s'));
         $this->assertSame('fixture-user', $this->target->last_user);
@@ -198,7 +344,7 @@ class TacticalAssetRebindTest extends TestCase
         $this->assertNull($old->tactical_asset_id);
         // The real sync refreshed the TARGET above; it must not restore the source's
         // released observations, which is the only writer that could have.
-        $this->assertFalse((bool) $old->rmm_online);
+        $this->assertNull($old->rmm_online);
         $this->assertNull($old->last_seen_at);
         $this->assertNull($old->last_user);
         $this->assertSame(2, Asset::withTrashed()->count());
@@ -244,7 +390,7 @@ class TacticalAssetRebindTest extends TestCase
         $this->assertSame(0, $syncResult->errors);
         $source = $this->from->fresh();
         $this->assertNull($source->tactical_asset_id);
-        $this->assertFalse((bool) $source->rmm_online);
+        $this->assertNull($source->rmm_online);
         $this->assertNull($source->last_seen_at);
         $this->assertNull($source->last_user);
         $target = $this->target->fresh();
