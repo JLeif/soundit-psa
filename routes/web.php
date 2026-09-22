@@ -240,6 +240,7 @@ Route::middleware('auth')->group(function () {
     // Call log
     Route::get('/calls', [CallController::class, 'index'])->name('calls.index');
     Route::get('/calls/latest', [CallController::class, 'latest'])->name('calls.latest');
+    Route::post('/calls/bulk-action', [CallController::class, 'bulkAction'])->name('calls.bulk-action');
     Route::get('/calls/{call}', [CallController::class, 'show'])->name('calls.show');
     Route::get('/calls/{call}/create-ticket', [CallController::class, 'createTicket'])->name('calls.create-ticket');
     Route::post('/calls/{call}/create-ticket', [CallController::class, 'storeTicket'])->name('calls.store-ticket');

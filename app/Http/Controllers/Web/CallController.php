@@ -365,6 +365,87 @@ class CallController extends Controller
             ->with('success', 'Call unlinked from ticket.');
     }
 
+    public function bulkAction(Request $request)
+    {
+        $validated = $request->validate([
+            'action' => ['required', 'string', 'in:set_billable,mark_followed_up'],
+            'call_ids' => ['required', 'array', 'min:1', 'max:100'],
+            // Missing/deleted calls are per-call skips, not a batch validation failure.
+            'call_ids.*' => ['required', 'integer', 'min:1'],
+            'is_billable' => ['required_if:action,set_billable', 'boolean'],
+        ]);
+
+        $action = $validated['action'];
+        $desired = $request->boolean('is_billable');
+        $submitted = array_map('intval', $validated['call_ids']);
+        $ids = array_values(array_unique($submitted));
+        $calls = PhoneCall::whereIn('id', $ids)->get()->keyBy('id');
+        $results = [];
+        $seen = [];
+        foreach ($submitted as $id) {
+            $status = 'skipped';
+            if (isset($seen[$id])) {
+                $reason = 'Duplicate submitted ID.';
+            } elseif (! ($call = $calls->get($id))) {
+                $reason = 'Call not found.';
+            } else {
+                $seen[$id] = true;
+                if ($action === 'set_billable' && ! $call->ticket_id) {
+                    $reason = 'Call must be linked to a ticket to change billability.';
+                } elseif (($action === 'set_billable' && $call->is_billable === $desired)
+                    || ($action === 'mark_followed_up' && $call->followed_up_at !== null)) {
+                    $reason = 'Already in the desired state.';
+                } else {
+                    try {
+                        if ($action === 'set_billable') {
+                            $this->phoneCallService->setBillable($call, $desired);
+                        } else {
+                            $this->phoneCallService->markFollowedUp($call, $request->user()->id);
+                        }
+                        $status = 'applied';
+                        $reason = $action === 'mark_followed_up' ? 'Marked followed up.'
+                            : ($desired ? 'Marked billable.' : 'Marked non-billable.');
+                    } catch (\Throwable $e) {
+                        // A service exception may follow a committed save AND debit.
+                        // Re-read persistence; never infer rollback from an exception.
+                        $status = 'reconciliation';
+                        $reason = 'The outcome could not be verified; verify this call before retrying.';
+                        try {
+                            $persisted = $call->fresh();
+                            if ($action === 'set_billable' && $persisted?->is_billable === $desired) {
+                                $reason = 'The billable state persisted and prepay needs verification.';
+                            } elseif ($action === 'mark_followed_up' && $persisted?->followed_up_at !== null) {
+                                $reason = 'Followed-up state persisted; verify this call before retrying.';
+                            } else {
+                                $status = 'failed';
+                                $reason = 'The requested state was not persisted; verify this call before retrying.';
+                            }
+                        } catch (\Throwable) {
+                            // Keep the uncertain outcome out of the ordinary failure bucket.
+                        }
+                        Log::warning('[Call] Bulk action requires verification', [
+                            'call_id' => $id, 'action' => $action, 'outcome' => $status,
+                        ]);
+                    }
+                }
+            }
+            $seen[$id] = true;
+            $results[] = ['call_id' => $id, 'status' => $status, 'reason' => $reason];
+        }
+
+        $summary = array_fill_keys(['applied', 'skipped', 'failed', 'reconciliation'], 0);
+        foreach ($results as $result) {
+            $summary[$result['status']]++;
+        }
+        $report = ['summary' => $summary, 'results' => $results];
+
+        if ($request->expectsJson()) {
+            return response()->json($report);
+        }
+
+        return redirect()->route('calls.index')->with('call_bulk_report', $report);
+    }
+
     public function toggleBillable(PhoneCall $call): RedirectResponse
     {
         if (! $call->ticket_id) {
