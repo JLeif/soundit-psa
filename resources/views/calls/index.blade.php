@@ -3,6 +3,17 @@
 @section('title', 'Call Log')
 
 @section('content')
+@if($report = session('call_bulk_report'))
+<div class="alert {{ $report['summary']['failed'] || $report['summary']['reconciliation'] ? 'alert-warning' : 'alert-success' }}" role="status">
+    <strong>{{ $report['summary']['applied'] }} applied / {{ $report['summary']['skipped'] }} skipped /
+        {{ $report['summary']['failed'] }} failed / {{ $report['summary']['reconciliation'] }} need verification.</strong>
+    <ul class="mb-0">
+        @foreach($report['results'] as $result)
+        <li>Call #{{ $result['call_id'] }} — {{ $result['status'] }}: {{ $result['reason'] }}</li>
+        @endforeach
+    </ul>
+</div>
+@endif
 <div class="row mb-4">
     <div class="col">
         <h4 class="section-title">Call Log</h4>
@@ -63,12 +74,29 @@
     </div>
 </div>
 
+<form method="POST" action="{{ route('calls.bulk-action') }}" id="callBulkForm">
+    @csrf
+    <input type="hidden" name="action" id="callBulkAction" value="set_billable">
+    <input type="hidden" name="is_billable" id="callBulkBillable" value="1">
+</form>
+<div id="bulkBar" class="card mb-3" hidden>
+    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center">
+        <strong><span id="bulkCount" aria-live="polite">0</span> selected</strong>
+        <button type="button" class="btn btn-primary btn-sm" data-bulk-action="set_billable" data-billable="1">Mark billable</button>
+        <button type="button" class="btn btn-outline-primary btn-sm" data-bulk-action="set_billable" data-billable="0">Mark non-billable</button>
+        <button type="button" class="btn btn-outline-primary btn-sm" data-bulk-action="mark_followed_up">Mark followed up</button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="deselectAll">Deselect all</button>
+    </div>
+</div>
+<noscript><p class="text-muted">Enable JavaScript to use bulk call actions. Individual call actions remain available through Open.</p></noscript>
+
 {{-- Call list --}}
 <div class="card card-static shadow-sm">
     <div class="table-responsive">
         <table class="table table-hover mb-0">
             <thead class="thead-brand">
                 <tr>
+                    <th><input type="checkbox" class="form-check-input" id="selectAll" aria-label="Select all displayed calls" {{ $calls->isEmpty() ? 'disabled' : '' }}></th>
                     <th>Time</th>
                     <th style="width: 30px"></th>
                     <th>From</th>
@@ -84,6 +112,7 @@
             <tbody>
                 @forelse($calls as $call)
                 <tr class="{{ $call->needsFollowUp() ? 'table-warning' : '' }}">
+                    <td><input type="checkbox" class="form-check-input call-checkbox" form="callBulkForm" name="call_ids[]" value="{{ $call->id }}" aria-label="Select call #{{ $call->id }}"></td>
                     <td class="text-nowrap">
                         <small>{{ $call->started_at?->toAppTz()->format('d M H:i') ?? '—' }}</small>
                     </td>
@@ -181,7 +210,7 @@
                 </tr>
                 @empty
                 <tr>
-                    <td colspan="9" class="text-center text-muted py-4">
+                    <td colspan="10" class="text-center text-muted py-4">
                         <i class="bi bi-telephone-x fs-3 d-block mb-2"></i>
                         @if(array_filter($filters))
                             No calls found for the selected filters.
@@ -196,3 +225,40 @@
     </div>
 </div>
 @endsection
+
+@push('scripts')
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('callBulkForm');
+    const boxes = Array.from(document.querySelectorAll('.call-checkbox'));
+    const all = document.getElementById('selectAll');
+    function update() {
+        const count = boxes.filter(box => box.checked).length;
+        document.getElementById('bulkCount').textContent = count;
+        document.getElementById('bulkBar').hidden = count === 0;
+        all.checked = boxes.length > 0 && count === boxes.length;
+        all.indeterminate = count > 0 && count < boxes.length;
+    }
+    all.addEventListener('change', function () {
+        boxes.forEach(box => { box.checked = all.checked; });
+        update();
+    });
+    boxes.forEach(box => box.addEventListener('change', update));
+    document.getElementById('deselectAll').addEventListener('click', function () {
+        boxes.forEach(box => { box.checked = false; });
+        update();
+    });
+    document.querySelectorAll('[data-bulk-action]').forEach(button => {
+        button.addEventListener('click', function () {
+            const count = boxes.filter(box => box.checked).length;
+            if (!count || !window.confirm(button.textContent + ' for ' + count + ' selected call(s)? Billability changes may adjust prepay.')) return;
+            document.getElementById('callBulkAction').value = button.dataset.bulkAction;
+            document.getElementById('callBulkBillable').value = button.dataset.billable || '0';
+            document.querySelectorAll('[data-bulk-action]').forEach(control => { control.disabled = true; });
+            form.requestSubmit();
+        });
+    });
+    update();
+});
+</script>
+@endpush
