@@ -19,6 +19,7 @@ use App\Services\Chet\OperatorBridgeTextSanitizer;
 use App\Services\Chet\OperatorBridgeToolExecutor;
 use App\Services\Chet\OperatorBridgeTools;
 use App\Services\Cipp\CippMcpDynamicToolExecutor;
+use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use App\Services\Mcp\StaffCippAdminToolExecutor;
 use App\Services\Mcp\StaffCippWriteToolExecutor;
@@ -33,6 +34,7 @@ use App\Services\Signals\SignalNudgeNotice;
 use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Technician\Scheduled\ExecuteAt;
 use App\Services\Technician\Scheduled\ScheduledClock;
+use App\Support\CippConfig;
 use App\Support\McpInputSchema;
 use App\Support\McpStaffToken;
 use App\Support\McpToolInstructions;
@@ -1154,6 +1156,64 @@ class McpStaffController extends Controller
         if (ChetDataSurfaceTools::requiresClient((string) $name) && $clientId === null) {
             $message = "client_id is required for {$name}.";
             $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
+
+            return response()->json([
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'result' => [
+                    'content' => [['type' => 'text', 'text' => $message]],
+                    'isError' => true,
+                ],
+            ]);
+        }
+
+        // UNKNOWN-ARGUMENT REFUSAL (card Z4PdzEZ1, PSA ticket T-22846).
+        //
+        // Until now an argument the tool does not declare was simply carried
+        // into the executor, which read the keys it knew and ignored the rest.
+        // On a SEARCH tool that is the worst possible shape: the unrecognised
+        // filter is dropped, the search runs UNFILTERED, and what comes back is
+        // well-formed data rather than an error. A caller mistake is then
+        // indistinguishable from a real result - it reads as "the filter is
+        // broken" or, far worse, as "no matching records found", which is an
+        // absence claim nothing ever tested.
+        //
+        // This is the same rule execute_at already follows a few hundred lines
+        // above ("on every other tool it is a named refusal, never a silently-
+        // ignored key that runs now") and the same rule the CIPP relay applies
+        // with "Unsupported CIPP MCP argument(s): ...". It generalises that
+        // treatment to every tool on this boundary instead of the handful whose
+        // executors happened to hand-roll an allow-list.
+        //
+        // It runs HERE, after the boundary has consumed its own keys and
+        // before dispatch, so no executor ever sees a key its schema did not
+        // advertise. client_id is consumed on every tool and stays acceptable;
+        // execute_at carries its own named refusal further up. `staged` is NOT
+        // unconditionally consumed - callTool() unsets it on the alias and
+        // stageable paths and nowhere else - so on a non-stageable tool it is
+        // a genuinely undeclared key and is refused like any other. Accepting
+        // it there would be this defect on its highest-stakes argument: a
+        // caller told it held a proposal for approval, by a call that ran.
+        //
+        // The comparison is against the PUBLISHED schema - the exact text a
+        // caller was handed by tools/list - so the contract being enforced is
+        // the one the caller could actually read. An EMPTY properties map is a
+        // contract ("this tool declares no arguments") and is enforced as one;
+        // only a tool whose schema cannot be resolved at all is left alone.
+        // This refuses a key known to be undeclared, never a key we merely
+        // failed to look up. Fail open on ignorance, closed on knowledge.
+        if ($this->selfValidatingTool((string) $name, $stageable)) {
+            // Left to its own validator on purpose - see selfValidatingTool().
+        } elseif (($unknown = $this->undeclaredArguments((string) $name, $arguments)) !== []) {
+            $declared = $this->declaredArgumentNames((string) $name);
+            $message = 'Unsupported MCP argument(s): '.implode(', ', $unknown).'. '
+                .$name.' accepts '.($declared === []
+                    ? 'no arguments.'
+                    : 'only: '.implode(', ', $declared).'.')
+                .' The argument was REFUSED, not ignored - this call ran nothing. '
+                .'Re-read the tool schema and retry with a declared argument; do not '
+                .'treat this as a result.';
+            $this->audit('tools/call', $requestedName, $auditArguments, 'error', $message, $start, $request);
 
             return response()->json([
                 'jsonrpc' => '2.0',
@@ -2460,6 +2520,320 @@ class McpStaffController extends Controller
         }
 
         return mb_substr($safe, 0, 1000);
+    }
+
+    /**
+     * Does this tool already refuse an undeclared argument in its own executor?
+     *
+     * The write, action and admin families hand-roll per-tool allow-lists and
+     * refuse with messages that teach the SEMANTICS of the mistake - "upstream
+     * CIPP identifiers are not accepted", "for a PSA-mapped person use
+     * cipp_assign_user_license". Those are strictly more useful than a generic
+     * "unsupported argument" and, on a mutating tool, they are also a safety
+     * surface with their own controls. Pre-empting them would REPLACE a good
+     * message with a worse one and move a refusal those tests pin.
+     *
+     * So the generic guard deliberately covers the READ surface only, which is
+     * exactly where the defect this fixes was found: a search tool that drops
+     * an unrecognised filter and answers unfiltered. Reads also carry no
+     * side-effect risk, so refusing one late is free.
+     *
+     * A tool that gains its own allow-list later does not need this list
+     * updated: the worst case is a generic refusal instead of a specific one,
+     * never a silently-ignored argument.
+     *
+     * Membership is a claim about the EXECUTOR, not about a family name, and
+     * the operator bridge never met it: none of OperatorBridgeToolExecutor's
+     * five bodies carries an allow-list, so find_staff read `query`/`limit`
+     * and dropped everything else - including an `is_active` filter its own
+     * description invites by advertising that field in the result. Exempting
+     * that family preserved THIS defect, on a read, inside the change that
+     * exists to close it. The question to ask of any arm added here is the one
+     * that arm failed: name the refusal it defers to, and name the state in
+     * which that refusal actually runs.
+     *
+     * ACCEPT_AND_IGNORE_TOOLS are excluded for a DIFFERENT and stronger
+     * reason than the write families: for them, dropping an undeclared key IS
+     * the security contract. send_reply deliberately does not declare `to`,
+     * and ChetSendReplyTest pins BOTH halves - the schema must not advertise
+     * it, AND a caller who supplies it must be ignored rather than obeyed, so
+     * a prompt-injected recipient cannot redirect a client-facing reply.
+     * Refusing there would turn a contained injection attempt into a failed
+     * call: louder, but it changes a behaviour a control asserts, and the
+     * containment is the point. These tools drop the key BY DESIGN; the read
+     * surface dropped it BY ACCIDENT, and only the accident is in scope.
+     */
+    private const ACCEPT_AND_IGNORE_TOOLS = [
+        'send_reply',
+        'add_ticket_note',
+        'propose_close',
+        'request_tool',
+    ];
+
+    private function selfValidatingTool(string $name, bool $stageable): bool
+    {
+        return $stageable
+            || McpToolModes::isStageable($name)
+            || $this->isPsaActionTool($name)
+            || $this->isCippWriteTool($name)
+            || $this->isCippAdminTool($name)
+            || $this->isTacticalActionTool($name)
+            || $this->isTacticalAdminTool($name)
+            || $this->isTaxonomyTool($name)
+            || in_array($name, self::ACCEPT_AND_IGNORE_TOOLS, true)
+            // App\Models\CippMcpTool::handles() - the DB-backed dynamic tools,
+            // present only while cipp_mcp_enabled is set.
+            || CippMcpTool::handles($name)
+            // ...and the RELAY's own static map, which is a DIFFERENT class and
+            // a different set. CippMcpToolRelay::unknownArguments() already
+            // answers "Unsupported CIPP MCP argument(s): ..." naming the keys,
+            // so the generic guard must defer or it DISPLACES the better
+            // message - the regression CippMcpRelayTest pins. The two CIPP
+            // predicates read alike and are not interchangeable: the model asks
+            // the registry, the relay asks its own TOOL_MAP.
+            //
+            // Gated on the predicate that decides whether the relay RUNS, not
+            // on its map alone. handles() is static and carries no config, but
+            // the refusal it defers to is reachable ONLY through
+            // AssistantToolExecutor::cippMcpRelay(), which returns null unless
+            // isMcpRelayEnabled(). With cipp_enabled on and cipp_mcp_enabled
+            // off - the documented fallback (psa-dbrw, psa-idii) - these static
+            // CIPP reads are still published under the WIDER REST predicate
+            // (isEnabled() && isConfigured()) and dispatch straight to
+            // CippClient, which inspects no keys at all. Exempting them there
+            // deferred to a validator that does not run and reopened the silent
+            // drop on a read. Publish and dispatch must answer ONE question
+            // (psa-wzjzz); so must exempt and refuse.
+            //
+            // ORDERED map-first and GUARDED - see cippMcpRelayIsLive(). The
+            // relay's handles() is a pure static map; the predicate gating it
+            // is I/O that can THROW, and this method runs on the pre-dispatch
+            // path of every call.
+            || (CippMcpToolRelay::handles($name) && $this->cippMcpRelayIsLive());
+    }
+
+    /**
+     * isMcpRelayEnabled(), read the way every other consumer of these settings
+     * reads it: guarded, and only for a name that could possibly care.
+     *
+     * The predicate is two uncached Setting reads and, once cipp_mcp_enabled
+     * is set, a Crypt::decryptString of cipp_mcp_client_secret - so a rotated
+     * APP_KEY, or a settings table restored from another environment, makes it
+     * THROW rather than return false. selfValidatingTool() is evaluated before
+     * dispatch and OUTSIDE callTool()'s try, so an escape there is a -32603 on
+     * the call, not a CIPP degradation.
+     *
+     * ORDER carries the first half of that. Gated behind the static map, the
+     * read happens only for a relay-mapped name; every other tool never
+     * touches it - including whoami / list_tool_surface / search_tools, which
+     * toolAllowed() passes BEFORE the liveness check precisely so a caller can
+     * still ask why something was refused. Those three are the names for which
+     * this arm was the first config read on the path at all.
+     *
+     * The CATCH carries the second. On a relay-mapped name a config fault
+     * means the relay is not going to run, so there is no better refusal to
+     * defer TO and the generic guard must apply - the same answer the
+     * cipp_mcp_enabled='0' arm gives, for the same reason. Degrade CIPP, never
+     * the boundary: CippMcpTool::handles() already catches \Throwable here,
+     * as do TriageToolDefinitions::isCippAvailable() and
+     * Setting::settingOrConfig(); this arm was the one that did not.
+     */
+    private function cippMcpRelayIsLive(): bool
+    {
+        try {
+            return CippConfig::isMcpRelayEnabled();
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Argument names the tool's own schema declares, as published to callers.
+     *
+     * Resolved from the SAME assemblies listTools() publishes, so the contract
+     * enforced on dispatch is the contract the caller was handed. Returns null
+     * - distinct from an empty array - only when no assembly here knows the
+     * tool, or it carries no properties block at all; the caller treats null
+     * as "do not judge this call" and an empty array as "this tool declares no
+     * arguments". An empty MAP - `(object) []`, which is how the definitions
+     * render {} - is the second of those, not the first.
+     *
+     * The boundary's own keys are added deliberately, but only where they are
+     * genuinely the boundary's. client_id is consumed on every tool, and
+     * execute_at is refused by name further up, so both stay acceptable here.
+     * `staged` is accepted ONLY on a stageable tool: callTool() unsets it on
+     * the alias and stageable paths and NOWHERE else, so on a non-stageable
+     * tool it reaches this guard as a live, undeclared key. Whitelisting it
+     * there would silently drop the one argument that means "hold this for a
+     * human", and the caller would record an approval request for work that
+     * already ran - this defect, on the key that can least afford it.
+     *
+     * @return list<string>|null
+     */
+    private function declaredArgumentNamesOrNull(string $name): ?array
+    {
+        if (($declared = $this->publishedPropertyNamesOrNull($name)) === null) {
+            return null;
+        }
+
+        $boundaryKeys = McpToolModes::isStageable($name)
+            ? ['client_id', 'staged', 'execute_at']
+            : ['client_id', 'execute_at'];
+        foreach ($boundaryKeys as $boundaryKey) {
+            if (! in_array($boundaryKey, $declared, true)) {
+                $declared[] = $boundaryKey;
+            }
+        }
+        sort($declared);
+
+        return $declared;
+    }
+
+    /**
+     * The property names the tool's OWN schema carries - exactly the keys
+     * tools/list published for it, before any boundary key is added.
+     *
+     * Split out from the acceptance set above because the MESSAGE has to tell
+     * the two apart. A boundary key is the BOUNDARY'S only where the tool did
+     * not declare it itself: the general PSA reads declare client_id in their
+     * own properties, so subtracting it by name quoted a contract the caller
+     * was never handed.
+     *
+     * Returns null on the same terms as the caller above - an unresolved name
+     * or no properties block at all - and an empty array for an empty map.
+     *
+     * @return list<string>|null
+     */
+    private function publishedPropertyNamesOrNull(string $name): ?array
+    {
+        static $cache = [];
+
+        if (array_key_exists($name, $cache)) {
+            return $cache[$name];
+        }
+
+        $schema = null;
+        foreach (array_merge(
+            McpToolSurface::liveGeneralToolDefinitions(),
+            McpToolSurface::liveClientScopedToolDefinitions(),
+            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition(), $this->searchToolsToolDefinition()],
+        ) as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                $schema = $tool['input_schema'] ?? null;
+                break;
+            }
+        }
+
+        if (! is_array($schema)) {
+            return $cache[$name] = null;
+        }
+
+        // The definitions render a properties map as a stdClass so it encodes
+        // as {} rather than []; listTools() normalises with `(array)` before
+        // injecting client_id, and this guard reads the SAME definitions, so
+        // it must normalise identically. Read raw, the cast failed is_array
+        // and the tool dropped out of the guard over an encoding artifact
+        // rather than a decision - fail-open by ACCIDENT, on exactly the read
+        // surface this exists to protect.
+        $properties = $schema['properties'] ?? null;
+        if ($properties instanceof \stdClass) {
+            $properties = (array) $properties;
+        }
+
+        if (! is_array($properties)) {
+            return $cache[$name] = null;
+        }
+
+        return $cache[$name] = array_values(array_filter(array_keys($properties), 'is_string'));
+    }
+
+    /**
+     * The names to QUOTE back to the caller: what tools/list actually
+     * published for this tool, and nothing else.
+     *
+     * This is the operator-facing half and it must not over-promise. The
+     * acceptance set above carries the boundary's own keys so a caller is
+     * never REFUSED for one; naming them here would do the opposite of this
+     * change's purpose, because it reads as an invitation. A caller that
+     * retries with client_id on a general tool lands straight back in the
+     * silent-drop shape - the boundary unsets it, the executor never declared
+     * it, the tool answers, and nothing says the key did nothing. So the
+     * message names the published properties, plus client_id only where it is
+     * published. Empty - a real "accepts no arguments" - when none are.
+     *
+     * @return list<string>
+     */
+    private function declaredArgumentNames(string $name): array
+    {
+        $declared = $this->declaredArgumentNamesOrNull($name) ?? [];
+        $ownProperties = $this->publishedPropertyNamesOrNull($name) ?? [];
+
+        // Subtract client_id only where it is genuinely the BOUNDARY'S key.
+        // tools/list injects it into client-scoped schemas, but the general
+        // PSA reads declare it in their own properties - REQUIRED on
+        // get_contract and list_client_contracts, an optional filter on the
+        // fleet-capable reads (list_mislinked_assets, list_invoices) where an
+        // ABSENT client_id means "every client". Subtracting it by name there
+        // hid a published argument and pointed the retry straight off a
+        // cross-client scope fence: the message must never under-promise the
+        // published contract any more than it may over-promise it.
+        $unpublished = ['staged', 'execute_at'];
+        if (! $this->publishesClientId($name) && ! in_array('client_id', $ownProperties, true)) {
+            $unpublished[] = 'client_id';
+        }
+
+        return array_values(array_diff($declared, $unpublished));
+    }
+
+    /**
+     * Does tools/list inject client_id into this tool's published schema?
+     *
+     * Mirrors listTools(): the general assembly wins on a duplicate name, and
+     * a PSA ticket-scoped tool is scoped by its ticket rather than by an
+     * injected client_id. listTools() also treats the action, write and
+     * add_ticket_note families as client-scoped; every one of those is
+     * self-validating or accept-and-ignore, so none can reach this message and
+     * none is re-derived here. Governs the MESSAGE only, never acceptance.
+     */
+    private function publishesClientId(string $name): bool
+    {
+        foreach (array_merge(
+            [$this->whoamiToolDefinition(), $this->toolSurfaceToolDefinition(), $this->searchToolsToolDefinition()],
+            McpToolSurface::liveGeneralToolDefinitions(),
+        ) as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                return false;
+            }
+        }
+
+        foreach (McpToolSurface::liveClientScopedToolDefinitions() as $tool) {
+            if (($tool['name'] ?? null) === $name) {
+                return ! $this->isPsaTicketScopedTool($name);
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Supplied argument names the tool does not declare.
+     *
+     * Empty when the schema could not be resolved: an unrecognised argument is
+     * only refusable against a contract we can actually read.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return list<string>
+     */
+    private function undeclaredArguments(string $name, array $arguments): array
+    {
+        if ($arguments === [] || ($declared = $this->declaredArgumentNamesOrNull($name)) === null) {
+            return [];
+        }
+
+        $unknown = array_values(array_diff(array_keys($arguments), $declared));
+        sort($unknown);
+
+        return array_slice($unknown, 0, 10);
     }
 
     private function positiveIntegerArgument(mixed $value): ?int
