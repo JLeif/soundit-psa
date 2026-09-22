@@ -300,11 +300,7 @@ class TechnicianCockpitController extends Controller
         );
     }
 
-    /**
-     * Dismiss a held intake suggestion (operator has reviewed the calibration signal).
-     * Transitions intake_route AwaitingApproval → Done via CAS guard (no-op if already
-     * resolved or if the run is not an intake_route). Visibility only — no merge action.
-     */
+    /** Confirm an irreversible intake merge with an explicitly selected survivor. */
     public function intakeMerge(Request $request, TechnicianRun $run, TechnicianApprovalService $service)
     {
         $input = $request->validate([
@@ -326,6 +322,11 @@ class TechnicianCockpitController extends Controller
         );
     }
 
+    /**
+     * Dismiss a held intake suggestion (operator has reviewed the calibration signal).
+     * Transitions intake_route AwaitingApproval → Done via CAS guard (no-op if already
+     * resolved or if the run is not an intake_route). Visibility only — no merge action.
+     */
     public function intakeDismiss(Request $request, TechnicianRun $run)
     {
         $ok = $run->dismissIntake();
