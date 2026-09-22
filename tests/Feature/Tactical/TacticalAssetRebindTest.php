@@ -34,7 +34,10 @@ class TacticalAssetRebindTest extends TestCase
         parent::setUp();
         Http::preventStrayRequests();
         $this->client = Client::factory()->create(['tactical_site_id' => 'Example|Main', 'is_active' => true]);
-        $this->from = Asset::factory()->create(['client_id' => $this->client->id]);
+        $this->from = Asset::factory()->create([
+            'client_id' => $this->client->id, 'rmm_online' => true, 'last_seen_at' => now()->subMinutes(5),
+            'last_user' => 'fixture-source-user', 'last_boot_at' => now()->subDay(),
+        ]);
         $this->target = Asset::factory()->create(['client_id' => $this->client->id, 'rmm_online' => false, 'last_seen_at' => null, 'last_user' => null]);
         $this->agent = TacticalAsset::create(['agent_id' => 'fixture-agent', 'hostname' => 'fixture-host', 'asset_id' => $this->from->id]);
         $this->from->update(['tactical_asset_id' => $this->agent->id]);
@@ -124,7 +127,15 @@ class TacticalAssetRebindTest extends TestCase
         $this->freezeTime();
         $result = $this->runRebind();
         $this->assertTrue($result['success'] ?? false, json_encode($result));
-        $this->assertNull($this->from->fresh()->tactical_asset_id);
+        $stranded = $this->from->fresh();
+        $this->assertNull($stranded->tactical_asset_id);
+        // The agent's own observations must not stay behind on the source: after the
+        // repoint no writer touches them there, so they would assert another
+        // machine's connectivity and logged-in user indefinitely.
+        $this->assertFalse((bool) $stranded->rmm_online);
+        $this->assertNull($stranded->last_seen_at);
+        $this->assertNull($stranded->last_user);
+        $this->assertNull($stranded->last_boot_at);
         $this->assertSame($this->agent->id, $this->target->fresh()->tactical_asset_id);
         $this->assertSame($this->target->id, $this->agent->fresh()->asset_id);
         $log = TacticalActionLog::findOrFail($result['audit_id']);
@@ -185,6 +196,11 @@ class TacticalAssetRebindTest extends TestCase
         $old = Asset::withTrashed()->findOrFail($this->from->id);
         $this->assertTrue($old->trashed());
         $this->assertNull($old->tactical_asset_id);
+        // The real sync refreshed the TARGET above; it must not restore the source's
+        // released observations, which is the only writer that could have.
+        $this->assertFalse((bool) $old->rmm_online);
+        $this->assertNull($old->last_seen_at);
+        $this->assertNull($old->last_user);
         $this->assertSame(2, Asset::withTrashed()->count());
     }
 }

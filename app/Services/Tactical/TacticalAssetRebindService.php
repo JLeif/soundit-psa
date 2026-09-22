@@ -47,7 +47,21 @@ class TacticalAssetRebindService
 
             // Both back-links and the audit commit together; an audit write
             // failure must roll back the repoint rather than leave it unrecorded.
-            $from->update(['tactical_asset_id' => null]);
+            //
+            // Clearing the FK alone would STRAND this agent's observations on the
+            // source: rmm_online/last_seen_at/last_user are written by syncDevices'
+            // per-run refresh and last_boot_at by refreshAssetBootTime, and after the
+            // repoint neither touches the source again — the not-seen sweep only
+            // writes tactical_assets. The source would keep asserting another
+            // machine's connectivity and logged-in user with no writer left to
+            // correct it. Release them here, unless another RMM still maintains this
+            // row (Ninja/Level write these same columns on their own cadence and
+            // would be the remaining source of truth).
+            $release = ['tactical_asset_id' => null];
+            if ($from->ninja_id === null && $from->level_id === null) {
+                $release += ['rmm_online' => false, 'last_seen_at' => null, 'last_user' => null, 'last_boot_at' => null];
+            }
+            $from->update($release);
             $target->update(['tactical_asset_id' => $agent->id]);
             $agent->update(['asset_id' => $targetId]);
             $log = TacticalActionLog::create([

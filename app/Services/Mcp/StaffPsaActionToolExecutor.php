@@ -1700,6 +1700,13 @@ class StaffPsaActionToolExecutor
      */
     private function rebindTacticalAsset(array $arguments, int $clientId, string $actorLabel): array
     {
+        // Same kill-switch gate as every other immediate asset mutator here
+        // (create/update/retire/restore/link_asset_user/merge_asset_now): this arm
+        // commits FK moves and an audit row, so it must refuse when they refuse.
+        if ($error = $this->guardDirectAction()) {
+            return $error;
+        }
+
         $validator = Validator::make($arguments, [
             'asset_id' => ['required', 'integer', 'min:1'],
             'target_asset_id' => ['required', 'integer', 'min:1'],

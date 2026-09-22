@@ -659,16 +659,26 @@ class TacticalDeviceSyncService
                     SweepQueuedActionsForAgent::dispatch((string) $agentId);
                 }
 
-                DB::transaction(function () use ($tacticalAsset, $agent, $psaClientId, $result) {
-                    // Match rebind's client lock, then reread the binding. Keep
-                    // the snapshot upsert outside: a failed link must preserve it.
-                    DB::table('clients')->where('id', $psaClientId)->lockForUpdate()->first();
-                    $tacticalAsset->refresh();
+                // The link keeps its OWN transaction — linkOrCreateAsset already
+                // takes the same client row lock inside it, so the serialization the
+                // rebind lock matches is unchanged. It must NOT be nested in the
+                // refresh transaction below: nesting demotes its commit to a
+                // savepoint, and a throw in the refresh UPDATE would then roll the
+                // new asset back while assets_created/linked — incremented after
+                // that inner commit precisely so a rolled-back create can never be
+                // reported — stayed raised, with errors bumped for the same agent.
+                $tacticalAsset->refresh();
+                if (! $tacticalAsset->asset_id) {
                     // Link to PSA asset if not already linked — creating the asset
                     // when Tactical is the discovery source for this device.
-                    if (! $tacticalAsset->asset_id) {
-                        $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
-                    }
+                    $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
+                }
+
+                DB::transaction(function () use ($tacticalAsset, $agent, $psaClientId) {
+                    // Match rebind's client lock, then reread the binding, so a
+                    // rebind committed since the upsert cannot make this run refresh
+                    // the old asset. The snapshot upsert stays outside: a failed
+                    // refresh must preserve it.
 
                     // Refresh the linked asset from THIS run's snapshot. rmm_online
                     // and last_seen_at are read as CURRENT truth by the Assets list
