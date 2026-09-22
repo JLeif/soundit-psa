@@ -62,7 +62,7 @@ class OperatorNotifier
             return;
         }
 
-        $this->delivery->send(
+        $result = $this->delivery->send(
             $user,
             TeamsBotConfig::escalationConversationId(),
             TeamsBotConfig::escalationServiceUrl(),
@@ -74,5 +74,13 @@ class OperatorNotifier
         if ($sms && is_string($phone) && $phone !== '') {
             $this->sms->send($phone, $smsText ?? $subject.' — '.$body);
         }
+
+        // Emergency bodies deliberately bypass scanning (including bearer ack links).
+        // Log metadata only, after SMS so a logging failure cannot prevent that send.
+        Log::info('[Technician] Operator delivery receipt', [
+            'posted' => $result->posted,
+            'posted_to_chat' => $result->postedToChat,
+            ...$result->scanReceipt(),
+        ]);
     }
 }

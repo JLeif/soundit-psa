@@ -31,25 +31,44 @@ class OperatorDelivery
 
     public function sanitize(string $fragment, string $placeholder = '[message detail withheld - see the cockpit]'): string
     {
-        $fragment = mb_substr($fragment, 0, self::FRAGMENT_LIMIT);
-
-        return $this->scanAndEscape($fragment, $placeholder, 'Fragment');
+        return $this->sanitizeWithMeta($fragment, $placeholder)['text'];
     }
 
     public function sanitizeMessage(string $message, string $placeholder = '[message detail withheld - see the cockpit]'): string
     {
-        return $this->scanAndEscape($message, $placeholder, 'Message');
+        return $this->sanitizeMessageWithMeta($message, $placeholder)['text'];
     }
 
-    private function scanAndEscape(string $text, string $placeholder, string $label): string
+    /** @return array{text: string, meta: OperatorScanMetadata} */
+    public function sanitizeWithMeta(string $fragment, string $placeholder = '[message detail withheld - see the cockpit]'): array
     {
-        if ($this->redactor->scan($text) !== []) {
-            Log::warning("[OperatorDelivery] {$label} failed output scan - detail withheld");
+        return $this->scanAndEscape(mb_substr($fragment, 0, self::FRAGMENT_LIMIT), $placeholder, 'Fragment', mb_strlen($fragment));
+    }
 
-            return TeamsText::escape($placeholder);
+    /** @return array{text: string, meta: OperatorScanMetadata} */
+    public function sanitizeMessageWithMeta(string $message, string $placeholder = '[message detail withheld - see the cockpit]'): array
+    {
+        return $this->scanAndEscape($message, $placeholder, 'Message', mb_strlen($message));
+    }
+
+    /** @return array{text: string, meta: OperatorScanMetadata} */
+    private function scanAndEscape(string $text, string $placeholder, string $label, int $totalChars): array
+    {
+        $violations = $this->redactor->scan($text);
+        $withheld = $violations !== [];
+        if ($withheld) {
+            Log::warning("[OperatorDelivery] {$label} failed output scan - detail withheld");
         }
 
-        return TeamsText::escape($text);
+        return [
+            'text' => TeamsText::escape($withheld ? $placeholder : $text),
+            'meta' => new OperatorScanMetadata(
+                $withheld,
+                ! $withheld && $totalChars > mb_strlen($text),
+                $totalChars,
+                array_column($violations, 'class'),
+            ),
+        ];
     }
 
     /**
@@ -89,6 +108,7 @@ class OperatorDelivery
         string $subject,
         string $body,
         ?TeamsPersona $persona = null,
+        ?OperatorScanMetadata $scanMetadata = null,
     ): OperatorDeliveryResult {
         $postedToChat = false;
         $posted = false;
@@ -173,6 +193,7 @@ class OperatorDelivery
             posted: $posted,
             postedToChat: $postedToChat,
             remoteMessageId: null,
+            scanMetadata: $scanMetadata,
         );
     }
 

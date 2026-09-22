@@ -162,10 +162,10 @@ class EscalationParallelPlaneTest extends TestCase
     private function mockOperatorDelivery(string $expectedBlocker, array &$sendCalls, ?string $sanitizedBlocker = null): void
     {
         $this->mock(OperatorDelivery::class, function (MockInterface $mock) use ($expectedBlocker, &$sendCalls, $sanitizedBlocker) {
-            $mock->shouldReceive('sanitize')
+            $mock->shouldReceive('sanitizeWithMeta')
                 ->once()
                 ->with($expectedBlocker, '[escalation detail withheld - open the ticket]')
-                ->andReturn($sanitizedBlocker ?? $expectedBlocker);
+                ->andReturn(['text' => $sanitizedBlocker ?? $expectedBlocker, 'meta' => new \App\Services\Agent\Escalation\OperatorScanMetadata($sanitizedBlocker !== null, false, mb_strlen($expectedBlocker), [])]);
 
             $mock->shouldReceive('send')
                 ->once()
@@ -176,6 +176,8 @@ class EscalationParallelPlaneTest extends TestCase
                         ?string $serviceUrl,
                         string $subject,
                         string $body,
+                        ?\App\Models\TeamsPersona $persona = null,
+                        ?\App\Services\Agent\Escalation\OperatorScanMetadata $scanMetadata = null,
                     ) use (&$sendCalls): OperatorDeliveryResult {
                         $sendCalls[] = [$recipient, $conversationId, $serviceUrl, $subject, $body];
 
@@ -183,6 +185,7 @@ class EscalationParallelPlaneTest extends TestCase
                             posted: false,
                             postedToChat: false,
                             remoteMessageId: null,
+                            scanMetadata: $scanMetadata,
                         );
                     },
                 );

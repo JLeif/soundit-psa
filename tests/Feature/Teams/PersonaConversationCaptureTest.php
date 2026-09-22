@@ -334,11 +334,11 @@ class PersonaConversationCaptureTest extends TestCase
 
         $captured = null;
         $this->mock(OperatorDelivery::class, function (MockInterface $m) use (&$captured) {
-            $m->shouldReceive('sanitizeMessage')->andReturnUsing(fn (string $msg): string => $msg);
+            $m->shouldReceive('sanitizeMessageWithMeta')->andReturnUsing(fn (string $msg): array => ['text' => $msg, 'meta' => new \App\Services\Agent\Escalation\OperatorScanMetadata(false, false, mb_strlen($msg), [])]);
             $m->shouldReceive('send')->once()->andReturnUsing(function (...$args) use (&$captured): OperatorDeliveryResult {
                 $captured = $args;
 
-                return new OperatorDeliveryResult(posted: false, postedToChat: false, remoteMessageId: null);
+                return new OperatorDeliveryResult(posted: false, postedToChat: false, remoteMessageId: null, scanMetadata: $args[6]);
             });
         });
 
