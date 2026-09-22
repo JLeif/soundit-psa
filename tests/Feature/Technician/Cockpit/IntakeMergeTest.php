@@ -47,11 +47,11 @@ class IntakeMergeTest extends TestCase
         $this->actingAs($this->actor);
     }
 
-    private function merge(?int $survivor = null)
+    private function merge(?int $survivor = null, ?int $suggested = null)
     {
         return $this->postJson('/cockpit/runs/'.$this->run->id.'/intake-merge', [
             'survivor_ticket_id' => $survivor ?? $this->older->id, 'confirmed' => 1,
-            'suggested_ticket_id' => $this->older->id,
+            'suggested_ticket_id' => $suggested ?? $this->older->id,
         ]);
     }
 
@@ -98,11 +98,13 @@ class IntakeMergeTest extends TestCase
 
     public static function refusals(): array
     {
-        return array_map(fn ($case) => [$case], [
+        $cases = [
             'missing', 'closed-survivor', 'resolved-survivor', 'closed-loser',
             'merged-survivor', 'merged-loser', 'cross-client-survivor', 'cross-client-loser',
             'self', 'unrelated-survivor', 'loser-has-children', 'stale-created-id', 'not-attach', 'already-attached',
-        ]);
+        ];
+
+        return array_combine($cases, array_map(fn ($case) => [$case], $cases));
     }
 
     #[DataProvider('refusals')]
@@ -146,7 +148,7 @@ class IntakeMergeTest extends TestCase
         }
         $this->run->update(['proposed_meta' => $meta]);
         $before = Ticket::query()->get()->toArray();
-        $this->merge($survivor)->assertOk()->assertJsonPath('ok', false)
+        $this->merge($survivor, $case === 'self' ? $this->newer->id : null)->assertOk()->assertJsonPath('ok', false)
             ->assertJsonPath('status', 'gate_declined')->assertSee('Merge refused');
         $this->assertSame($before, Ticket::query()->get()->toArray());
         $this->assertSame(TechnicianRunState::AwaitingApproval, $this->run->fresh()->state);
@@ -187,7 +189,7 @@ class IntakeMergeTest extends TestCase
 
     public function test_changed_suggestion_cannot_silently_change_loser_after_confirmation(): void
     {
-        $other = Ticket::factory()->create(['client_id' => $this->older->client_id]);
+        $other = Ticket::factory()->create(['client_id' => $this->older->client_id, 'status' => TicketStatus::InProgress]);
         $meta = $this->run->proposed_meta;
         $meta['suggested_ticket_id'] = $other->id;
         $this->run->update(['proposed_meta' => $meta]);
