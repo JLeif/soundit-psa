@@ -217,6 +217,7 @@ class McpStaffController extends Controller
         'move_contact_to_client',
         'delete_contact',
         'create_asset',
+        'rebind_tactical_asset',
         'update_asset',
         'retire_asset',
         'restore_asset',
@@ -250,6 +251,7 @@ class McpStaffController extends Controller
      * targets a soft-deleted asset) and a supplied client_id is rejected.
      */
     private const PSA_RECORDS_ASSET_SCOPED_TOOLS = [
+        'rebind_tactical_asset',
         'update_asset',
         'retire_asset',
         'restore_asset',
@@ -1680,6 +1682,10 @@ class McpStaffController extends Controller
 
         if ($tool === 'delete_contact') {
             return $this->auditDeleteContactArguments($args);
+        }
+
+        if ($tool === 'rebind_tactical_asset') {
+            return array_intersect_key($args, array_flip(['asset_id', 'target_asset_id']));
         }
 
         if ($tool === 'create_asset' || $tool === 'update_asset') {

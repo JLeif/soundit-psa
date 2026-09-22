@@ -659,76 +659,87 @@ class TacticalDeviceSyncService
                     SweepQueuedActionsForAgent::dispatch((string) $agentId);
                 }
 
-                // Link to PSA asset if not already linked — creating the asset
-                // when Tactical is the discovery source for this device.
-                if (! $tacticalAsset->asset_id) {
-                    $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
-                }
-
-                // Refresh the linked asset from THIS run's snapshot. rmm_online
-                // and last_seen_at are read as CURRENT truth by the Assets list
-                // badge and AssetHealthService::connectivityFactor(), so writing
-                // them once at creation and never again would assert a frozen
-                // connectivity state forever (psa-wedk: never present synced
-                // state as current truth).
-                //
-                // Three limits on what this run may assert, because the asset is
-                // not necessarily ours alone: linkOrCreateAsset() ADOPTS an
-                // existing asset by hostname/name, and that asset may already be
-                // maintained by NinjaSyncService or LevelSyncService, which write
-                // these same two columns on their own cadence.
-                //
-                //  - Only Tactical's contact vocabulary moves rmm_online:
-                //    'online' to true, 'offline' AND 'overdue' to false.
-                //    'overdue' is the LONGER out-of-contact state, not a softer
-                //    one (see rmmOnlineFromStatus), so a machine that stays down
-                //    is still recorded as down. Any other value is not an
-                //    observation of connectivity and leaves the flag untouched.
-                //  - A false is never written over another RMM's link. The false
-                //    branch has no staleness escape anywhere (isRmmDataStale
-                //    gates only a TRUE flag), so a broken Tactical agent would
-                //    otherwise re-assert Offline every interval on a device Ninja
-                //    or Level is actively reporting online. A TRUE still writes:
-                //    it is something we did observe, and every reader gates a
-                //    true on last_seen_at freshness.
-                //  - last_seen_at only ever moves FORWARD. Tactical's snapshot
-                //    can be older than the other RMM's heartbeat, and writing it
-                //    unconditionally would drag the asset's freshness backwards
-                //    and make current data read as stale.
-                $linkedAsset = $tacticalAsset->asset_id
-                    ? Asset::find($tacticalAsset->asset_id)
-                    : null;
-
-                if ($linkedAsset) {
-                    $refresh = [];
-                    $otherRmmMaintains = $linkedAsset->ninja_id !== null || $linkedAsset->level_id !== null;
-                    $online = $this->rmmOnlineFromStatus($tacticalAsset->status);
-
-                    if ($online === true || ($online === false && ! $otherRmmMaintains)) {
-                        $refresh['rmm_online'] = $online;
+                DB::transaction(function () use ($tacticalAsset, $agent, $psaClientId, $result) {
+                    // Match rebind's client lock, then reread the binding. Keep
+                    // the snapshot upsert outside: a failed link must preserve it.
+                    DB::table('clients')->where('id', $psaClientId)->lockForUpdate()->first();
+                    $tacticalAsset->refresh();
+                    // Link to PSA asset if not already linked — creating the asset
+                    // when Tactical is the discovery source for this device.
+                    if (! $tacticalAsset->asset_id) {
+                        $this->linkOrCreateAsset($tacticalAsset, $psaClientId, $agent, $result);
                     }
 
-                    $observed = $tacticalAsset->last_seen_at;
+                    // Refresh the linked asset from THIS run's snapshot. rmm_online
+                    // and last_seen_at are read as CURRENT truth by the Assets list
+                    // badge and AssetHealthService::connectivityFactor(), so writing
+                    // them once at creation and never again would assert a frozen
+                    // connectivity state forever (psa-wedk: never present synced
+                    // state as current truth).
+                    //
+                    // Three limits on what this run may assert, because the asset is
+                    // not necessarily ours alone: linkOrCreateAsset() ADOPTS an
+                    // existing asset by hostname/name, and that asset may already be
+                    // maintained by NinjaSyncService or LevelSyncService, which write
+                    // these same two columns on their own cadence.
+                    //
+                    //  - Only Tactical's contact vocabulary moves rmm_online:
+                    //    'online' to true, 'offline' AND 'overdue' to false.
+                    //    'overdue' is the LONGER out-of-contact state, not a softer
+                    //    one (see rmmOnlineFromStatus), so a machine that stays down
+                    //    is still recorded as down. Any other value is not an
+                    //    observation of connectivity and leaves the flag untouched.
+                    //  - A false is never written over another RMM's link. The false
+                    //    branch has no staleness escape anywhere (isRmmDataStale
+                    //    gates only a TRUE flag), so a broken Tactical agent would
+                    //    otherwise re-assert Offline every interval on a device Ninja
+                    //    or Level is actively reporting online. A TRUE still writes:
+                    //    it is something we did observe, and every reader gates a
+                    //    true on last_seen_at freshness.
+                    //  - last_seen_at only ever moves FORWARD. Tactical's snapshot
+                    //    can be older than the other RMM's heartbeat, and writing it
+                    //    unconditionally would drag the asset's freshness backwards
+                    //    and make current data read as stale.
+                    $linkedAsset = $tacticalAsset->asset_id
+                        ? Asset::find($tacticalAsset->asset_id)
+                        : null;
 
-                    if ($observed && (! $linkedAsset->last_seen_at || $observed->gt($linkedAsset->last_seen_at))) {
-                        $refresh['last_seen_at'] = $observed;
+                    if ($linkedAsset) {
+                        $refresh = [];
+                        $otherRmmMaintains = $linkedAsset->ninja_id !== null || $linkedAsset->level_id !== null;
+                        $online = $this->rmmOnlineFromStatus($tacticalAsset->status);
+
+                        if ($online === true || ($online === false && ! $otherRmmMaintains)) {
+                            $refresh['rmm_online'] = $online;
+                        }
+
+                        $observed = $tacticalAsset->last_seen_at;
+
+                        if ($observed && (! $linkedAsset->last_seen_at || $observed->gt($linkedAsset->last_seen_at))) {
+                            $refresh['last_seen_at'] = $observed;
+                        }
+
+                        if ($agent['logged_username'] ?? null) {
+                            $refresh['last_user'] = $agent['logged_username'];
+                        }
+
+                        if ($refresh !== []) {
+                            Asset::where('id', $linkedAsset->id)->update($refresh);
+                        }
                     }
 
-                    if ($agent['logged_username'] ?? null) {
-                        $refresh['last_user'] = $agent['logged_username'];
-                    }
+                });
 
-                    if ($refresh !== []) {
-                        Asset::where('id', $linkedAsset->id)->update($refresh);
-                    }
-                }
-
-                // AgentTableSerializer.Meta.fields in upstream agents/serializers.py
-                // (pinned in upstream_producers.json) includes boot_time on GET agents/.
-                // Keep opportunistic boot work AFTER connectivity, as on the detail
-                // path: an escaping prologue must not suppress this agent's refresh.
-                // Reuse the parser and guards unchanged, inside per-agent containment.
-                $this->refreshAssetBootTime($tacticalAsset, $agent['boot_time'] ?? null);
+                DB::transaction(function () use ($tacticalAsset, $agent, $psaClientId) {
+                    DB::table('clients')->where('id', $psaClientId)->lockForUpdate()->first();
+                    $tacticalAsset->refresh();
+                    // AgentTableSerializer.Meta.fields in upstream agents/serializers.py
+                    // (pinned in upstream_producers.json) includes boot_time on GET agents/.
+                    // Keep opportunistic boot work AFTER connectivity, as on the detail
+                    // path: an escaping prologue must not suppress this agent's refresh.
+                    // Reuse the parser and guards unchanged, inside per-agent containment.
+                    $this->refreshAssetBootTime($tacticalAsset, $agent['boot_time'] ?? null);
+                });
             } catch (\Throwable $e) {
                 $safe = $this->safeFailure($e, 'write');
                 Log::warning('[TacticalSync] Agent skipped after a write failure', [
