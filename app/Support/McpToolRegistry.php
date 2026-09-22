@@ -1210,6 +1210,7 @@ class McpToolRegistry
             self::deleteContactTool(),
             self::createAssetTool(),
             self::updateAssetTool(),
+            self::rebindTacticalAssetTool(),
             self::retireAssetTool(),
             self::restoreAssetTool(),
             self::linkAssetUserTool(),
@@ -2155,6 +2156,23 @@ class McpToolRegistry
                     'person_id' => ['type' => 'integer', 'description' => 'The linked contact (person) ID to set as primary user.'],
                 ],
                 'required' => ['asset_id', 'person_id'],
+            ],
+        ];
+    }
+
+    private static function rebindTacticalAssetTool(): array
+    {
+        return [
+            'name' => 'rebind_tactical_asset',
+            'description' => 'Move an existing Tactical binding from asset_id (which may be retired) to a different live target_asset_id in the SAME client. Refuses inconsistent or occupied bindings in either direction. Both assets and their history remain separate; no vendor action or retirement occurs. Records the authenticated actor and both IDs atomically. Scope is derived from asset_id; omit client_id. Requires an explicit grant.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'asset_id' => ['type' => 'integer', 'description' => 'Current PSA asset ID, not an upstream agent ID.'],
+                    'target_asset_id' => ['type' => 'integer', 'description' => 'Unbound live PSA asset in the same client.'],
+                ],
+                'required' => ['asset_id', 'target_asset_id'],
+                'additionalProperties' => false,
             ],
         ];
     }

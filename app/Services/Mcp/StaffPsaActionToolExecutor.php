@@ -99,6 +99,7 @@ class StaffPsaActionToolExecutor
             'stage_public_note' => $this->stageTicketAction('stage_public_note', $arguments, $clientId, $actorLabel, sendsEmail: false, tokenLabel: $tokenLabel),
             'merge_ticket' => $this->mergeTicketNow($arguments, $clientId, $actorLabel),
             'propose_merge' => $this->proposeMerge($arguments, $clientId, $actorLabel),
+            'rebind_tactical_asset' => $this->rebindTacticalAsset($arguments, $clientId, $actorLabel),
             'merge_asset' => $this->mergeAssetNow($arguments, $clientId, $actorLabel),
             'propose_asset_merge' => $this->proposeAssetMerge($arguments, $clientId, $actorLabel),
             'update_ticket' => $this->updateTicket($arguments, $clientId, $actorLabel),
@@ -1697,6 +1698,32 @@ class StaffPsaActionToolExecutor
      *
      * @return array<string, mixed>
      */
+    private function rebindTacticalAsset(array $arguments, int $clientId, string $actorLabel): array
+    {
+        // Same kill-switch gate as every other immediate asset mutator here
+        // (create/update/retire/restore/link_asset_user/merge_asset_now): this arm
+        // commits FK moves and an audit row, so it must refuse when they refuse.
+        if ($error = $this->guardDirectAction()) {
+            return $error;
+        }
+
+        $validator = Validator::make($arguments, [
+            'asset_id' => ['required', 'integer', 'min:1'],
+            'target_asset_id' => ['required', 'integer', 'min:1'],
+            'client_id' => ['prohibited'],
+        ]);
+        if ($validator->fails()) {
+            return ['error' => $validator->errors()->first()];
+        }
+        try {
+            return app(\App\Services\Tactical\TacticalAssetRebindService::class)->rebind(
+                (int) $arguments['asset_id'], (int) $arguments['target_asset_id'], $clientId, $actorLabel,
+            );
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return ['error' => $e->validator->errors()->first()];
+        }
+    }
+
     private function updateAsset(array $arguments, string $actorLabel): array
     {
         if ($error = $this->guardDirectAction()) {
