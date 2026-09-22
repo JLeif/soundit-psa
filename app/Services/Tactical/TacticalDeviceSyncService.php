@@ -678,7 +678,13 @@ class TacticalDeviceSyncService
                     // Match rebind's client lock, then reread the binding, so a
                     // rebind committed since the upsert cannot make this run refresh
                     // the old asset. The snapshot upsert stays outside: a failed
-                    // refresh must preserve it.
+                    // refresh must preserve it. The read above the link call is NOT a
+                    // substitute: it is taken outside this transaction and under no
+                    // lock, so a rebind committing after it would send this agent's
+                    // rmm_online/last_seen_at/last_user back onto the asset the
+                    // rebind just released, with no later writer to correct it.
+                    DB::table('clients')->where('id', $psaClientId)->lockForUpdate()->first();
+                    $tacticalAsset->refresh();
 
                     // Refresh the linked asset from THIS run's snapshot. rmm_online
                     // and last_seen_at are read as CURRENT truth by the Assets list

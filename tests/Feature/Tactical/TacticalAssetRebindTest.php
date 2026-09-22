@@ -203,4 +203,53 @@ class TacticalAssetRebindTest extends TestCase
         $this->assertNull($old->last_user);
         $this->assertSame(2, Asset::withTrashed()->count());
     }
+
+    public function test_sync_refresh_rereads_the_binding_when_a_rebind_commits_mid_run(): void
+    {
+        // Stands in for the second process we cannot schedule here: the rebind lands
+        // after this run has already read the binding, so only the re-read INSIDE the
+        // refresh transaction keeps the run off the released source. Row-lock
+        // scheduling itself is not certifiable on SQLite and is not claimed.
+        $fired = false;
+        $rebind = null;
+        \Illuminate\Support\Facades\Event::listen(\Illuminate\Database\Events\TransactionBeginning::class, function () use (&$fired, &$rebind): void {
+            if ($fired) {
+                return;
+            }
+            $fired = true;
+            $rebind = $this->runRebind();
+        });
+
+        // Same synthetic subset of amidaware/tacticalrmm e56ebd3e's
+        // AgentTableSerializer list projection as the refresh control above.
+        $payload = [[
+            'agent_id' => 'fixture-agent', 'hostname' => 'fixture-host',
+            'client_name' => 'Example', 'site_name' => 'Main',
+            'status' => 'online', 'last_seen' => '2026-09-22T03:00:00Z',
+            'logged_username' => 'fixture-user', 'plat' => 'windows',
+            'monitoring_type' => 'workstation',
+        ]];
+        $http = new GuzzleClient([
+            'base_uri' => 'https://tactical.example.test/',
+            'handler' => HandlerStack::create(new MockHandler([new Response(200, [], json_encode($payload))])),
+        ]);
+
+        try {
+            $syncResult = (new TacticalDeviceSyncService(new TacticalClient($http)))->syncDevices();
+        } finally {
+            \Illuminate\Support\Facades\Event::forget(\Illuminate\Database\Events\TransactionBeginning::class);
+        }
+
+        $this->assertTrue($rebind['success'] ?? false, 'The interleaved rebind did not commit: '.json_encode($rebind));
+        $this->assertSame(0, $syncResult->errors);
+        $source = $this->from->fresh();
+        $this->assertNull($source->tactical_asset_id);
+        $this->assertFalse((bool) $source->rmm_online);
+        $this->assertNull($source->last_seen_at);
+        $this->assertNull($source->last_user);
+        $target = $this->target->fresh();
+        $this->assertTrue((bool) $target->rmm_online);
+        $this->assertSame('2026-09-22 03:00:00', $target->last_seen_at->format('Y-m-d H:i:s'));
+        $this->assertSame('fixture-user', $target->last_user);
+    }
 }
