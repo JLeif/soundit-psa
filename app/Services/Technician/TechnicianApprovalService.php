@@ -367,6 +367,78 @@ class TechnicianApprovalService
         );
     }
 
+    /** Intake has its own pair contract: either ticket may be the survivor. */
+    public function intakeMerge(TechnicianRun $run, int $survivorId, int $suggestedTicketId, int $approverId): TechnicianApprovalResult
+    {
+        if ($run->action_type !== 'intake_route' || ! $run->claimForExecution()) {
+            return new TechnicianApprovalResult('already_handled');
+        }
+
+        try {
+            // Hold the pair through validation, gate execution and the merge. The
+            // gate nests its audit transaction here, so no partial merge can commit.
+            $result = \Illuminate\Support\Facades\DB::transaction(function () use ($run, $survivorId, $suggestedTicketId, $approverId) {
+                $run->refresh();
+                $meta = $run->proposed_meta ?? [];
+                $createdId = (int) $run->ticket_id;
+                $suggestedId = (int) ($meta['suggested_ticket_id'] ?? 0);
+                if (($meta['decision'] ?? null) !== 'attach' || ($meta['attached'] ?? false)
+                    || (int) ($meta['created_ticket_id'] ?? 0) !== $createdId
+                    || $suggestedId !== $suggestedTicketId
+                    || $createdId <= 0 || $suggestedId <= 0 || $createdId === $suggestedId
+                    || ! in_array($survivorId, [$createdId, $suggestedId], true)) {
+                    return new TechnicianApprovalResult('gate_declined');
+                }
+
+                $tickets = Ticket::query()->whereIn('id', [$createdId, $suggestedId])
+                    ->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+                $survivor = $tickets->get($survivorId);
+                $loser = $tickets->get($survivorId === $createdId ? $suggestedId : $createdId);
+                if (! $survivor || ! $loser
+                    || $survivor->client_id !== $run->client_id || $loser->client_id !== $run->client_id
+                    || $survivor->parent_ticket_id || $loser->parent_ticket_id
+                    || ! $survivor->status->isOpen() || ! $loser->status->isOpen()
+                    || $loser->childTickets()->exists()) {
+                    return new TechnicianApprovalResult('gate_declined');
+                }
+
+                // Reuse the always-human merge gate, NOT approveMerge's pinned
+                // primary pair. The grant binds the operator's chosen direction.
+                $hash = hash('sha256', 'intake_merge:'.$run->id.':'.$survivor->id.':'.$loser->id);
+                $token = TechnicianApprovalGrant::issue('propose_merge', $run->ticket_id, $hash, $approverId);
+                $gateResult = $this->gate->dispatch(
+                    actionType: 'propose_merge',
+                    ticketId: $run->ticket_id,
+                    clientId: $run->client_id,
+                    contentHash: $hash,
+                    summary: 'Operator-confirmed intake merge: '.$loser->display_id.' into '.$survivor->display_id.'.',
+                    runId: $run->id,
+                    executor: function () use ($run, $survivor, $loser, $approverId): void {
+                        app(TicketService::class)->mergeTickets($survivor, $loser, $approverId);
+                        TechnicianRun::query()->where('ticket_id', $loser->id)
+                            ->whereKeyNot($run->id)
+                            ->where('state', TechnicianRunState::AwaitingApproval->value)
+                            ->get()->each(fn (TechnicianRun $pending) => $pending->markSuperseded());
+                        $run->advanceTo(TechnicianRunState::Done);
+                    },
+                    approvalToken: $token,
+                    approverUserId: $approverId,
+                );
+
+                return new TechnicianApprovalResult($gateResult->status === 'executed' ? 'merged' : 'gate_declined');
+            });
+        } catch (\Throwable $e) {
+            $run->releaseClaim();
+            throw $e;
+        }
+
+        if ($result->status !== 'merged') {
+            $run->releaseClaim();
+        }
+
+        return $result;
+    }
+
     public function approveMerge(TechnicianRun $run, int $approverId): TechnicianApprovalResult
     {
         if ($run->action_type !== 'propose_merge' || ! $run->claimForExecution()) {
