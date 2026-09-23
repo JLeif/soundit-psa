@@ -59,14 +59,29 @@ class UnusableTranscriptTest extends TestCase
         Queue::assertNotPushed(CallIntakeJob::class);
     }
 
-    public function test_absence_is_not_an_unusable_transcript(): void
+    public function test_null_is_never_transcribed_and_keeps_completed_intake_path(): void
     {
-        foreach ([null, '', '   '] as $text) {
-            $call = $this->makeCall($text, 17);
-            $this->finalize($call);
-            $this->assertSame(TranscriptionStatus::Completed, $call->fresh()->transcription_status);
-            $this->assertSame($text, $call->fresh()->transcription);
-            $this->assertFalse((new TranscriptUsability)->isUnusable($text, 17));
+        \App\Models\Setting::setValue('intake_call_enabled', '1');
+        $call = $this->makeCall(null, 17);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Completed, $call->fresh()->transcription_status);
+        $this->assertNull($call->fresh()->transcription);
+        Queue::assertPushed(CallIntakeJob::class);
+        $event = \App\Models\SignalEvent::where('entity_id', $call->id)
+            ->where('type_key', 'intake.call_transcribed')->sole();
+        $this->assertSame([], $event->context);
+    }
+
+    public function test_produced_empty_and_whitespace_transcripts_require_a_listen(): void
+    {
+        foreach (['', '   ', "\n\n"] as $text) {
+            foreach ([null, 0, 5, 17] as $duration) {
+                $call = $this->makeCall($text, $duration);
+                $this->finalize($call);
+                $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+                $this->assertSame($text, $call->fresh()->transcription);
+                $this->assertTrue((new TranscriptUsability)->isUnusable($text, $duration));
+            }
         }
     }
 

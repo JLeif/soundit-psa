@@ -376,10 +376,15 @@ TEMPLATE;
      */
     private function markUnusableTranscript(PhoneCall $call): bool
     {
+        // null = never transcribed; '' = transcribed to nothing.
+        if ($call->transcription === null) {
+            return false;
+        }
+
         try {
             // Diarized text carries the same labels buildDiarizedTranscript() wrote;
-            // absent/blank text skips resolution so its prior path is untouched.
-            $labels = trim($call->transcription ?? '') === ''
+            // produced blank text needs no labels, but still reaches the guard.
+            $labels = trim($call->transcription) === ''
                 ? []
                 : array_values($this->resolveSpeakerLabels($call));
             $unusable = app(\App\Support\TranscriptUsability::class)->isUnusable(

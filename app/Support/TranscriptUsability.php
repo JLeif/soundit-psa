@@ -25,16 +25,15 @@ class TranscriptUsability
 
     /**
      * @param  list<string>  $speakerLabels  Stereo diarization writes "{label}: words"
-     *   lines; those line-start prefixes are stripped so they neither defeat the
-     *   whole-transcript stock match nor inflate characters per second.
+     *                                       lines; those line-start prefixes are stripped so they neither defeat the
+     *                                       whole-transcript stock match nor inflate characters per second.
      */
-    public function isUnusable(?string $transcript, ?int $duration, array $speakerLabels = []): bool
+    public function isUnusable(string $transcript, ?int $duration, array $speakerLabels = []): bool
     {
-        $text = trim($transcript ?? '');
-        // Absence is not a quality judgement. Preserve the pre-existing path
-        // for calls without transcript content, including direct finalization.
+        $text = trim($transcript);
+        // A transcription run that produced nothing needs a human listen.
         if ($text === '') {
-            return false;
+            return true;
         }
         $labels = array_map(
             fn (string $label) => preg_quote($label, '/'),

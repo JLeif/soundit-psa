@@ -47,6 +47,26 @@ class UnusableTranscriptSignalTest extends TestCase
         }
     }
 
+    public function test_produced_empty_text_is_flagged_at_both_exits_with_intake_on_and_off(): void
+    {
+        foreach (['', '   ', "\n\n"] as $text) {
+            foreach ([false, true] as $fullPath) {
+                foreach (['0', '1'] as $enabled) {
+                    Queue::fake();
+                    Setting::setValue('intake_call_enabled', $enabled);
+                    $call = $this->makeTranscriptCall($text);
+                    $this->runPath($call, $fullPath, $text);
+                    $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+                    $this->assertSame($text, $call->fresh()->transcription);
+                    Queue::assertNotPushed(CallIntakeJob::class);
+                    $event = SignalEvent::where('entity_id', $call->id)
+                        ->where('type_key', 'intake.call_transcribed')->sole();
+                    $this->assertSame(['transcript_unusable' => true], $event->context);
+                }
+            }
+        }
+    }
+
     public function test_throwing_signal_is_fail_soft_on_both_flagged_exits_and_finally_still_emails(): void
     {
         User::factory()->create(['is_active' => true, 'notification_preferences' => ['new_voicemail' => true]]);
