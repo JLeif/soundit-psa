@@ -268,13 +268,6 @@ class ReportStrandedVoicemailDeferrals extends Command
         // routine hourly line on a gauge whose whole subject is rows awaiting
         // a human: an unmappable status folded into it reads as part of the
         // expected report. This fires only when a row is genuinely corrupt.
-        //
-        // The record deliberately carries no explanation of WHICH surfaces
-        // the bad value breaks. Three drafts of that sentence were each
-        // falsified by execution (rounds 1-3 on this leg), because no test
-        // asserts its contents and so nothing can hold it true. The row id
-        // and the raw value below are what an operator needs; statusLabel()
-        // above is the executable statement of how the cast behaves.
         if ($unmapped !== []) {
             Log::error('[Voicemail] phone_calls rows carry a status no enum case maps', [
                 'unmapped_statuses' => $unmapped,
