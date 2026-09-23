@@ -6022,7 +6022,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_create_client_site',
-            'Create and map a Tactical client/site for one PSA client using server-derived PSA client scope. Requires explicit grant, reason, kill-switch, dedup/cooldown, policy IDs verified from Tactical getPolicies, and no-clobber mapping.',
+            'Create and map a Tactical client/site for one PSA client using server-derived PSA client scope. Requires explicit grant, reason, kill-switch, dedup, policy IDs verified from Tactical getPolicies, and no-clobber mapping.',
             array_merge(self::reasonProperties(), [
                 'workstation_policy_id' => ['type' => 'integer', 'description' => 'Optional Tactical workstation policy ID. It is verified against getPolicies before create.'],
                 'server_policy_id' => ['type' => 'integer', 'description' => 'Optional Tactical server policy ID. It is verified against getPolicies before create.'],
@@ -6064,7 +6064,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_upsert_url_action',
-            'Upsert the PSA-owned Tactical URL action for alert ticketing through the existing wrapper shape. Requires explicit grant, reason, kill-switch, dedup/cooldown, and refuses to update a stored id unless it still points to the PSA-owned action name.',
+            'Upsert the PSA-owned Tactical URL action for alert ticketing through the existing wrapper shape. Requires explicit grant, reason, kill-switch, dedup, and refuses to update a stored id unless it still points to the PSA-owned action name.',
             self::reasonProperties(),
             ['reason'],
         );
@@ -6075,7 +6075,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_upsert_alert_template',
-            'Upsert the PSA-owned Tactical alert template using the stored PSA URL action. Requires explicit grant, reason, kill-switch, dedup/cooldown, and refuses to update a stored id unless it still points to the PSA-owned template name.',
+            'Upsert the PSA-owned Tactical alert template using the stored PSA URL action. Requires explicit grant, reason, kill-switch, dedup, and refuses to update a stored id unless it still points to the PSA-owned template name.',
             self::reasonProperties(),
             ['reason'],
         );
@@ -6086,7 +6086,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_set_default_alert_template',
-            'Set the Tactical global default alert template to the stored PSA-owned template. This affects Tactical alert behavior across devices; it refuses to clobber a different existing default and requires explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Set the Tactical global default alert template to the stored PSA-owned template. This affects Tactical alert behavior across devices; it refuses to clobber a different existing default and requires explicit grant, reason, kill-switch, dedup.',
             self::reasonProperties(),
             ['reason'],
         );
@@ -6123,7 +6123,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_sync_devices_now',
-            'Run the existing Tactical device sync wrapper for one PSA client mapping. Requires explicit grant, reason, kill-switch, dedup/cooldown, and server-derived client scope.',
+            'Run the existing Tactical device sync wrapper for one PSA client mapping. Requires explicit grant, reason, kill-switch, dedup, and server-derived client scope.',
             self::reasonProperties(),
             ['reason'],
         );
@@ -6134,7 +6134,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_sync_scripts_now',
-            'Run the existing Tactical script catalog sync wrapper. Requires explicit grant, reason, kill-switch, dedup, and cooldown; it refreshes local script metadata only.',
+            'Run the existing Tactical script catalog sync wrapper. Requires explicit grant, reason, kill-switch, dedup; it refreshes local script metadata only.',
             self::reasonProperties(),
             ['reason'],
         );
@@ -6200,7 +6200,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_create_script',
-            'Create a global Tactical script using POST scripts/. This changes the global RMM script catalog; script_body is sent upstream but never retained in audit. Requires explicit grant, reason, shell allowlist, narrowed ScriptSerializer fields, kill-switch, dedup, and cooldown.',
+            'Create a global Tactical script using POST scripts/. This changes the global RMM script catalog; script_body is sent upstream but never retained in audit. Requires explicit grant, reason, shell allowlist, narrowed ScriptSerializer fields, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::scriptBodyProperties()),
             ['reason', 'name', 'shell', 'script_body'],
         );
@@ -6239,7 +6239,7 @@ class StaffTacticalAdminToolExecutor
             .'Refused unless the PSA asset is already inactive, the device has a linked Tactical agent, the typed hostname matches, and Tactical reports the agent not online and unseen for '
             .self::AGENT_REMOVAL_QUIET_HOURS.'h. An unreadable agent is a refusal, not a pass. '
             .'Removal is verified by a 404 on the per-agent read; the MeshCentral half of the upstream delete is best-effort and is never verified. '
-            .'Requires reason, ticket_id, typed hostname confirmation, kill-switch, dedup, and cooldown.',
+            .'Requires reason, ticket_id, typed hostname confirmation, kill-switch, and dedup.',
             self::removeAgentProperties(),
             ['reason', 'ticket_id', 'confirm_hostname'],
         );
@@ -6252,7 +6252,7 @@ class StaffTacticalAdminToolExecutor
             'tactical_stage_remove_agent',
             'Stage the Tactical agent removal for cockpit approval. This is the only lane the verb has: approval re-measures every precondition against LIVE Tactical state before DELETE agents/{agent_id}/, because the machine can come back between staging and approval. '
             .'Upstream this UNINSTALLS the RMM agent from the machine and cannot be undone. Requires a ticket, reason, typed hostname confirmation, an already-inactive PSA asset, an agent Tactical reports not online and unseen for '
-            .self::AGENT_REMOVAL_QUIET_HOURS.'h, explicit grant, kill-switch, dedup, and cooldown.',
+            .self::AGENT_REMOVAL_QUIET_HOURS.'h, explicit grant, kill-switch, and dedup.',
             self::removeAgentProperties(),
             ['reason', 'ticket_id', 'confirm_hostname'],
         );
@@ -6263,13 +6263,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_set_client_custom_field',
-            'Set one allowlisted PSA-owned Tactical CLIENT-scoped custom field for the server-derived PSA client, using PUT clients/{id}/. '
-            .'An explicit :immediate grant permits immediate execution with staged=false; staged grants and staged=true retain cockpit approval. '
-            .'A CLIENT custom field is read by Tactical automation for every agent under that client, so one write is a fleet-wide change rather than a per-endpoint one. '
-            .'The upstream client is resolved by NAME from the stored PSA mapping at call time and must match EXACTLY ONE Tactical client: upstream names are unique only case-sensitively, and an ambiguous or missing name is refused rather than guessed. '
-            .'Arbitrary field IDs and upstream client IDs are rejected; the field id comes from the PSA setting for that key and an unconfigured id is a refusal. '
-            .'Values are withheld from MCP and Technician audits, and the dedup key deliberately excludes the value — so a second write to the SAME field inside the dedup window is suppressed as a duplicate whatever the new value is. '
-            .'Requires reason, ticket_id, explicit grant, kill-switch, dedup, and cooldown.',
+            'Set one allowlisted PSA-owned Tactical CLIENT-scoped custom field for the server-derived PSA client, using PUT clients/{id}/. An explicit :immediate grant permits immediate execution with staged=false; staged grants and staged=true retain cockpit approval. A CLIENT custom field is read by Tactical automation for every agent under that client, so one write is a fleet-wide change rather than a per-endpoint one. The upstream client is resolved by NAME from the stored PSA mapping at call time and must match EXACTLY ONE Tactical client: upstream names are unique only case-sensitively, and an ambiguous or missing name is refused rather than guessed. Arbitrary field IDs and upstream client IDs are rejected; the field id comes from the PSA setting for that key and an unconfigured id is a refusal. Values are withheld from MCP and Technician audits, and the dedup key deliberately excludes the value — so a second write to the SAME field inside the dedup window is suppressed as a duplicate whatever the new value is. Requires reason, ticket_id, explicit grant, kill-switch, dedup.',
             self::clientCustomFieldProperties(),
             ['reason', 'ticket_id', 'field_key', 'value'],
         );
@@ -6280,8 +6274,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_stage_set_client_custom_field',
-            'Stage the Tactical CLIENT custom-field write for cockpit approval. Approval re-resolves the field id and the upstream client against LIVE state before PUT clients/{id}/, because the configured field id can change and a second Tactical client with a case-differing name can appear between staging and approval. '
-            .'The write is fleet-wide for the client and, for deployment fields, is itself the deploy trigger. Requires a ticket, reason, an allowlisted field_key with a configured field id, an unambiguous upstream client name match, explicit grant, kill-switch, dedup, and cooldown.',
+            'Stage the Tactical CLIENT custom-field write for cockpit approval. Approval re-resolves the field id and the upstream client against LIVE state before PUT clients/{id}/, because the configured field id can change and a second Tactical client with a case-differing name can appear between staging and approval. The write is fleet-wide for the client and, for deployment fields, is itself the deploy trigger. Requires a ticket, reason, an allowlisted field_key with a configured field id, an unambiguous upstream client name match, explicit grant, kill-switch, dedup.',
             self::clientCustomFieldProperties(),
             ['reason', 'ticket_id', 'field_key', 'value'],
         );
@@ -6311,7 +6304,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_delete_script',
-            'Delete one user-defined global Tactical script using DELETE scripts/{pk}/ after resolving the script through getScripts. This cannot be undone and can break checks, tasks, or operator workflows. Builtin/community scripts are refused PSA-side. Requires typed script-name confirmation, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Delete one user-defined global Tactical script using DELETE scripts/{pk}/ after resolving the script through getScripts. This cannot be undone and can break checks, tasks, or operator workflows. Builtin/community scripts are refused PSA-side. Requires typed script-name confirmation, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::scriptSelectorProperties(), [
                 'confirm_script_name' => ['type' => 'string', 'description' => 'Typed Tactical script name. Must match the resolved current script name.'],
             ]),
@@ -6402,7 +6395,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_delete_automation_policy',
-            'Delete one Tactical automation policy using DELETE automation/policies/{pk}/ after verifying policy_id with getPolicies. This can remove inherited checks/tasks from affected devices; requires typed policy-name confirmation, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Delete one Tactical automation policy using DELETE automation/policies/{pk}/ after verifying policy_id with getPolicies. This can remove inherited checks/tasks from affected devices; requires typed policy-name confirmation, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::automationPolicySelectorProperties(), [
                 'confirm_policy_name' => ['type' => 'string', 'description' => 'Typed Tactical automation policy name. Must match the current policy name.'],
             ]),
@@ -6426,7 +6419,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_assign_automation_policy',
-            'Assign a verified Tactical automation policy to a PSA-derived Tactical client, site, or agent. NO assign endpoint exists upstream: this uses PUT clients/{id}/, PUT clients/sites/{id}/, or PUT agents/{agent_id}/ with server-derived target ids. Assignment can change inherited checks/tasks for many devices; requires explicit grant, reason, kill-switch, dedup, cooldown, and getPolicies validation.',
+            'Assign a verified Tactical automation policy to a PSA-derived Tactical client, site, or agent. NO assign endpoint exists upstream: this uses PUT clients/{id}/, PUT clients/sites/{id}/, or PUT agents/{agent_id}/ with server-derived target ids. Assignment can change inherited checks/tasks for many devices; requires explicit grant, reason, kill-switch, dedup, and getPolicies validation.',
             array_merge(self::reasonProperties(), self::automationPolicySelectorProperties(), self::endpointSelectorProperties(), [
                 'target_type' => ['type' => 'string', 'enum' => ['client', 'site', 'agent'], 'description' => 'Where to assign the policy. client/site are resolved from the PSA client Tactical site mapping; agent is resolved from PSA asset_id or hostname.'],
                 'policy_kind' => ['type' => 'string', 'enum' => ['workstation', 'server'], 'description' => 'Required for client/site assignment; maps to workstation_policy or server_policy. Ignored for direct agent assignment.'],
@@ -6571,7 +6564,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_create_agent_task',
-            'Create one Tactical automated task on a PSA-derived agent using POST tasks/ with the agent field set server-side. Tasks can run scripts or commands on a schedule, so this requires explicit grant, reason, kill-switch, dedup, cooldown, narrowed TaskSerializer fields, shell allowlists, and getScripts validation for script actions.',
+            'Create one Tactical automated task on a PSA-derived agent using POST tasks/ with the agent field set server-side. Tasks can run scripts or commands on a schedule, so this requires explicit grant, reason, kill-switch, dedup, narrowed TaskSerializer fields, shell allowlists, and getScripts validation for script actions.',
             array_merge(self::reasonProperties(), self::endpointSelectorProperties(), self::taskBodyProperties()),
             ['client_id', 'reason', 'name', 'task_type', 'actions'],
         );
@@ -6582,7 +6575,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_create_policy_task',
-            'Create one Tactical automated task under a verified automation policy using POST tasks/ with the policy field set server-side. This can schedule scripts or commands for policy-affected devices or bind a checkfailure task to a verified policy check through assigned_check; it requires explicit grant, reason, kill-switch, dedup, cooldown, narrowed TaskSerializer fields, shell allowlists, getPolicies validation, and getScripts/check validation.',
+            'Create one Tactical automated task under a verified automation policy using POST tasks/ with the policy field set server-side. This can schedule scripts or commands for policy-affected devices or bind a checkfailure task to a verified policy check through assigned_check; it requires explicit grant, reason, kill-switch, dedup, narrowed TaskSerializer fields, shell allowlists, getPolicies validation, and getScripts/check validation.',
             array_merge(self::reasonProperties(), self::automationPolicySelectorProperties(), self::taskBodyProperties(includeAssignedCheck: true)),
             ['reason', 'policy_id', 'name', 'task_type', 'actions'],
         );
@@ -6615,7 +6608,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_delete_task',
-            'Delete one Tactical automated task using DELETE tasks/{pk}/ after verifying task_id against GET tasks/. This can remove a scheduled script/command from an agent or policy and cannot be undone; requires typed task-name confirmation, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Delete one Tactical automated task using DELETE tasks/{pk}/ after verifying task_id against GET tasks/. This can remove a scheduled script/command from an agent or policy and cannot be undone; requires typed task-name confirmation, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::taskSelectorProperties(), self::taskConfirmProperties()),
             ['reason', 'task_id', 'confirm_task_name'],
         );
@@ -6626,7 +6619,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_run_agent_task',
-            'Run one Tactical agent task now via POST tasks/{pk}/run/ after verifying the task belongs to the PSA-derived agent from GET agents/{agent}/tasks/. This can execute scripts or commands immediately; requires typed hostname and typed task-name confirmation, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Run one Tactical agent task now via POST tasks/{pk}/run/ after verifying the task belongs to the PSA-derived agent from GET agents/{agent}/tasks/. This can execute scripts or commands immediately; requires typed hostname and typed task-name confirmation, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::endpointSelectorProperties(), self::taskSelectorProperties(), self::taskConfirmProperties(), [
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed Tactical hostname. Must match the PSA-derived Tactical agent.'],
             ]),
@@ -6639,7 +6632,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_run_policy_task_on_agent',
-            'Run one verified Tactical policy task on one PSA-derived agent via POST tasks/{pk}/run/ with {agent_id} set server-side. Caller-supplied Tactical agent ids are refused. This can execute scripts or commands immediately on the target device; requires typed hostname and task-name confirmation, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Run one verified Tactical policy task on one PSA-derived agent via POST tasks/{pk}/run/ with {agent_id} set server-side. Caller-supplied Tactical agent ids are refused. This can execute scripts or commands immediately on the target device; requires typed hostname and task-name confirmation, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::endpointSelectorProperties(), self::automationPolicySelectorProperties(), self::taskSelectorProperties(), self::taskConfirmProperties(), [
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed Tactical hostname. Must match the PSA-derived Tactical agent.'],
             ]),
@@ -6652,7 +6645,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_run_policy_task_all',
-            'BROAD IMPACT: run one verified Tactical policy task on ALL affected agents under that automation policy via POST automation/tasks/{task}/run/. This can execute scripts or commands across many devices; requires typed policy name, typed task name, exact all-agents confirmation phrase, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'BROAD IMPACT: run one verified Tactical policy task on ALL affected agents under that automation policy via POST automation/tasks/{task}/run/. This can execute scripts or commands across many devices; requires typed policy name, typed task name, exact all-agents confirmation phrase, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::automationPolicySelectorProperties(), self::taskSelectorProperties(), self::taskConfirmProperties(), [
                 'confirm_policy_name' => ['type' => 'string', 'description' => 'Typed Tactical automation policy name. Must match the resolved policy.'],
                 'confirm_run_all' => ['type' => 'string', 'description' => "Must exactly be '".self::TASK_RUN_ALL_CONFIRMATION."'."],
@@ -6666,7 +6659,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_stage_run_policy_task_all',
-            'Stage the broad-impact Tactical policy task run for cockpit approval instead of executing immediately. Approval revalidates getPolicies and automation/policies/{policy}/tasks/ before POST automation/tasks/{task}/run/. This can execute scripts or commands on ALL affected agents, so it requires a ticket, typed policy/task confirmation, exact all-agents phrase, explicit grant, reason, kill-switch, dedup, and cooldown.',
+            'Stage the broad-impact Tactical policy task run for cockpit approval instead of executing immediately. Approval revalidates getPolicies and automation/policies/{policy}/tasks/ before POST automation/tasks/{task}/run/. This can execute scripts or commands on ALL affected agents, so it requires a ticket, typed policy/task confirmation, exact all-agents phrase, explicit grant, reason, kill-switch, dedup.',
             array_merge(self::reasonProperties(), self::automationPolicySelectorProperties(), self::taskSelectorProperties(), self::taskConfirmProperties(), [
                 'client_id' => ['type' => 'integer', 'description' => 'PSA client id for the ticket used to hold this staged action.'],
                 'ticket_id' => ['type' => 'integer', 'description' => 'PSA ticket id that will receive the cockpit approval item. Must belong to client_id.'],
@@ -6731,7 +6724,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_delete_patch_policy',
-            'Delete the patch policy currently attached to one verified Tactical automation policy using DELETE automation/patchpolicy/{pk}/. This can remove Windows update automation behavior; requires explicit grant, reason, typed policy-name confirmation, kill-switch, dedup/cooldown, and server-side patch-policy id resolution.',
+            'Delete the patch policy currently attached to one verified Tactical automation policy using DELETE automation/patchpolicy/{pk}/. This can remove Windows update automation behavior; requires explicit grant, reason, typed policy-name confirmation, kill-switch, dedup, and server-side patch-policy id resolution.',
             array_merge(self::reasonProperties(), [
                 'policy_id' => ['type' => 'integer', 'description' => 'Tactical automation policy id from tactical_list_policies. The server resolves its patch-policy id from getPolicies.'],
                 'confirm_policy_name' => ['type' => 'string', 'description' => 'Typed Tactical automation policy name.'],
@@ -6745,7 +6738,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_reset_patch_policies',
-            'Directly bulk reset Tactical patch policies to inherit for the PSA client-derived Tactical client or site using POST automation/patchpolicy/reset/. This can affect many endpoints; the global empty-body reset is intentionally not exposed. Requires explicit grant, reason, typed client-name confirmation, kill-switch, dedup/cooldown, and server-derived client/site ids.',
+            'Directly bulk reset Tactical patch policies to inherit for the PSA client-derived Tactical client or site using POST automation/patchpolicy/reset/. This can affect many endpoints; the global empty-body reset is intentionally not exposed. Requires explicit grant, reason, typed client-name confirmation, kill-switch, dedup, and server-derived client/site ids.',
             array_merge(self::reasonProperties(), [
                 'scope' => ['type' => 'string', 'enum' => ['site', 'client'], 'description' => 'Reset scope derived from the PSA client Tactical site mapping. Default site.'],
                 'confirm_client_name' => ['type' => 'string', 'description' => 'Typed PSA client name for direct bulk reset confirmation.'],
@@ -6759,7 +6752,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_stage_reset_patch_policies',
-            'Stage a bulk reset of Tactical patch policies to inherit for the PSA client-derived Tactical client or site. The MCP call makes no reset call; cockpit approval re-derives the Tactical client/site scope, re-checks kill-switch and cooldown, then POSTs automation/patchpolicy/reset/.',
+            'Stage a bulk reset of Tactical patch policies to inherit for the PSA client-derived Tactical client or site. The MCP call makes no reset call; cockpit approval re-derives the Tactical client/site scope, re-checks kill-switch, then POSTs automation/patchpolicy/reset/.',
             array_merge(self::reasonProperties(), [
                 'ticket_id' => ['type' => 'integer', 'description' => 'Required ticket ID anchoring the cockpit approval. The ticket must belong to client_id.'],
                 'scope' => ['type' => 'string', 'enum' => ['site', 'client'], 'description' => 'Reset scope derived from the PSA client Tactical site mapping. Default site.'],

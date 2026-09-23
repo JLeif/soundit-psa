@@ -87,10 +87,9 @@ class StaffCippAdminToolExecutor
      * its content hash for a sync is constant per client — so applying it to a refresh
      * would answer the second call in a day with {success, idempotent} and NO sync,
      * which is precisely the failure this tool exists to remove. A sync is idempotent
-     * by construction; running it again is the point. The 5-minute cooldown remains as
-     * the runaway guard, and it is what bounds upstream API cost — so it counts every
-     * attempt that REACHED CIPP, failures included: a retry loop against a degraded
-     * tenant is precisely the case the bound exists for.
+     * by construction; running it again is the point. The per-client sync lock
+     * bounds concurrency to one sync at a time. There is no rate bound on
+     * back-to-back runs, including retries against a degraded tenant.
      *
      * Client scope matches the scheduled pass (operational() clients only), so an
      * on-demand call cannot resurrect a roster the nightly sync deliberately stopped
@@ -308,7 +307,7 @@ class StaffCippAdminToolExecutor
     {
         return self::tool(
             'cipp_sync_people_now',
-            'Run the existing CIPP/M365 person sync on demand for one PSA client mapping, so a mailbox created in the tenant today is visible to the PSA today instead of after the next nightly pass. Reads from CIPP and writes only to the PSA people table; it makes no change to the customer tenant. Server-derived client scope; a client with no CIPP tenant mapping, or one that is not operational, is refused. Returns what the sync did (created/updated/deactivated). If a sync for this client is already running, it returns in_flight with synced=false and changes nothing — that is NOT a "no such person" answer. If CIPP returned nothing usable for the tenant it returns an error with synced=false and roster_verified=false — also NOT a "no such person" answer; and if a sync fails part-way it reports the counts it had already written. Requires explicit grant, reason, kill-switch, and a 5-minute per-client cooldown that bounds upstream API cost.',
+            'Run the existing CIPP/M365 person sync on demand for one PSA client mapping, so a mailbox created in the tenant today is visible to the PSA today instead of after the next nightly pass. Reads from CIPP and writes only to the PSA people table; it makes no change to the customer tenant. Server-derived client scope; a client with no CIPP tenant mapping, or one that is not operational, is refused. Returns what the sync did (created/updated/deactivated). If a sync for this client is already running, it returns in_flight with synced=false and changes nothing — that is NOT a "no such person" answer. If CIPP returned nothing usable for the tenant it returns an error with synced=false and roster_verified=false — also NOT a "no such person" answer; and if a sync fails part-way it reports the counts it had already written. Requires explicit grant, reason, and kill-switch. The per-client sync lock bounds concurrency to one sync at a time, with no rate bound on back-to-back runs.',
             self::reasonProperties(),
             ['reason'],
         );

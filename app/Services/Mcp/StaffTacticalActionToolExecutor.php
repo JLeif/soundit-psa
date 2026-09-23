@@ -78,10 +78,9 @@ class StaffTacticalActionToolExecutor
         'tactical_run_script' => 0,
         'tactical_stage_script' => 0,
         // 0 = no dispatch cooldown, per Charlie's ruling 2026-08-25 (T-22782: a failed
-        // dispatch armed the window and blocked the live retry). The key must stay —
-        // every lookup falls back to `?? 60`, so deleting it would silently reinstate
-        // a 60s cooldown. Applies to direct dispatch AND the approval-time recheck of
-        // staged commands; the per-ticket staging cooldown below is separate and kept.
+        // dispatch armed the window and blocked the live retry). Keep explicit zero
+        // keys. B1 also zeros every fallback and the per-ticket proposal timers:
+        // direct dispatch, staging and approval-time timer checks are all disabled.
         'tactical_run_command' => 0,
         'tactical_stage_command' => 0,
         'tactical_reboot_device' => 0,
@@ -1793,7 +1792,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_run_script',
-            'Run a visible local-catalog Tactical script on one server-derived endpoint immediately. Requires an explicit token grant, a concrete reason, kill-switch/cooldown gates, and writes both TechnicianActionLog and TacticalActionLog audit rows before returning the result.',
+            'Run a visible local-catalog Tactical script on one server-derived endpoint immediately. Requires an explicit token grant, a concrete reason, kill-switch gate, and writes both TechnicianActionLog and TacticalActionLog audit rows before returning the result.',
             array_merge(self::targetProperties(), [
                 'script_id' => ['type' => 'integer', 'description' => 'Local PSA tactical_scripts.id. Upstream Tactical script IDs are rejected.'],
                 'script_name' => ['type' => 'string', 'description' => 'Optional exact visible local script name when script_id is not known.'],
@@ -1856,7 +1855,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_reboot_device',
-            'Reboot one server-derived endpoint immediately. This disrupts the user and active services. Requires an explicit token grant, reason, confirm_hostname friction, kill-switch, cooldown, and audited TacticalActionService dispatch.',
+            'Reboot one server-derived endpoint immediately. This disrupts the user and active services. Requires an explicit token grant, reason, confirm_hostname friction, kill-switch, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), [
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed target hostname. Defense-in-depth friction only.'],
             ]),
@@ -1880,7 +1879,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_shutdown_device',
-            'Shut down one server-derived endpoint immediately. The device powers off and cannot be powered back on remotely; recovery requires physical/IPMI access. Requires an explicit token grant, reason, confirm_hostname friction, kill-switch, cooldown, and audited TacticalActionService dispatch.',
+            'Shut down one server-derived endpoint immediately. The device powers off and cannot be powered back on remotely; recovery requires physical/IPMI access. Requires an explicit token grant, reason, confirm_hostname friction, kill-switch, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), [
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed target hostname. Defense-in-depth friction only.'],
             ]),
@@ -1904,7 +1903,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_recover_mesh',
-            'Recover Mesh agent services on one server-derived endpoint immediately. Requires an explicit token grant, reason, kill-switch, cooldown, and audited TacticalActionService dispatch.',
+            'Recover Mesh agent services on one server-derived endpoint immediately. Requires an explicit token grant, reason, kill-switch, and audited TacticalActionService dispatch.',
             self::targetProperties(),
             ['reason'],
         );
@@ -1926,7 +1925,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_set_maintenance',
-            'Enable or disable Tactical maintenance mode for one server-derived endpoint immediately. This suppresses or resumes alerting. Requires an explicit token grant, reason, kill-switch, cooldown, and audited TacticalActionService dispatch.',
+            'Enable or disable Tactical maintenance mode for one server-derived endpoint immediately. This suppresses or resumes alerting. Requires an explicit token grant, reason, kill-switch, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), [
                 'enabled' => ['type' => 'boolean', 'description' => 'true to enable maintenance mode, false to disable it.'],
             ]),
@@ -1952,7 +1951,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_open_remote_control',
-            'Mint a one-time MeshCentral remote-control link for one server-derived endpoint. Requires an explicit token grant, reason, kill-switch, cooldown, URL-free audits, and returns the URL with no-store response headers.',
+            'Mint a one-time MeshCentral remote-control link for one server-derived endpoint. Requires an explicit token grant, reason, kill-switch, URL-free audits, and returns the URL with no-store response headers.',
             array_merge(self::targetProperties(), [
                 'type' => ['type' => 'string', 'enum' => ['control', 'terminal', 'file'], 'description' => 'Remote session link type.'],
             ]),
@@ -1965,7 +1964,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stage_open_remote_control',
-            'Stage a MeshCentral remote-control session for cockpit approval instead of opening it now. On approval the link is minted fresh and surfaced to the approver; approval revalidates ticket, asset, kill-switch, and cooldown first.',
+            'Stage a MeshCentral remote-control session for cockpit approval instead of opening it now. On approval the link is minted fresh and surfaced to the approver; approval revalidates ticket, asset, kill-switch first.',
             array_merge(self::targetProperties(ticket: true), [
                 'type' => ['type' => 'string', 'enum' => ['control', 'terminal', 'file'], 'description' => 'Remote session link type.'],
             ]),
@@ -1978,7 +1977,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_refresh_device_snapshot',
-            'Refresh the local Tactical device snapshot for one server-derived endpoint. This is a live read plus local write, not an endpoint mutation; it still requires an explicit token grant, reason, kill-switch, and cooldown.',
+            'Refresh the local Tactical device snapshot for one server-derived endpoint. This is a live read plus local write, not an endpoint mutation; it still requires an explicit token grant, reason, kill-switch.',
             self::targetProperties(),
             ['reason'],
         );
@@ -2015,7 +2014,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_start_service',
-            'Start one Windows service on a server-derived endpoint immediately using Tactical POST services/{agent_id}/{svcname}/ with sv_action=start. Requires an explicit token grant, reason, kill-switch, current service-list resolution, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Start one Windows service on a server-derived endpoint immediately using Tactical POST services/{agent_id}/{svcname}/ with sv_action=start. Requires an explicit token grant, reason, kill-switch, current service-list resolution, dedup, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), self::serviceSelectorProperties()),
             ['reason', 'service_name'],
         );
@@ -2026,7 +2025,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stage_start_service',
-            'Stage a Windows service start for cockpit approval instead of starting it now. Approval revalidates ticket, asset, kill-switch, cooldown, and current service scope before dispatch.',
+            'Stage a Windows service start for cockpit approval instead of starting it now. Approval revalidates ticket, asset, kill-switch, and current service scope before dispatch.',
             array_merge(self::targetProperties(ticket: true), self::serviceSelectorProperties()),
             ['ticket_id', 'reason', 'service_name'],
         );
@@ -2037,7 +2036,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stop_service',
-            'Stop one Windows service on a server-derived endpoint immediately. This can interrupt applications or dependent services. Requires an explicit token grant, reason, confirm_hostname, confirm_service_name, kill-switch, current service-list resolution, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Stop one Windows service on a server-derived endpoint immediately. This can interrupt applications or dependent services. Requires an explicit token grant, reason, confirm_hostname, confirm_service_name, kill-switch, current service-list resolution, dedup, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), self::serviceSelectorProperties(), self::destructiveServiceConfirmProperties()),
             ['reason', 'service_name', 'confirm_hostname', 'confirm_service_name'],
         );
@@ -2048,7 +2047,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stage_stop_service',
-            'Stage a Windows service stop for cockpit approval instead of stopping it now. Stopping a service can interrupt applications or dependent services; approval revalidates ticket, asset, kill-switch, cooldown, and current service scope before dispatch.',
+            'Stage a Windows service stop for cockpit approval instead of stopping it now. Stopping a service can interrupt applications or dependent services; approval revalidates ticket, asset, kill-switch, and current service scope before dispatch.',
             array_merge(self::targetProperties(ticket: true), self::serviceSelectorProperties()),
             ['ticket_id', 'reason', 'service_name'],
         );
@@ -2059,7 +2058,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_restart_service',
-            'Restart one Windows service on a server-derived endpoint immediately. Tactical stops then starts the service, which can interrupt applications or dependent services. Requires an explicit token grant, reason, confirm_hostname, confirm_service_name, kill-switch, current service-list resolution, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Restart one Windows service on a server-derived endpoint immediately. Tactical stops then starts the service, which can interrupt applications or dependent services. Requires an explicit token grant, reason, confirm_hostname, confirm_service_name, kill-switch, current service-list resolution, dedup, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), self::serviceSelectorProperties(), self::destructiveServiceConfirmProperties()),
             ['reason', 'service_name', 'confirm_hostname', 'confirm_service_name'],
         );
@@ -2070,7 +2069,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stage_restart_service',
-            'Stage a Windows service restart for cockpit approval instead of restarting it now. Tactical stops then starts the service; approval revalidates ticket, asset, kill-switch, cooldown, and current service scope before dispatch.',
+            'Stage a Windows service restart for cockpit approval instead of restarting it now. Tactical stops then starts the service; approval revalidates ticket, asset, kill-switch, and current service scope before dispatch.',
             array_merge(self::targetProperties(ticket: true), self::serviceSelectorProperties()),
             ['ticket_id', 'reason', 'service_name'],
         );
@@ -2081,7 +2080,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_set_service_start_type',
-            'Set one Windows service start type on a server-derived endpoint using Tactical PUT services/{agent_id}/{svcname}/ with startType. This can affect service startup after reboot or recovery. Requires an explicit token grant, reason, kill-switch, current service-list resolution, start_type allowlist, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Set one Windows service start type on a server-derived endpoint using Tactical PUT services/{agent_id}/{svcname}/ with startType. This can affect service startup after reboot or recovery. Requires an explicit token grant, reason, kill-switch, current service-list resolution, start_type allowlist, dedup, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), self::serviceSelectorProperties(), [
                 'start_type' => [
                     'type' => 'string',
@@ -2121,7 +2120,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_scan_patches',
-            'Start a Windows update scan on one server-derived endpoint using Tactical POST winupdate/{agent_id}/scan/. Requires explicit grant, reason, kill-switch, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Start a Windows update scan on one server-derived endpoint using Tactical POST winupdate/{agent_id}/scan/. Requires explicit grant, reason, kill-switch, dedup, and audited TacticalActionService dispatch.',
             self::targetProperties(),
             ['reason'],
         );
@@ -2149,7 +2148,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_install_approved_patches',
-            'Install all approved Windows updates on one server-derived endpoint immediately using Tactical POST winupdate/{agent_id}/install/. Approved Windows updates can reboot, interrupt users, and change system state. Requires explicit grant, reason, confirm_hostname, confirm_install, kill-switch, dedup/cooldown, and audited TacticalActionService dispatch.',
+            'Install all approved Windows updates on one server-derived endpoint immediately using Tactical POST winupdate/{agent_id}/install/. Approved Windows updates can reboot, interrupt users, and change system state. Requires explicit grant, reason, confirm_hostname, confirm_install, kill-switch, dedup, and audited TacticalActionService dispatch.',
             array_merge(self::targetProperties(), [
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed target hostname. Defense-in-depth friction only.'],
                 'confirm_install' => ['type' => 'string', 'description' => 'Type exactly: install approved patches'],
@@ -2163,7 +2162,7 @@ class StaffTacticalActionToolExecutor
     {
         return self::tool(
             'tactical_stage_install_approved_patches',
-            'Stage installation of all approved Windows updates on one endpoint for cockpit approval. Approved Windows updates can reboot, interrupt users, and change system state; approval revalidates ticket, asset, kill-switch, cooldown, and server-derived agent scope before dispatch.',
+            'Stage installation of all approved Windows updates on one endpoint for cockpit approval. Approved Windows updates can reboot, interrupt users, and change system state; approval revalidates ticket, asset, kill-switch, and server-derived agent scope before dispatch.',
             self::targetProperties(ticket: true),
             ['ticket_id', 'reason'],
         );
