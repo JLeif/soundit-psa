@@ -138,9 +138,8 @@ class StaffCippWriteToolExecutor
      * Only the executed-content rail is skipped, exactly as
      * stageResetPasswordAction() skips it for a credential mint that must stay
      * repeatable: the liveAwaitingRun() dedupe still collapses an identical
-     * proposal that is still pending approval, and the per-target proposal
-     * cooldown still stops runaway staging. Both of those refuse honestly rather
-     * than claiming the work is already done.
+     * proposal that is still pending approval without claiming the work is done.
+     * Proposal timers are disabled per zAYpGMFJ; approval and execution claims remain.
      *
      * A LICENCE SEAT IS RECREATABLE THE SAME WAY, and it is the clearer case.
      * assign -> remove -> re-assign is an ordinary supported sequence (a
@@ -155,8 +154,8 @@ class StaffCippWriteToolExecutor
      * billing write, and on the staged path one the operator cannot even
      * re-approve. Unlike a device wipe, the write is harmless to repeat
      * (assigning a SKU the user already holds is an upstream no-op), so the
-     * family lets the call through and keeps the per-target cooldown, which
-     * refuses honestly instead of claiming the work is already done.
+     * family lets the call through without a timer (zAYpGMFJ), rather than
+     * claiming the work is already done.
      *
      * @var array<int, string>
      */

@@ -548,7 +548,7 @@ class TacticalActionToolsPhase2Test extends TestCase
         $this->assertStringNotContainsString($url, (string) json_encode(McpAuditLog::where('tool_name', 'tactical_open_remote_control')->firstOrFail()->arguments));
     }
 
-    public function test_refresh_snapshot_requires_reason_and_cooldown_but_does_not_use_action_bus(): void
+    public function test_refresh_snapshot_allows_immediate_retry_without_using_action_bus(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -557,7 +557,7 @@ class TacticalActionToolsPhase2Test extends TestCase
 
         $sync = Mockery::mock(TacticalDeviceSyncService::class);
         $sync->shouldReceive('syncDeviceDetail')
-            ->once()
+            ->twice()
             ->with(Mockery::on(fn (Asset $asset): bool => $asset->is($fixture['asset'])))
             ->andReturn(DetailSyncResult::success('online', now()));
         $this->app->instance(TacticalDeviceSyncService::class, $sync);
@@ -573,14 +573,13 @@ class TacticalActionToolsPhase2Test extends TestCase
         $second = $this->callTool($token, 'tactical_refresh_device_snapshot', [
             'client_id' => $fixture['client']->id,
             'hostname' => 'PC-01',
-            'reason' => 'Second refresh should be blocked by cooldown.',
+            'reason' => 'Second refresh is allowed immediately.',
         ]);
-        $this->assertTrue((bool) $second->json('result.isError'));
-        $this->assertStringContainsString('cooldown', (string) $second->json('result.content.0.text'));
+        $this->assertFalse((bool) $second->json('result.isError'));
 
         $this->assertSame(0, TacticalActionLog::count());
-        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'executed')->count());
-        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'blocked')->count());
+        $this->assertSame(2, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'executed')->count());
+        $this->assertSame(0, TechnicianActionLog::where('action_type', 'tactical_refresh_device_snapshot')->where('result_status', 'blocked')->count());
     }
 
     // ── psa-5s4r2: stage-gate tactical_open_remote_control (Charlie GO / so-1jq4) ──
@@ -738,17 +737,16 @@ class TacticalActionToolsPhase2Test extends TestCase
      * immediate path's cooldown (which looks up tactical.remote_control) never saw it,
      * and the next immediate open bypassed the cooldown.
      */
-    public function test_staged_and_immediate_remote_control_share_the_canonical_cooldown_key(): void
+    public function test_staged_and_immediate_remote_control_share_the_canonical_audit_key_without_a_timer(): void
     {
         $this->configureTactical();
         $approver = $this->configureAiActor();
         $fixture = $this->endpointFixture();
         $url = 'https://mesh.example.test/control/session-token';
 
-        // Minted exactly ONCE — at the staged approval. The immediate call that
-        // follows must be refused by the cooldown BEFORE any second upstream call.
+        // Both calls mint a session; neither is time-blocked (zAYpGMFJ).
         $tactical = Mockery::mock(TacticalClient::class);
-        $tactical->shouldReceive('getMeshCentralLinks')->once()->with('agent-1')->andReturn(['control' => $url]);
+        $tactical->shouldReceive('getMeshCentralLinks')->twice()->with('agent-1')->andReturn(['control' => $url]);
         $this->app->instance(TacticalClient::class, $tactical);
 
         $staged = $this->callTool($this->token(['tactical_stage_open_remote_control']), 'tactical_stage_open_remote_control', [
@@ -771,9 +769,7 @@ class TacticalActionToolsPhase2Test extends TestCase
         ]);
         $this->assertDatabaseMissing('tactical_action_logs', ['action_key' => 'tactical.open_remote_control']);
 
-        // (2) A subsequent IMMEDIATE open on the same asset is cooldown-blocked by that
-        // staged log — proving both paths share one cooldown key. getMeshCentralLinks is
-        // NOT called again: the refusal lands before any upstream call.
+        // (2) A subsequent immediate open is allowed and returns its session URL.
         $immediate = $this->callTool($this->token(['tactical_open_remote_control']), 'tactical_open_remote_control', [
             'client_id' => $fixture['client']->id,
             'hostname' => 'PC-01',
@@ -781,7 +777,7 @@ class TacticalActionToolsPhase2Test extends TestCase
             'reason' => 'Immediate open right after the staged session.',
         ]);
         $immediate->assertOk();
-        $this->assertTrue((bool) $immediate->json('result.isError'), (string) $immediate->json('result.content.0.text'));
-        $this->assertStringContainsString('cooldown', (string) $immediate->json('result.content.0.text'));
+        $this->assertFalse((bool) $immediate->json('result.isError'), (string) $immediate->json('result.content.0.text'));
+        $this->assertSame($url, $this->decodedResult($immediate)['url']);
     }
 }

@@ -318,7 +318,7 @@ class TacticalSetClientCustomFieldTest extends TestCase
         $this->assertSame(0, TechnicianRun::count());
     }
 
-    public function test_immediate_cooldown_and_24_hour_duplicate_suppression(): void
+    public function test_immediate_retry_retains_24_hour_duplicate_suppression(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -332,7 +332,7 @@ class TacticalSetClientCustomFieldTest extends TestCase
         $first = $this->callTool($token, 'tactical_set_client_custom_field', $args);
         $this->assertTrue($this->decodedResult($first)['success']);
         $second = $this->callTool($token, 'tactical_set_client_custom_field', $args);
-        $this->assertStringContainsString('cooldown active', (string) $second->json('result.content.0.text'));
+        $this->assertTrue($this->decodedResult($second)['idempotent']);
         $this->travel(6)->minutes();
         $args['value'] = 'org-replacement';
         $duplicate = $this->callTool($token, 'tactical_set_client_custom_field', $args);

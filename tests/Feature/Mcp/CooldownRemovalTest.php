@@ -8,6 +8,7 @@ use App\Models\Person;
 use App\Models\TechnicianActionLog;
 use App\Services\Cipp\ResolvedCippPerson;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use Tests\TestCase;
 
@@ -45,7 +46,13 @@ class CooldownRemovalTest extends TestCase
         $this->assertSame(24, $fallbacks);
     }
 
-    public function test_absent_tools_do_not_block_after_executed_rows_in_each_executor(): void
+    public static function executors(): array
+    {
+        return array_map(fn ($name) => [$name], ['StaffCippAdmin', 'StaffCippWrite', 'StaffTacticalAdmin', 'StaffTacticalAction', 'StaffHuntressAction', 'StaffControlDOnboarding']);
+    }
+
+    #[DataProvider('executors')]
+    public function test_absent_tools_do_not_block_after_executed_rows_in_each_executor(string $name): void
     {
         $this->freezeTime();
         $client = Client::factory()->create();
@@ -59,35 +66,33 @@ class CooldownRemovalTest extends TestCase
             'result_status' => 'executed', 'summary' => $target.': completed',
             'tier' => 'auto', 'content_hash' => hash('sha256', 'test'), 'correlation_id' => 'test',
         ]);
-        foreach (['StaffCippAdmin', 'StaffCippWrite', 'StaffTacticalAdmin', 'StaffTacticalAction', 'StaffHuntressAction', 'StaffControlDOnboarding'] as $name) {
-            $class = new ReflectionClass('App\\Services\\Mcp\\'.$name.'ToolExecutor');
-            $map = $class->hasConstant('COOLDOWNS') ? $class->getConstant('COOLDOWNS') : [];
-            $this->assertArrayNotHasKey($tool, $map);
-            $source = file_get_contents($class->getFileName());
-            preg_match_all('/COOLDOWNS\[[^\]]+\]\s*\?\?\s*(\d+)/', $source, $matches);
-            // Exercise each actual source fallback, not a duplicated hardcoded zero.
-            // CippAdmin has direct indexing only (no production absent-key path);
-            // constant families have no map, so use their actual shared constant.
-            $defaults = $matches[1] ?: [$class->hasConstant('COOLDOWN_SECONDS') ? $class->getConstant('COOLDOWN_SECONDS') : max($map)];
-            $executor = $class->newInstanceWithoutConstructor();
-            $method = $class->getMethod('cooldownActive');
-            $args = match ($name) {
-                'StaffCippWrite' => [$tool, $client->id, $resolved, null],
-                'StaffTacticalAction' => [$tool, $asset, null],
-                'StaffHuntressAction', 'StaffControlDOnboarding' => [[$tool], $client->id, $target],
-                default => [$tool, $client->id],
-            };
-            // A real matching executed row must arm the SAME query with a nonzero window.
-            $this->assertTrue($method->invokeArgs($executor, [...$args, 300]), $name.' positive control');
-            foreach ($defaults as $default) {
-                $seconds = $map[$tool] ?? (int) $default;
-                $this->assertFalse($method->invokeArgs($executor, [...$args, $seconds]), $name.' absent map');
-            }
-            if ($class->hasMethod('executedCooldownActive')) {
-                $held = $class->getMethod('executedCooldownActive');
-                $this->assertTrue($held->invokeArgs($executor, [...$args, 300]));
-                $this->assertFalse($held->invokeArgs($executor, [...$args, $class->getConstant('COOLDOWN_SECONDS')]));
-            }
+        $class = new ReflectionClass('App\\Services\\Mcp\\'.$name.'ToolExecutor');
+        $map = $class->hasConstant('COOLDOWNS') ? $class->getConstant('COOLDOWNS') : [];
+        $this->assertArrayNotHasKey($tool, $map);
+        $source = file_get_contents($class->getFileName());
+        preg_match_all('/COOLDOWNS\[[^\]]+\]\s*\?\?\s*(\d+)/', $source, $matches);
+        // Exercise each actual source fallback, not a duplicated hardcoded zero.
+        // CippAdmin has direct indexing only (no production absent-key path);
+        // constant families have no map, so use their actual shared constant.
+        $defaults = $matches[1] ?: [$class->hasConstant('COOLDOWN_SECONDS') ? $class->getConstant('COOLDOWN_SECONDS') : max($map)];
+        $executor = $class->newInstanceWithoutConstructor();
+        $method = $class->getMethod('cooldownActive');
+        $args = match ($name) {
+            'StaffCippWrite' => [$tool, $client->id, $resolved, null],
+            'StaffTacticalAction' => [$tool, $asset, null],
+            'StaffHuntressAction', 'StaffControlDOnboarding' => [[$tool], $client->id, $target],
+            default => [$tool, $client->id],
+        };
+        // A real matching executed row must arm the SAME query with a nonzero window.
+        $this->assertTrue($method->invokeArgs($executor, [...$args, 300]), $name.' positive control');
+        foreach ($defaults as $default) {
+            $seconds = $map[$tool] ?? (int) $default;
+            $this->assertFalse($method->invokeArgs($executor, [...$args, $seconds]), $name.' absent map');
+        }
+        if ($class->hasMethod('executedCooldownActive')) {
+            $held = $class->getMethod('executedCooldownActive');
+            $this->assertTrue($held->invokeArgs($executor, [...$args, 300]));
+            $this->assertFalse($held->invokeArgs($executor, [...$args, $class->getConstant('COOLDOWN_SECONDS')]));
         }
     }
 }

@@ -676,7 +676,7 @@ class HuntressResolveEscalationTest extends TestCase
         $this->assertSame(0, TechnicianRun::count());
     }
 
-    public function test_restaging_the_same_escalation_is_idempotent_and_a_second_ticket_hits_the_cooldown(): void
+    public function test_restaging_is_idempotent_and_another_ticket_may_stage_immediately(): void
     {
         $this->configureHuntress();
         $this->configureAiActor();
@@ -691,12 +691,12 @@ class HuntressResolveEscalationTest extends TestCase
         $this->assertTrue((bool) ($result['idempotent'] ?? false));
         $this->assertSame($run->id, $result['run_id'] ?? null);
 
-        // Different ticket, same escalation, inside the window: cooldown refusal.
+        // Different ticket may stage immediately; human approval is still required.
         $secondTicket = Ticket::factory()->for($fixture['client'])->create();
         $this->mockReadClient($this->escalation());
         $text = (string) $this->callTool($token, 'huntress_stage_resolve_escalation', $this->stageArguments($fixture, ['ticket_id' => $secondTicket->id]))->json('result.content.0.text');
-        $this->assertStringContainsString('cooldown', $text);
-        $this->assertSame(1, TechnicianRun::count());
+        $this->assertStringContainsString('Staged for cockpit approval', $text);
+        $this->assertSame(2, TechnicianRun::count());
     }
 
     public function test_cooldown_is_anchored_prefix_ids_and_reason_embedded_keys_do_not_collide(): void

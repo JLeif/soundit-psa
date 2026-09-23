@@ -255,7 +255,7 @@ class TacticalServiceControlPhase4Test extends TestCase
         ]);
     }
 
-    public function test_direct_stop_service_requires_confirm_friction_and_cooldown_before_mutating_call(): void
+    public function test_direct_stop_service_requires_confirm_friction_but_allows_a_different_service_immediately(): void
     {
         $this->configureTactical();
         $this->configureAiActor();
@@ -274,6 +274,7 @@ class TacticalServiceControlPhase4Test extends TestCase
         $tactical = Mockery::mock(TacticalClient::class);
         $tactical->shouldReceive('getServices')->twice()->with('agent-1')->andReturn($this->services());
         $tactical->shouldReceive('controlService')->once()->with('agent-1', 'Spooler', 'stop')->andReturn('The service was stopped successfully');
+        $tactical->shouldReceive('controlService')->once()->with('agent-1', 'BITS', 'stop')->andReturn('The service was stopped successfully');
         $this->app->instance(TacticalClient::class, $tactical);
 
         $first = $this->callTool($token, 'tactical_stop_service', [
@@ -293,14 +294,13 @@ class TacticalServiceControlPhase4Test extends TestCase
             'service_name' => 'BITS',
             'confirm_hostname' => 'PC-01',
             'confirm_service_name' => 'BITS',
-            'reason' => 'Rapid second service stop should be blocked.',
+            'reason' => 'Stop a different confirmed service immediately.',
         ]);
-        $this->assertTrue((bool) $second->json('result.isError'));
-        $this->assertStringContainsString('cooldown', (string) $second->json('result.content.0.text'));
+        $this->assertFalse((bool) $second->json('result.isError'));
 
-        $this->assertSame(1, TacticalActionLog::where('action_key', 'tactical.service_stop')->count());
-        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_stop_service')->where('result_status', 'executed')->count());
-        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_stop_service')->where('result_status', 'blocked')->count());
+        $this->assertSame(2, TacticalActionLog::where('action_key', 'tactical.service_stop')->count());
+        $this->assertSame(2, TechnicianActionLog::where('action_type', 'tactical_stop_service')->where('result_status', 'executed')->count());
+        $this->assertSame(0, TechnicianActionLog::where('action_type', 'tactical_stop_service')->where('result_status', 'blocked')->count());
     }
 
     public function test_staged_restart_service_is_held_then_approval_dispatches_service_action(): void
