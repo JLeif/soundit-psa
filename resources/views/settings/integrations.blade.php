@@ -4362,7 +4362,7 @@
                         <input class="form-check-input" type="checkbox" id="intake_call_enabled" name="intake_call_enabled" {{ $intakeCallEnabled ? 'checked' : '' }}>
                         <label class="form-check-label" for="intake_call_enabled">
                             <strong>Create tickets from inbound calls</strong>
-                            <span class="d-block text-muted small">Off &rarr; a transcribed call never creates a PSA ticket. The call is still recorded, transcribed and shown in Calls; ticketing is left to your agent or a technician.</span>
+                            <span class="d-block text-muted small">Off &rarr; a transcribed call never creates a PSA ticket. The call is still recorded, transcribed and shown in Calls; ticketing is left to your agent or a technician. Flagged-unusable transcripts are deliberately held out of call intake even when enabled and reach a human through the voicemail email and the intake.call_transcribed signal instead.</span>
                         </label>
                     </div>
 

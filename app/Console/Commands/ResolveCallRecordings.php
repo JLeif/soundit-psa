@@ -106,7 +106,7 @@ class ResolveCallRecordings extends Command
             return;
         }
 
-        if ($call->isTranscribed() || $call->isTranscribing()) {
+        if ($call->hasTerminalTranscription() || $call->isTranscribing()) {
             return;
         }
 

@@ -15,6 +15,7 @@ class SignalHub
         'priority',
         'client_id',
         'destination_id',
+        'transcript_unusable',
     ];
 
     public function __construct(

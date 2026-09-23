@@ -190,6 +190,15 @@ class PhoneCall extends Model
         return $this->transcription_status === TranscriptionStatus::Completed;
     }
 
+    /** Automatic delivery must not retry content explicitly held for listening. */
+    public function hasTerminalTranscription(): bool
+    {
+        return in_array($this->transcription_status, [
+            TranscriptionStatus::Completed,
+            TranscriptionStatus::Unusable,
+        ], true);
+    }
+
     public function isTranscribing(): bool
     {
         return in_array($this->transcription_status, [

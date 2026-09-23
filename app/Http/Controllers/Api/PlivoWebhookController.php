@@ -459,7 +459,7 @@ class PlivoWebhookController extends Controller
                 $minDuration = TranscriptionConfig::minDurationSeconds();
                 if ($recordingDuration >= $minDuration) {
                     $call = $call ?? PhoneCall::where('call_uuid', $callUuid)->first();
-                    if ($call && ! $call->isTranscribed() && ! $call->isTranscribing()) {
+                    if ($call && ! $call->hasTerminalTranscription() && ! $call->isTranscribing()) {
                         $call->update(['transcription_status' => \App\Enums\TranscriptionStatus::Pending]);
                         // Delay 15s — Plivo's CDN needs time to finalize the MP3 after the callback fires
                         $cmd = sprintf('sleep 15 && php %s calls:transcribe %d > /dev/null 2>&1 &', base_path('artisan'), $call->id);

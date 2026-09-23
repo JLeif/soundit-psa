@@ -572,6 +572,7 @@ class NotificationService
             'client' => $clientName,
             'duration' => $call->recording_duration,
             'call_id' => $call->id,
+            'transcript_unusable' => $call->transcription_status === \App\Enums\TranscriptionStatus::Unusable,
         ]);
 
         $users = User::where('is_active', true)->whereNotNull('email')->get();

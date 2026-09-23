@@ -44,6 +44,11 @@ class TranscribeCall extends Command
 
         try {
             $service->transcribe($call);
+            if ($call->fresh()->transcription_status === TranscriptionStatus::Unusable) {
+                $this->warn(\App\Support\TranscriptUsability::WARNING);
+
+                return self::FAILURE;
+            }
             $this->info("Call #{$callId} transcribed successfully.");
 
             return self::SUCCESS;

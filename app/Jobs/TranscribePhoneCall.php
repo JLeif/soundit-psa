@@ -38,6 +38,7 @@ class TranscribePhoneCall implements ShouldQueue
             if (in_array($call->transcription_status, [
                 TranscriptionStatus::Processing,
                 TranscriptionStatus::Completed,
+                TranscriptionStatus::Unusable,
             ])) {
                 Log::debug('[Transcription] Skipping — already '.$call->transcription_status->value, [
                     'call_id' => $this->callId,
