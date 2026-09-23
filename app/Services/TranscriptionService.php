@@ -228,8 +228,11 @@ TEMPLATE;
                 'diarized' => $isDiarized,
             ]);
 
-            // Do not ask AI to analyze or act on content already flagged for listening.
+            // With intake_call_enabled on or off, Unusable deliberately skips
+            // AI analysis and CallIntakeJob: voicemail email + signal only, no auto-ticket.
             if ($this->markUnusableTranscript($call)) {
+                $this->emitTranscribedSignal($call, true);
+
                 return; // finally still notifies the human.
             }
 
@@ -303,11 +306,11 @@ TEMPLATE;
      * reference-only intake.call_transcribed signal (E4, psa-ip15 W1 Task 3), and
      * dispatch the AI call-intake front-door job when enabled.
      *
-     * Extracted from transcribe()'s success tail to create a test seam —
-     * the private whisperTranscribe(...) and analyzeWithAi(...) helpers build
-     * their own raw GuzzleClient with no fake/mock seam, so the full transcribe()
-     * success path can't be driven end-to-end in tests. The usability check also
-     * runs before analysis; keeping it here protects direct finalization.
+     * Extracted from transcribe()'s success tail to create a test seam.
+     * Download, ffmpeg detection and aggregate transcription are protected seams
+     * so tests can exercise transcribe() without external audio/API calls.
+     * The usability check also runs before analysis; keeping it here protects
+     * direct finalization.
      *
      * The signal emit is wrapped in its own try/catch: this method runs INSIDE
      * transcribe()'s try block, so an unwrapped throw here would be caught by
@@ -317,7 +320,11 @@ TEMPLATE;
      */
     protected function finalizeSuccessfulTranscription(PhoneCall $call): void
     {
+        // Even when intake_call_enabled is on, flagged calls get voicemail email
+        // + signal only, no auto-ticket or AI routing/spam assessment.
         if ($this->markUnusableTranscript($call)) {
+            $this->emitTranscribedSignal($call, true);
+
             return;
         }
 
@@ -327,14 +334,7 @@ TEMPLATE;
             'transcription_error' => null,
         ]);
 
-        try {
-            app(\App\Services\Signals\SignalHub::class)->emit('intake.call_transcribed', $call, 'call transcribed', ['client_id' => $call->client_id]);
-        } catch (\Throwable $e) {
-            Log::warning('[Transcription] intake.call_transcribed emit failed', [
-                'call_id' => $call->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
+        $this->emitTranscribedSignal($call);
 
         // AI call-intake front-door (psa-xcyo): dispatch only when CALL intake is enabled.
         // psa-28j4 §3.2: this reads the per-channel intakeCallEnabled() gate, NOT the shared
@@ -347,6 +347,28 @@ TEMPLATE;
         }
     }
 
+    /** Reference-only and fail-soft on both success exits; never emit raw text. */
+    private function emitTranscribedSignal(PhoneCall $call, bool $unusable = false): void
+    {
+        $context = ['client_id' => $call->client_id];
+        if ($unusable) {
+            $context['transcript_unusable'] = true;
+        }
+
+        try {
+            app(\App\Services\Signals\SignalHub::class)->emit(
+                'intake.call_transcribed', $call,
+                $unusable ? 'call transcribed — transcript unusable, listen to the recording' : 'call transcribed',
+                $context
+            );
+        } catch (\Throwable $e) {
+            Log::warning('[Transcription] intake.call_transcribed emit failed', [
+                'call_id' => $call->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     /**
      * A broken quality check is unassessed content, not a transport failure or a
      * plain success. Keep the raw text and send it to a human without throwing
@@ -356,7 +378,7 @@ TEMPLATE;
     {
         try {
             $unusable = app(\App\Support\TranscriptUsability::class)->isUnusable(
-                (string) $call->transcription, $call->recording_duration
+                $call->transcription, $call->recording_duration
             );
         } catch (\Throwable) {
             $unusable = true;
@@ -418,7 +440,7 @@ TEMPLATE;
      *
      * @param  GuzzleClient|null  $client  Injectable for tests; production uses a fresh client.
      */
-    private function downloadRecording(string $url, ?GuzzleClient $client = null): string
+    protected function downloadRecording(string $url, ?GuzzleClient $client = null): string
     {
         $tempFile = tempnam(sys_get_temp_dir(), 'psa_recording_');
 
@@ -593,7 +615,7 @@ TEMPLATE;
     /**
      * Check if ffmpeg and ffprobe binaries are available on the system.
      */
-    private function isFfmpegAvailable(): bool
+    protected function isFfmpegAvailable(): bool
     {
         static $available = null;
         if ($available !== null) {
@@ -693,7 +715,7 @@ TEMPLATE;
      *
      * @param  string|null  $namePrompt  Optional name-bias hint; see whisperTranscribe().
      */
-    private function whisperTranscribeAll(string $filePath, string $apiKey, array &$tempFiles, ?string $namePrompt = null): string
+    protected function whisperTranscribeAll(string $filePath, string $apiKey, array &$tempFiles, ?string $namePrompt = null): string
     {
         if (filesize($filePath) <= self::MAX_WHISPER_SIZE) {
             return $this->whisperTranscribe($filePath, $apiKey, $namePrompt);

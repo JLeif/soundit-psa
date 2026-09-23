@@ -23,7 +23,7 @@ class UnusableTranscriptTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function makeCall(string $text, ?int $duration): PhoneCall
+    private function makeCall(?string $text, ?int $duration): PhoneCall
     {
         return PhoneCall::forceCreate([
             'call_uuid' => (string) \Illuminate\Support\Str::uuid(),
@@ -55,8 +55,31 @@ class UnusableTranscriptTest extends TestCase
         $this->assertSame('You', $call->fresh()->transcription);
         $this->assertFalse($call->fresh()->isTranscribed());
         $this->assertTrue($call->fresh()->hasTerminalTranscription());
-        $this->assertDatabaseCount('signal_events', 0);
+        $this->assertDatabaseHas('signal_events', ['type_key' => 'intake.call_transcribed', 'entity_id' => $call->id]);
         Queue::assertNotPushed(CallIntakeJob::class);
+    }
+
+    public function test_absence_is_not_an_unusable_transcript(): void
+    {
+        foreach ([null, '', '   '] as $text) {
+            $call = $this->makeCall($text, 17);
+            $this->finalize($call);
+            $this->assertSame(TranscriptionStatus::Completed, $call->fresh()->transcription_status);
+            $this->assertSame($text, $call->fresh()->transcription);
+            $this->assertFalse((new TranscriptUsability)->isUnusable($text, 17));
+        }
+    }
+
+    public function test_short_real_message_is_deliberately_flagged_for_a_listen(): void
+    {
+        // Accepted false positive: real speech + silence tail, not proof of silence.
+        $text = "Call me back, it's Dave";
+        $this->assertSame(23, mb_strlen($text));
+        $call = $this->makeCall($text, 17);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+        $this->assertSame($text, $call->fresh()->transcription);
+        $this->assertTrue((new TranscriptUsability)->isUnusable($text, 17));
     }
 
     public function test_normal_density_message_is_unchanged(): void
@@ -112,7 +135,7 @@ class UnusableTranscriptTest extends TestCase
         $this->finalize($call);
         $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
         $this->assertSame(TranscriptUsability::WARNING, $call->fresh()->transcription_error);
-        $this->assertDatabaseCount('signal_events', 0);
+        $this->assertDatabaseHas('signal_events', ['type_key' => 'intake.call_transcribed', 'entity_id' => $call->id]);
     }
 
     public function test_unusable_call_renders_listen_marker_and_not_ai_summary(): void

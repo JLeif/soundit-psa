@@ -23,13 +23,18 @@ class TranscriptUsability
         'subs by www zeoranger co uk',
     ];
 
-    public function isUnusable(string $transcript, ?int $duration): bool
+    public function isUnusable(?string $transcript, ?int $duration): bool
     {
-        $text = trim($transcript);
+        $text = trim($transcript ?? '');
+        // Absence is not a quality judgement. Preserve the pre-existing path
+        // for calls without transcript content, including direct finalization.
+        if ($text === '') {
+            return false;
+        }
         $normalized = mb_strtolower($text, 'UTF-8');
         $normalized = trim(preg_replace('/[\p{P}\p{Z}\s]+/u', ' ', $normalized) ?? $normalized);
 
-        if ($text === '' || in_array($normalized, self::STOCK, true)) {
+        if (in_array($normalized, self::STOCK, true)) {
             return true;
         }
 
