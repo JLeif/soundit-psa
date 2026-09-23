@@ -124,6 +124,7 @@ class TechnicianAgent
                 maxRounds: 10,
                 maxTokenBudget: 200_000,
                 wallClockSeconds: 240,
+                ignoreUndeclaredArgumentsFor: $surface->ignoreUndeclaredArgumentsFor(),
             );
 
             // The loop ran to completion. If the agent took no action, $response->text is its

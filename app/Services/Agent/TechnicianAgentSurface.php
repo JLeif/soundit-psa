@@ -119,6 +119,12 @@ final class TechnicianAgentSurface
         return $this->tools;
     }
 
+    /** Undeclared recipient/body input must not reach the server-drafted reply tool. */
+    public function ignoreUndeclaredArgumentsFor(): array
+    {
+        return ['send_reply'];
+    }
+
     /** Will this turn run $name? True only for names this turn published. */
     public function allows(string $name): bool
     {
