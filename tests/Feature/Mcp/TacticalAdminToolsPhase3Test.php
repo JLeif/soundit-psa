@@ -397,6 +397,36 @@ class TacticalAdminToolsPhase3Test extends TestCase
         $this->assertStringNotContainsString('downloads.example.test', $auditJson);
     }
 
+    public function test_both_installer_verbs_allow_immediate_retry_and_publish_atomic_delivery_instructions(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $this->freezeTime();
+        $client = Client::factory()->create(['tactical_site_id' => 'Acme|Main']);
+        $tools = ['tactical_get_or_create_installer', 'tactical_generate_installer'];
+        $token = $this->token($tools);
+        $published = collect($this->listTools($token))->keyBy('name');
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('getInstallerInfo')->times(4)->with('Acme|Main', 'windows')
+            ->andReturn(new InstallerInfo(downloadUrl: 'https://downloads.example.test/agent.exe'));
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        foreach ($tools as $tool) {
+            for ($attempt = 0; $attempt < 2; $attempt++) {
+                $response = $this->callTool($token, $tool, [
+                    'client_id' => $client->id,
+                    'platform' => 'windows',
+                    'reason' => 'Recover an installer whose delivery was interrupted.',
+                ]);
+                $response->assertOk();
+                $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+                $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
+            }
+            $this->assertStringContainsString('Capture and deliver the URL and command in the same step.', $published[$tool]['description']);
+            $this->assertStringContainsString('They cannot be fetched again, and a new call mints a new token.', $published[$tool]['description']);
+        }
+    }
+
     public function test_sync_admin_tools_require_reason_and_execute_existing_sync_wrappers(): void
     {
         $this->configureTactical();
