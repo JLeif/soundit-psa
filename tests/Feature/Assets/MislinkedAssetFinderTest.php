@@ -645,6 +645,178 @@ class MislinkedAssetFinderTest extends TestCase
         $this->assertSame('WINCO-', $prefixHits[0]['evidence']['hostname_prefix']);
     }
 
+    /**
+     * The multi-client distinctness filter (count($byClient) === 1 in
+     * buildPrefixOwners()) is what stops a prefix that two clients BOTH hold
+     * dominantly from being assigned to whichever of them array order visits
+     * first. Before the factory-prefix exclusion landed, the only control
+     * covering it used DESKTOP- — which is now skipped before any counting, so
+     * that control passes for a different reason and the filter itself became
+     * untested. Measured on the branch: changing the comparison to >= 1 left
+     * the whole file green.
+     *
+     * This control uses SRV-, a prefix on no factory list, held dominantly by
+     * two clients at once. Neither may own it, so the third client's SRV- box
+     * must not read as a suspect.
+     */
+    public function test_a_non_factory_prefix_two_clients_hold_dominant_is_owned_by_neither(): void
+    {
+        $first = Client::factory()->create(['name' => 'First']);
+        $second = Client::factory()->create(['name' => 'Second']);
+        $third = Client::factory()->create(['name' => 'Third']);
+
+        // SRV- is dominant for BOTH First and Second: 3 each, at or above N=3.
+        foreach (['SRV-A1', 'SRV-A2', 'SRV-A3'] as $h) {
+            $this->asset($first, ['hostname' => $h]);
+        }
+        foreach (['SRV-B1', 'SRV-B2', 'SRV-B3'] as $h) {
+            $this->asset($second, ['hostname' => $h]);
+        }
+        // A third client's SRV- machine: a suspect only if someone owns SRV-.
+        $this->asset($third, ['hostname' => 'SRV-C1']);
+
+        $result = $this->finder()->find(null);
+        $srvHits = array_values(array_filter(
+            $result['tier_b'],
+            fn ($r) => ($r['evidence']['hostname_prefix'] ?? null) === 'SRV-'
+        ));
+
+        $this->assertCount(0, $srvHits,
+            'SRV- is held dominantly by two clients, so the distinctness filter must '
+            .'leave it owned by nobody. A finding here means a prefix was assigned to '
+            .'whichever client the map happened to visit first.');
+
+        // Precondition: SRV- really did clear the learned-dominance threshold for
+        // both, so the zero above is the filter working and not the count failing.
+        $this->assertSame(3, MislinkedAssetFinder::LEARNED_PREFIX_MIN);
+    }
+
+    /**
+     * The prefixes this suite asserts are excluded, written out rather than read
+     * from the constant. THIS LIST IS THE CONTROL: a provider driven from
+     * FACTORY_HOSTNAME_PREFIXES cannot fail when an entry is deleted, because the
+     * deletion removes its own test case — measured, the suite merely dropped from
+     * 47 cases to 46 and stayed green. Naming the expectation independently is what
+     * makes a removal a failure instead of a smaller run.
+     *
+     * Adding an entry to the constant therefore requires adding it here too, which
+     * is the point: a new entry must arrive with its own evidence and its own case.
+     *
+     * @var array<int, string>
+     */
+    private const EXPECTED_FACTORY_PREFIXES = [
+        'DESKTOP-',
+        'LAPTOP-',
+        'WINDOWS-',
+        'WIN-',
+        'MACBOOK-',
+        'MACBOOKAIR-',
+        'MACBOOKPRO-',
+        'IMAC-',
+        'MACMINI-',
+        'UBUNTU-',
+        'DEBIAN-',
+        'LOCALHOST-',
+    ];
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function factoryPrefixProvider(): array
+    {
+        $cases = [];
+        foreach (self::EXPECTED_FACTORY_PREFIXES as $prefix) {
+            $cases[$prefix] = [$prefix];
+        }
+
+        return $cases;
+    }
+
+    /**
+     * The membership assertion the per-entry control cannot make for itself: the
+     * shipped constant must be exactly the list this suite covers, in both
+     * directions. An entry removed from the constant fails here; an entry added
+     * without a case fails here too.
+     */
+    public function test_the_factory_prefix_list_is_exactly_the_covered_set(): void
+    {
+        $this->assertSame(
+            self::EXPECTED_FACTORY_PREFIXES,
+            MislinkedAssetFinder::FACTORY_HOSTNAME_PREFIXES,
+            'FACTORY_HOSTNAME_PREFIXES has drifted from the set this suite covers. '
+            .'Every entry needs evidence for why it is a vendor default and a case '
+            .'proving it is load-bearing; removing one must be a deliberate act, not '
+            .'a silently smaller test run.'
+        );
+    }
+
+    /**
+     * EVERY entry on the factory list must be load-bearing. Before this control
+     * only DESKTOP- was exercised, so deleting any other entry — including
+     * WINDOWS-, the one the live fleet was a single asset away from firing on —
+     * left the suite green and the exposure came back silently.
+     *
+     * Driven from the constant itself, so an entry added later without evidence
+     * is covered the moment it is added, and an entry removed takes its own case
+     * with it. The case is built from the prefix under test: one client holds
+     * three machines wearing it (enough to be learned), another holds one. With
+     * the entry present nothing fires; with it removed the prefix is learned as
+     * the first client's fingerprint and the second client's machine reads as a
+     * suspect.
+     *
+     * @dataProvider factoryPrefixProvider
+     */
+    public function test_every_factory_prefix_entry_is_load_bearing(string $prefix): void
+    {
+        $owner = Client::factory()->create(['name' => 'Owner']);
+        $other = Client::factory()->create(['name' => 'Other']);
+
+        foreach (['A1', 'A2', 'A3'] as $suffix) {
+            $this->asset($owner, ['hostname' => $prefix.$suffix]);
+        }
+        $this->asset($other, ['hostname' => $prefix.'B1']);
+
+        $result = $this->finder()->find(null);
+        $hits = array_values(array_filter(
+            $result['tier_b'],
+            fn ($r) => ($r['evidence']['hostname_prefix'] ?? null) === $prefix
+        ));
+
+        $this->assertCount(0, $hits,
+            $prefix.' is on FACTORY_HOSTNAME_PREFIXES, so it must never be learned as a '
+            ."client's fingerprint. A finding here means that entry is not doing its job "
+            .'— either it was removed, or the exclusion no longer reaches it.');
+    }
+
+    /**
+     * The control above proves each entry SUPPRESSES; this proves the fixtures it
+     * uses can actually produce a finding, so a green run there is the exclusion
+     * working rather than a case that could never fire. Same shape, same counts,
+     * one prefix that is deliberately NOT on the list.
+     */
+    public function test_the_load_bearing_fixture_shape_fires_for_a_non_factory_prefix(): void
+    {
+        $owner = Client::factory()->create(['name' => 'Owner']);
+        $other = Client::factory()->create(['name' => 'Other']);
+
+        $this->assertNotContains('KIOSK-', MislinkedAssetFinder::FACTORY_HOSTNAME_PREFIXES,
+            'This positive control depends on KIOSK- being absent from the factory list.');
+
+        foreach (['A1', 'A2', 'A3'] as $suffix) {
+            $this->asset($owner, ['hostname' => 'KIOSK-'.$suffix]);
+        }
+        $foreign = $this->asset($other, ['hostname' => 'KIOSK-B1']);
+
+        $result = $this->finder()->find(null);
+        $hits = array_values(array_filter(
+            $result['tier_b'],
+            fn ($r) => ($r['evidence']['hostname_prefix'] ?? null) === 'KIOSK-'
+        ));
+
+        $this->assertCount(1, $hits);
+        $this->assertSame($foreign->id, $hits[0]['asset_id']);
+    }
+
     public function test_rule6_does_not_fire_below_the_learned_threshold(): void
     {
         $a = Client::factory()->create();

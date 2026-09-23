@@ -118,12 +118,35 @@ class MislinkedAssetFinder
      * distinguish "one client owns DESKTOP-" from "one client happens to hold three
      * un-renamed machines", and on this data it guesses wrong.
      *
+     * WHY WINDOWS- IS HERE, since it is the one entry a reader would reasonably
+     * challenge (it sits at exactly one client, which is also what a deliberate
+     * scheme looks like). What separates the two is the SUFFIX, not the count.
+     * Measured on the live fleet 2026-09-23, suffixes rendered as shape only
+     * (A = letter, 9 = digit) because the hostnames themselves are client data:
+     *
+     *   WINDOWS-  7 assets, every suffix 7 chars, shapes 9A9AAAA / 9AAAAA9 /
+     *             9AA9A9A / AAAA9AA / A9AAAA9 / AA9AAA9 / AA99AAA — no two alike,
+     *             letters and digits interleaved at no fixed position.
+     *   DESKTOP- 31 assets, every suffix 7 chars, same interleaved random shape.
+     *   WIN-      1 asset, suffix 11 chars — the documented Windows Server default
+     *             width, and 11 is a width no human picks.
+     *
+     * A fixed-width random alphanumeric suffix is what a vendor GENERATES. Every
+     * genuine client scheme measured on the same fleet reads the opposite way:
+     * short, stable-width, and meaningful (site codes, room names, initials), and
+     * none of them interleaves digits at random positions.
+     *
+     * That is evidence about SHAPE, not a proof of origin, and it is stated here
+     * rather than in a commit message so the next reader can weigh it. If a client
+     * ever adopts a random-suffix scheme of their own, this list silences it — the
+     * trade is accepted deliberately, and rule 3 still reports a genuine collision.
+     *
      * @var array<int, string>
      */
-    private const FACTORY_HOSTNAME_PREFIXES = [
+    public const FACTORY_HOSTNAME_PREFIXES = [
         'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
         'LAPTOP-',    // Windows default on portable SKUs
-        'WINDOWS-',   // older Windows / imaging default
+        'WINDOWS-',   // older Windows / imaging default — see the provenance note above
         'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
         'MACBOOK-',   // macOS default when the model name is hyphenated
         'MACBOOKAIR-',
