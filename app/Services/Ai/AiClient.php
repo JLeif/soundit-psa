@@ -207,6 +207,7 @@ class AiClient
             $acceptedKeys[$tool['name']] = is_array($schema)
                 && (! array_key_exists('additionalProperties', $schema) || $schema['additionalProperties'] === false)
                 && (is_array($properties) || $properties instanceof \stdClass)
+                && ! (is_array($properties) && $properties !== [] && array_is_list($properties))
                     ? array_keys((array) $properties)
                     : null;
         }
@@ -298,6 +299,22 @@ class AiClient
                         // this loop, and the ticket body is untrusted client text.
                         'content' => json_encode([
                             'error' => "Tool '{$toolName}' is not available in this deployment. Do not retry it; continue without it and say plainly what you could not check.",
+                        ]),
+                    ];
+
+                    continue;
+                }
+
+                if (! is_array($toolInput)) {
+                    Log::warning('[AiClient] Refused non-object tool arguments', [
+                        'tool' => $toolName,
+                        'type' => get_debug_type($toolInput),
+                    ]);
+                    $toolResults[] = [
+                        'type' => 'tool_result',
+                        'tool_use_id' => $toolId,
+                        'content' => json_encode([
+                            'error' => 'Tool arguments must be a JSON object. Call REFUSED; retry using the published arguments.',
                         ]),
                     ];
 
