@@ -95,8 +95,12 @@ class MislinkedAssetFinder
     ];
 
     /**
-     * Hostname prefixes an OPERATING SYSTEM assigns, never a naming scheme anyone
-     * chose — so no client can own one however many of them it happens to hold.
+     * Hostname prefixes that are NOT a client's naming scheme, so no client can own
+     * one however many of them it happens to hold. An entry qualifies on one of two
+     * grounds: a documented OS or vendor default (DESKTOP-, WIN-, the mac and linux
+     * entries), or a generated name admitted by recorded judgement because the harm
+     * of omitting it outweighs the cost of silencing it — see WINDOWS- below, which
+     * cites no vendor default and says so.
      *
      * buildPrefixOwners() rejects a generic prefix only when 2+ clients hold it
      * DOMINANTLY, and that test needs data thick enough to express the fact. On a
