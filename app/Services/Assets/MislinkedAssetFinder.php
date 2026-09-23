@@ -129,12 +129,21 @@ class MislinkedAssetFinder
      *             letters and digits interleaved at no fixed position.
      *   DESKTOP- 31 assets, every suffix 7 chars, same interleaved random shape.
      *   WIN-      1 asset, suffix 11 chars — the documented Windows Server default
-     *             width, and 11 is a width no human picks.
+     *             width.
      *
-     * A fixed-width random alphanumeric suffix is what a vendor GENERATES. Every
-     * genuine client scheme measured on the same fleet reads the opposite way:
-     * short, stable-width, and meaningful (site codes, room names, initials), and
-     * none of them interleaves digits at random positions.
+     * The discriminator is that the width is FIXED and the characters are not:
+     * one suffix width across every asset wearing the prefix, with letters and
+     * digits interleaved at no fixed position and no two suffixes alike. Genuine
+     * client schemes measured on the same fleet are the other way round — their
+     * widths VARY because the suffix means something (site codes, room names,
+     * initials), so on this fleet they ran anywhere from 4 to 9 characters under
+     * a single prefix while every factory prefix sat at exactly one width.
+     *
+     * That is a statement about SHAPE ONLY. A fixed-width random-looking suffix
+     * is what a generator produces; it does not establish WHICH generator, and a
+     * client scheme built from a serial number or an MDM naming template would
+     * look the same. The entry rests on that shape plus the vendor defaults
+     * documented for DESKTOP- and WIN-, not on a proof of origin.
      *
      * That is evidence about SHAPE, not a proof of origin, and it is stated here
      * rather than in a commit message so the next reader can weigh it. If a client
@@ -146,7 +155,7 @@ class MislinkedAssetFinder
     public const FACTORY_HOSTNAME_PREFIXES = [
         'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
         'LAPTOP-',    // Windows default on portable SKUs
-        'WINDOWS-',   // older Windows / imaging default — see the provenance note above
+        'WINDOWS-',   // fixed-width random suffix, no cited vendor default — see the note above
         'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
         'MACBOOK-',   // macOS default when the model name is hyphenated
         'MACBOOKAIR-',

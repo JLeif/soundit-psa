@@ -8,6 +8,7 @@ use App\Models\Person;
 use App\Models\TacticalAsset;
 use App\Services\Assets\MislinkedAssetFinder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -685,19 +686,52 @@ class MislinkedAssetFinderTest extends TestCase
             'SRV- is held dominantly by two clients, so the distinctness filter must '
             .'leave it owned by nobody. A finding here means a prefix was assigned to '
             .'whichever client the map happened to visit first.');
+    }
 
-        // Precondition: SRV- really did clear the learned-dominance threshold for
-        // both, so the zero above is the filter working and not the count failing.
-        $this->assertSame(3, MislinkedAssetFinder::LEARNED_PREFIX_MIN);
+    /**
+     * The positive control for the test above, and it has to be its OWN fleet:
+     * dominance is computed across the whole universe, so a second pair added
+     * beside First and Second makes THREE clients hold SRV- dominantly and the
+     * filter still declines — measured, that is how the first version of this
+     * control failed.
+     *
+     * Same prefix, same fixture shape, ONE dominant holder. If this does not fire
+     * then three machines under a prefix are not enough to learn it on this
+     * fixture, and the zero next door is the count failing rather than the
+     * distinctness filter working. Asserting LEARNED_PREFIX_MIN could not tell
+     * those apart: it pins a threshold, not the state the threshold is used for.
+     */
+    public function test_a_non_factory_prefix_one_client_holds_dominant_is_owned_by_that_client(): void
+    {
+        $owner = Client::factory()->create(['name' => 'Sole']);
+        $other = Client::factory()->create(['name' => 'Lone']);
+
+        foreach (['SRV-A1', 'SRV-A2', 'SRV-A3'] as $h) {
+            $this->asset($owner, ['hostname' => $h]);
+        }
+        $exposed = $this->asset($other, ['hostname' => 'SRV-C1']);
+
+        $hits = array_values(array_filter(
+            $this->finder()->find(null)['tier_b'],
+            fn ($r) => ($r['evidence']['hostname_prefix'] ?? null) === 'SRV-'
+        ));
+
+        $this->assertCount(1, $hits,
+            'Three SRV- machines at a single client must be enough to learn the '
+            .'prefix. A zero here means the sibling test proves nothing.');
+        $this->assertSame($exposed->id, $hits[0]['asset_id']);
+        $this->assertSame($owner->id, $hits[0]['other_client_id']);
     }
 
     /**
      * The prefixes this suite asserts are excluded, written out rather than read
      * from the constant. THIS LIST IS THE CONTROL: a provider driven from
      * FACTORY_HOSTNAME_PREFIXES cannot fail when an entry is deleted, because the
-     * deletion removes its own test case — measured, the suite merely dropped from
-     * 47 cases to 46 and stayed green. Naming the expectation independently is what
-     * makes a removal a failure instead of a smaller run.
+     * deletion removes its own test case. Measured while building this suite, at a
+     * state that had the per-entry provider but not yet the KIOSK- positive
+     * control: dropping WINDOWS- took the run from 47 cases to 46 and it stayed
+     * green. Naming the expectation independently is what makes a removal a
+     * failure instead of a smaller run.
      *
      * Adding an entry to the constant therefore requires adding it here too, which
      * is the point: a new entry must arrive with its own evidence and its own case.
@@ -756,16 +790,16 @@ class MislinkedAssetFinderTest extends TestCase
      * WINDOWS-, the one the live fleet was a single asset away from firing on —
      * left the suite green and the exposure came back silently.
      *
-     * Driven from the constant itself, so an entry added later without evidence
-     * is covered the moment it is added, and an entry removed takes its own case
-     * with it. The case is built from the prefix under test: one client holds
+     * Driven from EXPECTED_FACTORY_PREFIXES, never from the constant under test —
+     * see that docblock for why. This test proves each entry SUPPRESSES; deletion
+     * is caught by the membership assertion, which is the only thing that can
+     * catch it. The case is built from the prefix under test: one client holds
      * three machines wearing it (enough to be learned), another holds one. With
      * the entry present nothing fires; with it removed the prefix is learned as
      * the first client's fingerprint and the second client's machine reads as a
      * suspect.
-     *
-     * @dataProvider factoryPrefixProvider
      */
+    #[DataProvider('factoryPrefixProvider')]
     public function test_every_factory_prefix_entry_is_load_bearing(string $prefix): void
     {
         $owner = Client::factory()->create(['name' => 'Owner']);
