@@ -191,6 +191,20 @@
                         </form>
                     </div>
 
+                @elseif($call->transcription_status === \App\Enums\TranscriptionStatus::Unusable)
+                    <div class="alert alert-warning" role="alert">
+                        {{ \App\Support\TranscriptUsability::WARNING }}
+                        <a href="{{ route('calls.recording', $call) }}">Listen to recording</a>
+                    </div>
+                    <details class="mb-2">
+                        <summary>Unverified raw transcript (do not rely on this)</summary>
+                        <pre class="text-wrap">{{ $call->transcription }}</pre>
+                    </details>
+                    <form method="POST" action="{{ route('calls.transcribe', $call) }}">
+                        @csrf
+                        <button type="submit" class="btn btn-outline-secondary btn-sm">Retry transcription</button>
+                    </form>
+
                 @elseif($call->isTranscribing())
                     <div class="text-center py-3">
                         <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>

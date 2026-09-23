@@ -211,14 +211,20 @@ class SendTicketNotification implements ShouldQueue
 
             if ($callId = $ctx['call_id'] ?? null) {
                 $call = \App\Models\PhoneCall::find($callId);
-                if ($call?->call_summary) {
+                $unusable = ($ctx['transcript_unusable'] ?? false)
+                    || $call?->transcription_status === \App\Enums\TranscriptionStatus::Unusable;
+                if ($unusable) {
+                    $lines[] = '';
+                    $lines[] = \App\Support\TranscriptUsability::WARNING;
+                }
+                if (! $unusable && $call?->call_summary) {
                     $lines[] = '';
                     $lines[] = 'AI Summary:';
                     $lines[] = trim($call->call_summary);
                 }
                 if ($call?->transcription) {
                     $lines[] = '';
-                    $lines[] = 'Transcript:';
+                    $lines[] = $unusable ? 'Unverified raw transcript (do not rely on this):' : 'Transcript:';
                     $lines[] = trim($call->transcription);
                 }
                 $lines[] = '';

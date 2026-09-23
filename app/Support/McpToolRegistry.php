@@ -1403,7 +1403,7 @@ class McpToolRegistry
                     'direction' => ['type' => 'string', 'enum' => ['inbound', 'outbound'], 'description' => 'Filter by direction.'],
                     'unlinked' => ['type' => 'boolean', 'description' => 'Only calls not yet linked to a ticket.'],
                     'client_id' => ['type' => 'integer', 'description' => 'Optional: scope to one client. Omit for cross-client triage of unresolved calls.'],
-                    'transcription_status' => ['type' => 'string', 'enum' => ['pending', 'processing', 'completed', 'failed'], 'description' => 'Filter by transcription status.'],
+                    'transcription_status' => ['type' => 'string', 'enum' => ['pending', 'processing', 'completed', 'failed', 'unusable'], 'description' => 'Filter by transcription status.'],
                     'since' => ['type' => 'string', 'description' => 'ISO-8601; only calls started at/after this time.'],
                     'limit' => ['type' => 'integer', 'description' => 'Max rows (default 25, cap 50).'],
                 ],

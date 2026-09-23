@@ -48,7 +48,7 @@ class ResolveCallRecording extends Command
         // Auto-transcribe if enabled
         if (TranscriptionConfig::autoTranscribeEnabled()
             && TranscriptionConfig::isConfigured()
-            && ! $call->isTranscribed()
+            && ! $call->hasTerminalTranscription()
             && ! $call->isTranscribing()
             && ($call->recording_duration ?? 0) >= TranscriptionConfig::minDurationSeconds()
         ) {

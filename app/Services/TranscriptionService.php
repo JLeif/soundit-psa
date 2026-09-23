@@ -125,7 +125,7 @@ TEMPLATE;
     public function transcribe(PhoneCall $call): void
     {
         // Guard: skip if already transcribed or no recording
-        if ($call->isTranscribed() || ! $call->recording_url) {
+        if ($call->hasTerminalTranscription() || ! $call->recording_url) {
             return;
         }
 
@@ -228,6 +228,11 @@ TEMPLATE;
                 'diarized' => $isDiarized,
             ]);
 
+            // Do not ask AI to analyze or act on content already flagged for listening.
+            if ($this->markUnusableTranscript($call)) {
+                return; // finally still notifies the human.
+            }
+
             // 4. AI analysis (optional — raw transcript is the primary value)
             try {
                 if (AiConfig::isConfigured()) {
@@ -298,12 +303,11 @@ TEMPLATE;
      * reference-only intake.call_transcribed signal (E4, psa-ip15 W1 Task 3), and
      * dispatch the AI call-intake front-door job when enabled.
      *
-     * Extracted from transcribe()'s success tail purely to create a test seam —
+     * Extracted from transcribe()'s success tail to create a test seam —
      * the private whisperTranscribe(...) and analyzeWithAi(...) helpers build
      * their own raw GuzzleClient with no fake/mock seam, so the full transcribe()
-     * success path can't be driven end-to-end in tests. This method is
-     * behaviour-preserving: same statements, same order, called from the same
-     * place inside transcribe()'s try block.
+     * success path can't be driven end-to-end in tests. The usability check also
+     * runs before analysis; keeping it here protects direct finalization.
      *
      * The signal emit is wrapped in its own try/catch: this method runs INSIDE
      * transcribe()'s try block, so an unwrapped throw here would be caught by
@@ -313,6 +317,10 @@ TEMPLATE;
      */
     protected function finalizeSuccessfulTranscription(PhoneCall $call): void
     {
+        if ($this->markUnusableTranscript($call)) {
+            return;
+        }
+
         $call->update([
             'transcription_status' => TranscriptionStatus::Completed,
             'transcribed_at' => now(),
@@ -337,6 +345,34 @@ TEMPLATE;
         if (\App\Support\AgentConfig::intakeCallEnabled()) {
             \App\Jobs\CallIntakeJob::dispatch($call->id)->afterCommit();
         }
+    }
+
+    /**
+     * A broken quality check is unassessed content, not a transport failure or a
+     * plain success. Keep the raw text and send it to a human without throwing
+     * into transcribe()'s Failed catch. Persistence failures still propagate.
+     */
+    private function markUnusableTranscript(PhoneCall $call): bool
+    {
+        try {
+            $unusable = app(\App\Support\TranscriptUsability::class)->isUnusable(
+                (string) $call->transcription, $call->recording_duration
+            );
+        } catch (\Throwable) {
+            $unusable = true;
+        }
+
+        if (! $unusable) {
+            return false;
+        }
+
+        $call->update([
+            'transcription_status' => TranscriptionStatus::Unusable,
+            'transcription_error' => \App\Support\TranscriptUsability::WARNING,
+            'transcribed_at' => now(),
+        ]);
+
+        return true;
     }
 
     /**

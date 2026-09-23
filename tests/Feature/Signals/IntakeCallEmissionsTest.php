@@ -207,6 +207,8 @@ class IntakeCallEmissionsTest extends TestCase
             'to_number' => '+15555550000',
             'status' => CallStatus::InProgress,
             'started_at' => now()->subMinutes(2),
+            'transcription' => 'Please call me back about the printer today.',
+            'recording_duration' => 10,
         ]);
     }
 
