@@ -75,37 +75,37 @@ class StaffTacticalActionToolExecutor
 
     /** @var array<string, int> */
     private const COOLDOWNS = [
-        'tactical_run_script' => 120,
-        'tactical_stage_script' => 120,
+        'tactical_run_script' => 0,
+        'tactical_stage_script' => 0,
         // 0 = no dispatch cooldown, per Charlie's ruling 2026-08-25 (T-22782: a failed
         // dispatch armed the window and blocked the live retry). The key must stay —
         // every lookup falls back to `?? 60`, so deleting it would silently reinstate
         // a 60s cooldown. Applies to direct dispatch AND the approval-time recheck of
         // staged commands; the per-ticket staging cooldown below is separate and kept.
         'tactical_run_command' => 0,
-        'tactical_stage_command' => 300,
-        'tactical_reboot_device' => 300,
-        'tactical_stage_reboot' => 300,
-        'tactical_shutdown_device' => 300,
-        'tactical_stage_shutdown' => 300,
-        'tactical_recover_mesh' => 60,
-        'tactical_stage_recover_mesh' => 60,
-        'tactical_set_maintenance' => 60,
-        'tactical_stage_maintenance' => 60,
-        'tactical_open_remote_control' => 60,
-        'tactical_stage_open_remote_control' => 60,
-        'tactical_refresh_device_snapshot' => 60,
-        'tactical_start_service' => 120,
-        'tactical_stage_start_service' => 120,
-        'tactical_stop_service' => 300,
-        'tactical_stage_stop_service' => 300,
-        'tactical_restart_service' => 300,
-        'tactical_stage_restart_service' => 300,
-        'tactical_set_service_start_type' => 300,
-        'tactical_scan_patches' => 300,
-        'tactical_set_patch_action' => 120,
-        'tactical_install_approved_patches' => 600,
-        'tactical_stage_install_approved_patches' => 600,
+        'tactical_stage_command' => 0,
+        'tactical_reboot_device' => 0,
+        'tactical_stage_reboot' => 0,
+        'tactical_shutdown_device' => 0,
+        'tactical_stage_shutdown' => 0,
+        'tactical_recover_mesh' => 0,
+        'tactical_stage_recover_mesh' => 0,
+        'tactical_set_maintenance' => 0,
+        'tactical_stage_maintenance' => 0,
+        'tactical_open_remote_control' => 0,
+        'tactical_stage_open_remote_control' => 0,
+        'tactical_refresh_device_snapshot' => 0,
+        'tactical_start_service' => 0,
+        'tactical_stage_start_service' => 0,
+        'tactical_stop_service' => 0,
+        'tactical_stage_stop_service' => 0,
+        'tactical_restart_service' => 0,
+        'tactical_stage_restart_service' => 0,
+        'tactical_set_service_start_type' => 0,
+        'tactical_scan_patches' => 0,
+        'tactical_set_patch_action' => 0,
+        'tactical_install_approved_patches' => 0,
+        'tactical_stage_install_approved_patches' => 0,
     ];
 
     /** @var array<string, string> */
@@ -316,7 +316,7 @@ class StaffTacticalActionToolExecutor
                 return new TechnicianApprovalResult('gate_declined');
             }
 
-            if ($this->cooldownActive($directTool, $asset, $ticket, self::COOLDOWNS[$directTool] ?? 60)) {
+            if ($this->cooldownActive($directTool, $asset, $ticket, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', (int) $run->client_id, $ticket, $asset, $run->content_hash, 'Tactical staged action cooldown active; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaimTo($releaseState);
 
@@ -512,7 +512,7 @@ class StaffTacticalActionToolExecutor
             ];
         }
 
-        if ($this->cooldownActive($tool, $asset, $ticket, self::COOLDOWNS[$tool] ?? 60)) {
+        if ($this->cooldownActive($tool, $asset, $ticket, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, "{$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -667,7 +667,7 @@ class StaffTacticalActionToolExecutor
             ];
         }
 
-        if ($this->proposalCooldownActive($tool, $ticket, self::COOLDOWNS[$tool] ?? 60)) {
+        if ($this->proposalCooldownActive($tool, $ticket, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, "{$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1244,7 +1244,7 @@ class StaffTacticalActionToolExecutor
         if ($this->confirmHostnameError($tool, $human, $asset) || $this->confirmServiceNameError($tool, $human, $params)) {
             throw new \InvalidArgumentException('confirmation_mismatch');
         }
-        if ($this->cooldownActive($tool, $asset, Ticket::find($run->ticket_id), self::COOLDOWNS[$tool] ?? 60)) {
+        if ($this->cooldownActive($tool, $asset, Ticket::find($run->ticket_id), self::COOLDOWNS[$tool] ?? 0)) {
             throw new \App\Services\Technician\Scheduled\ScheduledUnavailable('cooldown');
         }
     }

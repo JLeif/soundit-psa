@@ -65,7 +65,7 @@ class StaffHuntressActionToolExecutor
 {
     private const DIRECT_DEDUP_HOURS = 24;
 
-    private const COOLDOWN_SECONDS = 300;
+    private const COOLDOWN_SECONDS = 0;
 
     /**
      * How long an Executing claim may stand before a re-stage treats it as

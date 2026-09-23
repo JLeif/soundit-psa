@@ -167,53 +167,53 @@ class StaffCippWriteToolExecutor
 
     /** @var array<string, int> */
     private const COOLDOWNS = [
-        'cipp_disable_user_sign_in' => 300,
-        'cipp_stage_disable_user_sign_in' => 300,
-        'cipp_enable_user_sign_in' => 300,
-        'cipp_stage_enable_user_sign_in' => 300,
-        'cipp_revoke_user_sessions' => 300,
-        'cipp_stage_revoke_user_sessions' => 300,
-        'cipp_remove_user_mfa_methods' => 300,
-        'cipp_stage_remove_user_mfa_methods' => 300,
-        'cipp_set_legacy_per_user_mfa' => 300,
-        'cipp_stage_set_legacy_per_user_mfa' => 300,
-        'cipp_assign_user_license' => 300,
-        'cipp_stage_assign_user_license' => 300,
-        'cipp_assign_tenant_user_license' => 300,
-        'cipp_stage_assign_tenant_user_license' => 300,
-        'cipp_remove_user_license' => 300,
-        'cipp_stage_remove_user_license' => 300,
-        'cipp_convert_mailbox' => 300,
-        'cipp_stage_convert_mailbox' => 300,
-        'cipp_set_mailbox_forwarding' => 300,
-        'cipp_stage_set_mailbox_forwarding' => 300,
-        'cipp_set_mailbox_gal_visibility' => 300,
-        'cipp_stage_set_mailbox_gal_visibility' => 300,
-        'cipp_set_mailbox_out_of_office' => 300,
-        'cipp_stage_set_mailbox_out_of_office' => 300,
+        'cipp_disable_user_sign_in' => 0,
+        'cipp_stage_disable_user_sign_in' => 0,
+        'cipp_enable_user_sign_in' => 0,
+        'cipp_stage_enable_user_sign_in' => 0,
+        'cipp_revoke_user_sessions' => 0,
+        'cipp_stage_revoke_user_sessions' => 0,
+        'cipp_remove_user_mfa_methods' => 0,
+        'cipp_stage_remove_user_mfa_methods' => 0,
+        'cipp_set_legacy_per_user_mfa' => 0,
+        'cipp_stage_set_legacy_per_user_mfa' => 0,
+        'cipp_assign_user_license' => 0,
+        'cipp_stage_assign_user_license' => 0,
+        'cipp_assign_tenant_user_license' => 0,
+        'cipp_stage_assign_tenant_user_license' => 0,
+        'cipp_remove_user_license' => 0,
+        'cipp_stage_remove_user_license' => 0,
+        'cipp_convert_mailbox' => 0,
+        'cipp_stage_convert_mailbox' => 0,
+        'cipp_set_mailbox_forwarding' => 0,
+        'cipp_stage_set_mailbox_forwarding' => 0,
+        'cipp_set_mailbox_gal_visibility' => 0,
+        'cipp_stage_set_mailbox_gal_visibility' => 0,
+        'cipp_set_mailbox_out_of_office' => 0,
+        'cipp_stage_set_mailbox_out_of_office' => 0,
         // Distinct delegates on one mailbox must not block each other. Exact-content
         // deduplication still applies; zero disables only the mailbox-wide cooldown.
         'cipp_set_mailbox_delegate' => 0,
         'cipp_stage_set_mailbox_delegate' => 0,
-        'cipp_remove_directory_role' => 300,
-        'cipp_stage_remove_directory_role' => 300,
-        'cipp_remove_mailbox_rule' => 300,
-        'cipp_stage_remove_mailbox_rule' => 300,
-        'cipp_release_quarantine_message' => 300,
-        'cipp_stage_release_quarantine_message' => 300,
-        'cipp_add_tenant_allow_entry' => 300,
-        'cipp_stage_add_tenant_allow_entry' => 300,
-        'cipp_wipe_device' => 300,
-        'cipp_stage_wipe_device' => 300,
-        'cipp_reassign_onedrive' => 300,
-        'cipp_stage_reassign_onedrive' => 300,
+        'cipp_remove_directory_role' => 0,
+        'cipp_stage_remove_directory_role' => 0,
+        'cipp_remove_mailbox_rule' => 0,
+        'cipp_stage_remove_mailbox_rule' => 0,
+        'cipp_release_quarantine_message' => 0,
+        'cipp_stage_release_quarantine_message' => 0,
+        'cipp_add_tenant_allow_entry' => 0,
+        'cipp_stage_add_tenant_allow_entry' => 0,
+        'cipp_wipe_device' => 0,
+        'cipp_stage_wipe_device' => 0,
+        'cipp_reassign_onedrive' => 0,
+        'cipp_stage_reassign_onedrive' => 0,
         'cipp_reset_user_password' => 300,
-        'cipp_create_user' => 300,
-        'cipp_stage_create_user' => 300,
-        'cipp_edit_user' => 300,
-        'cipp_stage_edit_user' => 300,
-        'cipp_set_group_membership' => 300,
-        'cipp_stage_set_group_membership' => 300,
+        'cipp_create_user' => 0,
+        'cipp_stage_create_user' => 0,
+        'cipp_edit_user' => 0,
+        'cipp_stage_edit_user' => 0,
+        'cipp_set_group_membership' => 0,
+        'cipp_stage_set_group_membership' => 0,
     ];
 
     private const OOO_MESSAGE_MAX = 2000;
@@ -826,7 +826,7 @@ class StaffCippWriteToolExecutor
         $this->resolver->resolveTicketForHeldAction($client->id, $run->ticket_id);
         $person = $this->resolver->resolveCippPerson($client->id, $payload['person_id'] ?? null);
         $params = $this->mailboxParamsForTool($tool, $client->id, $payload['params'] ?? [], $humanInputs, heldApproval: true, person: $person);
-        if ($this->cooldownActive($tool, $client->id, $person, null, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->cooldownActive($tool, $client->id, $person, null, self::COOLDOWNS[$tool] ?? 0)) {
             throw new \App\Services\Technician\Scheduled\ScheduledUnavailable('cooldown');
         }
         $people = ['owner' => ['person_id' => $person->person->id, 'id' => $person->userId, 'upn' => $person->userPrincipalName]];
@@ -942,7 +942,7 @@ class StaffCippWriteToolExecutor
                 }
             }
 
-            if ($this->cooldownActive($directTool, $client->id, $person, $license, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->cooldownActive($directTool, $client->id, $person, $license, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, $license, $run->content_hash, 'CIPP staged action cooldown active; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -1007,7 +1007,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->cooldownActive($tool, $client->id, $person, $license, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->cooldownActive($tool, $client->id, $person, $license, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -1073,10 +1073,10 @@ class StaffCippWriteToolExecutor
 
         // Shared across both paths: a held approval audits under the STAGED name, so a
         // single-name lookup would miss it here (security review psa-eerg4 R2).
-        if ($this->resetCooldownActive($client->id, $person, self::COOLDOWNS[$tool] ?? 300)) {
+        if (($secondsLeft = $this->resetCooldownRemainingSeconds($client->id, $person, self::COOLDOWNS[$tool] ?? 0)) > 0) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$tool} cooldown active; upstream call refused.", $actorLabel);
 
-            return ['error' => "{$tool} cooldown active for this target; no reset was performed. Wait before retrying a password reset."];
+            return ['error' => "{$tool} cooldown active for this target; no reset was performed. Retry in {$secondsLeft} seconds."];
         }
 
         try {
@@ -1182,11 +1182,11 @@ class StaffCippWriteToolExecutor
                 return $this->declined('Technician kill-switch engaged; the staged password reset was refused.');
             }
 
-            if ($this->resetCooldownActive($client->id, $person, self::COOLDOWNS[$directTool] ?? 300)) {
+            if (($secondsLeft = $this->resetCooldownRemainingSeconds($client->id, $person, self::COOLDOWNS[$directTool] ?? 0)) > 0) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $contentHash, 'Password reset cooldown active for this target; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
-                return $this->declined('This user\'s password was reset very recently; wait a few minutes and approve again if a new password is still needed.');
+                return $this->declined("This user's password was reset very recently; retry in {$secondsLeft} seconds and approve again if a new password is still needed.");
             }
 
             try {
@@ -1294,7 +1294,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->proposalCooldownActive($tool, $ticket, $person, null, self::COOLDOWNS[$directTool] ?? 300)) {
+        if ($this->proposalCooldownActive($tool, $ticket, $person, null, self::COOLDOWNS[$directTool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1467,7 +1467,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->proposalCooldownActive($tool, $ticket, $person, $license, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->proposalCooldownActive($tool, $ticket, $person, $license, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1619,7 +1619,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -1721,7 +1721,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1863,7 +1863,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('gate_declined');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -2398,7 +2398,7 @@ class StaffCippWriteToolExecutor
 
         // Shared targetKey-in-summary cooldown helper (same semantics as the
         // email-security non-person targets).
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -2508,7 +2508,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -2653,7 +2653,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('already_handled');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -2998,7 +2998,7 @@ class StaffCippWriteToolExecutor
 
         // Shared targetKey-in-summary cooldown helper (same semantics as the
         // email-security and create-user non-person-only targets).
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -3098,7 +3098,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -3252,7 +3252,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('already_handled');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -3715,7 +3715,7 @@ class StaffCippWriteToolExecutor
         // cooldown, not the single-name one: an approval audits under the STAGED
         // action_type, so a lookup filtered on the direct name alone is blind to
         // the write an approval just made (see licenseTargetCooldownActive()).
-        if ($this->licenseTargetCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->licenseTargetCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -3826,7 +3826,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -4180,7 +4180,7 @@ class StaffCippWriteToolExecutor
             // preceding approval's own executed write, and back-to-back approvals
             // of duplicate proposals reached upstream with no rail observing the
             // first (see licenseTargetCooldownActive()).
-            if ($this->licenseTargetCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->licenseTargetCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -6404,13 +6404,14 @@ class StaffCippWriteToolExecutor
      * Matches EXECUTED rows only, deliberately: an awaiting_approval row has not minted
      * a password, and counting it would make a proposal block its own approval.
      */
-    private function resetCooldownActive(int $clientId, ResolvedCippPerson $person, int $cooldownSeconds): bool
+    private function resetCooldownRemainingSeconds(int $clientId, ResolvedCippPerson $person, int $cooldownSeconds): int
     {
         if ($cooldownSeconds <= 0) {
-            return false;
+            return 0;
         }
 
-        return TechnicianActionLog::query()
+        $now = now();
+        $latest = TechnicianActionLog::query()
             ->whereIn('action_type', ['cipp_reset_user_password', 'cipp_stage_reset_user_password'])
             ->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))
@@ -6423,7 +6424,10 @@ class StaffCippWriteToolExecutor
             // falsely block a reset for the wrong user. Anchoring to the real prefix
             // "person #<id>:" makes the match exact and index-friendly.
             ->where('summary', 'like', $this->targetKey($person, null).':%')
-            ->exists();
+            ->latest('created_at')
+            ->first();
+
+        return $latest === null ? 0 : max(0, (int) ceil($now->diffInSeconds($latest->created_at->addSeconds($cooldownSeconds), false)));
     }
 
     private function proposalCooldownActive(string $tool, Ticket $ticket, ResolvedCippPerson $person, ?ResolvedCippLicense $license, int $cooldownSeconds): bool

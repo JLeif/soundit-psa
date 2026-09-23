@@ -33,7 +33,7 @@ class StaffCippAdminToolExecutor
 
     /** @var array<string, int> */
     private const COOLDOWNS = [
-        'cipp_sync_people_now' => 300,
+        'cipp_sync_people_now' => 0,
     ];
 
     public function __construct(

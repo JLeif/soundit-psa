@@ -113,45 +113,45 @@ class StaffTacticalAdminToolExecutor
 
     /** @var array<string, int> */
     private const COOLDOWNS = [
-        'tactical_create_client_site' => 300,
-        'tactical_provision_client_site' => 300,
-        'tactical_set_agent_custom_field' => 300,
-        'tactical_upsert_url_action' => 300,
-        'tactical_upsert_alert_template' => 300,
-        'tactical_set_default_alert_template' => 300,
+        'tactical_create_client_site' => 0,
+        'tactical_provision_client_site' => 0,
+        'tactical_set_agent_custom_field' => 0,
+        'tactical_upsert_url_action' => 0,
+        'tactical_upsert_alert_template' => 0,
+        'tactical_set_default_alert_template' => 0,
         // No installer cooldown per Jeeves's 2026-09-22 ruling (zAYpGMFJ):
         // independent token mints are additive; a timer only blocks recovery of lost delivery.
-        // Keep explicit zeroes: deleting these keys would not disable a fallback cooldown.
+        // Keep explicit zeroes: installer lookups index these keys directly; deleting them would error.
         'tactical_get_or_create_installer' => 0,
         'tactical_generate_installer' => 0,
-        'tactical_sync_devices_now' => 300,
-        'tactical_sync_scripts_now' => 300,
-        'tactical_provision_alert_ticketing' => 300,
-        'tactical_create_patch_policy' => 300,
-        'tactical_update_patch_policy' => 300,
-        'tactical_delete_patch_policy' => 600,
-        'tactical_reset_patch_policies' => 900,
-        'tactical_stage_reset_patch_policies' => 900,
-        'tactical_create_script' => 300,
-        'tactical_update_script' => 300,
-        'tactical_delete_script' => 600,
-        'tactical_create_automation_policy' => 300,
-        'tactical_update_automation_policy' => 300,
-        'tactical_delete_automation_policy' => 600,
-        'tactical_assign_automation_policy' => 600,
-        'tactical_create_check' => 300,
-        'tactical_create_agent_task' => 300,
-        'tactical_create_policy_task' => 300,
-        'tactical_update_task' => 300,
-        'tactical_delete_task' => 600,
-        'tactical_run_agent_task' => 300,
-        'tactical_run_policy_task_on_agent' => 300,
-        'tactical_run_policy_task_all' => 900,
-        'tactical_stage_run_policy_task_all' => 900,
-        'tactical_remove_agent' => 600,
-        'tactical_stage_remove_agent' => 600,
-        'tactical_set_client_custom_field' => 300,
-        'tactical_stage_set_client_custom_field' => 300,
+        'tactical_sync_devices_now' => 0,
+        'tactical_sync_scripts_now' => 0,
+        'tactical_provision_alert_ticketing' => 0,
+        'tactical_create_patch_policy' => 0,
+        'tactical_update_patch_policy' => 0,
+        'tactical_delete_patch_policy' => 0,
+        'tactical_reset_patch_policies' => 0,
+        'tactical_stage_reset_patch_policies' => 0,
+        'tactical_create_script' => 0,
+        'tactical_update_script' => 0,
+        'tactical_delete_script' => 0,
+        'tactical_create_automation_policy' => 0,
+        'tactical_update_automation_policy' => 0,
+        'tactical_delete_automation_policy' => 0,
+        'tactical_assign_automation_policy' => 0,
+        'tactical_create_check' => 0,
+        'tactical_create_agent_task' => 0,
+        'tactical_create_policy_task' => 0,
+        'tactical_update_task' => 0,
+        'tactical_delete_task' => 0,
+        'tactical_run_agent_task' => 0,
+        'tactical_run_policy_task_on_agent' => 0,
+        'tactical_run_policy_task_all' => 0,
+        'tactical_stage_run_policy_task_all' => 0,
+        'tactical_remove_agent' => 0,
+        'tactical_stage_remove_agent' => 0,
+        'tactical_set_client_custom_field' => 0,
+        'tactical_stage_set_client_custom_field' => 0,
     ];
 
     /** @var array<string, int> */
@@ -3743,7 +3743,7 @@ class StaffTacticalAdminToolExecutor
                 return new TechnicianApprovalResult('gate_declined');
             }
 
-            if ($this->cooldownActive($directTool, (int) $run->client_id, self::COOLDOWNS[$directTool] ?? 60)) {
+            if ($this->cooldownActive($directTool, (int) $run->client_id, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', (int) $run->client_id, $run->content_hash, 'Tactical staged admin action cooldown active; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -6097,7 +6097,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_get_or_create_installer',
-            'Generate a signed installer URL AND the matching install command for a client-scoped Tactical site using server-derived PSA client mapping. The download URL on its own is the bare agent binary and does NOT register the device: when install_command is present the recipient must run it too, and on Windows the command expects the downloaded file to be in the current folder. Relay the instructions field verbatim rather than summarising it as "download and run". Capture and deliver the URL and command in the same step. They cannot be fetched again, and a new call mints a new token. Both the URL and the command are returned once, not retained in audits, and the response is no-store; the command contains an enrolment credential, so do not paste it into a ticket, note, or log.',
+            'Generate a signed installer URL AND the matching install command for a client-scoped Tactical site using server-derived PSA client mapping. The download URL on its own is the bare agent binary and does NOT register the device: when install_command is present the recipient must run it too, and on Windows the command downloads the installer to its own temporary folder. Relay the instructions field verbatim rather than summarising it as "download and run". Capture and deliver the URL and, when present, the command in the same step. They cannot be fetched again, and a new call mints a new token. Earlier installer links remain valid until their own expiry; a new token does not revoke them. Both the URL and the command are returned once, not retained in audits, and the response is no-store; the command contains an enrolment credential, so do not paste it into a ticket, note, or log.',
             array_merge(self::reasonProperties(), [
                 'platform' => ['type' => 'string', 'enum' => ['windows', 'mac', 'linux'], 'description' => 'Installer platform.'],
             ]),
@@ -6110,7 +6110,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_generate_installer',
-            'Composed installer generation alias for tactical_get_or_create_installer. Capture and deliver the URL and command in the same step. They cannot be fetched again, and a new call mints a new token. It returns a signed installer URL and the matching install_command once; both are not retained in audits, and it uses no-store HTTP caching. The URL alone does NOT register the device — see tactical_get_or_create_installer for the full contract.',
+            'Composed installer generation alias for tactical_get_or_create_installer. Capture and deliver the URL and, when present, the command in the same step. They cannot be fetched again, and a new call mints a new token. Earlier installer links remain valid until their own expiry; a new token does not revoke them. It returns a signed installer URL and the matching install_command once; both are not retained in audits, and it uses no-store HTTP caching. The URL alone does NOT register the device — see tactical_get_or_create_installer for the full contract.',
             array_merge(self::reasonProperties(), [
                 'platform' => ['type' => 'string', 'enum' => ['windows', 'mac', 'linux'], 'description' => 'Installer platform.'],
             ]),

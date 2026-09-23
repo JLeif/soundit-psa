@@ -242,6 +242,7 @@ class CippStagedPasswordResetTest extends TestCase
      */
     public function test_approval_is_refused_while_the_target_is_in_reset_cooldown(): void
     {
+        $this->freezeTime();
         $this->configureCipp();
         $this->configureAiActor();
         $fixture = $this->cippFixture();
@@ -273,10 +274,12 @@ class CippStagedPasswordResetTest extends TestCase
         $this->app->instance(CippRestWriteClient::class, $blocked);
 
         $approver = User::factory()->create();
+        $this->travel(37)->seconds();
         $approval = $this->actingAs($approver)->postJson(route('cockpit.approve', $run));
 
         $this->assertFalse((bool) $approval->json('ok'));
         $this->assertNull($approval->json('secret'));
+        $this->assertStringContainsString('263 seconds', $approval->getContent());
     }
 
     /**

@@ -87,7 +87,7 @@ class StaffControlDOnboardingToolExecutor
     /** Sub-organizations are created with two-factor required (standing brief, step 2). */
     public const REQUIRE_MFA = 1;
 
-    private const COOLDOWN_SECONDS = 300;
+    private const COOLDOWN_SECONDS = 0;
 
     private const DIRECT_DEDUP_HOURS = 24;
 
@@ -664,6 +664,10 @@ class StaffControlDOnboardingToolExecutor
      */
     private function cooldownActive(array $actionTypes, int $clientId, string $targetKey, int $cooldownSeconds, ?string $ownContentHash = null): bool
     {
+        if ($cooldownSeconds <= 0) {
+            return false;
+        }
+
         return TechnicianActionLog::query()->whereIn('action_type', $actionTypes)->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))
             ->where(function ($query) use ($ownContentHash) {
@@ -680,6 +684,10 @@ class StaffControlDOnboardingToolExecutor
     /** @param  array<int, string>  $actionTypes */
     private function executedCooldownActive(array $actionTypes, int $clientId, string $targetKey, int $cooldownSeconds): bool
     {
+        if ($cooldownSeconds <= 0) {
+            return false;
+        }
+
         return TechnicianActionLog::query()->whereIn('action_type', $actionTypes)->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))->where('result_status', 'executed')
             ->where('summary', 'like', $targetKey.':%')->exists();
