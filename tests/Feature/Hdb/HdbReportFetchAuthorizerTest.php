@@ -31,7 +31,8 @@ class HdbReportFetchAuthorizerTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const PRESS_A = '780d16b2-76f4-4931-837b-c2917fb8db9a';
+    // Deliberately synthetic fixture; never use an ID copied from a client ticket.
+    private const PRESS_A = 'deadbeef-0000-4000-8000-000000000001';
 
     private const PRESS_B = '2f9c1a04-8b1e-4d77-9a3c-55e0b6d21f88';
 
@@ -287,7 +288,7 @@ class HdbReportFetchAuthorizerTest extends TestCase
     {
         $ticket = $this->ticketFor();
 
-        foreach ([null, '', 'not-a-uuid', '780d16b2-76f4-4931-837b', self::PRESS_A.'x'] as $offered) {
+        foreach ([null, '', 'not-a-uuid', substr(self::PRESS_A, 0, 23), self::PRESS_A.'x'] as $offered) {
             $this->assertRefused(
                 $this->authorizer()->authorize($ticket->id, $offered),
                 HdbReportFetchRefusal::MalformedPressId,

@@ -69,6 +69,12 @@ Source: development ruling 2026-07-31, parent `CKFuKp9m` §4. Work carrying a re
 
 Source: parent `CKFuKp9m` §4 and corrected leg-1 ruling 2026-09-15 on `6aa9df4732eaa04b2e8a65bd`. The public tracker credential files under Charlie's own account (`Wldc4rd`): each filing is a technical claim in that name. No client material, secrets, internal hosts, IPs or absolute infrastructure paths in public issues, PRs or source citations. Cite commits, tests, PR/issue numbers, card IDs or repository documents. Issue bodies are create-only in this workflow: correct with a comment; PR titles/bodies are editable. A green secret regex is not proof of privacy. Newly discovered unfixed vulnerabilities require private escalation, not public disclosure.
 
+Source: card `zLXEBPec`, Charlie's 2026-09-22 ruling (“integration mechanics are ours to document”), recorded by Jeeves the same day.
+
+Vendor integration mechanics (endpoints, parameter/query shapes, redirect chains, auth flow, product names) may be documented in public source, tests, issues and PRs; credentials, client-derived identifiers and vendor security weaknesses may not (G-9; private escalation).
+
+This retires Jeeves's 2026-09-04 bar on putting integration detail in the public tracker, so code and issues follow one rule again. The existing prohibition on client material (including real press IDs from real client tickets), secrets, internal hosts, IPs and infrastructure paths remains binding; vendor security weaknesses stay under private escalation.
+
 <a id="modes"></a>
 ## Fail-closed MCP modes
 
