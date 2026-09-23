@@ -236,11 +236,10 @@ class CippStagedPasswordResetTest extends TestCase
     }
 
     /**
-     * SECURITY review (psa-smh26) R1, second gate: a recent reset for the same target
-     * must block approval of a held one, so a duplicate proposal staged from another
-     * ticket cannot mint a second credential moments later.
+     * B2: a definite direct answer releases the request claim; a held approval
+     * afterwards is a new legitimate reset, even within the former timer.
      */
-    public function test_approval_is_refused_while_the_target_is_in_reset_cooldown(): void
+    public function test_approval_proceeds_after_a_definite_direct_answer(): void
     {
         $this->freezeTime();
         $this->configureCipp();
@@ -268,18 +267,17 @@ class CippStagedPasswordResetTest extends TestCase
             ],
         )->assertOk();
 
-        // Now approving the held proposal must be refused, not mint a second password.
+        // The direct request is over; approval can mint a new password.
         $blocked = Mockery::mock(CippRestWriteClient::class);
-        $blocked->shouldNotReceive('resetUserPassword');
+        $blocked->shouldReceive('resetUserPassword')->once()->andReturn(['status' => 200, 'body' => ['Results' => ['state' => 'success', 'copyField' => 'Second-Pass-2!']]]);
         $this->app->instance(CippRestWriteClient::class, $blocked);
 
         $approver = User::factory()->create();
         $this->travel(37)->seconds();
         $approval = $this->actingAs($approver)->postJson(route('cockpit.approve', $run));
 
-        $this->assertFalse((bool) $approval->json('ok'));
-        $this->assertNull($approval->json('secret'));
-        $this->assertStringContainsString('263 seconds', $approval->getContent());
+        $this->assertTrue((bool) $approval->json('ok'), $approval->getContent());
+        $this->assertSame('Second-Pass-2!', $approval->json('secret'));
     }
 
     /**
@@ -391,14 +389,10 @@ class CippStagedPasswordResetTest extends TestCase
     }
 
     /**
-     * SECURITY review (psa-eerg4) R2 — the cooldown was ASYMMETRIC. A direct reset
-     * audits as cipp_reset_user_password but a held approval audits as
-     * cipp_stage_reset_user_password, and cooldownActive() filters one exact name. So
-     * direct -> held was covered while held -> direct was not: a held approval was
-     * invisible to a later direct reset, and a second credential could be minted inside
-     * the window the cooldown exists to close.
+     * B2: a definite held answer releases the shared request claim, allowing direct
+     * execution afterwards. Overlap exclusion is covered by PasswordResetClaimTest.
      */
-    public function test_an_executed_held_reset_blocks_a_later_direct_reset(): void
+    public function test_an_executed_held_reset_allows_a_later_direct_reset(): void
     {
         $this->configureCipp();
         $this->configureAiActor();
@@ -406,9 +400,9 @@ class CippStagedPasswordResetTest extends TestCase
 
         $this->stageAndApprove($fixture, 'Held-Pass-1!');
 
-        // A direct reset for the same person must now be refused.
+        // A new direct reset after the answer is allowed.
         $blocked = Mockery::mock(CippRestWriteClient::class);
-        $blocked->shouldNotReceive('resetUserPassword');
+        $blocked->shouldReceive('resetUserPassword')->once()->andReturn(['status' => 200, 'body' => ['Results' => ['state' => 'success', 'copyField' => 'Second-Pass-2!']]]);
         $this->app->instance(CippRestWriteClient::class, $blocked);
 
         $response = $this->callTool(
@@ -423,26 +417,28 @@ class CippStagedPasswordResetTest extends TestCase
             ],
         );
 
-        $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('cooldown', (string) $response->json('result.content.0.text'));
+        $this->assertFalse((bool) $response->json('result.isError'), $response->getContent());
+        $this->assertSame('Second-Pass-2!', $this->decoded($response)['temporary_password']);
     }
 
-    public function test_executed_reset_allows_same_ticket_restaging_but_approval_reports_seconds_left(): void
+    public function test_executed_reset_allows_same_ticket_restaging_and_new_approval(): void
     {
         $this->freezeTime();
         $this->configureCipp();
         $this->configureAiActor();
         $fixture = $this->cippFixture();
         $this->stageAndApprove($fixture, 'Held-Pass-1!');
-        // Live control: the first call actually executed and armed the mint window.
+        // Live control: the first call actually executed.
         $this->assertDatabaseHas('technician_action_logs', ['action_type' => self::STAGED, 'result_status' => 'executed']);
         $firstId = TechnicianRun::where('action_type', self::STAGED)->sole()->id;
         $this->travel(37)->seconds();
         $run = $this->restageAndGetNewRun($fixture, $firstId);
+        $vendor = Mockery::mock(CippRestWriteClient::class);
+        $vendor->shouldReceive('resetUserPassword')->once()->andReturn(['status' => 200, 'body' => ['Results' => ['state' => 'success', 'copyField' => 'Second-Pass-2!']]]);
+        $this->app->instance(CippRestWriteClient::class, $vendor);
         $approval = $this->actingAs(User::factory()->create())->postJson(route('cockpit.approve', $run));
-        $this->assertFalse((bool) $approval->json('ok'));
-        $this->assertStringContainsString('263 seconds', $approval->getContent());
-        $this->assertNull($approval->json('secret'));
+        $this->assertTrue((bool) $approval->json('ok'), $approval->getContent());
+        $this->assertSame('Second-Pass-2!', $approval->json('secret'));
     }
 
     public function test_rejected_reset_allows_immediate_same_ticket_restaging(): void

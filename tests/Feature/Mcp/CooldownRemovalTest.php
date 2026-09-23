@@ -18,7 +18,7 @@ class CooldownRemovalTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_every_executor_cooldown_is_zero_except_the_named_reset(): void
+    public function test_every_executor_cooldown_is_zero(): void
     {
         $maps = $constants = $fallbacks = 0;
         foreach (glob(app_path('Services/Mcp/*Executor.php')) as $file) {
@@ -28,7 +28,7 @@ class CooldownRemovalTest extends TestCase
                 $maps++;
                 foreach ($class->getConstant('COOLDOWNS') as $tool => $seconds) {
                     // zAYpGMFJ: B2 must delete this sole exception after target-wide intent coordination.
-                    $expected = $tool === 'cipp_reset_user_password' ? 300 : 0;
+                    $expected = 0;
                     $this->assertSame($expected, $seconds, $tool);
                 }
             }
@@ -71,8 +71,8 @@ class CooldownRemovalTest extends TestCase
         sort($mentions);
         $this->assertSame(['cipp_reset_user_password', 'cipp_set_mailbox_delegate', 'tactical_run_command'], $mentions);
         $this->assertStringContainsString('execution/approval, not at staging', $definitions['cipp_reset_user_password']);
-        $this->assertStringContainsString('300 seconds per target', $definitions['cipp_reset_user_password']);
-        $this->assertStringContainsString('seconds left', $definitions['cipp_reset_user_password']);
+        $this->assertStringContainsString('There is no reset cooldown.', $definitions['cipp_reset_user_password']);
+        $this->assertStringContainsString('durable per-client/person request claim', $definitions['cipp_reset_user_password']);
         $this->assertStringContainsString('no rate bound on back-to-back runs', $definitions['cipp_sync_people_now']);
     }
 

@@ -206,7 +206,7 @@ class StaffCippWriteToolExecutor
         'cipp_stage_wipe_device' => 0,
         'cipp_reassign_onedrive' => 0,
         'cipp_stage_reassign_onedrive' => 0,
-        'cipp_reset_user_password' => 300,
+        'cipp_reset_user_password' => 0,
         'cipp_create_user' => 0,
         'cipp_stage_create_user' => 0,
         'cipp_edit_user' => 0,
@@ -1036,7 +1036,7 @@ class StaffCippWriteToolExecutor
      * back an upstream value (the temp password). Reuses every context() gate; skips the
      * idempotent alreadyExecuted() short-circuit (a password reset is NON-idempotent — a
      * second reset must generate a new password, not return a stale "already done"). A
-     * cooldown still guards runaway repeats. The credential lives ONLY in the returned
+     * durable target claim excludes overlapping requests. The credential lives ONLY in the returned
      * result; auditAttempt() records the action + target UPN, never the password.
      *
      * @return array<string, mixed>
@@ -1078,13 +1078,24 @@ class StaffCippWriteToolExecutor
             return ['error' => "{$tool} cooldown active for this target; no reset was performed. Retry in {$secondsLeft} seconds."];
         }
 
+        $claims = app(\App\Services\Cipp\PasswordResetClaim::class);
+        $claim = $claims->acquire($client->id, $person->person->id, $actorLabel);
+        if ($claim['refusal'] !== null) {
+            return ['error' => $claim['refusal']];
+        }
+
         try {
             $upstream = $this->client->resetUserPassword($tenant, $person->userPrincipalName, $mustChange);
         } catch (CippClientException $e) {
+            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                $claims->release($claim['id']);
+            }
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($tool, $e), $actorLabel);
 
             return ['error' => "CIPP password reset failed for {$tool}; no password was returned."];
         }
+
+        $claims->releaseOnAnswer($claim['id'], $upstream);
 
         // Audit records the action + target + the EFFECTIVE must_change flag (a boolean, not a
         // credential) so the immutable log distinguishes a temp reset from a permanent one. NO password.
@@ -1188,14 +1199,28 @@ class StaffCippWriteToolExecutor
                 return $this->declined("This user's password was reset very recently; retry in {$secondsLeft} seconds and approve again if a new password is still needed.");
             }
 
+            $claims = app(\App\Services\Cipp\PasswordResetClaim::class);
+            $claim = $claims->acquire($client->id, $person->person->id, $this->approverLabel($approverId));
+            if ($claim['refusal'] !== null) {
+                $run->releaseClaim();
+
+                // The generic 300-character decline truncates the clearing command.
+                return new TechnicianApprovalResult('gate_declined', message: $this->redactor->redactString($claim['refusal']));
+            }
+
             try {
                 $upstream = $this->client->resetUserPassword($tenant, $person->userPrincipalName, $mustChange);
             } catch (CippClientException $e) {
+                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                    $claims->release($claim['id']);
+                }
                 $run->releaseClaim();
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
 
                 return $this->declined('CIPP password reset failed; no password was returned. The proposal is still open — retry or deny it.');
             }
+
+            $claims->releaseOnAnswer($claim['id'], $upstream);
 
             $results = is_array($upstream['body']['Results'] ?? null) ? $upstream['body']['Results'] : [];
             $password = (isset($results['copyField']) && is_string($results['copyField']) && $results['copyField'] !== '')
@@ -1242,8 +1267,8 @@ class StaffCippWriteToolExecutor
      *     correct for an idempotent write, WRONG here: a second reset request after one
      *     already executed must be allowed to stage a fresh proposal, because the point
      *     of a reset is to mint a NEW password. liveAwaitingRun() still folds an
-     *     identical pending proposal. The staging timer is disabled; the 300-second
-     *     window applies only when minting, at direct execution or approval.
+     *     identical pending proposal. Staging takes no reset claim; the durable
+     *     request-window claim applies only at direct execution or approval.
      *  2. must_change rides in the held payload, so approval executes the operator's
      *     reviewed intent rather than re-reading a default.
      *
@@ -7639,7 +7664,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_reset_user_password',
-            'Reset the Microsoft 365 password for one server-derived CIPP user. IMMEDIATE (staged=false) returns a newly generated temporary password in this tool result — generated by CIPP/Microsoft, never written to any log or audit record; relay it to the user over a secure channel. STAGED (staged=true, and the automatic behaviour when your token grants staged-only) returns NO PASSWORD: nothing is reset yet, the action is held for human approval, and the temporary password is generated only on approval and shown to the approving human in the cockpit — do not wait for a credential from a staged call, and tell the requester a person must approve it first. Defaults to must-change-at-next-sign-in. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, and TechnicianActionLog audit. Consequential: staged=false performs a live credential reset immediately. The cooldown is 300 seconds per target at execution/approval, not at staging; refusal reports the seconds left.',
+            'Reset the Microsoft 365 password for one server-derived CIPP user. IMMEDIATE (staged=false) returns a newly generated temporary password in this tool result — generated by CIPP/Microsoft, never written to any log or audit record; relay it to the user over a secure channel. STAGED (staged=true, and the automatic behaviour when your token grants staged-only) returns NO PASSWORD: nothing is reset yet, the action is held for human approval, and the temporary password is generated only on approval and shown to the approving human in the cockpit — do not wait for a credential from a staged call, and tell the requester a person must approve it first. Defaults to must-change-at-next-sign-in. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, and TechnicianActionLog audit. Consequential: staged=false performs a live credential reset immediately. There is no reset cooldown. A durable per-client/person request claim applies at execution/approval, not at staging; refusal names the holder, start time and operator clearing command. Definite CIPP answers release it; uncertain outcomes require a human to check CIPP logs and clear it. This does not confirm downstream password writeback.',
             array_merge(self::personProperties(), self::resetUserPasswordProperties()),
             ['person_id', 'confirm_upn', 'reason'],
         );

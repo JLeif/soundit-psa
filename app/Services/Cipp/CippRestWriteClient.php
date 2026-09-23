@@ -1062,7 +1062,7 @@ class CippRestWriteClient
             ->post($url, $body);
 
         if ($response->failed()) {
-            throw new CippClientException("CIPP write {$endpoint} failed: HTTP {$response->status()}");
+            throw new CippWriteHttpException($response->status());
         }
 
         if ($captureBody) {
