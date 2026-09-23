@@ -9,8 +9,8 @@ namespace App\Services\Hdb;
  * here are `redactDiagnostic` and `redactScreenshots`, named in the household
  * vault plan `wiki/sound-psa/soundit-dev/plans/`
  * `2026-09-04-hdb-report-integration-build-guide.md` §6a, which records them
- * from a live capture of a real press on 2026-09-04 (pressID 780d16b2…,
- * marked `[VERIFIED keys]` there). HDB is not open source and publishes no
+ * from a live capture of a real press on 2026-09-04 (marked `[VERIFIED keys]`
+ * there). HDB is not open source and publishes no
  * OpenAPI spec, so that note is the best producer available and it is a
  * SECOND-HAND TRANSCRIPTION, not a captured payload: the key NAMES are cited,
  * the value TYPES are not independently attested, and nothing in this repo has

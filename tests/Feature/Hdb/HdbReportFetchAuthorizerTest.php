@@ -288,7 +288,7 @@ class HdbReportFetchAuthorizerTest extends TestCase
     {
         $ticket = $this->ticketFor();
 
-        foreach ([null, '', 'not-a-uuid', 'deadbeef-0000-4000-8000', self::PRESS_A.'x'] as $offered) {
+        foreach ([null, '', 'not-a-uuid', substr(self::PRESS_A, 0, 23), self::PRESS_A.'x'] as $offered) {
             $this->assertRefused(
                 $this->authorizer()->authorize($ticket->id, $offered),
                 HdbReportFetchRefusal::MalformedPressId,
