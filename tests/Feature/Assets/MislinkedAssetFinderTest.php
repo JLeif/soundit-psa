@@ -774,7 +774,10 @@ class MislinkedAssetFinderTest extends TestCase
      */
     public function test_the_factory_prefix_list_is_exactly_the_covered_set(): void
     {
-        $this->assertSame(
+        // Canonicalizing: order carries no behaviour (isFactoryPrefix is an exact
+        // in_array, and no entry is a prefix of another), so a reorder must not
+        // fail. What must fail is a MEMBERSHIP change in either direction.
+        $this->assertEqualsCanonicalizing(
             self::EXPECTED_FACTORY_PREFIXES,
             MislinkedAssetFinder::FACTORY_HOSTNAME_PREFIXES,
             'FACTORY_HOSTNAME_PREFIXES has drifted from the set this suite covers. '
@@ -810,6 +813,20 @@ class MislinkedAssetFinderTest extends TestCase
         }
         $this->asset($other, ['hostname' => $prefix.'B1']);
 
+        // PRECONDITION: the entry must be in the form the exclusion actually sees.
+        // hostnamePrefix() upper-cases and cuts at the first separator, while
+        // isFactoryPrefix() is an exact in_array on the raw constant. So an entry
+        // like 'Chromebook-' would never match in production (it normalises to
+        // 'CHROMEBOOK-'), yet a case filtering on the raw string would still go
+        // green on zero hits. Assert the round trip, or this whole test is vacuous
+        // for exactly the entries most likely to be wrong.
+        $extracted = $this->extractedPrefix($prefix.'A1');
+        $this->assertSame($prefix, $extracted,
+            $prefix.' is not in the normalised form the exclusion compares against: '
+            .'hostnamePrefix() extracts '.var_export($extracted, true).'. isFactoryPrefix() '
+            .'is an exact in_array on the raw entry, so this entry can never match in '
+            .'production and every absence assertion below would pass for the wrong reason.');
+
         $result = $this->finder()->find(null);
         $hits = array_values(array_filter(
             $result['tier_b'],
@@ -820,6 +837,20 @@ class MislinkedAssetFinderTest extends TestCase
             $prefix.' is on FACTORY_HOSTNAME_PREFIXES, so it must never be learned as a '
             ."client's fingerprint. A finding here means that entry is not doing its job "
             .'— either it was removed, or the exclusion no longer reaches it.');
+    }
+
+    /**
+     * The prefix the service itself extracts from a hostname. Used as a
+     * precondition so a per-entry case cannot pass on an entry the exclusion
+     * can never reach.
+     */
+    private function extractedPrefix(string $hostname): ?string
+    {
+        $finder = $this->finder();
+        $method = new \ReflectionMethod($finder, 'hostnamePrefix');
+        $method->setAccessible(true);
+
+        return $method->invoke($finder, $hostname);
     }
 
     /**

@@ -128,22 +128,25 @@ class MislinkedAssetFinder
      *             9AA9A9A / AAAA9AA / A9AAAA9 / AA9AAA9 / AA99AAA — no two alike,
      *             letters and digits interleaved at no fixed position.
      *   DESKTOP- 31 assets, every suffix 7 chars, same interleaved random shape.
-     *   WIN-      1 asset, suffix 11 chars — the documented Windows Server default
-     *             width.
+     *   WIN-      1 asset, suffix 11 chars — the documented Windows Server default.
      *
-     * The discriminator is that the width is FIXED and the characters are not:
-     * one suffix width across every asset wearing the prefix, with letters and
-     * digits interleaved at no fixed position and no two suffixes alike. Genuine
-     * client schemes measured on the same fleet are the other way round — their
-     * widths VARY because the suffix means something (site codes, room names,
-     * initials), so on this fleet they ran anywhere from 4 to 9 characters under
-     * a single prefix while every factory prefix sat at exactly one width.
+     * THE SINGLE WIDTH IS NOT THE EVIDENCE. Add the prefix back and every one of
+     * those lands on exactly 15 characters: DESKTOP- 8+7, WINDOWS- 8+7, WIN- 4+11.
+     * That is the NetBIOS computer-name cap, so a generator filling the name to
+     * the limit produces one width per prefix STRUCTURALLY, whatever produced it.
+     * A fixed width therefore says nothing about origin.
      *
-     * That is a statement about SHAPE ONLY. A fixed-width random-looking suffix
-     * is what a generator produces; it does not establish WHICH generator, and a
-     * client scheme built from a serial number or an MDM naming template would
-     * look the same. The entry rests on that shape plus the vendor defaults
-     * documented for DESKTOP- and WIN-, not on a proof of origin.
+     * What carries the entry is the CONTENT of those suffixes: letters and digits
+     * interleaved at no fixed position, and no two of the seven alike. That is a
+     * random fill, not a scheme someone chose. Genuine client prefixes on the same
+     * fleet read the other way — their widths VARY (4 to 9 characters under one
+     * prefix) because the suffix MEANS something: site codes, room names, initials.
+     *
+     * That is a statement about SHAPE ONLY, from seven samples, and it claims no
+     * more: random interleaving is what a generator produces, it does not establish
+     * WHICH generator, and a client scheme built from a serial number or an MDM
+     * naming template would look the same. The entry rests on that shape plus the
+     * vendor defaults documented for DESKTOP- and WIN-, not on a proof of origin.
      *
      * That is evidence about SHAPE, not a proof of origin, and it is stated here
      * rather than in a commit message so the next reader can weigh it. If a client
@@ -155,7 +158,7 @@ class MislinkedAssetFinder
     public const FACTORY_HOSTNAME_PREFIXES = [
         'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
         'LAPTOP-',    // Windows default on portable SKUs
-        'WINDOWS-',   // fixed-width random suffix, no cited vendor default — see the note above
+        'WINDOWS-',   // random interleaved suffix, no cited vendor default — see the note above
         'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
         'MACBOOK-',   // macOS default when the model name is hyphenated
         'MACBOOKAIR-',
