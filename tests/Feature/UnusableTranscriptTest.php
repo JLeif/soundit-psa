@@ -196,6 +196,39 @@ class UnusableTranscriptTest extends TestCase
         $this->assertStringContainsString('Please call me back about the printer today.', $body);
     }
 
+    public function test_diarized_speaker_labels_do_not_defeat_stock_match_or_inflate_density(): void
+    {
+        // buildDiarizedTranscript() writes "{label}: words"; no person/client/answerer
+        // on these fixtures, so resolveSpeakerLabels() yields Customer / Agent.
+        $call = $this->makeCall('Customer: You', 3);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+        $this->assertSame('Customer: You', $call->fresh()->transcription);
+        Queue::assertNotPushed(CallIntakeJob::class);
+
+        // 52 labelled characters over 20s is 2.6/s: only the stripped stock match catches it.
+        $text = 'Customer: Thank you for watching, see you next time.';
+        $call = $this->makeCall($text, 20);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+        $this->assertSame($text, $call->fresh()->transcription);
+
+        $normal = "Customer: Hi, the printer on the second floor is jammed again.\n\nAgent: Thanks, I will take a look now.";
+        $call = $this->makeCall($normal, 20);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Completed, $call->fresh()->transcription_status);
+
+        $guard = new TranscriptUsability;
+        $labels = ['Acme Industries Corporation', 'Agent'];
+        $this->assertTrue($guard->isUnusable('Acme Industries Corporation: Thank you for watching see you next time', 30, $labels));
+        $this->assertFalse($guard->isUnusable('Acme Industries Corporation: Thank you for watching see you next time', 30));
+        // Label inflates density: 40 chars/10s unstripped, 11 chars/10s stripped.
+        $this->assertTrue($guard->isUnusable('Acme Industries Corporation: Hello there', 10, $labels));
+        $this->assertFalse($guard->isUnusable('Acme Industries Corporation: Hello there', 10));
+        // Only line-start label prefixes are removed.
+        $this->assertFalse($guard->isUnusable('Please tell the Agent: you', 3, $labels));
+    }
+
     public function test_service_short_circuits_unusable_before_api_configuration(): void
     {
         $call = $this->makeCall('You', 14);

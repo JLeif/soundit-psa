@@ -23,13 +23,25 @@ class TranscriptUsability
         'subs by www zeoranger co uk',
     ];
 
-    public function isUnusable(?string $transcript, ?int $duration): bool
+    /**
+     * @param  list<string>  $speakerLabels  Stereo diarization writes "{label}: words"
+     *   lines; those line-start prefixes are stripped so they neither defeat the
+     *   whole-transcript stock match nor inflate characters per second.
+     */
+    public function isUnusable(?string $transcript, ?int $duration, array $speakerLabels = []): bool
     {
         $text = trim($transcript ?? '');
         // Absence is not a quality judgement. Preserve the pre-existing path
         // for calls without transcript content, including direct finalization.
         if ($text === '') {
             return false;
+        }
+        $labels = array_map(
+            fn (string $label) => preg_quote($label, '/'),
+            array_filter($speakerLabels, fn ($label) => is_string($label) && trim($label) !== '')
+        );
+        if ($labels !== []) {
+            $text = trim(preg_replace('/^(?:'.implode('|', $labels).'):[ \t]*/mu', '', $text) ?? $text);
         }
         $normalized = mb_strtolower($text, 'UTF-8');
         $normalized = trim(preg_replace('/[\p{P}\p{Z}\s]+/u', ' ', $normalized) ?? $normalized);
