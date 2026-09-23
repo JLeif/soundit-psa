@@ -1,6 +1,6 @@
 # Project standards — sourced operative index
 
-Membership: 58 carried ledger entries + 13 later obligations; IDs are stable, not a rule count. Full bundled wording remains binding in the linked same-tip sources; this index is not a replacement. Forge maintains; Jeeves adjudicates; Charlie owns product/design and production authority. No prompt wiring or rubric change is made here. For any Blade diff read [DESIGN §§5–6](DESIGN.md#5-components) and [Do/Don't](DESIGN.md#6-dos-and-donts).
+Membership: 58 carried ledger entries + 14 later obligations; IDs are stable, not a rule count. Full bundled wording remains binding in the linked same-tip sources; this index is not a replacement. Forge maintains; Jeeves adjudicates; Charlie owns product/design and production authority. No prompt wiring or rubric change is made here. For any Blade diff read [DESIGN §§5–6](DESIGN.md#5-components) and [Do/Don't](DESIGN.md#6-dos-and-donts).
 
 ## Architecture and integrations
 
@@ -59,6 +59,8 @@ Membership: 58 carried ledger entries + 13 later obligations; IDs are stable, no
 - A-4, G-8: Commit/push real work promptly before review and session end; branch publication merges nothing; [DECISIONS / Push](docs/DECISIONS.md#push).
 
 ## Later development obligations
+
+- G-14: Operator-facing runtime strings (including log context, exception messages and operator output) that assert a mechanism — why something happened, how a function behaves, or what is or is not true of data — must be true on every emitting path. Pure event labels are outside this rule. Work one site at a time: (1) delete the explanatory clause when structured keys already carry the fact; (2) otherwise assert the claim on every emitting arm, with a swap/merge-arms mutant that the controls kill; (3) use prose with an executable citation only as a last resort. Verify truth by isolated execution before pinning text; never bulk-assert strings or cite suite totals as truth evidence. Cite methods rather than unstable line numbers. Review new mechanism strings against this rule; comments and names retain the separate delete-or-rename remedy.
 
 - G-1: Follow independent FIND/ADJUDICATE/REWORK/VERIFY, rubric, 3-sample majority and bounded cycles; [DECISIONS / Review](docs/DECISIONS.md#review).
 - G-2: Hold for human-grade exact-SHA review, guards/full suite/CI, re-review additions, authorized gated landing and production verification; [DECISIONS / Held](docs/DECISIONS.md#held).

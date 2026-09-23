@@ -1791,11 +1791,8 @@ class CippToolContract
      */
     private function warnOnShapeDrift(string $toolName, array $rows, array $projected, array $keyResolved): void
     {
-        // Every row projecting to {} means DEFAULT_FIELDS has drifted wholesale
-        // from the live CIPP response shape, and the tool reports a false "no
-        // results" (psa-3twu).
         if (array_filter($projected) === []) {
-            Log::warning('[CippTools] Every row projected empty — DEFAULT_FIELDS out of sync with CIPP response shape', [
+            Log::warning('[CippTools] Every row projected empty', [
                 'tool' => $toolName,
                 'row_count' => count($rows),
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
