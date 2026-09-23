@@ -552,6 +552,25 @@
                                 <div class="fw-semibold small">{{ $isCall ? '📞 Call → ticket' : 'New ticket' }} @if($run->ticket_id)<a href="{{ route('tickets.show', $run->ticket_id) }}" class="text-decoration-none">#{{ $run->ticket_id }}</a>@else<span>#?</span>@endif looks like open ticket @if(! empty($meta['suggested_ticket_id']))<a href="{{ route('tickets.show', $meta['suggested_ticket_id']) }}" class="text-decoration-none">#{{ $meta['suggested_ticket_id'] }}</a>@else<span>#?</span>@endif</div>
                                 <div class="text-muted small text-truncate">{{ $run->proposed_content }} @if(isset($meta['confidence']))({{ (int) round(((float) $meta['confidence']) * 100) }}% confidence)@endif</div>
                             </div>
+                            @if ($run->intake_merge_options->count() === 2)
+                                <details>
+                                    <summary class="btn btn-sm btn-outline-primary">Merge…</summary>
+                                    <form method="POST" action="{{ route('cockpit.intake-merge', $run) }}" class="mt-2">
+                                        @csrf
+                                        <input type="hidden" name="suggested_ticket_id" value="{{ $run->proposed_meta['suggested_ticket_id'] }}">
+                                        <label class="form-label small" for="intake-survivor-{{ $run->id }}">Keep this ticket (survivor)</label>
+                                        <select class="form-select form-select-sm" id="intake-survivor-{{ $run->id }}" name="survivor_ticket_id" required>
+                                            @foreach ($run->intake_merge_options as $option)
+                                                <option value="{{ $option['id'] }}" @selected($loop->first)>{{ $option['label'] }} ({{ $option['references'] }} linked calls/emails/notes)</option>
+                                            @endforeach
+                                        </select>
+                                        <p class="small mt-2 mb-2">The other ticket will close and its calls, notes and emails will move to the selected survivor. This cannot be undone.</p>
+                                        <button type="submit" class="btn btn-sm btn-primary" name="confirmed" value="1">Confirm merge into selected survivor</button>
+                                    </form>
+                                </details>
+                            @else
+                                <span class="small text-muted">Merge unavailable: refresh and review the ticket pair.</span>
+                            @endif
                             <form method="POST" action="{{ route('cockpit.intake-dismiss', $run) }}" data-cockpit-form data-mode="optimistic" data-keybind="hold" data-undo-action="dismiss-intake" data-target-type="run" data-target-id="{{ $run->id }}">
                                 @csrf
                                 <button class="btn btn-sm btn-outline-secondary">Dismiss</button>

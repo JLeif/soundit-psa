@@ -807,7 +807,9 @@ Route::middleware('auth')->group(function () {
     // so the bounds for this path are: this rate-limit + supersede-first (it replaces the pending
     // proposal rather than accumulating) + the agent's daily token budget.
     Route::post('/cockpit/runs/{run}/correct', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'correct'])->name('cockpit.correct')->middleware('throttle:20,1');
-    // psa-xcyo Task 3: intake calibration lane — dismiss a held intake suggestion (no merge).
+    // Intake duplicate lane — explicitly confirmed merge with a chosen survivor.
+    Route::post('/cockpit/runs/{run}/intake-merge', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'intakeMerge'])->name('cockpit.intake-merge')->middleware('throttle:60,1');
+    // Dismiss is visibility-only and retains its independent undo.
     Route::post('/cockpit/runs/{run}/intake-dismiss', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'intakeDismiss'])->name('cockpit.intake-dismiss')->middleware('throttle:60,1');
     // psa-xcyo Task 6b: spam lane — one-tap mark-followed-up + block number for a suspected-spam call.
     Route::post('/cockpit/calls/{call}/intake-spam-block', [\App\Http\Controllers\Web\TechnicianCockpitController::class, 'intakeSpamBlock'])->name('cockpit.intake-spam-block')->middleware('throttle:60,1');

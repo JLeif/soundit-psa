@@ -141,16 +141,34 @@ class CockpitQuery
 
     /**
      * Held intake suggestions awaiting operator review (psa-xcyo Task 3).
-     * Surfaces intake_route AwaitingApproval runs so the operator can calibrate
-     * the auto-attach threshold. Visibility only — no merge action (deferred).
+     * Surfaces intake_route AwaitingApproval runs with history-ranked survivor
+     * choices for a confirmed merge, or an independent visibility-only dismissal.
      */
     public function intakeReview(): Collection
     {
-        return $this->intakeReviewQuery()
+        $runs = $this->intakeReviewQuery()
             ->with('ticket')
             ->latest()
             ->limit(20)
             ->get();
+        $ids = $runs->flatMap(fn (TechnicianRun $run) => [$run->ticket_id, $run->proposed_meta['suggested_ticket_id'] ?? null])->filter()->unique();
+        $tickets = Ticket::query()->whereIn('id', $ids)->withCount(['notes', 'phoneCalls'])->get()->keyBy('id');
+        $emails = \App\Models\Email::query()->whereIn('ticket_id', $ids)
+            ->selectRaw('ticket_id, count(*) as aggregate')->groupBy('ticket_id')->pluck('aggregate', 'ticket_id');
+        foreach ($runs as $run) {
+            // Stable descending sort keeps the suggested existing ticket first on a tie.
+            $options = collect([$run->proposed_meta['suggested_ticket_id'] ?? null, $run->ticket_id])
+                ->unique()->map(fn ($id) => $tickets->get($id))
+                ->filter(fn ($ticket) => $ticket && $ticket->client_id === $run->client_id)
+                ->map(fn (Ticket $ticket) => [
+                    'id' => $ticket->id,
+                    'label' => $ticket->display_id.' — '.$ticket->subject,
+                    'references' => $ticket->notes_count + $ticket->phone_calls_count + (int) ($emails[$ticket->id] ?? 0),
+                ])->sortByDesc('references')->values();
+            $run->setAttribute('intake_merge_options', $options);
+        }
+
+        return $runs;
     }
 
     /**

@@ -300,6 +300,28 @@ class TechnicianCockpitController extends Controller
         );
     }
 
+    /** Confirm an irreversible intake merge with an explicitly selected survivor. */
+    public function intakeMerge(Request $request, TechnicianRun $run, TechnicianApprovalService $service)
+    {
+        $input = $request->validate([
+            'survivor_ticket_id' => ['required', 'integer', 'min:1'],
+            'suggested_ticket_id' => ['required', 'integer', 'min:1'],
+            'confirmed' => ['required', 'accepted'],
+        ]);
+        $result = $service->intakeMerge($run, (int) $input['survivor_ticket_id'], (int) $input['suggested_ticket_id'], (int) $request->user()->id);
+
+        return $this->actionResponse(
+            $request,
+            $result->status === 'merged',
+            $result->status,
+            match ($result->status) {
+                'merged' => 'Tickets merged into ticket #'.$input['survivor_ticket_id'].'. This cannot be undone.',
+                'already_handled' => 'That intake suggestion was already handled.',
+                default => 'Merge refused: the suggestion is stale, a ticket is missing, closed, already merged, belongs to another client, or the approval gate declined. Refresh and review the tickets.',
+            },
+        );
+    }
+
     /**
      * Dismiss a held intake suggestion (operator has reviewed the calibration signal).
      * Transitions intake_route AwaitingApproval → Done via CAS guard (no-op if already
