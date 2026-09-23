@@ -560,7 +560,7 @@ class MislinkedAssetFinderTest extends TestCase
         foreach (['DESKTOP-O1', 'DESKTOP-O2', 'DESKTOP-O3'] as $h) {
             $this->asset($owner, ['hostname' => $h]);
         }
-        $factoryNamed = $this->asset($other, ['hostname' => 'DESKTOP-TEG77JU']);
+        $factoryNamed = $this->asset($other, ['hostname' => 'DESKTOP-OTHER01']);
 
         $result = $this->finder()->find(null);
         $prefixHits = array_values(array_filter($result['tier_b'], fn ($r) => $r['rule'] === 'foreign_client_hostname_prefix'));
@@ -591,7 +591,7 @@ class MislinkedAssetFinderTest extends TestCase
         foreach (['DESKTOP-O1', 'DESKTOP-O2', 'DESKTOP-O3'] as $h) {
             $this->asset($owner, ['hostname' => $h]);
         }
-        $this->asset($other, ['hostname' => 'DESKTOP-TEG77JU']);
+        $this->asset($other, ['hostname' => 'DESKTOP-OTHER01']);
 
         $result = $this->finder()->find(null);
         $prefixHits = array_values(array_filter($result['tier_b'], fn ($r) => $r['rule'] === 'foreign_client_hostname_prefix'));
