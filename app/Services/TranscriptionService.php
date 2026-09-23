@@ -387,9 +387,13 @@ TEMPLATE;
             $labels = trim($call->transcription) === ''
                 ? []
                 : array_values($this->resolveSpeakerLabels($call));
-            // Density was calibrated on voicemail-shaped recordings; a long answered
-            // call with quiet stretches keeps the stock and produced-blank checks only.
-            $duration = $call->status === CallStatus::Voicemail ? $call->recording_duration : null;
+            // Density was calibrated on unanswered (voicemail-shaped) recordings. The
+            // webhook marks those Voicemail; calls:resolve-recording leaves them Missed.
+            // A long answered call with quiet stretches keeps the stock and
+            // produced-blank checks only.
+            $duration = in_array($call->status, [CallStatus::Voicemail, CallStatus::Missed], true)
+                ? $call->recording_duration
+                : null;
             $unusable = app(\App\Support\TranscriptUsability::class)->isUnusable(
                 $call->transcription, $duration, $labels
             );

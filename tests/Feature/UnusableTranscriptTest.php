@@ -100,7 +100,7 @@ class UnusableTranscriptTest extends TestCase
         }
     }
 
-    public function test_density_applies_to_voicemail_only_so_sparse_answered_calls_keep_intake(): void
+    public function test_density_applies_to_unanswered_calls_only_so_sparse_answered_calls_keep_intake(): void
     {
         \App\Models\Setting::setValue('intake_call_enabled', '1');
         // 3000 characters over 1800s is 1.67/s: a quiet remote-support session.
@@ -118,6 +118,18 @@ class UnusableTranscriptTest extends TestCase
         $this->finalize($call);
         $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
         Queue::assertNotPushed(CallIntakeJob::class);
+
+        // Unanswered recordings resolved via calls:resolve-recording stay Missed and
+        // never become Voicemail; density must still apply. 'Okay, bye.' is not stock:
+        // 10 characters over 40s is 0.25/s.
+        foreach ([[$text, 1800], ['Okay, bye.', 40]] as [$sparse, $duration]) {
+            $call = $this->makeCall($sparse, $duration);
+            $call->forceFill(['status' => CallStatus::Missed, 'answered_at' => null])->save();
+            $this->finalize($call);
+            $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+            $this->assertSame($sparse, $call->fresh()->transcription);
+            Queue::assertNotPushed(CallIntakeJob::class);
+        }
 
         // Stock and produced-blank checks still apply to answered calls.
         foreach (['You', '', '   ', '...'] as $flagged) {
