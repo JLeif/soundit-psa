@@ -1515,6 +1515,15 @@
         </div>
         @endif
 
+        {{-- Privilege elevation (AutoElevate, stage 3a) — beside Control D. Shown whenever
+             AutoElevate is configured (so an unlinked asset states WHY) or the asset is linked. --}}
+        @php
+            $autoelevateBlock = $asset->autoelevate_computer_id || \App\Support\AutoElevateConfig::isConfigured();
+        @endphp
+        @if($autoelevateBlock)
+            @include('assets.partials.autoelevate', ['asset' => $asset])
+        @endif
+
         {{-- DNS Security (Zorus) --}}
         @if($asset->zorus_endpoint_id)
         <div class="card shadow-sm mb-3">
@@ -1729,7 +1738,7 @@
         </div>
         @endif
 
-        @if(!$asset->m365_device_id && !$asset->controld_device_id && $controldDevices === null && !$asset->zorus_endpoint_id && $zorusEndpoints === null && !$asset->screenconnect_session_id)
+        @if(!$asset->m365_device_id && !$asset->controld_device_id && $controldDevices === null && !$asset->zorus_endpoint_id && $zorusEndpoints === null && !$asset->screenconnect_session_id && !$autoelevateBlock)
             <p class="text-muted">No security integrations linked to this asset.</p>
         @endif
     </div>

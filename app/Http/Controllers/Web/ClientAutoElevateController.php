@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
+use App\Models\Asset;
 use App\Models\Client;
 use App\Services\AutoElevate\AutoElevateReadException;
 use App\Services\AutoElevate\AutoElevateReadService;
@@ -35,7 +36,7 @@ class ClientAutoElevateController extends Controller
     }
 
     /**
-     * @return array{state: string, reason: ?string, computers: list<array<string, mixed>>, client: Client}
+     * @return array{state: string, reason: ?string, computers: list<array<string, mixed>>, client: Client, linkedAssets?: array<string, Asset>}
      */
     public static function panelData(Client $client, AutoElevateReadService $reads): array
     {
@@ -64,6 +65,34 @@ class ClientAutoElevateController extends Controller
             'reason' => null,
             'computers' => $computers,
             'client' => $client,
+            'linkedAssets' => self::linkedAssets($client, $computers),
         ];
+    }
+
+    /**
+     * Stage 3a "linked asset" column: computer id => this client's live asset carrying that
+     * link (written by AutoElevateAssetSyncService). Scoped to THIS client, so a stale link on
+     * another client's asset can never be shown here; trashed assets are excluded by SoftDeletes.
+     *
+     * @param  list<array<string, mixed>>  $computers
+     * @return array<string, Asset>
+     */
+    public static function linkedAssets(Client $client, array $computers): array
+    {
+        $ids = array_values(array_filter(array_map(fn ($c) => $c['id'] ?? null, $computers)));
+        if ($ids === []) {
+            return [];
+        }
+
+        $byComputer = [];
+        Asset::where('client_id', $client->id)
+            ->whereIn('autoelevate_computer_id', $ids)
+            ->orderBy('id')
+            ->get(['id', 'client_id', 'name', 'hostname', 'autoelevate_computer_id'])
+            ->each(function (Asset $asset) use (&$byComputer) {
+                $byComputer[strtolower($asset->autoelevate_computer_id)] ??= $asset;
+            });
+
+        return $byComputer;
     }
 }

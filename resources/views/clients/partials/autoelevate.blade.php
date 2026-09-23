@@ -34,6 +34,7 @@
                     <th>Operating system</th>
                     <th>Elevation mode</th>
                     <th>Last check-in</th>
+                    <th>Linked asset</th>
                 </tr>
             </thead>
             <tbody>
@@ -68,6 +69,14 @@
                             {{ $computer['last_checked_in_at']->toAppTz()->format('M j, Y g:i A T') }}
                         @else
                             <span class="text-muted">Never checked in</span>
+                        @endif
+                    </td>
+                    <td>
+                        @php($linked = ($linkedAssets ?? [])[strtolower((string) $computer['id'])] ?? null)
+                        @if($linked)
+                            <a href="{{ route('assets.show', $linked) }}" data-linked-asset="{{ $linked->id }}">{{ $linked->hostname ?: $linked->name }}</a>
+                        @else
+                            <span class="text-muted" data-linked-asset="none">Not linked</span>
                         @endif
                     </td>
                 </tr>
