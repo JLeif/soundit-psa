@@ -72,7 +72,7 @@
                         @endif
                     </td>
                     <td>
-                        @php($linked = ($linkedAssets ?? [])[$computer['id']] ?? null)
+                        @php($linked = ($linkedAssets ?? [])[strtolower((string) $computer['id'])] ?? null)
                         @if($linked)
                             <a href="{{ route('assets.show', $linked) }}" data-linked-asset="{{ $linked->id }}">{{ $linked->hostname ?: $linked->name }}</a>
                         @else

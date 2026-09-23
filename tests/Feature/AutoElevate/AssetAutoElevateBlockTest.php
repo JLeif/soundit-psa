@@ -105,7 +105,8 @@ class AssetAutoElevateBlockTest extends TestCase
     {
         $client = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
         $asset = Asset::factory()->create(['client_id' => $client->id]);
-        AutoElevateAssetSyncService::recordClientOutcome($client->id, true, null);
+        AutoElevateAssetSyncService::recordClientOutcome($client->id, self::COMPANY_A, true, null,
+            [$asset->id => AutoElevateAssetSyncService::normalizeHostname($asset->hostname)]);
 
         $this->block($asset)->assertSee('data-state="no_match"', false)->assertSee('No AutoElevate match.');
     }
@@ -114,7 +115,7 @@ class AssetAutoElevateBlockTest extends TestCase
     {
         $client = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
         $asset = Asset::factory()->create(['client_id' => $client->id]);
-        AutoElevateAssetSyncService::recordClientOutcome($client->id, false, 'http_503');
+        AutoElevateAssetSyncService::recordClientOutcome($client->id, self::COMPANY_A, false, 'http_503');
 
         $this->block($asset)->assertSee('data-state="read_failed"', false)
             ->assertSee('data-reason="http_503"', false)
@@ -128,6 +129,17 @@ class AssetAutoElevateBlockTest extends TestCase
         $asset = Asset::factory()->create(['client_id' => $client->id]);
 
         $this->block($asset)->assertSee('data-state="not_synced"', false)->assertSee('Not synced yet.');
+    }
+
+    public function test_outcome_read_under_a_previous_mapping_is_not_claimed_as_no_match(): void
+    {
+        $client = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $asset = Asset::factory()->create(['client_id' => $client->id]);
+        // Recorded while the client was mapped to company B, with this very asset considered.
+        AutoElevateAssetSyncService::recordClientOutcome($client->id, self::COMPANY_B, true, null,
+            [$asset->id => AutoElevateAssetSyncService::normalizeHostname($asset->hostname)]);
+
+        $this->block($asset)->assertSee('data-state="not_synced"', false)->assertDontSee('No AutoElevate match.');
     }
 
     public function test_block_hidden_when_unconfigured_and_unlinked(): void
@@ -161,5 +173,25 @@ class AssetAutoElevateBlockTest extends TestCase
             ->assertSee(route('assets.show', $mine), false)
             ->assertDontSee('data-linked-asset="'.$foreign->id.'"', false)
             ->assertSee('data-linked-asset="none"', false);
+    }
+
+    /** linkedAssets() keys by lowercase id; the panel must look up the same way, whatever the id's case. */
+    public function test_client_panel_finds_the_linked_asset_for_a_non_lowercase_computer_id(): void
+    {
+        $client = Client::factory()->create(['autoelevate_company_id' => self::COMPANY_A]);
+        $upper = strtoupper(self::uuid(5));
+        $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'WS-UPPER',
+            'autoelevate_computer_id' => $upper]);
+        // Seed the panel's read cache so the rendered id is exactly the non-lowercase one.
+        Cache::put('autoelevate_computers_'.strtolower(self::COMPANY_A), [[
+            'id' => $upper, 'machine_name' => 'WS-UPPER', 'os_name' => null, 'os_version' => null,
+            'elevation_mode' => null, 'elevation_mode_known' => false, 'last_checked_in_at' => null,
+        ]], 60);
+
+        Http::fake();
+        $this->get(route('clients.autoelevate.computers', $client))->assertOk()
+            ->assertSee('data-linked-asset="'.$asset->id.'"', false)
+            ->assertDontSee('data-linked-asset="none"', false);
+        Http::assertNothingSent();
     }
 }

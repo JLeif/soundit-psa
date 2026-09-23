@@ -54,18 +54,29 @@ class AutoElevateAssetSyncService
      * The asset page's empty state must say WHY an asset is unlinked (C-56), and "the last
      * read for this client failed" is not visible in the asset row. The per-client outcome of
      * the last run is kept in the cache; if it is evicted the page says "no sync recorded",
-     * which is still true, rather than guessing "no vendor match".
+     * which is still true, rather than guessing "no vendor match". The outcome also records WHICH
+     * company was read and every asset the read considered (id => hostname key). An asset added
+     * or renamed since, or a client re-mapped since, is therefore "not synced", never "no match".
+     *
+     * @param  array<int, ?string>  $considered  asset id => normalizeHostname() at read time (ok reads only)
      */
-    public static function recordClientOutcome(int $clientId, bool $ok, ?string $reason): void
+    public static function recordClientOutcome(int $clientId, string $companyId, bool $ok, ?string $reason, array $considered = []): void
     {
         Cache::forever(self::OUTCOME_CACHE_PREFIX.$clientId, [
             'ok' => $ok,
             'reason' => $reason,
+            'company_id' => strtolower($companyId),
+            'considered' => $considered,
             'at' => now()->toIso8601String(),
         ]);
     }
 
-    /** @return array{ok: bool, reason: ?string, at: string}|null */
+    public static function forgetClientOutcome(int $clientId): void
+    {
+        Cache::forget(self::OUTCOME_CACHE_PREFIX.$clientId);
+    }
+
+    /** @return array{ok: bool, reason: ?string, company_id: string, considered: array<int, ?string>, at: string}|null */
     public static function lastClientOutcome(int $clientId): ?array
     {
         $outcome = Cache::get(self::OUTCOME_CACHE_PREFIX.$clientId);
@@ -78,8 +89,10 @@ class AutoElevateAssetSyncService
      *   linked        the asset carries an AutoElevate computer id
      *   not_mapped    its client has no AutoElevate company, so nothing was ever read
      *   read_failed   the client's last sync read failed (reason = the fixed read label)
-     *   no_match      the last read succeeded and no computer matched this asset
-     *   not_synced    mapped, but no sync outcome is recorded for the client yet
+     *   no_match      the last read of the client's CURRENT company succeeded, considered this
+     *                 asset under its current hostname, and no computer matched it
+     *   not_synced    mapped, but no recorded outcome covers this asset: never synced, evicted,
+     *                 re-mapped since, or the asset was added/renamed after the last read
      *
      * @return array{state: string, reason: ?string}
      */
@@ -93,11 +106,18 @@ class AutoElevateAssetSyncService
             return ['state' => 'not_mapped', 'reason' => null];
         }
         $outcome = $asset->client_id ? self::lastClientOutcome($asset->client_id) : null;
-        if ($outcome === null) {
+        // An outcome read under another company says nothing about the current mapping.
+        if ($outcome === null || ($outcome['company_id'] ?? null) !== strtolower($companyId)) {
             return ['state' => 'not_synced', 'reason' => null];
         }
         if (! $outcome['ok']) {
             return ['state' => 'read_failed', 'reason' => $outcome['reason']];
+        }
+        // "No match" only for an asset that read actually considered, under its current hostname.
+        $considered = $outcome['considered'] ?? [];
+        if (! array_key_exists($asset->id, $considered)
+            || $considered[$asset->id] !== self::normalizeHostname($asset->hostname)) {
+            return ['state' => 'not_synced', 'reason' => null];
         }
 
         return ['state' => 'no_match', 'reason' => null];
@@ -122,13 +142,13 @@ class AutoElevateAssetSyncService
                 // Client id + fixed reason label only: no client name, no vendor text.
                 Log::warning('[AutoElevateAssetSync] read failed', ['client_id' => $client->id, 'reason' => $e->reason]);
                 $report->recordFailure($client->id, $e->reason);
-                self::recordClientOutcome($client->id, false, $e->reason);
+                self::recordClientOutcome($client->id, $client->autoelevate_company_id, false, $e->reason);
 
                 continue;
             }
 
-            DB::transaction(fn () => $this->syncClient($client, $computers, $report));
-            self::recordClientOutcome($client->id, true, null);
+            $considered = DB::transaction(fn () => $this->syncClient($client, $computers, $report));
+            self::recordClientOutcome($client->id, $client->autoelevate_company_id, true, null, $considered);
         }
 
         $this->clearUnmappedClients($clients->pluck('id')->all(), $report);
@@ -138,16 +158,19 @@ class AutoElevateAssetSyncService
 
     /**
      * @param  list<array<string, mixed>>  $computers  rows from AutoElevateReadService::normalizeComputer()
+     * @return array<int, ?string> asset id => hostname key of every live asset this read considered
      */
-    public function syncClient(Client $client, array $computers, AutoElevateAssetSyncReport $report): void
+    public function syncClient(Client $client, array $computers, AutoElevateAssetSyncReport $report): array
     {
         // Live assets of THIS client only. SoftDeletes' default scope excludes trashed rows,
         // so a soft-deleted asset can neither be matched nor block a match.
         $assets = Asset::where('client_id', $client->id)->get();
 
         $byHostname = [];
+        $considered = [];
         foreach ($assets as $asset) {
             $key = self::normalizeHostname($asset->hostname);
+            $considered[$asset->id] = $key;
             if ($key !== null) {
                 $byHostname[$key][] = $asset;
             }
@@ -223,6 +246,8 @@ class AutoElevateAssetSyncService
             ->whereNotNull('autoelevate_computer_id')
             ->when($seenAssetIds !== [], fn ($q) => $q->whereNotIn('id', array_keys($seenAssetIds)))
             ->update($this->clearedColumns());
+
+        return $considered;
     }
 
     /**
@@ -244,6 +269,13 @@ class AutoElevateAssetSyncService
         $report->cleared += Asset::whereNotNull('autoelevate_computer_id')
             ->when($mappedClientIds !== [], fn ($q) => $q->whereNotIn('client_id', $mappedClientIds))
             ->update($this->clearedColumns());
+
+        // Their recorded outcome no longer describes them. Without this, a client that lost its
+        // mapping or operational status would keep claiming "no match" from an old read.
+        Client::query()
+            ->when($mappedClientIds !== [], fn ($q) => $q->whereNotIn('id', $mappedClientIds))
+            ->pluck('id')
+            ->each(fn ($id) => self::forgetClientOutcome((int) $id));
     }
 
     /** @return array<string, mixed> */

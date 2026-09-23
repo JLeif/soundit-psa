@@ -95,7 +95,7 @@
     @else
         <p class="text-muted mb-0" role="status">
             <i class="bi bi-hourglass me-1"></i><strong>Not synced yet.</strong>
-            This asset's client is mapped to AutoElevate, but no asset sync has been recorded for it.
+            This asset's client is mapped to AutoElevate, but no asset sync has been recorded for this asset under its current hostname and company mapping.
         </p>
     @endif
     </div>

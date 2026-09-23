@@ -299,12 +299,41 @@ class AutoElevateAssetSyncTest extends TestCase
     {
         $client = Client::factory()->create();
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'WAS-MAPPED', 'autoelevate_computer_id' => self::uuid(13)]);
+        AutoElevateAssetSyncService::recordClientOutcome($client->id, self::COMPANY_A, true, null, [$asset->id => 'was-mapped']);
         Http::fake();
 
         $this->sync();
 
         $this->assertNull($asset->fresh()->autoelevate_computer_id);
+        $this->assertNull(AutoElevateAssetSyncService::lastClientOutcome($client->id),
+            'A client that left the synced set must not keep its old outcome.');
         Http::assertNothingSent();
+    }
+
+    /** "No match" is claimed only for an asset the last read of the CURRENT company considered. */
+    public function test_no_match_only_for_assets_the_last_read_considered_under_the_current_mapping(): void
+    {
+        $clientA = $this->mappedClient(self::COMPANY_A);
+        $seen = Asset::factory()->create(['client_id' => $clientA->id, 'hostname' => 'WS-SEEN']);
+        $this->fakeVendor([self::COMPANY_A => [self::computer(['id' => self::uuid(14), 'machineName' => 'LT-ELSEWHERE'])]]);
+
+        $this->sync();
+
+        $this->assertSame('no_match', AutoElevateAssetSyncService::assetLinkState($seen->fresh())['state']);
+
+        // Added after the read: that read never considered it.
+        $added = Asset::factory()->create(['client_id' => $clientA->id, 'hostname' => 'WS-ADDED']);
+        $this->assertSame('not_synced', AutoElevateAssetSyncService::assetLinkState($added->fresh())['state']);
+
+        // Re-mapped: the recorded read was of another company.
+        $clientA->forceFill(['autoelevate_company_id' => self::COMPANY_B])->save();
+        $this->assertSame('not_synced', AutoElevateAssetSyncService::assetLinkState($seen->fresh())['state']);
+        $clientA->forceFill(['autoelevate_company_id' => strtoupper(self::COMPANY_A)])->save();
+        $this->assertSame('no_match', AutoElevateAssetSyncService::assetLinkState($seen->fresh())['state']);
+
+        // Renamed after the read: the read matched against a different hostname.
+        $seen->forceFill(['hostname' => 'WS-RENAMED'])->save();
+        $this->assertSame('not_synced', AutoElevateAssetSyncService::assetLinkState($seen->fresh())['state']);
     }
 
     public function test_hostname_normalizer(): void
