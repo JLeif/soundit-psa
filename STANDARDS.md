@@ -1,6 +1,6 @@
 # Project standards — sourced operative index
 
-Membership: 58 carried ledger entries + 12 later obligations; IDs are stable, not a rule count. Full bundled wording remains binding in the linked same-tip sources; this index is not a replacement. Forge maintains; Jeeves adjudicates; Charlie owns product/design and production authority. No prompt wiring or rubric change is made here. For any Blade diff read [DESIGN §§5–6](DESIGN.md#5-components) and [Do/Don't](DESIGN.md#6-dos-and-donts).
+Membership: 58 carried ledger entries + 13 later obligations; IDs are stable, not a rule count. Full bundled wording remains binding in the linked same-tip sources; this index is not a replacement. Forge maintains; Jeeves adjudicates; Charlie owns product/design and production authority. No prompt wiring or rubric change is made here. For any Blade diff read [DESIGN §§5–6](DESIGN.md#5-components) and [Do/Don't](DESIGN.md#6-dos-and-donts).
 
 ## Architecture and integrations
 
@@ -68,6 +68,7 @@ Membership: 58 carried ledger entries + 12 later obligations; IDs are stable, no
 - G-6: Hand back assertion-killed mutants, behavioral red/positive controls, restored green source and load-path proof; [DECISIONS / Evidence](docs/DECISIONS.md#evidence).
 - G-7: Preserve review brief in domain, keep notes rebase-only and require preflight without treating it as admission; [DECISIONS / Brief](docs/DECISIONS.md#brief).
 - G-9: Publish no client material, secrets, internal hosts/IPs or infrastructure paths; filings carry the owner's name; [DECISIONS / Hygiene](docs/DECISIONS.md#hygiene).
+- G-13: Vendor integration mechanics (endpoints, parameter/query shapes, redirect chains, auth flow, product names) may be documented in public source, tests, issues and PRs; credentials, client-derived identifiers and vendor security weaknesses may not (G-9; private escalation); [DECISIONS / Hygiene](docs/DECISIONS.md#hygiene).
 - G-10: Refuse unknown; bare grants run immediate, held-only verbs never do; [DECISIONS / Modes](docs/DECISIONS.md#modes).
 - G-11: Leave freeze/release to Jeeves and specific production/settings/grants/credentials/live actions to Charlie; [DECISIONS / Authority](docs/DECISIONS.md#authority).
 - G-12: Separate measured from inferred, cite SHA/time, enumerate denominators and control absence claims; [DECISIONS / Reporting](docs/DECISIONS.md#reporting).
