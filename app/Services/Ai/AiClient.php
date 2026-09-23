@@ -105,6 +105,7 @@ class AiClient
      * @param  int  $maxRounds  Maximum tool-use rounds
      * @param  int  $maxTokenBudget  Max total tokens (input+output) across all rounds
      * @param  int  $wallClockSeconds  Max wall-clock time for the loop
+     * @param  list<string>  $ignoreUndeclaredArgumentsFor  Caller-declared containment: strip unknown keys rather than refuse
      * @return AiResponse Final text response from the model
      */
     public function runToolLoop(
@@ -115,10 +116,11 @@ class AiClient
         int $maxRounds = 10,
         int $maxTokenBudget = 200_000,
         int $wallClockSeconds = 240,
+        array $ignoreUndeclaredArgumentsFor = [],
     ): AiResponse {
         $messages = [['role' => 'user', 'content' => $userMessage]];
 
-        return $this->executeToolLoop($system, $messages, $tools, $executor, $maxRounds, $maxTokenBudget, $wallClockSeconds);
+        return $this->executeToolLoop($system, $messages, $tools, $executor, $maxRounds, $maxTokenBudget, $wallClockSeconds, ignoreUndeclaredArgumentsFor: $ignoreUndeclaredArgumentsFor);
     }
 
     /**
@@ -134,6 +136,7 @@ class AiClient
      * @param  int  $wallClockSeconds  Max wall-clock time for the loop
      * @param  callable|null  $onToolCall  fn(string $toolName): void — progress callback
      * @param  bool  $enableCaching  Whether to enable prompt caching for the system prompt
+     * @param  list<string>  $ignoreUndeclaredArgumentsFor  Caller-declared containment: strip unknown keys rather than refuse
      */
     public function runChatWithTools(
         string $system,
@@ -145,8 +148,9 @@ class AiClient
         int $wallClockSeconds = 120,
         ?callable $onToolCall = null,
         bool $enableCaching = false,
+        array $ignoreUndeclaredArgumentsFor = [],
     ): AiResponse {
-        return $this->executeToolLoop($system, $messages, $tools, $executor, $maxRounds, $maxTokenBudget, $wallClockSeconds, $onToolCall, $enableCaching);
+        return $this->executeToolLoop($system, $messages, $tools, $executor, $maxRounds, $maxTokenBudget, $wallClockSeconds, $onToolCall, $enableCaching, $ignoreUndeclaredArgumentsFor);
     }
 
     /**
@@ -162,6 +166,7 @@ class AiClient
         int $wallClockSeconds,
         ?callable $onToolCall = null,
         bool $enableCaching = false,
+        array $ignoreUndeclaredArgumentsFor = [],
     ): AiResponse {
         if (AiConfig::provider() !== 'anthropic') {
             throw new \RuntimeException('Tool loop is only supported with Anthropic provider');
@@ -190,7 +195,23 @@ class AiClient
         // round: $tools is by-value and never mutated, so this cannot drift from what the
         // model was offered. Deriving it a second time from a live source is exactly the
         // TOCTOU that cost psa-uw2o four review rounds — do not "refresh" it per round.
+        // The same snapshot also bounds top-level argument names. Missing/unusable
+        // properties or an explicitly open schema are unknown/permissive (null);
+        // an empty properties map is a known no-argument contract ([]).
+        // Only the publishing caller may request strip-and-ignore containment.
         $publishedTools = array_column($tools, 'name');
+        $acceptedKeys = [];
+        foreach ($tools as $tool) {
+            $schema = $tool['input_schema'] ?? null;
+            $properties = is_array($schema) ? ($schema['properties'] ?? null) : null;
+            $acceptedKeys[$tool['name']] = is_array($schema)
+                && (! array_key_exists('additionalProperties', $schema) || $schema['additionalProperties'] === false)
+                && (is_array($properties) || $properties instanceof \stdClass)
+                    ? array_keys((array) $properties)
+                    : null;
+        }
+        // Redundant with the name guard + $tools-keyed $acceptedKeys today; retain if keys ever come from another source.
+        $ignoreUndeclaredArgumentsFor = array_values(array_intersect($ignoreUndeclaredArgumentsFor, $publishedTools));
 
         $finalText = '';
 
@@ -281,6 +302,33 @@ class AiClient
                     ];
 
                     continue;
+                }
+
+                $keys = $acceptedKeys[$toolName] ?? null;
+                $unknown = $keys === null ? [] : array_diff(array_keys($toolInput), $keys);
+                if ($unknown !== []) {
+                    sort($unknown, SORT_STRING);
+                    $ignored = in_array($toolName, $ignoreUndeclaredArgumentsFor, true);
+                    Log::warning('[AiClient] Undeclared tool arguments', [
+                        'tool' => $toolName,
+                        'keys' => array_slice($unknown, 0, 10),
+                        'action' => $ignored ? 'ignored' : 'refused',
+                    ]);
+                    if ($ignored) {
+                        $toolInput = array_intersect_key($toolInput, array_flip($keys));
+                    } else {
+                        sort($keys, SORT_STRING);
+                        $accepted = $keys === [] ? 'no arguments' : 'only: '.implode(', ', $keys);
+                        $toolResults[] = [
+                            'type' => 'tool_result',
+                            'tool_use_id' => $toolId,
+                            'content' => json_encode([
+                                'error' => 'Unsupported tool argument(s): '.implode(', ', array_slice($unknown, 0, 10)).". {$toolName} accepts {$accepted}. Call REFUSED, not ignored; retry using the published arguments.",
+                            ]),
+                        ];
+
+                        continue;
+                    }
                 }
 
                 Log::debug('[AiClient] Executing tool', [

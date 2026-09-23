@@ -221,7 +221,7 @@ class AiClientSchemaEnforcementTest extends TestCase
         return [
             'name' => $name,
             'description' => 'test tool',
-            'input_schema' => ['type' => 'object', 'properties' => new \stdClass],
+            'input_schema' => ['type' => 'object', 'properties' => ['query' => ['type' => 'string']]],
         ];
     }
 
