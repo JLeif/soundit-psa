@@ -369,9 +369,26 @@ class StrandedVoicemailDeferralReportTest extends TestCase
 
         // And a distinct error-level record exists, so the corrupt row is not
         // read as part of the expected hourly report.
+        //
+        // `detail` is asserted alongside unmapped_statuses because it is an
+        // EMITTED operator-facing value, not a comment: it rides in the same
+        // context array as count/call_ids/unmapped_statuses/oldest_deferred_at,
+        // every one of which this file already grades. It was the only emitted
+        // key here that nothing asserted on, and it is the one that drifted
+        // through four adjudication rounds (card Ujy42wr5). Graded here in the
+        // house shape used at TacticalBootTimeRefreshTest:275.
+        //
+        // NOTE what this does and does not buy: asserting a string pins its
+        // TEXT, never its TRUTH -- this same assertion would have passed for
+        // all three falsified drafts. Its value is that a future edit to the
+        // sentence must come back through a test. The truth of the surviving
+        // claim was established separately, by EXECUTION: CallStatus::from()
+        // on an unmapped value throws ValueError (and the model cast reaches
+        // from(), not tryFrom()), which is what statusLabel() catches.
         Log::shouldHaveReceived('error')
             ->withArgs(fn (string $m, array $c) => str_contains($m, 'no enum case maps')
-                && $c['unmapped_statuses'] === [$call->id => 'legacy_unmapped'])
+                && $c['unmapped_statuses'] === [$call->id => 'legacy_unmapped']
+                && $c['detail'] === 'CallStatus::from() throws on these values.')
             ->once();
     }
 
