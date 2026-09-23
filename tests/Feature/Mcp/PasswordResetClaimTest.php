@@ -111,6 +111,7 @@ class PasswordResetClaimTest extends TestCase
             $run = $this->stage($executor);
             $approval = $executor->approveStagedRun($run, $this->approver);
             $this->assertStringContainsString('direct-holder, started ', $approval->message);
+            $this->assertStringContainsString('--checked-cipp-log', $approval->message);
 
             return $this->success();
         });
@@ -217,7 +218,9 @@ class PasswordResetClaimTest extends TestCase
         });
         $this->assertTrue($this->direct($executor)['success']);
         $this->assertDatabaseCount('password_reset_claims', 0);
-        $this->assertTrue($this->direct($executor)['success']);
+        $second = $this->direct($executor);
+        $this->assertArrayNotHasKey('error', $second, json_encode($second));
+        $this->assertTrue($second['success']);
         $this->assertSame(2, $calls);
         $this->assertDatabaseCount('password_reset_claims', 0);
     }

@@ -1204,7 +1204,8 @@ class StaffCippWriteToolExecutor
             if ($claim['refusal'] !== null) {
                 $run->releaseClaim();
 
-                return $this->declined($claim['refusal']);
+                // The generic 300-character decline truncates the clearing command.
+                return new TechnicianApprovalResult('gate_declined', message: $this->redactor->redactString($claim['refusal']));
             }
 
             try {
