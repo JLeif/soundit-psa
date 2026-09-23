@@ -37,20 +37,38 @@ class CippProjectionMessageTest extends TestCase
                 ]
         );
 
+        foreach (['emergency', 'alert', 'critical', 'error', 'notice', 'info', 'debug', 'log'] as $level) {
+            Log::shouldNotHaveReceived($level);
+        }
         Http::assertNothingSent();
     }
 
-    public function test_nonempty_projection_does_not_emit_empty_projection_warning(): void
+    public static function nonemptyRows(): array
+    {
+        return [
+            'nonempty row' => [
+                [['User' => null, 'Permissions' => 'FullAccess']],
+                [['permissions' => 'FullAccess']],
+            ],
+            'empty and nonempty rows' => [
+                [['User' => null, 'Permissions' => null], ['User' => null, 'Permissions' => 'FullAccess']],
+                [[], ['permissions' => 'FullAccess']],
+            ],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('nonemptyRows')]
+    public function test_nonempty_projection_emits_nothing_at_any_level(array $rows, array $expected): void
     {
         Http::preventStrayRequests();
         Log::spy();
 
-        $result = app(CippToolContract::class)->shape('cipp_list_mailbox_permissions', [
-            ['User' => null, 'Permissions' => 'FullAccess'],
-        ], [], null);
+        $result = app(CippToolContract::class)->shape('cipp_list_mailbox_permissions', $rows, [], null);
 
-        $this->assertSame([['permissions' => 'FullAccess']], $result);
-        Log::shouldNotHaveReceived('warning');
+        $this->assertSame($expected, $result);
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $level) {
+            Log::shouldNotHaveReceived($level);
+        }
         Http::assertNothingSent();
     }
 }
