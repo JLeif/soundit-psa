@@ -285,7 +285,11 @@ class CometAlertService
 
         $stale = $this->staleAgainst($existing, $identity);
         if ($stale !== null) {
-            Log::info('[Comet Alert] Stale/replayed failure event ignored — newer or equal state already recorded', [
+            // No reason is stated here: staleAgainst() refuses for two reasons
+            // and only one of them is a time comparison, so any clause about
+            // recorded state would be false on a replayed GUID (#3232). The
+            // reason travels in stale_because, which is accurate on both arms.
+            Log::info('[Comet Alert] Stale/replayed failure event ignored', [
                 'alert_id' => $existing->id,
                 'source_alert_id' => $identity['series_key'],
                 'event_time' => $eventTime,
@@ -363,14 +367,18 @@ class CometAlertService
             if ($isOpen) {
                 // The mirror image of the original defect: a stale/replayed
                 // success must never present a broken backup as recovered.
-                Log::warning('[Comet Alert] Stale success rejected — it does not postdate the recorded failure, alert stays open', [
+                // Reason deliberately unstated — see staleAgainst() and #3232:
+                // a replayed GUID is refused without any timestamp comparison
+                // and can be newer than the failure, so stale_because carries
+                // the reason instead of the message.
+                Log::warning('[Comet Alert] Stale success rejected, alert stays open', [
                     'alert_id' => $existing->id,
                     'source_alert_id' => $identity['series_key'],
                     'event_time' => $eventTime,
                     'stale_because' => $stale,
                 ]);
             } else {
-                Log::info('[Comet Alert] Stale/replayed success ignored — newer state already recorded', [
+                Log::info('[Comet Alert] Stale/replayed success ignored', [
                     'alert_id' => $existing->id,
                     'source_alert_id' => $identity['series_key'],
                     'event_time' => $eventTime,
