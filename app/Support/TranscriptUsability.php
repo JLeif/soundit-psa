@@ -45,7 +45,9 @@ class TranscriptUsability
         $normalized = mb_strtolower($text, 'UTF-8');
         $normalized = trim(preg_replace('/[\p{P}\p{Z}\s]+/u', ' ', $normalized) ?? $normalized);
 
-        if (in_array($normalized, self::STOCK, true)) {
+        // Unicode-only whitespace or punctuation (e.g. '...' on silence) is produced
+        // blank too; trim() above strips ASCII whitespace only.
+        if ($normalized === '' || in_array($normalized, self::STOCK, true)) {
             return true;
         }
 

@@ -85,6 +85,51 @@ class UnusableTranscriptTest extends TestCase
         }
     }
 
+    public function test_punctuation_or_unicode_blank_output_requires_a_listen_at_every_duration(): void
+    {
+        \App\Models\Setting::setValue('intake_call_enabled', '1');
+        foreach (['...', '.', '…', "\u{3000}", "\u{00A0}", 'Customer: ...'] as $text) {
+            foreach ([null, 0, -1, 3, 5, 17] as $duration) {
+                $call = $this->makeCall($text, $duration);
+                $this->finalize($call);
+                $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+                $this->assertSame($text, $call->fresh()->transcription);
+                Queue::assertNotPushed(CallIntakeJob::class);
+            }
+            $this->assertTrue((new TranscriptUsability)->isUnusable($text, null, ['Customer']));
+        }
+    }
+
+    public function test_density_applies_to_voicemail_only_so_sparse_answered_calls_keep_intake(): void
+    {
+        \App\Models\Setting::setValue('intake_call_enabled', '1');
+        // 3000 characters over 1800s is 1.67/s: a quiet remote-support session.
+        $text = str_repeat('Checking the server now. ', 120);
+        foreach ([CallStatus::Completed, CallStatus::InProgress] as $status) {
+            $call = $this->makeCall($text, 1800);
+            $call->forceFill(['status' => $status])->save();
+            $this->finalize($call);
+            $this->assertSame(TranscriptionStatus::Completed, $call->fresh()->transcription_status);
+            Queue::assertPushed(CallIntakeJob::class);
+        }
+
+        // The same shape left as a voicemail still asks for a listen.
+        $call = $this->makeCall($text, 1800);
+        $this->finalize($call);
+        $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+        Queue::assertNotPushed(CallIntakeJob::class);
+
+        // Stock and produced-blank checks still apply to answered calls.
+        foreach (['You', '', '   ', '...'] as $flagged) {
+            $call = $this->makeCall($flagged, 1800);
+            $call->forceFill(['status' => CallStatus::Completed])->save();
+            $this->finalize($call);
+            $this->assertSame(TranscriptionStatus::Unusable, $call->fresh()->transcription_status);
+            $this->assertSame($flagged, $call->fresh()->transcription);
+            Queue::assertNotPushed(CallIntakeJob::class);
+        }
+    }
+
     public function test_short_real_message_is_deliberately_flagged_for_a_listen(): void
     {
         // Accepted false positive: real speech + silence tail, not proof of silence.

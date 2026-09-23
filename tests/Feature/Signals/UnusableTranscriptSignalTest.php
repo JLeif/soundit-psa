@@ -49,7 +49,7 @@ class UnusableTranscriptSignalTest extends TestCase
 
     public function test_produced_empty_text_is_flagged_at_both_exits_with_intake_on_and_off(): void
     {
-        foreach (['', '   ', "\n\n"] as $text) {
+        foreach (['', '   ', "\n\n", '...', "\u{3000}"] as $text) {
             foreach ([false, true] as $fullPath) {
                 foreach (['0', '1'] as $enabled) {
                     Queue::fake();
