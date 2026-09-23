@@ -92,6 +92,7 @@ class PasswordResetClaimTest extends TestCase
         $this->assertNull($first['refusal']);
         $this->travel(365)->days(); // No expiry, even long after a transport failure.
         $blocked = $claims->acquire($this->clientId, $this->args['person_id'], 'second-holder');
+        $this->assertNotNull($blocked['refusal']);
         $this->assertStringContainsString('first-holder, started ', $blocked['refusal']);
         $this->assertStringContainsString('php artisan cipp:clear-reset-claim '.$first['id'], $blocked['refusal']);
         $this->assertNull($claims->acquire($this->clientId + 1, $this->args['person_id'], 'other-client')['refusal']);
@@ -195,6 +196,8 @@ class PasswordResetClaimTest extends TestCase
         $this->assertDatabaseCount('password_reset_claims', 1);
         $this->artisan('cipp:clear-reset-claim', ['id' => $held->id, '--operator' => 'Reconciler', '--reason' => 'Checked vendor log; request no longer running.', '--checked-cipp-log' => true])
             ->assertSuccessful();
+        $this->assertDatabaseCount('password_reset_claims', 0);
+        $this->assertSame(1, \App\Models\McpAuditLog::where('method', 'cipp:clear-reset-claim')->count());
         $audit = \App\Models\McpAuditLog::where('method', 'cipp:clear-reset-claim')->sole();
         $this->assertSame('Reconciler', $audit->actor_label);
         $this->assertSame($held->id, $audit->arguments['claim_id']);
@@ -214,8 +217,6 @@ class PasswordResetClaimTest extends TestCase
         });
         $this->assertTrue($this->direct($executor)['success']);
         $this->assertDatabaseCount('password_reset_claims', 0);
-        // Step one retains the old timer; step two removes this travel with the timer.
-        $this->travel(301)->seconds();
         $this->assertTrue($this->direct($executor)['success']);
         $this->assertSame(2, $calls);
         $this->assertDatabaseCount('password_reset_claims', 0);

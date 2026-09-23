@@ -386,7 +386,7 @@ class CippWritePasswordResetPr3Test extends TestCase
         $this->assertSame('[withheld]', $args['confirm_upn']);
     }
 
-    public function test_cooldown_blocks_a_second_reset_for_the_same_user(): void
+    public function test_definite_answer_allows_a_second_reset_for_the_same_user(): void
     {
         $this->freezeTime();
         $this->configureCipp();
@@ -395,7 +395,7 @@ class CippWritePasswordResetPr3Test extends TestCase
 
         $client = Mockery::mock(CippRestWriteClient::class);
         $client->shouldReceive('resetUserPassword')
-            ->once() // ONLY the first attempt may reach upstream
+            ->twice() // Each deliberately requested reset after a definite answer is legitimate.
             ->andReturn(['success' => true, 'status' => 200, 'body' => [
                 'Results' => ['copyField' => 'pw-cooldown-1', 'state' => 'success'],
             ]]);
@@ -406,7 +406,7 @@ class CippWritePasswordResetPr3Test extends TestCase
             'client_id' => $fixture['client']->id,
             'person_id' => $fixture['person']->id,
             'confirm_upn' => 'alex@acme.example',
-            'reason' => 'First reset, then an immediate retry that must be refused.',
+            'reason' => 'First reset, then a deliberate new reset after a definite answer.',
         ];
 
         $first = $this->callTool($token, self::TOOL, $args);
@@ -414,11 +414,8 @@ class CippWritePasswordResetPr3Test extends TestCase
         $this->assertFalse((bool) $first->json('result.isError'), (string) $first->json('result.content.0.text'));
         $this->assertSame('pw-cooldown-1', $this->decodedResult($first)['temporary_password']);
 
-        // Immediate second attempt for the same person is refused by the cooldown;
-        // resetUserPassword must NOT be called a second time (Mockery ->once() enforces this).
         $second = $this->callTool($token, self::TOOL, $args);
-        $this->assertTrue((bool) $second->json('result.isError'));
-        $this->assertStringContainsString('cooldown', (string) $second->json('result.content.0.text'));
-        $this->assertStringContainsString('300 seconds', (string) $second->json('result.content.0.text'));
+        $this->assertFalse((bool) $second->json('result.isError'), $second->getContent());
+        $this->assertSame('pw-cooldown-1', $this->decodedResult($second)['temporary_password']);
     }
 }
