@@ -272,7 +272,7 @@ class CippAdminSyncNowTest extends TestCase
         ]);
     }
 
-    public function test_cooldown_blocks_a_second_run_inside_the_window(): void
+    public function test_a_second_run_is_allowed_immediately(): void
     {
         $this->configureCipp();
         $this->configureAiActor();
@@ -291,8 +291,8 @@ class CippAdminSyncNowTest extends TestCase
             'reason' => 'immediately again',
         ]));
 
-        $this->assertStringContainsString('cooldown active', (string) ($second['error'] ?? ''));
-        $this->assertSame(1, TechnicianActionLog::where('action_type', self::TOOL)
+        $this->assertTrue($second['success']);
+        $this->assertSame(2, TechnicianActionLog::where('action_type', self::TOOL)
             ->where('result_status', 'executed')->count());
     }
 
@@ -434,10 +434,9 @@ class CippAdminSyncNowTest extends TestCase
     }
 
     /**
-     * The cooldown is what bounds upstream cost, so a FAILING sync must arm it too — an
-     * agent retry loop against a degraded tenant is the case it exists for.
+     * zAYpGMFJ: failed syncs may be retried immediately; the sync lock remains.
      */
-    public function test_a_failed_sync_arms_the_cooldown(): void
+    public function test_a_failed_sync_allows_immediate_retry(): void
     {
         $this->configureCipp();
         $this->configureAiActor();
@@ -452,12 +451,12 @@ class CippAdminSyncNowTest extends TestCase
             'reason' => 'retry immediately',
         ]));
 
-        $this->assertStringContainsString('cooldown active', (string) ($second['error'] ?? ''));
-        $this->assertSame(1, $calls->count, 'the retry must not reach CIPP');
+        $this->assertStringNotContainsString('cooldown active', (string) ($second['error'] ?? ''));
+        $this->assertSame(2, $calls->count, 'the retry must reach CIPP');
     }
 
-    /** A degraded read arms it too — same upstream call, same cost to bound. */
-    public function test_a_degraded_read_arms_the_cooldown(): void
+    /** A degraded read must also allow immediate recovery. */
+    public function test_a_degraded_read_allows_immediate_retry(): void
     {
         $this->configureCipp();
         $this->configureAiActor();
@@ -472,8 +471,8 @@ class CippAdminSyncNowTest extends TestCase
             'reason' => 'retry immediately',
         ]));
 
-        $this->assertStringContainsString('cooldown active', (string) ($second['error'] ?? ''));
-        $this->assertSame(1, $calls->count, 'the retry must not reach CIPP');
+        $this->assertStringNotContainsString('cooldown active', (string) ($second['error'] ?? ''));
+        $this->assertSame(2, $calls->count, 'the retry must reach CIPP');
     }
 
     /**

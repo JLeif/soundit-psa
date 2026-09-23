@@ -2111,17 +2111,7 @@ class CippWriteLicenseTargetTest extends TestCase
         $this->assertSame(2, TechnicianActionLog::where('result_status', 'executed')->count());
     }
 
-    /**
-     * THE COOLDOWN IS THIS FAMILY'S ONLY RUNAWAY GUARD, so it has to be able to
-     * see the approval path.
-     *
-     * There is no executed-content rail and no identity dedup on this verb (a
-     * seat is a recreatable target), and an approval audits under the STAGED
-     * action_type while the cooldown asked for the DIRECT one — so an
-     * operator-approved grant was invisible to the very next call, and a second
-     * upstream billing write went out with no rail having observed the first.
-     */
-    public function test_an_approved_grant_is_visible_to_the_cooldown_on_the_next_call(): void
+    public function test_an_approved_grant_does_not_time_block_a_later_assignment(): void
     {
         $this->configureCipp();
         $f = $this->fixture();
@@ -2131,8 +2121,8 @@ class CippWriteLicenseTargetTest extends TestCase
         $client = Mockery::mock(CippRestWriteClient::class);
         // Staging, approval and the second call each re-read the listing.
         $client->shouldReceive('listUsers')->times(3)->with(self::TENANT)->andReturn([$this->userRow()]);
-        // ONCE is the assertion: the approved grant is the only upstream write.
-        $client->shouldReceive('assignUserLicense')->once()
+        // zAYpGMFJ: repeat assignment uses existing tenant seats; it buys no subscription.
+        $client->shouldReceive('assignUserLicense')->twice()
             ->with(self::TENANT, self::TARGET_OBJECT_ID, 'sku-from-tenant-sync');
         $this->app->instance(CippRestWriteClient::class, $client);
 
@@ -2159,9 +2149,8 @@ class CippWriteLicenseTargetTest extends TestCase
             'reason' => 'Contractor needs a seat.',
         ]));
 
-        $this->assertArrayNotHasKey('success', $second);
-        $this->assertStringContainsString('cooldown active', (string) ($second['error'] ?? ''));
-        $this->assertSame(1, TechnicianActionLog::where('result_status', 'executed')->count());
+        $this->assertTrue($second['success']);
+        $this->assertSame(2, TechnicianActionLog::where('result_status', 'executed')->count());
     }
 
     /** @return array<int, array<string, mixed>> */

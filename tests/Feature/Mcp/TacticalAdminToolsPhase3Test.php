@@ -408,7 +408,7 @@ class TacticalAdminToolsPhase3Test extends TestCase
         $published = collect($this->listTools($token))->keyBy('name');
         $tactical = Mockery::mock(TacticalClient::class);
         $tactical->shouldReceive('getInstallerInfo')->times(4)->with('Acme|Main', 'windows')
-            ->andReturn(new InstallerInfo(downloadUrl: 'https://downloads.example.test/agent.exe'));
+            ->andReturn(new InstallerInfo(downloadUrl: 'https://downloads.example.test/agent.exe?token=retry-secret', installScript: 'install --token retry-secret'));
         $this->app->instance(TacticalClient::class, $tactical);
 
         foreach ($tools as $tool) {
@@ -421,8 +421,15 @@ class TacticalAdminToolsPhase3Test extends TestCase
                 $response->assertOk();
                 $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
                 $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
+                $result = $this->decodedResult($response);
+                $this->assertSame('https://downloads.example.test/agent.exe?token=retry-secret', $result['download_url']);
+                $this->assertSame('install --token retry-secret', $result['install_command']);
+                $this->assertSame($attempt + 1, TechnicianActionLog::where('action_type', $tool)->where('result_status', 'executed')->where('client_id', $client->id)->count());
+                $this->assertStringNotContainsString('retry-secret', json_encode(TechnicianActionLog::pluck('summary')->all()));
             }
-            $this->assertStringContainsString('Capture and deliver the URL and command in the same step.', $published[$tool]['description']);
+            $this->assertStringContainsString('Capture and deliver the URL and, when present, the command in the same step.', $published[$tool]['description']);
+            $this->assertStringContainsString('Earlier installer links remain valid until their own expiry', $published[$tool]['description']);
+            $this->assertStringNotContainsString('current folder', $published[$tool]['description']);
             $this->assertStringContainsString('They cannot be fetched again, and a new call mints a new token.', $published[$tool]['description']);
         }
     }

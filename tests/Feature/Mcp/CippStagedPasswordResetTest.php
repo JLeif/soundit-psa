@@ -242,6 +242,7 @@ class CippStagedPasswordResetTest extends TestCase
      */
     public function test_approval_is_refused_while_the_target_is_in_reset_cooldown(): void
     {
+        $this->freezeTime();
         $this->configureCipp();
         $this->configureAiActor();
         $fixture = $this->cippFixture();
@@ -273,10 +274,12 @@ class CippStagedPasswordResetTest extends TestCase
         $this->app->instance(CippRestWriteClient::class, $blocked);
 
         $approver = User::factory()->create();
+        $this->travel(37)->seconds();
         $approval = $this->actingAs($approver)->postJson(route('cockpit.approve', $run));
 
         $this->assertFalse((bool) $approval->json('ok'));
         $this->assertNull($approval->json('secret'));
+        $this->assertStringContainsString('263 seconds', $approval->getContent());
     }
 
     /**
@@ -422,6 +425,63 @@ class CippStagedPasswordResetTest extends TestCase
 
         $this->assertTrue((bool) $response->json('result.isError'));
         $this->assertStringContainsString('cooldown', (string) $response->json('result.content.0.text'));
+    }
+
+    public function test_executed_reset_allows_same_ticket_restaging_but_approval_reports_seconds_left(): void
+    {
+        $this->freezeTime();
+        $this->configureCipp();
+        $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $this->stageAndApprove($fixture, 'Held-Pass-1!');
+        // Live control: the first call actually executed and armed the mint window.
+        $this->assertDatabaseHas('technician_action_logs', ['action_type' => self::STAGED, 'result_status' => 'executed']);
+        $firstId = TechnicianRun::where('action_type', self::STAGED)->sole()->id;
+        $this->travel(37)->seconds();
+        $run = $this->restageAndGetNewRun($fixture, $firstId);
+        $approval = $this->actingAs(User::factory()->create())->postJson(route('cockpit.approve', $run));
+        $this->assertFalse((bool) $approval->json('ok'));
+        $this->assertStringContainsString('263 seconds', $approval->getContent());
+        $this->assertNull($approval->json('secret'));
+    }
+
+    public function test_rejected_reset_allows_immediate_same_ticket_restaging(): void
+    {
+        $this->freezeTime();
+        $this->configureCipp();
+        $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $first = $this->stageAndGetRun($fixture);
+        // Positive control: a pending repeat folds into the same live proposal.
+        $this->assertSame($first->id, $this->stageAndGetRun($fixture)->id);
+        $this->assertSame(1, TechnicianRun::where('action_type', self::STAGED)->count());
+        $this->actingAs(User::factory()->create())->postJson(route('cockpit.deny', $first))->assertOk();
+        $this->assertSame(TechnicianRunState::Denied, $first->fresh()->state);
+        $this->restageAndGetNewRun($fixture, $first->id);
+    }
+
+    private function restageAndGetNewRun(array $fixture, int $firstId): TechnicianRun
+    {
+        $staging = Mockery::mock(CippRestWriteClient::class);
+        $staging->shouldNotReceive('resetUserPassword');
+        $this->app->instance(CippRestWriteClient::class, $staging);
+        $response = $this->callTool(
+            McpConfig::rotateStaffToken(allowedTools: [self::TOOL.':staged'], label: 'opsbot'),
+            self::TOOL,
+            ['client_id' => $fixture['client']->id, 'person_id' => $fixture['contact']->id,
+                'ticket_id' => $fixture['ticket']->id, 'confirm_upn' => 'alex@acme.example',
+                'reason' => 'Held for approval.', 'staged' => true],
+        );
+        $this->assertFalse((bool) $response->json('result.isError'), $response->getContent());
+        $result = json_decode($response->json('result.content.0.text'), true, flags: JSON_THROW_ON_ERROR);
+        $this->assertTrue($result['success']);
+        $this->assertArrayNotHasKey('idempotent', $result);
+        // Identical content revives the terminal row; staging need not allocate a new id.
+        $run = TechnicianRun::findOrFail($result['run_id']);
+        $this->assertSame($firstId, $run->id);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+
+        return $run;
     }
 
     /** The other half of the same asymmetry: held -> held, from a different ticket. */

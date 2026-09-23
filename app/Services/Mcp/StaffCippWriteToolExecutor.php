@@ -138,9 +138,8 @@ class StaffCippWriteToolExecutor
      * Only the executed-content rail is skipped, exactly as
      * stageResetPasswordAction() skips it for a credential mint that must stay
      * repeatable: the liveAwaitingRun() dedupe still collapses an identical
-     * proposal that is still pending approval, and the per-target proposal
-     * cooldown still stops runaway staging. Both of those refuse honestly rather
-     * than claiming the work is already done.
+     * proposal that is still pending approval without claiming the work is done.
+     * Proposal timers are disabled per zAYpGMFJ; approval and execution claims remain.
      *
      * A LICENCE SEAT IS RECREATABLE THE SAME WAY, and it is the clearer case.
      * assign -> remove -> re-assign is an ordinary supported sequence (a
@@ -155,8 +154,8 @@ class StaffCippWriteToolExecutor
      * billing write, and on the staged path one the operator cannot even
      * re-approve. Unlike a device wipe, the write is harmless to repeat
      * (assigning a SKU the user already holds is an upstream no-op), so the
-     * family lets the call through and keeps the per-target cooldown, which
-     * refuses honestly instead of claiming the work is already done.
+     * family lets the call through without a timer (zAYpGMFJ), rather than
+     * claiming the work is already done.
      *
      * @var array<int, string>
      */
@@ -167,53 +166,53 @@ class StaffCippWriteToolExecutor
 
     /** @var array<string, int> */
     private const COOLDOWNS = [
-        'cipp_disable_user_sign_in' => 300,
-        'cipp_stage_disable_user_sign_in' => 300,
-        'cipp_enable_user_sign_in' => 300,
-        'cipp_stage_enable_user_sign_in' => 300,
-        'cipp_revoke_user_sessions' => 300,
-        'cipp_stage_revoke_user_sessions' => 300,
-        'cipp_remove_user_mfa_methods' => 300,
-        'cipp_stage_remove_user_mfa_methods' => 300,
-        'cipp_set_legacy_per_user_mfa' => 300,
-        'cipp_stage_set_legacy_per_user_mfa' => 300,
-        'cipp_assign_user_license' => 300,
-        'cipp_stage_assign_user_license' => 300,
-        'cipp_assign_tenant_user_license' => 300,
-        'cipp_stage_assign_tenant_user_license' => 300,
-        'cipp_remove_user_license' => 300,
-        'cipp_stage_remove_user_license' => 300,
-        'cipp_convert_mailbox' => 300,
-        'cipp_stage_convert_mailbox' => 300,
-        'cipp_set_mailbox_forwarding' => 300,
-        'cipp_stage_set_mailbox_forwarding' => 300,
-        'cipp_set_mailbox_gal_visibility' => 300,
-        'cipp_stage_set_mailbox_gal_visibility' => 300,
-        'cipp_set_mailbox_out_of_office' => 300,
-        'cipp_stage_set_mailbox_out_of_office' => 300,
+        'cipp_disable_user_sign_in' => 0,
+        'cipp_stage_disable_user_sign_in' => 0,
+        'cipp_enable_user_sign_in' => 0,
+        'cipp_stage_enable_user_sign_in' => 0,
+        'cipp_revoke_user_sessions' => 0,
+        'cipp_stage_revoke_user_sessions' => 0,
+        'cipp_remove_user_mfa_methods' => 0,
+        'cipp_stage_remove_user_mfa_methods' => 0,
+        'cipp_set_legacy_per_user_mfa' => 0,
+        'cipp_stage_set_legacy_per_user_mfa' => 0,
+        'cipp_assign_user_license' => 0,
+        'cipp_stage_assign_user_license' => 0,
+        'cipp_assign_tenant_user_license' => 0,
+        'cipp_stage_assign_tenant_user_license' => 0,
+        'cipp_remove_user_license' => 0,
+        'cipp_stage_remove_user_license' => 0,
+        'cipp_convert_mailbox' => 0,
+        'cipp_stage_convert_mailbox' => 0,
+        'cipp_set_mailbox_forwarding' => 0,
+        'cipp_stage_set_mailbox_forwarding' => 0,
+        'cipp_set_mailbox_gal_visibility' => 0,
+        'cipp_stage_set_mailbox_gal_visibility' => 0,
+        'cipp_set_mailbox_out_of_office' => 0,
+        'cipp_stage_set_mailbox_out_of_office' => 0,
         // Distinct delegates on one mailbox must not block each other. Exact-content
         // deduplication still applies; zero disables only the mailbox-wide cooldown.
         'cipp_set_mailbox_delegate' => 0,
         'cipp_stage_set_mailbox_delegate' => 0,
-        'cipp_remove_directory_role' => 300,
-        'cipp_stage_remove_directory_role' => 300,
-        'cipp_remove_mailbox_rule' => 300,
-        'cipp_stage_remove_mailbox_rule' => 300,
-        'cipp_release_quarantine_message' => 300,
-        'cipp_stage_release_quarantine_message' => 300,
-        'cipp_add_tenant_allow_entry' => 300,
-        'cipp_stage_add_tenant_allow_entry' => 300,
-        'cipp_wipe_device' => 300,
-        'cipp_stage_wipe_device' => 300,
-        'cipp_reassign_onedrive' => 300,
-        'cipp_stage_reassign_onedrive' => 300,
+        'cipp_remove_directory_role' => 0,
+        'cipp_stage_remove_directory_role' => 0,
+        'cipp_remove_mailbox_rule' => 0,
+        'cipp_stage_remove_mailbox_rule' => 0,
+        'cipp_release_quarantine_message' => 0,
+        'cipp_stage_release_quarantine_message' => 0,
+        'cipp_add_tenant_allow_entry' => 0,
+        'cipp_stage_add_tenant_allow_entry' => 0,
+        'cipp_wipe_device' => 0,
+        'cipp_stage_wipe_device' => 0,
+        'cipp_reassign_onedrive' => 0,
+        'cipp_stage_reassign_onedrive' => 0,
         'cipp_reset_user_password' => 300,
-        'cipp_create_user' => 300,
-        'cipp_stage_create_user' => 300,
-        'cipp_edit_user' => 300,
-        'cipp_stage_edit_user' => 300,
-        'cipp_set_group_membership' => 300,
-        'cipp_stage_set_group_membership' => 300,
+        'cipp_create_user' => 0,
+        'cipp_stage_create_user' => 0,
+        'cipp_edit_user' => 0,
+        'cipp_stage_edit_user' => 0,
+        'cipp_set_group_membership' => 0,
+        'cipp_stage_set_group_membership' => 0,
     ];
 
     private const OOO_MESSAGE_MAX = 2000;
@@ -826,7 +825,7 @@ class StaffCippWriteToolExecutor
         $this->resolver->resolveTicketForHeldAction($client->id, $run->ticket_id);
         $person = $this->resolver->resolveCippPerson($client->id, $payload['person_id'] ?? null);
         $params = $this->mailboxParamsForTool($tool, $client->id, $payload['params'] ?? [], $humanInputs, heldApproval: true, person: $person);
-        if ($this->cooldownActive($tool, $client->id, $person, null, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->cooldownActive($tool, $client->id, $person, null, self::COOLDOWNS[$tool] ?? 0)) {
             throw new \App\Services\Technician\Scheduled\ScheduledUnavailable('cooldown');
         }
         $people = ['owner' => ['person_id' => $person->person->id, 'id' => $person->userId, 'upn' => $person->userPrincipalName]];
@@ -942,7 +941,7 @@ class StaffCippWriteToolExecutor
                 }
             }
 
-            if ($this->cooldownActive($directTool, $client->id, $person, $license, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->cooldownActive($directTool, $client->id, $person, $license, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, $license, $run->content_hash, 'CIPP staged action cooldown active; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -1007,7 +1006,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->cooldownActive($tool, $client->id, $person, $license, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->cooldownActive($tool, $client->id, $person, $license, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -1073,10 +1072,10 @@ class StaffCippWriteToolExecutor
 
         // Shared across both paths: a held approval audits under the STAGED name, so a
         // single-name lookup would miss it here (security review psa-eerg4 R2).
-        if ($this->resetCooldownActive($client->id, $person, self::COOLDOWNS[$tool] ?? 300)) {
+        if (($secondsLeft = $this->resetCooldownRemainingSeconds($client->id, $person, self::COOLDOWNS[$tool] ?? 0)) > 0) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$tool} cooldown active; upstream call refused.", $actorLabel);
 
-            return ['error' => "{$tool} cooldown active for this target; no reset was performed. Wait before retrying a password reset."];
+            return ['error' => "{$tool} cooldown active for this target; no reset was performed. Retry in {$secondsLeft} seconds."];
         }
 
         try {
@@ -1182,11 +1181,11 @@ class StaffCippWriteToolExecutor
                 return $this->declined('Technician kill-switch engaged; the staged password reset was refused.');
             }
 
-            if ($this->resetCooldownActive($client->id, $person, self::COOLDOWNS[$directTool] ?? 300)) {
+            if (($secondsLeft = $this->resetCooldownRemainingSeconds($client->id, $person, self::COOLDOWNS[$directTool] ?? 0)) > 0) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $contentHash, 'Password reset cooldown active for this target; approval refused before upstream call.', $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
-                return $this->declined('This user\'s password was reset very recently; wait a few minutes and approve again if a new password is still needed.');
+                return $this->declined("This user's password was reset very recently; retry in {$secondsLeft} seconds and approve again if a new password is still needed.");
             }
 
             try {
@@ -1242,9 +1241,9 @@ class StaffCippWriteToolExecutor
      *     "Already executed identical action recently; no new proposal was staged" —
      *     correct for an idempotent write, WRONG here: a second reset request after one
      *     already executed must be allowed to stage a fresh proposal, because the point
-     *     of a reset is to mint a NEW password. The liveAwaitingRun() dedupe and the
-     *     proposal cooldown are kept — an identical proposal still pending approval is
-     *     genuinely the same ask, and the cooldown still stops runaway staging.
+     *     of a reset is to mint a NEW password. liveAwaitingRun() still folds an
+     *     identical pending proposal. The staging timer is disabled; the 300-second
+     *     window applies only when minting, at direct execution or approval.
      *  2. must_change rides in the held payload, so approval executes the operator's
      *     reviewed intent rather than re-reading a default.
      *
@@ -1294,7 +1293,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->proposalCooldownActive($tool, $ticket, $person, null, self::COOLDOWNS[$directTool] ?? 300)) {
+        if ($this->proposalCooldownActive($tool, $ticket, $person, null, 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1467,7 +1466,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->proposalCooldownActive($tool, $ticket, $person, $license, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->proposalCooldownActive($tool, $ticket, $person, $license, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1619,7 +1618,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -1721,7 +1720,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -1863,7 +1862,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('gate_declined');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -2265,19 +2264,17 @@ class StaffCippWriteToolExecutor
      * direct-then-approve, while the write an approval just made is invisible to
      * the NEXT approval and to a later direct call.
      *
-     * That asymmetry costs more here than anywhere else in this class. This
-     * family carries no executed-content rail and no identity dedup at all — a
-     * licence seat is a recreatable target (RECREATABLE_TARGET_STAGED_TOOLS) and
-     * no log-derived key can see a removal between two grants — so this cooldown
-     * is the ONLY runaway guard on a billing write. Blind on the staged path it
-     * is not a guard, it is a comment.
+     * This family carries no executed-content or identity dedup: a licence seat
+     * is a recreatable target (RECREATABLE_TARGET_STAGED_TOOLS), and log-derived
+     * keys cannot see a removal between grants. B1 passes zero to this helper;
+     * it is not a live rate or duplicate guard. Repeat assignments go upstream.
      *
      * EXECUTED rows only, deliberately, for resetCooldownActive()'s reason: the
      * staging call leaves an awaiting_approval row under the STAGED name
      * carrying this same target key, and counting it would make every proposal
      * block its own approval. Nothing is lost on the direct name — staging never
-     * audits under it — and runaway STAGING is refused by the ticket-scoped
-     * proposal cooldown, which is a different question.
+     * audits under it. Proposal timers are also disabled; pending-proposal
+     * identity and per-run approval claiming remain separate mechanisms.
      */
     private function licenseTargetCooldownActive(string $tool, int $clientId, string $targetKey, int $cooldownSeconds): bool
     {
@@ -2398,7 +2395,7 @@ class StaffCippWriteToolExecutor
 
         // Shared targetKey-in-summary cooldown helper (same semantics as the
         // email-security non-person targets).
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -2508,7 +2505,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -2653,7 +2650,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('already_handled');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -2998,7 +2995,7 @@ class StaffCippWriteToolExecutor
 
         // Shared targetKey-in-summary cooldown helper (same semantics as the
         // email-security and create-user non-person-only targets).
-        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -3098,7 +3095,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -3252,7 +3249,7 @@ class StaffCippWriteToolExecutor
                 return new TechnicianApprovalResult('already_handled');
             }
 
-            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            if ($this->emailSecurityCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -3622,11 +3619,9 @@ class StaffCippWriteToolExecutor
      * removal made in between, so suppressing a repeat answers success on a
      * billing write that never happened. What actually runs, in order: the
      * verification read, the held-only refusal for a target the PSA maps to a
-     * person record, the targetKey cooldown, then upstream. The cooldown is the
-     * ONLY runaway guard on this write, which is why it spans both of the
-     * family's action_type names (licenseTargetCooldownActive()) and why it
-     * refuses honestly instead of reporting an unmade write as done. The
-     * reasoning for each is at its own call site.
+     * person record, then upstream (the intervening target timer is zero in B1).
+     * Repeat assignments are sent upstream, not rate-bound or answered as
+     * already executed. Per-run approval claiming is not a target-wide mutex.
      *
      * The verified user is resolved INSIDE the try so a scope refusal is audited
      * as 'rejected' with the operator-readable reason rather than escaping as a
@@ -3709,13 +3704,10 @@ class StaffCippWriteToolExecutor
         // the re-assignment as a duplicate answered success/idempotent with no
         // upstream call while the user held no licence — a false success on a
         // billing write. The write is harmless to repeat (assigning a SKU the
-        // user already holds is an upstream no-op), so it goes through, and the
-        // cooldown below is the runaway guard: it refuses honestly rather than
-        // reporting work that never happened as done. It is THIS family's
-        // cooldown, not the single-name one: an approval audits under the STAGED
-        // action_type, so a lookup filtered on the direct name alone is blind to
-        // the write an approval just made (see licenseTargetCooldownActive()).
-        if ($this->licenseTargetCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        // user already holds is an upstream no-op), so it goes through.
+        // B1 disables the timer below: back-to-back assignments are not rate-bound.
+        // No duplicate or in-flight protection is claimed from this zero window.
+        if ($this->licenseTargetCooldownActive($tool, $client->id, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} cooldown active; upstream call refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no upstream call was made."];
@@ -3826,7 +3818,7 @@ class StaffCippWriteToolExecutor
             ];
         }
 
-        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 300)) {
+        if ($this->emailSecurityProposalCooldownActive($tool, $ticket, $targetKey, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} cooldown active; staged proposal refused.", $actorLabel);
 
             return ['error' => "{$tool} cooldown active for this target; no proposal was staged."];
@@ -4164,23 +4156,13 @@ class StaffCippWriteToolExecutor
             // an identical user/SKU had already executed. A human approved this
             // seat after reading a card naming the user and the SKU; the only
             // rails allowed to stop it are the ones that can PROVE something
-            // changed (the three drift rails above) or that refuse honestly (the
-            // cooldown below). Once this run reaches Done, re-firing it needs
-            // no rail here: claimForExecution() does its CAS only from
-            // AwaitingApproval. Read that as a property of the Done STATE and
-            // not as an invariant of this method — the upstream write commits
-            // before the executed row and before advanceTo(Done), so a throw
-            // from either returns the run to AwaitingApproval with the seat
-            // already assigned. The docblock carries that window in full,
-            // including which of the two throws the cooldown can still see.
-            //
-            // Which is exactly why this cooldown has to span BOTH action_type
-            // names: the row an approval writes carries the STAGED one, so the
-            // single-name lookup that used to sit here could not see the
-            // preceding approval's own executed write, and back-to-back approvals
-            // of duplicate proposals reached upstream with no rail observing the
-            // first (see licenseTargetCooldownActive()).
-            if ($this->licenseTargetCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 300)) {
+            // changed (the three drift rails above). B1 disables the timer below;
+            // different proposals may execute back-to-back. claimForExecution()
+            // provides per-run CAS from AwaitingApproval, not a target-wide claim.
+            // Once Done, the same run cannot be approved again. An upstream write
+            // followed by a local failure can still return it to AwaitingApproval;
+            // the zero timer provides no protection for that uncertainty.
+            if ($this->licenseTargetCooldownActive($directTool, $client->id, $targetKey, self::COOLDOWNS[$directTool] ?? 0)) {
                 $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: CIPP staged action cooldown active; approval refused before upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
@@ -6404,13 +6386,14 @@ class StaffCippWriteToolExecutor
      * Matches EXECUTED rows only, deliberately: an awaiting_approval row has not minted
      * a password, and counting it would make a proposal block its own approval.
      */
-    private function resetCooldownActive(int $clientId, ResolvedCippPerson $person, int $cooldownSeconds): bool
+    private function resetCooldownRemainingSeconds(int $clientId, ResolvedCippPerson $person, int $cooldownSeconds): int
     {
         if ($cooldownSeconds <= 0) {
-            return false;
+            return 0;
         }
 
-        return TechnicianActionLog::query()
+        $now = now();
+        $latest = TechnicianActionLog::query()
             ->whereIn('action_type', ['cipp_reset_user_password', 'cipp_stage_reset_user_password'])
             ->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))
@@ -6423,7 +6406,10 @@ class StaffCippWriteToolExecutor
             // falsely block a reset for the wrong user. Anchoring to the real prefix
             // "person #<id>:" makes the match exact and index-friendly.
             ->where('summary', 'like', $this->targetKey($person, null).':%')
-            ->exists();
+            ->latest('created_at')
+            ->first();
+
+        return $latest === null ? 0 : max(0, (int) ceil($now->diffInSeconds($latest->created_at->addSeconds($cooldownSeconds), false)));
     }
 
     private function proposalCooldownActive(string $tool, Ticket $ticket, ResolvedCippPerson $person, ?ResolvedCippLicense $license, int $cooldownSeconds): bool
@@ -7099,7 +7085,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_remove_mailbox_rule',
-            'Remove ONE inbox rule from ONE server-derived user\'s mailbox through CIPP — compromise remediation and mailbox hygiene (e.g. strip a malicious forwarding or delete-mail rule after an account takeover). HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Identify the rule by rule_name only (from the per-mailbox rule reads); at approval the server re-reads the mailbox\'s LIVE inbox rules, drops every row whose own mailbox marker proves it belongs to a different mailbox, and requires the name to match exactly ONE remaining rule — whose upstream identity must not comparably name a different mailbox and must still be shown by a second live read — before the single-rule removal is sent. A missing or ambiguous name declines without removing anything. LIMIT, state it when you report this action: CIPP exposes no per-rule read keyed on a mailbox, so both reads are the same UPN-keyed listing call and neither can prove a row is on THIS mailbox when the row carries no comparable mailbox marker. confirm_upn is the mailbox owner\'s UPN. Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'Remove ONE inbox rule from ONE server-derived user\'s mailbox through CIPP — compromise remediation and mailbox hygiene (e.g. strip a malicious forwarding or delete-mail rule after an account takeover). HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Identify the rule by rule_name only (from the per-mailbox rule reads); at approval the server re-reads the mailbox\'s LIVE inbox rules, drops every row whose own mailbox marker proves it belongs to a different mailbox, and requires the name to match exactly ONE remaining rule — whose upstream identity must not comparably name a different mailbox and must still be shown by a second live read — before the single-rule removal is sent. A missing or ambiguous name declines without removing anything. LIMIT, state it when you report this action: CIPP exposes no per-rule read keyed on a mailbox, so both reads are the same UPN-keyed listing call and neither can prove a row is on THIS mailbox when the row carries no comparable mailbox marker. confirm_upn is the mailbox owner\'s UPN. Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit.',
             array_merge(self::personProperties(), self::mailboxRuleProperties()),
             ['person_id', 'rule_name', 'confirm_upn', 'reason'],
         );
@@ -7166,7 +7152,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_disable_user_sign_in',
-            'Disable Microsoft 365 sign-in for one server-derived CIPP user immediately. This blocks sign-in and can interrupt mail, Teams, and business app access. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Disable Microsoft 365 sign-in for one server-derived CIPP user immediately. This blocks sign-in and can interrupt mail, Teams, and business app access. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup, and TechnicianActionLog audit.',
             self::personProperties(),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7188,7 +7174,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_enable_user_sign_in',
-            'Enable Microsoft 365 sign-in for one server-derived CIPP user immediately. This can restore account access. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Enable Microsoft 365 sign-in for one server-derived CIPP user immediately. This can restore account access. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup, and TechnicianActionLog audit.',
             self::personProperties(),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7210,7 +7196,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_revoke_user_sessions',
-            'Revoke active Microsoft 365 sessions for one server-derived CIPP user immediately. This signs the user out of active sessions and may disrupt work. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup/cooldown, and audit.',
+            'Revoke active Microsoft 365 sessions for one server-derived CIPP user immediately. This signs the user out of active sessions and may disrupt work. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup, and audit.',
             self::personProperties(),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7232,7 +7218,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_remove_user_mfa_methods',
-            'Remove MFA methods for one server-derived CIPP user immediately. This can weaken account protection until MFA is re-registered. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup/cooldown, and audit.',
+            'Remove MFA methods for one server-derived CIPP user immediately. This can weaken account protection until MFA is re-registered. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, dedup, and audit.',
             self::personProperties(),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7254,7 +7240,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_legacy_per_user_mfa',
-            'Set legacy per-user MFA state for one server-derived CIPP user immediately. This changes authentication requirements and can lock out or weaken access. Requires explicit grant, reason, confirm_upn, kill-switch, dedup/cooldown, and audit.',
+            'Set legacy per-user MFA state for one server-derived CIPP user immediately. This changes authentication requirements and can lock out or weaken access. Requires explicit grant, reason, confirm_upn, kill-switch, dedup, and audit.',
             array_merge(self::personProperties(), self::stateProperties()),
             ['person_id', 'confirm_upn', 'reason', 'state'],
         );
@@ -7276,7 +7262,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_assign_user_license',
-            'Assign one local CIPP M365 license SKU to one server-derived user immediately. This can alter billing and app entitlements. Requires explicit grant, reason, confirm_upn, kill-switch, dedup/cooldown, and audit. The target must be an ACTIVE PSA person; for a tenant user with no PSA person record use cipp_assign_tenant_user_license (its own grant). Dial note: human-smoke-verify before first live grant; no replace-all or remove-all license body is supported.',
+            'Assign one local CIPP M365 license SKU to one server-derived user immediately. This can alter billing and app entitlements. Requires explicit grant, reason, confirm_upn, kill-switch, dedup, and audit. The target must be an ACTIVE PSA person; for a tenant user with no PSA person record use cipp_assign_tenant_user_license (its own grant). Dial note: human-smoke-verify before first live grant; no replace-all or remove-all license body is supported.',
             array_merge(self::personProperties(), self::licenseProperties()),
             ['person_id', 'license_type_id', 'confirm_upn', 'reason'],
         );
@@ -7298,7 +7284,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_assign_tenant_user_license',
-            'Assign one CIPP M365 license SKU to one tenant user with NO ACTIVE PSA person record, immediately. This can alter billing and app entitlements. The server verifies target_upn against the resolved client tenant\'s live user listing and derives the object id from it — an address that is absent, ambiguous, in another tenant, on a disabled account, or mapped to an ACTIVE PSA person is refused (that person belongs on cipp_assign_user_license with its typed confirmation; a mapped but deactivated person is served here, but HELD-ONLY: a target the PSA holds a person record for never executes immediately, whatever mode was granted — re-call with staged=true and a ticket_id) — and matches sku_id against this client\'s synced licence rows. Requires an explicit token grant, reason, kill-switch, a per-target cooldown, and TechnicianActionLog audit. A licence can legitimately be removed and re-assigned, so a repeat grant is sent upstream rather than answered as an already-executed duplicate. Dial note: human-smoke-verify before first live grant; no replace-all or remove-all license body is supported.',
+            'Assign one CIPP M365 license SKU to one tenant user with NO ACTIVE PSA person record, immediately. This can alter billing and app entitlements. The server verifies target_upn against the resolved client tenant\'s live user listing and derives the object id from it — an address that is absent, ambiguous, in another tenant, on a disabled account, or mapped to an ACTIVE PSA person is refused (that person belongs on cipp_assign_user_license with its typed confirmation; a mapped but deactivated person is served here, but HELD-ONLY: a target the PSA holds a person record for never executes immediately, whatever mode was granted — re-call with staged=true and a ticket_id) — and matches sku_id against this client\'s synced licence rows. Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit. A licence can legitimately be removed and re-assigned, so a repeat grant is sent upstream rather than answered as an already-executed duplicate. Dial note: human-smoke-verify before first live grant; no replace-all or remove-all license body is supported.',
             array_merge(self::licenseTargetProperties(), self::licenseTargetCommonProperties(ticketRequired: false)),
             ['target_upn', 'sku_id', 'reason'],
         );
@@ -7359,7 +7345,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_remove_user_license',
-            'Remove one local CIPP M365 license SKU from one server-derived user immediately. This can remove Microsoft 365 app/service access and alter billing. Requires explicit grant, reason, confirm_upn, kill-switch, dedup/cooldown, and audit. No replace-all or remove-all license body is supported.',
+            'Remove one local CIPP M365 license SKU from one server-derived user immediately. This can remove Microsoft 365 app/service access and alter billing. Requires explicit grant, reason, confirm_upn, kill-switch, dedup, and audit. No replace-all or remove-all license body is supported.',
             array_merge(self::personProperties(), self::licenseProperties()),
             ['person_id', 'license_type_id', 'confirm_upn', 'reason'],
         );
@@ -7381,7 +7367,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_convert_mailbox',
-            'Convert a server-derived Microsoft 365 mailbox immediately through CIPP. Shared mailbox conversion can change licensing obligations and mailbox behavior. Requires explicit grant, reason, confirm_upn, kill-switch, dedup/cooldown, and audit.',
+            'Convert a server-derived Microsoft 365 mailbox immediately through CIPP. Shared mailbox conversion can change licensing obligations and mailbox behavior. Requires explicit grant, reason, confirm_upn, kill-switch, dedup, and audit.',
             array_merge(self::personProperties(), self::mailboxTypeProperties()),
             ['person_id', 'mailbox_type', 'confirm_upn', 'reason'],
         );
@@ -7403,7 +7389,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_mailbox_forwarding',
-            'Set mailbox forwarding immediately through CIPP for one server-derived user. Direct execution supports internal forwarding or disabling only. External SMTP forwarding is held-only because it can create BEC and data-exfiltration risk. Requires explicit grant, reason, confirm_upn, kill-switch, cooldown, and audit.',
+            'Set mailbox forwarding immediately through CIPP for one server-derived user. Direct execution supports internal forwarding or disabling only. External SMTP forwarding is held-only because it can create BEC and data-exfiltration risk. Requires explicit grant, reason, confirm_upn, kill-switch, and audit.',
             array_merge(self::personProperties(), self::forwardingProperties(stage: false)),
             ['person_id', 'mode', 'confirm_upn', 'reason'],
         );
@@ -7425,7 +7411,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_mailbox_gal_visibility',
-            'Set Global Address List visibility immediately for one server-derived mailbox. Hiding a mailbox can affect discoverability for staff. Requires explicit grant, reason, confirm_upn, kill-switch, cooldown, and audit.',
+            'Set Global Address List visibility immediately for one server-derived mailbox. Hiding a mailbox can affect discoverability for staff. Requires explicit grant, reason, confirm_upn, kill-switch, and audit.',
             array_merge(self::personProperties(), self::galVisibilityProperties()),
             ['person_id', 'hidden', 'confirm_upn', 'reason'],
         );
@@ -7447,7 +7433,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_mailbox_out_of_office',
-            'Set mailbox out-of-office state/messages/schedule immediately through CIPP. Calendar-decline options are not supported in v1. Message bodies are sent upstream but never stored or returned; audit records message lengths only. Requires explicit grant, reason, confirm_upn, kill-switch, cooldown, and audit.',
+            'Set mailbox out-of-office state/messages/schedule immediately through CIPP. Calendar-decline options are not supported in v1. Message bodies are sent upstream but never stored or returned; audit records message lengths only. Requires explicit grant, reason, confirm_upn, kill-switch, and audit.',
             array_merge(self::personProperties(), self::outOfOfficeProperties()),
             ['person_id', 'state', 'confirm_upn', 'reason'],
         );
@@ -7491,7 +7477,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_remove_directory_role',
-            'Remove one Microsoft Entra directory (admin) role from one server-derived CIPP user through CIPP, WITHOUT touching license assignments — offboarding and least-privilege hygiene for stale admin roles. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Identify the role by its universal Entra role_template_id (from the CIPP role reads) plus a typed role_name confirmation; approval re-resolves the tenant\'s activated role and re-verifies the user\'s current membership before execution. confirm_upn is the target user\'s UPN. Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'Remove one Microsoft Entra directory (admin) role from one server-derived CIPP user through CIPP, WITHOUT touching license assignments — offboarding and least-privilege hygiene for stale admin roles. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Identify the role by its universal Entra role_template_id (from the CIPP role reads) plus a typed role_name confirmation; approval re-resolves the tenant\'s activated role and re-verifies the user\'s current membership before execution. confirm_upn is the target user\'s UPN. Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit.',
             array_merge(self::personProperties(), self::directoryRoleProperties()),
             ['person_id', 'role_template_id', 'role_name', 'confirm_upn', 'reason'],
         );
@@ -7554,7 +7540,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_release_quarantine_message',
-            'Release one quarantined email message to ALL of its original recipients immediately through CIPP (Exchange Release-QuarantineMessage). Use only for a CONFIRMED false positive: releasing delivers mail the filter judged unsafe. The server verifies the identity against the resolved client tenant\'s live quarantine listing before calling — a message not present there is refused — and confirm_sender must match the verified message\'s real sender. The sender is NOT allow-listed for the future (that is cipp_add_tenant_allow_entry, if warranted). Requires an explicit token grant, reason, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Release one quarantined email message to ALL of its original recipients immediately through CIPP (Exchange Release-QuarantineMessage). Use only for a CONFIRMED false positive: releasing delivers mail the filter judged unsafe. The server verifies the identity against the resolved client tenant\'s live quarantine listing before calling — a message not present there is refused — and confirm_sender must match the verified message\'s real sender. The sender is NOT allow-listed for the future (that is cipp_add_tenant_allow_entry, if warranted). Requires an explicit token grant, reason, kill-switch, dedup, and TechnicianActionLog audit.',
             array_merge(self::quarantineReleaseProperties(), self::emailSecurityCommonProperties(ticketRequired: false)),
             ['quarantine_identity', 'confirm_sender', 'reason'],
         );
@@ -7587,7 +7573,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_wipe_device',
-            'Issue an IRREVERSIBLE Intune device wipe (factory reset — destroys local data) or retire (removes company data and unenrolls) for one server-derived managed device — the destructive execute half of offboarding. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval, where the approver must type the exact Intune device id; staged=false calls are refused. Identify the device by PSA asset_id plus a typed confirm_hostname; the server derives the Intune device id from the synced asset and re-verifies it at approval. The asset must demonstrably belong to person_id (an asset-user link or a matching RMM last logged-on user); a person/device mismatch is refused at staging and again at approval. A completed action is never re-issued: a re-fired approval is a logged no-op. confirm_upn is the device user\'s UPN (person_id). Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'Issue an IRREVERSIBLE Intune device wipe (factory reset — destroys local data) or retire (removes company data and unenrolls) for one server-derived managed device — the destructive execute half of offboarding. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval, where the approver must type the exact Intune device id; staged=false calls are refused. Identify the device by PSA asset_id plus a typed confirm_hostname; the server derives the Intune device id from the synced asset and re-verifies it at approval. The asset must demonstrably belong to person_id (an asset-user link or a matching RMM last logged-on user); a person/device mismatch is refused at staging and again at approval. A completed action is never re-issued: a re-fired approval is a logged no-op. confirm_upn is the device user\'s UPN (person_id). Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit.',
             array_merge(self::personProperties(), self::deviceWipeProperties()),
             ['person_id', 'asset_id', 'wipe_action', 'confirm_hostname', 'confirm_upn', 'reason'],
         );
@@ -7598,7 +7584,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_add_tenant_allow_entry',
-            'Add ONE allow entry (sender address, sender domain, or URL pattern) to the Microsoft 365 Tenant Allow/Block List of the resolved client tenant immediately through CIPP. TENANT-WIDE consequence: matching mail bypasses spam/phish filtering for every mailbox in the tenant — use only to remediate a CONFIRMED false positive, with the narrowest entry that works. The list method is pinned to Allow (no block adds) and expiry is pinned to 45 days after last use (no-expiration allows are not possible through this tool). confirm_entry must retype the exact entry. Requires an explicit token grant, reason, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Add ONE allow entry (sender address, sender domain, or URL pattern) to the Microsoft 365 Tenant Allow/Block List of the resolved client tenant immediately through CIPP. TENANT-WIDE consequence: matching mail bypasses spam/phish filtering for every mailbox in the tenant — use only to remediate a CONFIRMED false positive, with the narrowest entry that works. The list method is pinned to Allow (no block adds) and expiry is pinned to 45 days after last use (no-expiration allows are not possible through this tool). confirm_entry must retype the exact entry. Requires an explicit token grant, reason, kill-switch, dedup, and TechnicianActionLog audit.',
             array_merge(self::allowEntryProperties(), self::emailSecurityCommonProperties(ticketRequired: false)),
             ['list_type', 'entry', 'confirm_entry', 'reason'],
         );
@@ -7631,7 +7617,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_reassign_onedrive',
-            'Reassign OneDrive ownership for one server-derived offboarded user: grant one server-derived successor (successor_person_id, an ACTIVE and different person in the same client) owner/site-admin access to the user\'s entire OneDrive through CIPP — the data-handover half of offboarding. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Exposes the entire OneDrive contents to the successor, so it is a sensitive data-exposure write. confirm_upn is the OneDrive OWNER\'s UPN (person_id). Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'Reassign OneDrive ownership for one server-derived offboarded user: grant one server-derived successor (successor_person_id, an ACTIVE and different person in the same client) owner/site-admin access to the user\'s entire OneDrive through CIPP — the data-handover half of offboarding. HELD-ONLY: this capability never executes immediately, whatever mode was granted — every call must use staged=true with a ticket_id and is held for cockpit approval; staged=false calls are refused. Exposes the entire OneDrive contents to the successor, so it is a sensitive data-exposure write. confirm_upn is the OneDrive OWNER\'s UPN (person_id). Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit.',
             array_merge(self::personProperties(), self::successorProperties()),
             ['person_id', 'successor_person_id', 'confirm_upn', 'reason'],
         );
@@ -7653,7 +7639,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_reset_user_password',
-            'Reset the Microsoft 365 password for one server-derived CIPP user. IMMEDIATE (staged=false) returns a newly generated temporary password in this tool result — generated by CIPP/Microsoft, never written to any log or audit record; relay it to the user over a secure channel. STAGED (staged=true, and the automatic behaviour when your token grants staged-only) returns NO PASSWORD: nothing is reset yet, the action is held for human approval, and the temporary password is generated only on approval and shown to the approving human in the cockpit — do not wait for a credential from a staged call, and tell the requester a person must approve it first. Defaults to must-change-at-next-sign-in. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, cooldown, and TechnicianActionLog audit. Consequential: staged=false performs a live credential reset immediately.',
+            'Reset the Microsoft 365 password for one server-derived CIPP user. IMMEDIATE (staged=false) returns a newly generated temporary password in this tool result — generated by CIPP/Microsoft, never written to any log or audit record; relay it to the user over a secure channel. STAGED (staged=true, and the automatic behaviour when your token grants staged-only) returns NO PASSWORD: nothing is reset yet, the action is held for human approval, and the temporary password is generated only on approval and shown to the approving human in the cockpit — do not wait for a credential from a staged call, and tell the requester a person must approve it first. Defaults to must-change-at-next-sign-in. Requires an explicit token grant, reason, confirm_upn friction, kill-switch, and TechnicianActionLog audit. Consequential: staged=false performs a live credential reset immediately. The cooldown is 300 seconds per target at execution/approval, not at staging; refusal reports the seconds left.',
             array_merge(self::personProperties(), self::resetUserPasswordProperties()),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7720,7 +7706,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_create_user',
-            'Create a NEW Microsoft 365 user in the resolved client tenant immediately through CIPP — privileged provisioning. The sign-in UPN domain is ALWAYS the client\'s mapped CIPP tenant domain (server-derived; upstream domains, passwords, and license SKUs are never accepted from the caller). The account is created enabled, with a CIPP-generated temporary password that must be changed at first sign-in; the password is returned only in this tool result — never stored, never audited — so relay it over a secure channel. Optionally assigns one local CIPP M365 license SKU (usage_location required with it). Requires an explicit token grant (grants start staged-only; immediate execution needs the immediate mode grant), reason, confirm_upn friction, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Create a NEW Microsoft 365 user in the resolved client tenant immediately through CIPP — privileged provisioning. The sign-in UPN domain is ALWAYS the client\'s mapped CIPP tenant domain (server-derived; upstream domains, passwords, and license SKUs are never accepted from the caller). The account is created enabled, with a CIPP-generated temporary password that must be changed at first sign-in; the password is returned only in this tool result — never stored, never audited — so relay it over a secure channel. Optionally assigns one local CIPP M365 license SKU (usage_location required with it). Requires an explicit token grant (grants start staged-only; immediate execution needs the immediate mode grant), reason, confirm_upn friction, kill-switch, dedup, and TechnicianActionLog audit.',
             self::createUserProperties(),
             ['username', 'display_name', 'given_name', 'surname', 'confirm_upn', 'reason'],
         );
@@ -7785,7 +7771,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_edit_user',
-            'Edit an existing Microsoft 365 user\'s profile and directory attributes immediately through CIPP for one server-derived user — a null-safe PARTIAL update: only the fields you provide change, omitted fields are left untouched, and explicit blanking goes through clear_fields (the vendor\'s own clear whitelist). The editable surface matches the CIPP edit-user form: names, job title, department, company, address, phones, usage location, and manager (a server-derived ACTIVE person in the same client). The sign-in UPN is pinned server-side to the user\'s current UPN — this tool cannot rename an account — and passwords, licenses, aliases, and group membership are NOT accepted here (dedicated tools exist). On-prem-AD-synced (hybrid) users should be edited on-prem instead: Entra changes can be overwritten by the sync. Requires an explicit token grant (grants start staged-only; immediate execution needs the immediate mode grant), reason, confirm_upn friction, kill-switch, dedup/cooldown, and TechnicianActionLog audit.',
+            'Edit an existing Microsoft 365 user\'s profile and directory attributes immediately through CIPP for one server-derived user — a null-safe PARTIAL update: only the fields you provide change, omitted fields are left untouched, and explicit blanking goes through clear_fields (the vendor\'s own clear whitelist). The editable surface matches the CIPP edit-user form: names, job title, department, company, address, phones, usage location, and manager (a server-derived ACTIVE person in the same client). The sign-in UPN is pinned server-side to the user\'s current UPN — this tool cannot rename an account — and passwords, licenses, aliases, and group membership are NOT accepted here (dedicated tools exist). On-prem-AD-synced (hybrid) users should be edited on-prem instead: Entra changes can be overwritten by the sync. Requires an explicit token grant (grants start staged-only; immediate execution needs the immediate mode grant), reason, confirm_upn friction, kill-switch, dedup, and TechnicianActionLog audit.',
             self::editUserProperties(),
             ['person_id', 'confirm_upn', 'reason'],
         );
@@ -7816,7 +7802,7 @@ class StaffCippWriteToolExecutor
     {
         return self::tool(
             'cipp_set_group_membership',
-            'Add one server-derived CIPP user to — or remove them from — one Microsoft 365 group (Security, Microsoft 365, Distribution List, or Mail-Enabled Security) in the resolved client tenant immediately through CIPP. The group is verified against the tenant\'s LIVE group listing and its name and type are derived server-side from the verified row; dynamic-membership groups and on-premises-synced groups are refused (their membership is rule- or AD-managed). ADD grants the user whatever access the group carries — shared data, resources, mail, and for security groups possibly privileged access — so the target user must be ACTIVE in the PSA; REMOVE stays possible for deactivated users (offboarding cleanup). Adds to Security and Mail-Enabled Security groups are HELD-ONLY: they never execute immediately, whatever mode was granted — call with staged=true and a ticket_id for cockpit approval. Immediate execution (with the immediate mode grant; grants start staged-only) covers Microsoft 365 and Distribution List adds and all removes. Requires an explicit token grant, reason, kill-switch, dedup/cooldown, and TechnicianActionLog audit. confirm_upn is the target USER\'s UPN (person_id); confirm_group_name is the group\'s display name.',
+            'Add one server-derived CIPP user to — or remove them from — one Microsoft 365 group (Security, Microsoft 365, Distribution List, or Mail-Enabled Security) in the resolved client tenant immediately through CIPP. The group is verified against the tenant\'s LIVE group listing and its name and type are derived server-side from the verified row; dynamic-membership groups and on-premises-synced groups are refused (their membership is rule- or AD-managed). ADD grants the user whatever access the group carries — shared data, resources, mail, and for security groups possibly privileged access — so the target user must be ACTIVE in the PSA; REMOVE stays possible for deactivated users (offboarding cleanup). Adds to Security and Mail-Enabled Security groups are HELD-ONLY: they never execute immediately, whatever mode was granted — call with staged=true and a ticket_id for cockpit approval. Immediate execution (with the immediate mode grant; grants start staged-only) covers Microsoft 365 and Distribution List adds and all removes. Requires an explicit token grant, reason, kill-switch, dedup, and TechnicianActionLog audit. confirm_upn is the target USER\'s UPN (person_id); confirm_group_name is the group\'s display name.',
             array_merge(self::personProperties(), self::groupMembershipProperties()),
             ['person_id', 'group_id', 'operation', 'confirm_group_name', 'confirm_upn', 'reason'],
         );

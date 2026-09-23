@@ -87,7 +87,7 @@ class StaffControlDOnboardingToolExecutor
     /** Sub-organizations are created with two-factor required (standing brief, step 2). */
     public const REQUIRE_MFA = 1;
 
-    private const COOLDOWN_SECONDS = 300;
+    private const COOLDOWN_SECONDS = 0;
 
     private const DIRECT_DEDUP_HOURS = 24;
 
@@ -664,6 +664,10 @@ class StaffControlDOnboardingToolExecutor
      */
     private function cooldownActive(array $actionTypes, int $clientId, string $targetKey, int $cooldownSeconds, ?string $ownContentHash = null): bool
     {
+        if ($cooldownSeconds <= 0) {
+            return false;
+        }
+
         return TechnicianActionLog::query()->whereIn('action_type', $actionTypes)->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))
             ->where(function ($query) use ($ownContentHash) {
@@ -680,6 +684,10 @@ class StaffControlDOnboardingToolExecutor
     /** @param  array<int, string>  $actionTypes */
     private function executedCooldownActive(array $actionTypes, int $clientId, string $targetKey, int $cooldownSeconds): bool
     {
+        if ($cooldownSeconds <= 0) {
+            return false;
+        }
+
         return TechnicianActionLog::query()->whereIn('action_type', $actionTypes)->where('client_id', $clientId)
             ->where('created_at', '>=', now()->subSeconds($cooldownSeconds))->where('result_status', 'executed')
             ->where('summary', 'like', $targetKey.':%')->exists();
@@ -813,7 +821,7 @@ class StaffControlDOnboardingToolExecutor
     {
         return [
             'name' => self::TOOL,
-            'description' => 'Onboard ONE PSA client to Control D: step 1 creates the client\'s Control D sub-organization (name and contact email from the client record, two-factor required, the panel\'s analytics region) and binds the returned organization id to the client; step 2, staged separately once the mapping is bound, cuts one provisioning code under that organization with the Settings > Integrations > Control D defaults (enforced profile, expiry, device limit = asset count + headroom, analytics level, intercept mode). HELD-ONLY: never executes immediately, whatever mode was granted — every call needs staged=true and a ticket_id and is approved in the cockpit by an active Admin. Only an MCP token marked ai_actor may stage it (the agent stages, one human approves); a person onboards from the Control D card on the client page, where a second Admin must approve. The server decides which step the client needs; one proposal is one step. No PIN, hostname prefix, icon, profile, limit or vendor PK is accepted from the caller; secrets are stored encrypted on the client record and never returned. Inert unless the Control D onboarding switch is on and all six defaults are configured. Requires an explicit token grant, reason, kill-switch, cooldown, and TechnicianActionLog audit.',
+            'description' => 'Onboard ONE PSA client to Control D: step 1 creates the client\'s Control D sub-organization (name and contact email from the client record, two-factor required, the panel\'s analytics region) and binds the returned organization id to the client; step 2, staged separately once the mapping is bound, cuts one provisioning code under that organization with the Settings > Integrations > Control D defaults (enforced profile, expiry, device limit = asset count + headroom, analytics level, intercept mode). HELD-ONLY: never executes immediately, whatever mode was granted — every call needs staged=true and a ticket_id and is approved in the cockpit by an active Admin. Only an MCP token marked ai_actor may stage it (the agent stages, one human approves); a person onboards from the Control D card on the client page, where a second Admin must approve. The server decides which step the client needs; one proposal is one step. No PIN, hostname prefix, icon, profile, limit or vendor PK is accepted from the caller; secrets are stored encrypted on the client record and never returned. Inert unless the Control D onboarding switch is on and all six defaults are configured. Requires an explicit token grant, reason, kill-switch, and TechnicianActionLog audit.',
             'input_schema' => ['type' => 'object', 'properties' => self::properties(), 'required' => ['reason']],
         ];
     }

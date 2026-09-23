@@ -388,6 +388,7 @@ class CippWritePasswordResetPr3Test extends TestCase
 
     public function test_cooldown_blocks_a_second_reset_for_the_same_user(): void
     {
+        $this->freezeTime();
         $this->configureCipp();
         $this->configureAiActor();
         $fixture = $this->cippFixture();
@@ -418,5 +419,6 @@ class CippWritePasswordResetPr3Test extends TestCase
         $second = $this->callTool($token, self::TOOL, $args);
         $this->assertTrue((bool) $second->json('result.isError'));
         $this->assertStringContainsString('cooldown', (string) $second->json('result.content.0.text'));
+        $this->assertStringContainsString('300 seconds', (string) $second->json('result.content.0.text'));
     }
 }
