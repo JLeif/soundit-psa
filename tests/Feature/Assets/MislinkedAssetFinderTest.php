@@ -543,6 +543,108 @@ class MislinkedAssetFinderTest extends TestCase
         $this->assertCount(0, $desktopHits);
     }
 
+    /**
+     * The learned-dominance filter can only call a prefix generic when 2+ clients
+     * hold it dominantly. On a thin fleet exactly one client can hold 3+ factory-named
+     * boxes, so DESKTOP- becomes that client's "fingerprint" and every other client's
+     * factory-named machine reads as a Tier B suspect. Measured on the live fleet
+     * 2026-09-23: DESKTOP- was owned by one client and produced 28 such rows.
+     */
+    public function test_rule6_never_learns_an_os_factory_default_prefix(): void
+    {
+        $owner = Client::factory()->create(['name' => 'Owner']);
+        $other = Client::factory()->create(['name' => 'Other']);
+
+        // Exactly ONE client holds 3+ DESKTOP- assets, so the multi-client
+        // distinctness filter cannot reject it.
+        foreach (['DESKTOP-O1', 'DESKTOP-O2', 'DESKTOP-O3'] as $h) {
+            $this->asset($owner, ['hostname' => $h]);
+        }
+        $factoryNamed = $this->asset($other, ['hostname' => 'DESKTOP-OTHER01']);
+
+        $result = $this->finder()->find(null);
+        $prefixHits = array_values(array_filter($result['tier_b'], fn ($r) => $r['rule'] === 'foreign_client_hostname_prefix'));
+
+        $this->assertCount(0, $prefixHits,
+            'DESKTOP- is the Windows factory default, not a client naming scheme: it must '
+            .'never be learnable as one client\'s prefix, however thin the fleet.');
+        $this->assertNotContains($factoryNamed->id, array_column($prefixHits, 'asset_id'));
+    }
+
+    /**
+     * The exclusion is a fixed list of OS factory defaults, NOT a widening of the
+     * generic filter: a genuine client prefix held dominantly by one client alone
+     * must still be learned and must still fire. Without this the fix could pass by
+     * disabling rule 6 altogether.
+     */
+    public function test_rule6_still_learns_a_genuine_client_prefix_on_the_same_thin_fleet(): void
+    {
+        $owner = Client::factory()->create(['name' => 'Owner']);
+        $other = Client::factory()->create(['name' => 'Other']);
+
+        foreach (['SMARTS-01', 'SMARTS-02', 'SMARTS-03'] as $h) {
+            $this->asset($owner, ['hostname' => $h]);
+        }
+        $foreign = $this->asset($other, ['hostname' => 'SMARTS-99']);
+
+        // Factory-named boxes sit alongside and must not disturb the real finding.
+        foreach (['DESKTOP-O1', 'DESKTOP-O2', 'DESKTOP-O3'] as $h) {
+            $this->asset($owner, ['hostname' => $h]);
+        }
+        $this->asset($other, ['hostname' => 'DESKTOP-OTHER01']);
+
+        $result = $this->finder()->find(null);
+        $prefixHits = array_values(array_filter($result['tier_b'], fn ($r) => $r['rule'] === 'foreign_client_hostname_prefix'));
+
+        $this->assertCount(1, $prefixHits, 'the genuine client prefix must still be learned and still fire');
+        $this->assertSame($foreign->id, $prefixHits[0]['asset_id']);
+        $this->assertSame('SMARTS-', $prefixHits[0]['evidence']['hostname_prefix']);
+    }
+
+    /**
+     * The factory prefixes are excluded from OWNERSHIP, never from the honest
+     * cross-source rules. A factory-named hostname colliding across two clients is
+     * still a rule 3 duplicate_hostname finding, which is a contradiction rather
+     * than a guess.
+     */
+    public function test_factory_prefix_exclusion_does_not_silence_a_real_hostname_collision(): void
+    {
+        $a = Client::factory()->create();
+        $b = Client::factory()->create();
+        $this->asset($a, ['hostname' => 'DESKTOP-COLLIDE', 'serial_number' => null]);
+        $this->asset($b, ['hostname' => 'DESKTOP-COLLIDE', 'serial_number' => null]);
+
+        $rules = $this->rules($this->finder()->find(null)['tier_a']);
+        $this->assertContains('duplicate_hostname_cross_client', $rules);
+    }
+
+    /**
+     * The exclusion is a MEMBERSHIP test on the whole normalised prefix, not a
+     * leading-substring match. A client whose genuine scheme merely starts with a
+     * factory name's stem — WINCO- against WIN-, DESKTOPS- against DESKTOP- — must
+     * still be learnable, or the fix silences real findings while reading as narrow.
+     * Without this control a str_starts_with implementation passes the whole suite.
+     */
+    public function test_factory_exclusion_is_exact_and_does_not_swallow_a_client_prefix_sharing_its_stem(): void
+    {
+        $owner = Client::factory()->create(['name' => 'Winco']);
+        $other = Client::factory()->create(['name' => 'Other']);
+
+        foreach (['WINCO-01', 'WINCO-02', 'WINCO-03'] as $h) {
+            $this->asset($owner, ['hostname' => $h]);
+        }
+        $foreign = $this->asset($other, ['hostname' => 'WINCO-99']);
+
+        $result = $this->finder()->find(null);
+        $prefixHits = array_values(array_filter($result['tier_b'], fn ($r) => $r['rule'] === 'foreign_client_hostname_prefix'));
+
+        $this->assertCount(1, $prefixHits,
+            'WINCO- shares a stem with the factory default WIN- but is a real client '
+            .'scheme: the exclusion must compare whole prefixes, not leading substrings.');
+        $this->assertSame($foreign->id, $prefixHits[0]['asset_id']);
+        $this->assertSame('WINCO-', $prefixHits[0]['evidence']['hostname_prefix']);
+    }
+
     public function test_rule6_does_not_fire_below_the_learned_threshold(): void
     {
         $a = Client::factory()->create();

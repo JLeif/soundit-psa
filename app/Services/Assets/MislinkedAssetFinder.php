@@ -95,6 +95,47 @@ class MislinkedAssetFinder
     ];
 
     /**
+     * Hostname prefixes an OPERATING SYSTEM assigns, never a naming scheme anyone
+     * chose — so no client can own one however many of them it happens to hold.
+     *
+     * buildPrefixOwners() rejects a generic prefix only when 2+ clients hold it
+     * DOMINANTLY, and that test needs data thick enough to express the fact. On a
+     * thin fleet exactly one client can hold LEARNED_PREFIX_MIN factory-named boxes
+     * while every other client holds one or two, at which point the learner reads
+     * DESKTOP- as that client's fingerprint and rule 6 flags everyone else's
+     * factory-named machine. Measured against the live fleet 2026-09-23 at merge
+     * 8465d5d8: DESKTOP- was dominant for exactly ONE client (3 assets), the
+     * multi-client filter therefore could not reject it, and rule 6 emitted 28 Tier B
+     * rows — every one of them a factory-named box at a different client. WINDOWS-
+     * was in the same position and was one asset away from doing the same.
+     *
+     * These names are excluded from OWNERSHIP only, before dominance is learned.
+     * They are NOT excluded from the sweep: a factory-named hostname colliding across
+     * two clients is still a rule 3 duplicate_hostname_cross_client finding, because
+     * that rule reads a contradiction rather than guessing from a name.
+     *
+     * The list is fixed and never learned, which is the point — a learner cannot
+     * distinguish "one client owns DESKTOP-" from "one client happens to hold three
+     * un-renamed machines", and on this data it guesses wrong.
+     *
+     * @var array<int, string>
+     */
+    private const FACTORY_HOSTNAME_PREFIXES = [
+        'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
+        'LAPTOP-',    // Windows default on portable SKUs
+        'WINDOWS-',   // older Windows / imaging default
+        'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
+        'MACBOOK-',   // macOS default when the model name is hyphenated
+        'MACBOOKAIR-',
+        'MACBOOKPRO-',
+        'IMAC-',
+        'MACMINI-',
+        'UBUNTU-',    // common Linux installer defaults
+        'DEBIAN-',
+        'LOCALHOST-',
+    ];
+
+    /**
      * Labels that belong to a public suffix, not to a tenant — the walk above must
      * never step into one.
      *
@@ -381,11 +422,17 @@ class MislinkedAssetFinder
      * Learn each client's dominant hostname prefixes — a prefix is DOMINANT for a
      * client when at least LEARNED_PREFIX_MIN of that client's assets IN $universe
      * share it — then keep only prefixes that are dominant for exactly one client. A
-     * prefix dominant for 2+ clients (DESKTOP-, LAPTOP-, WIN-, …) is generic noise,
-     * not a client fingerprint, so no client owns it. Throughout this class the OWNER
-     * is the client — the sense $prefixOwner, $owner and owner_asset_count all carry.
-     * That distinctness filter shapes slot [0] alone; slot [1] is built before it
-     * runs.
+     * prefix dominant for 2+ clients is generic noise, not a client fingerprint, so no
+     * client owns it. Throughout this class the OWNER is the client — the sense
+     * $prefixOwner, $owner and owner_asset_count all carry. That distinctness filter
+     * shapes slot [0] alone; slot [1] is built before it runs.
+     *
+     * An OS factory-default prefix (FACTORY_HOSTNAME_PREFIXES) is skipped before any
+     * counting, so it can reach neither slot. The distinctness filter alone cannot
+     * reject one: it needs 2+ clients holding the prefix dominantly, and a thin fleet
+     * where a single client holds LEARNED_PREFIX_MIN factory-named boxes satisfies
+     * neither that test nor any other. Excluding them here rather than at the rule
+     * keeps owner_asset_count in slot [1] honest for every prefix a client really owns.
      *
      * Every count here is over $universe alone, never the client's full asset list:
      * find() builds it with loadUniverse($includeInactive), which omits is_active =
@@ -415,7 +462,7 @@ class MislinkedAssetFinder
                 continue;
             }
             $prefix = $this->hostnamePrefix($asset->hostname);
-            if ($prefix === null) {
+            if ($prefix === null || $this->isFactoryPrefix($prefix)) {
                 continue;
             }
             $perClient[(int) $asset->client_id][$prefix] = ($perClient[(int) $asset->client_id][$prefix] ?? 0) + 1;
@@ -760,6 +807,18 @@ class MislinkedAssetFinder
         }
 
         return null;
+    }
+
+    /**
+     * Whether a prefix is an OS factory default, which no client may own.
+     *
+     * hostnamePrefix() upper-cases and keeps the separator, so the comparison is a
+     * membership test on already-normalised values rather than a prefix match — WIN-
+     * must not swallow a client's genuine WINCO- or WINDSOR- scheme.
+     */
+    private function isFactoryPrefix(string $prefix): bool
+    {
+        return in_array($prefix, self::FACTORY_HOSTNAME_PREFIXES, true);
     }
 
     /**
