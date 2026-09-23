@@ -18,6 +18,32 @@ class CippRestWriteClientTest extends TestCase
         Cache::flush();
     }
 
+    public function test_reset_http_failure_carries_status_without_response_body(): void
+    {
+        Http::preventStrayRequests();
+        foreach ([400, 401, 429, 500, 502, 504] as $status) {
+            Http::swap(new \Illuminate\Http\Client\Factory);
+            Http::preventStrayRequests();
+            Http::fake([
+                'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
+                'cipp.example.test/api/*' => Http::response(['Results' => 'synthetic-sensitive-body'], $status),
+            ]);
+            $client = new CippRestWriteClient([
+                'api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1',
+                'client_id' => 'write-client', 'client_secret' => 'write-secret',
+            ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+            try {
+                $client->resetUserPassword('example.onmicrosoft.com', 'alex@example.test', true);
+                $this->fail('HTTP failure must throw');
+            } catch (CippClientException $e) {
+                $this->assertInstanceOf(\App\Services\Cipp\CippWriteHttpException::class, $e);
+                $this->assertSame($status, $e->status);
+                $this->assertStringNotContainsString('synthetic-sensitive-body', $e->getMessage());
+            }
+            Http::assertSent(fn ($request) => str_contains($request->url(), '/api/ExecResetPass'));
+        }
+    }
+
     public function test_exposes_curated_methods_only_no_arbitrary_endpoint_post(): void
     {
         $methods = collect((new ReflectionClass(CippRestWriteClient::class))->getMethods())

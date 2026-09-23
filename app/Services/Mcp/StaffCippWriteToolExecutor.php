@@ -1078,13 +1078,24 @@ class StaffCippWriteToolExecutor
             return ['error' => "{$tool} cooldown active for this target; no reset was performed. Retry in {$secondsLeft} seconds."];
         }
 
+        $claims = app(\App\Services\Cipp\PasswordResetClaim::class);
+        $claim = $claims->acquire($client->id, $person->person->id, $actorLabel);
+        if ($claim['refusal'] !== null) {
+            return ['error' => $claim['refusal']];
+        }
+
         try {
             $upstream = $this->client->resetUserPassword($tenant, $person->userPrincipalName, $mustChange);
         } catch (CippClientException $e) {
+            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                $claims->release($claim['id']);
+            }
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($tool, $e), $actorLabel);
 
             return ['error' => "CIPP password reset failed for {$tool}; no password was returned."];
         }
+
+        $claims->releaseOnAnswer($claim['id'], $upstream);
 
         // Audit records the action + target + the EFFECTIVE must_change flag (a boolean, not a
         // credential) so the immutable log distinguishes a temp reset from a permanent one. NO password.
@@ -1188,14 +1199,27 @@ class StaffCippWriteToolExecutor
                 return $this->declined("This user's password was reset very recently; retry in {$secondsLeft} seconds and approve again if a new password is still needed.");
             }
 
+            $claims = app(\App\Services\Cipp\PasswordResetClaim::class);
+            $claim = $claims->acquire($client->id, $person->person->id, $this->approverLabel($approverId));
+            if ($claim['refusal'] !== null) {
+                $run->releaseClaim();
+
+                return $this->declined($claim['refusal']);
+            }
+
             try {
                 $upstream = $this->client->resetUserPassword($tenant, $person->userPrincipalName, $mustChange);
             } catch (CippClientException $e) {
+                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                    $claims->release($claim['id']);
+                }
                 $run->releaseClaim();
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
 
                 return $this->declined('CIPP password reset failed; no password was returned. The proposal is still open — retry or deny it.');
             }
+
+            $claims->releaseOnAnswer($claim['id'], $upstream);
 
             $results = is_array($upstream['body']['Results'] ?? null) ? $upstream['body']['Results'] : [];
             $password = (isset($results['copyField']) && is_string($results['copyField']) && $results['copyField'] !== '')
