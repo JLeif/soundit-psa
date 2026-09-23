@@ -774,14 +774,16 @@ class MislinkedAssetFinderTest extends TestCase
      */
     public function test_the_factory_prefix_list_is_exactly_the_covered_set(): void
     {
-        // Canonicalizing: order carries no behaviour (isFactoryPrefix is an exact
-        // in_array, and no entry is a prefix of another), so a reorder must not
-        // fail. What must fail is a MEMBERSHIP change in either direction.
+        // Canonicalizing: order carries no behaviour, because isFactoryPrefix is an
+        // exact in_array rather than a prefix scan, so a reorder must not fail. What
+        // must fail is a MEMBERSHIP change in either direction — including a
+        // duplicated entry, which survives the sort and fails on count.
         $this->assertEqualsCanonicalizing(
             self::EXPECTED_FACTORY_PREFIXES,
             MislinkedAssetFinder::FACTORY_HOSTNAME_PREFIXES,
             'FACTORY_HOSTNAME_PREFIXES has drifted from the set this suite covers. '
-            .'Every entry needs evidence for why it is a vendor default and a case '
+            .'Every entry needs a recorded reason for being here — a documented vendor '
+            .'default, or an explicit judgement like the one for WINDOWS- — and a case '
             .'proving it is load-bearing; removing one must be a deliberate act, not '
             .'a silently smaller test run.'
         );
@@ -794,9 +796,12 @@ class MislinkedAssetFinderTest extends TestCase
      * left the suite green and the exposure came back silently.
      *
      * Driven from EXPECTED_FACTORY_PREFIXES, never from the constant under test —
-     * see that docblock for why. This test proves each entry SUPPRESSES; deletion
-     * is caught by the membership assertion, which is the only thing that can
-     * catch it. The case is built from the prefix under test: one client holds
+     * see that docblock for why. This test proves each entry SUPPRESSES. Deleting
+     * an entry from the constant is caught TWICE, measured by dropping MACBOOKPRO-:
+     * the membership assertion fails, and this test's own case for that prefix
+     * fails too, because the provider iterates the expected list and so still
+     * builds a case for an entry the constant no longer has. The case is built
+     * from the prefix under test: one client holds
      * three machines wearing it (enough to be learned), another holds one. With
      * the entry present nothing fires; with it removed the prefix is learned as
      * the first client's fingerprint and the second client's machine reads as a
@@ -811,46 +816,28 @@ class MislinkedAssetFinderTest extends TestCase
         foreach (['A1', 'A2', 'A3'] as $suffix) {
             $this->asset($owner, ['hostname' => $prefix.$suffix]);
         }
-        $this->asset($other, ['hostname' => $prefix.'B1']);
-
-        // PRECONDITION: the entry must be in the form the exclusion actually sees.
-        // hostnamePrefix() upper-cases and cuts at the first separator, while
-        // isFactoryPrefix() is an exact in_array on the raw constant. So an entry
-        // like 'Chromebook-' would never match in production (it normalises to
-        // 'CHROMEBOOK-'), yet a case filtering on the raw string would still go
-        // green on zero hits. Assert the round trip, or this whole test is vacuous
-        // for exactly the entries most likely to be wrong.
-        $extracted = $this->extractedPrefix($prefix.'A1');
-        $this->assertSame($prefix, $extracted,
-            $prefix.' is not in the normalised form the exclusion compares against: '
-            .'hostnamePrefix() extracts '.var_export($extracted, true).'. isFactoryPrefix() '
-            .'is an exact in_array on the raw entry, so this entry can never match in '
-            .'production and every absence assertion below would pass for the wrong reason.');
+        $foreign = $this->asset($other, ['hostname' => $prefix.'B1']);
 
         $result = $this->finder()->find(null);
+
+        // Filter on the OTHER client's ASSET ID, not on the prefix string the
+        // fixture was built from. Filtering on the raw entry made this case
+        // vacuous for exactly the entries most likely to be wrong: hostnamePrefix()
+        // upper-cases and cuts at the first separator while isFactoryPrefix() is an
+        // exact in_array on the raw constant, so a non-normalised entry such as
+        // 'Chromebook-' can never match in production ('CHROMEBOOK-' is what the
+        // service extracts) yet produced zero hits and a green case. An asset id
+        // cannot be normalised away, so the absence below is now about the row.
         $hits = array_values(array_filter(
             $result['tier_b'],
-            fn ($r) => ($r['evidence']['hostname_prefix'] ?? null) === $prefix
+            fn ($r) => (int) ($r['asset_id'] ?? 0) === $foreign->id
         ));
 
         $this->assertCount(0, $hits,
             $prefix.' is on FACTORY_HOSTNAME_PREFIXES, so it must never be learned as a '
             ."client's fingerprint. A finding here means that entry is not doing its job "
-            .'— either it was removed, or the exclusion no longer reaches it.');
-    }
-
-    /**
-     * The prefix the service itself extracts from a hostname. Used as a
-     * precondition so a per-entry case cannot pass on an entry the exclusion
-     * can never reach.
-     */
-    private function extractedPrefix(string $hostname): ?string
-    {
-        $finder = $this->finder();
-        $method = new \ReflectionMethod($finder, 'hostnamePrefix');
-        $method->setAccessible(true);
-
-        return $method->invoke($finder, $hostname);
+            .'— either it was removed, it is not in the normalised form the exclusion '
+            .'compares against, or the exclusion no longer reaches it.');
     }
 
     /**

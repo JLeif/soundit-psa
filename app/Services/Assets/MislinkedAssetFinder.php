@@ -118,47 +118,41 @@ class MislinkedAssetFinder
      * distinguish "one client owns DESKTOP-" from "one client happens to hold three
      * un-renamed machines", and on this data it guesses wrong.
      *
-     * WHY WINDOWS- IS HERE, since it is the one entry a reader would reasonably
-     * challenge (it sits at exactly one client, which is also what a deliberate
-     * scheme looks like). What separates the two is the SUFFIX, not the count.
-     * Measured on the live fleet 2026-09-23, suffixes rendered as shape only
-     * (A = letter, 9 = digit) because the hostnames themselves are client data:
+     * WINDOWS- IS THE WEAKEST ENTRY ON THIS LIST, AND NO MEASUREMENT HERE MAKES IT
+     * STRONG. It sits at exactly one client, which is also what a deliberate client
+     * scheme looks like. Three rounds of review tried to find a discriminator in
+     * the hostnames and there is none:
      *
-     *   WINDOWS-  7 assets, every suffix 7 chars, shapes 9A9AAAA / 9AAAAA9 /
-     *             9AA9A9A / AAAA9AA / A9AAAA9 / AA9AAA9 / AA99AAA — no two alike,
-     *             letters and digits interleaved at no fixed position.
-     *   DESKTOP- 31 assets, every suffix 7 chars, same interleaved random shape.
-     *   WIN-      1 asset, suffix 11 chars — the documented Windows Server default.
+     *   - A single suffix width proves nothing. Add the prefix back and each lands
+     *     on exactly 15 characters (DESKTOP- 8+7, WINDOWS- 8+7, WIN- 4+11), the
+     *     NetBIOS computer-name cap. Any generator filling the name to the limit
+     *     produces one width per prefix, whatever produced it.
+     *   - "Letters and digits interleaved, no two of seven alike" proves nothing
+     *     either. For a uniform [A-Z0-9] fill, two samples share a letter/digit
+     *     shape with p ~ 0.028, so seven samples show no repeat about 56% of the
+     *     time. A coin flip is not evidence.
+     *   - A client naming machines WINDOWS-<7-character service tag> reproduces
+     *     every one of those facts exactly.
      *
-     * THE SINGLE WIDTH IS NOT THE EVIDENCE. Add the prefix back and every one of
-     * those lands on exactly 15 characters: DESKTOP- 8+7, WINDOWS- 8+7, WIN- 4+11.
-     * That is the NetBIOS computer-name cap, so a generator filling the name to
-     * the limit produces one width per prefix STRUCTURALLY, whatever produced it.
-     * A fixed width therefore says nothing about origin.
+     * So the entry does NOT rest on shape. It rests on a JUDGEMENT: the harm is
+     * asymmetric. Leaving it off cost 28 false Tier B rows on the live fleet at
+     * merge 8465d5d8, and WINDOWS- was one asset from adding its own. Putting it
+     * on costs silence for one prefix at one client IF that client turns out to
+     * have chosen the name deliberately — and rule 3 still reports any genuine
+     * cross-client collision, because it reads a contradiction rather than a name.
+     * That trade is accepted deliberately, and it is recorded here rather than in
+     * a commit message so the next reader can re-weigh it rather than re-derive it.
      *
-     * What carries the entry is the CONTENT of those suffixes: letters and digits
-     * interleaved at no fixed position, and no two of the seven alike. That is a
-     * random fill, not a scheme someone chose. Genuine client prefixes on the same
-     * fleet read the other way — their widths VARY (4 to 9 characters under one
-     * prefix) because the suffix MEANS something: site codes, room names, initials.
-     *
-     * That is a statement about SHAPE ONLY, from seven samples, and it claims no
-     * more: random interleaving is what a generator produces, it does not establish
-     * WHICH generator, and a client scheme built from a serial number or an MDM
-     * naming template would look the same. The entry rests on that shape plus the
-     * vendor defaults documented for DESKTOP- and WIN-, not on a proof of origin.
-     *
-     * That is evidence about SHAPE, not a proof of origin, and it is stated here
-     * rather than in a commit message so the next reader can weigh it. If a client
-     * ever adopts a random-suffix scheme of their own, this list silences it — the
-     * trade is accepted deliberately, and rule 3 still reports a genuine collision.
+     * If the trade is ever revisited, the discriminator is NOT in the hostname. It
+     * is whether the client's other machines follow the same scheme, which is a
+     * question about that client's naming convention and not about this list.
      *
      * @var array<int, string>
      */
     public const FACTORY_HOSTNAME_PREFIXES = [
         'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
         'LAPTOP-',    // Windows default on portable SKUs
-        'WINDOWS-',   // random interleaved suffix, no cited vendor default — see the note above
+        'WINDOWS-',   // no vendor default cited, no discriminating evidence — see the judgement above
         'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
         'MACBOOK-',   // macOS default when the model name is hyphenated
         'MACBOOKAIR-',
