@@ -1740,10 +1740,12 @@ class CippToolContract
     {
         $fields = self::DEFAULT_FIELDS[$toolName] ?? [];
 
-        // Tracks whether each field's key was ever FOUND upstream, independent
-        // of its value. "Key absent from every row" is schema drift; "key
-        // present holding null" is a genuine no-value (an unset Exchange
-        // property serializes as null) and must not be mistaken for drift.
+        // Tracks whether each field's key was ever RESOLVED upstream,
+        // independent of its value. A key that never resolves in any row and a
+        // key present holding null are different things: an unset Exchange
+        // property serializes as null, which is a genuine no-value, not an
+        // unresolved key. Why this observation is not labelled with a cause:
+        // see warnOnShapeDrift() below.
         $keyResolved = array_fill_keys($fields, false);
 
         $projected = array_map(function (array $row) use ($toolName, $fields, &$keyResolved): array {
@@ -1829,11 +1831,20 @@ class CippToolContract
         // DEFAULT_FIELDS/FIELD_ALIASES drift as the cause, which this function
         // cannot establish: five of the six callers (shapeEvents,
         // shapeMessageTrace, shapeMailQuarantine, shapeMailboxRules,
-        // shapeTenantMailboxRules) filter rows BEFORE calling projectRows, so
-        // $rows is a subset of the response and a field present only in the
-        // rows the caller dropped is absent here while the constants are
-        // correct. An operator who trusted the named cause would go and edit
-        // constants that are not wrong. row_count is that post-filter count.
+        // shapeTenantMailboxRules) can filter rows BEFORE calling projectRows.
+        // MEASURED, not assumed: every one of those filters is CONDITIONAL --
+        // shapeEvents only when filtered_by_days is an int, shapeMessageTrace
+        // on a non-empty sender/recipient, shapeMailQuarantine on a non-empty
+        // recipient, shapeMailboxRules only when a mailbox was requested. And
+        // shapeTenantMailboxRules' sentinel drop CANNOT hide a field: the
+        // sentinel is a row with no resolvable identity whose name is
+        // 'No rules found', and 'name' is itself a DEFAULT_FIELDS entry, so a
+        // dropped sentinel removes no key the guard tracks. So the reachable
+        // case is: when one of the four conditional filters is active, $rows is
+        // a subset of the response and a field carried only by dropped rows
+        // never resolves here while the constants are correct. An operator who
+        // trusted a named cause would go and edit constants that are not wrong.
+        // row_count is that post-filter count.
         // The wording is "never resolved", not "absent": resolveKey() is an
         // exact-case array_key_exists over FIELD_ALIASES[$field] ?? [$field],
         // so a row CAN carry the field under a casing that has no alias and
