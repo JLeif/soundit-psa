@@ -64,7 +64,7 @@ class PreferencesController extends Controller
                 ->exists();
 
             if ($duplicate) {
-                return back()->withErrors(['sip_username' => 'This username is already registered to another user.'])->withInput();
+                return back()->withErrors(['sip_username' => 'This username is already registered to another user.'])->withInput($request->except('sip_password'));
             }
 
             $existing->update($data);
@@ -72,7 +72,7 @@ class PreferencesController extends Controller
             $duplicate = SipEndpoint::where('sip_username', $validated['sip_username'])->exists();
 
             if ($duplicate) {
-                return back()->withErrors(['sip_username' => 'This username is already registered to another user.'])->withInput();
+                return back()->withErrors(['sip_username' => 'This username is already registered to another user.'])->withInput($request->except('sip_password'));
             }
 
             $data['user_id'] = auth()->id();

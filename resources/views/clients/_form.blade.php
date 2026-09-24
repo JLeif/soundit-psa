@@ -152,6 +152,11 @@
 </h6>
 
 <div class="mb-3">
+    @if($errors->any() && old('credentials') === null)
+        <div class="alert alert-warning small py-2 mb-2" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>The save failed and the credentials below were not carried back from it, so they show the stored copy. Re-enter any changes you made before saving again.
+        </div>
+    @endif
     <x-markdown-editor name="credentials" id="form_credentials" :value="$client->credentials ?? ''"
                        rows="5" placeholder="Vault references, alarm codes, WiFi passwords, admin credentials..." />
     <div class="form-text">Credentials are never shared with AI triage. Store vault references, access codes, and site-specific credentials here.</div>
