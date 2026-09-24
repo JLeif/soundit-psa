@@ -265,6 +265,18 @@ class LitsrmmClientMappingTest extends TestCase
             'a different port on the configured host is a different service' => [
                 'https://litsrmm.test', '//litsrmm.test:8443/v1/x',
             ],
+            // THE ORIGIN INCLUDES THE SCHEME (#3500 diff:1). getPort() is null
+            // for each scheme's OWN default, so a host:port key read these as
+            // one origin; on a loopback host the plain-http transport rule then
+            // admits the request and the Bearer lands on port 80 (or 443), a
+            // different service. Only a loopback host reaches that path, which
+            // is why the non-loopback downgrade row above could not catch it.
+            'https loopback base to plain http on the same host is port 80' => [
+                'https://127.0.0.1', 'http://127.0.0.1/v1/x',
+            ],
+            'plain http loopback base to https on the same host is port 443' => [
+                'http://127.0.0.1', 'https://127.0.0.1/v1/x',
+            ],
         ];
     }
 
@@ -369,16 +381,40 @@ class LitsrmmClientMappingTest extends TestCase
             new Response(200, [], json_encode(['data' => [['id' => 'x', 'name' => 'X']]])),
         ]);
 
+        $threw = false;
         try {
             $client->get('v1/clients');
-        } catch (LitsrmmClientException) {
-            // A 3xx surfacing as an error is the correct outcome; what is
-            // forbidden is a second request, which the history decides.
+        } catch (LitsrmmClientException $e) {
+            $threw = true;
+            $this->assertStringContainsString('redirected', $e->getMessage());
         }
 
         $this->assertCount(1, $this->history,
             'the client must not follow a redirect: the second hop would carry the request body off-host');
         $this->assertSame('litsrmm.test', $this->history[0]['request']->getUri()->getHost());
+        $this->assertTrue($threw,
+            'an unfollowed 3xx must surface as an error, not decode its empty body into a successful []');
+    }
+
+    /**
+     * #3500 diff:4. With allow_redirects false and http_errors only throwing
+     * from 400, a 3xx with an EMPTY body decoded to []: isHealthy() reported
+     * healthy and getClients() reported a vendor with no clients. The Location
+     * here is same-origin on purpose: this is about the degraded read, not
+     * about an escape.
+     */
+    public function test_a_redirect_is_not_read_as_a_healthy_vendor_with_no_clients(): void
+    {
+        $this->configure();
+        $client = $this->clientWithResponses([
+            new Response(301, ['Location' => 'https://litsrmm.test/v2/health']),
+            new Response(301, ['Location' => 'https://litsrmm.test/v2/clients']),
+        ]);
+
+        $this->assertFalse($client->isHealthy(), 'a redirect is not a healthy answer');
+
+        $this->expectException(LitsrmmClientException::class);
+        $client->getClients();
     }
 
     /**

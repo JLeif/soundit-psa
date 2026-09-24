@@ -164,10 +164,24 @@ class LitsrmmClient
         // on the same machine. Guzzle's own UriComparator::isCrossOrigin
         // compares host, scheme AND port, so matching that rule keeps this
         // guard and the one inside the redirect middleware in agreement.
-        // getPort() is null for a default port, which normalises https:443 and
-        // an explicit :443 to the same origin.
-        $origin = static fn (\Psr\Http\Message\UriInterface $u): string => strtolower($u->getHost())
-            .':'.($u->getPort() ?? '');
+        // The scheme is part of the key and the port is the EFFECTIVE one
+        // (#3500 diff:1). getPort() is null for the default port of the URI's
+        // OWN scheme, so a host:getPort() key read https://localhost and
+        // http://localhost as one origin -- ports 443 and 80 -- and the
+        // loopback exemption in assertTransportIsSafe() then admitted the
+        // plain-http side. Filling the default back in keeps an explicit :443
+        // and no port equal, which is what UriComparator::isCrossOrigin
+        // computes too.
+        $origin = static function (\Psr\Http\Message\UriInterface $u): string {
+            $scheme = strtolower($u->getScheme());
+            $port = $u->getPort() ?? match ($scheme) {
+                'https' => 443,
+                'http' => 80,
+                default => null,
+            };
+
+            return $scheme.'://'.strtolower($u->getHost()).':'.($port ?? '');
+        };
 
         if ($origin($resolvedUri) !== $origin($baseUri)) {
             // The endpoint is logged, the credential is not, and the throw
@@ -178,11 +192,12 @@ class LitsrmmClient
             ]);
 
             throw new LitsrmmClientException(
-                'LITSRMM endpoint resolves to a different host or port than the configured base URL'
+                'LITSRMM endpoint resolves to a different scheme, host or port than the configured base URL'
             );
         }
 
-        // Same host, but the endpoint may still have downgraded the scheme.
+        // The origin key already pins the scheme; the transport rule is still
+        // re-asserted on the URL that will actually be requested.
         self::assertTransportIsSafe($resolved);
     }
 
@@ -376,6 +391,25 @@ class LitsrmmClient
                 "LITSRMM API error: {$method} {$endpoint} returned {$status}",
                 $status,
                 $e,
+            );
+        }
+
+        // allow_redirects is false (see http()) and http_errors only throws
+        // from 400, so a 3xx arrives here as an ordinary response. Decoding it
+        // would turn an empty redirect body into [] -- a healthy vendor with no
+        // clients, the silent degraded read C-56 forbids (#3500 diff:4).
+        $status = $response->getStatusCode();
+
+        if ($status >= 300 && $status < 400) {
+            Log::warning('[LitsrmmClient] refusing a redirect response: redirects are not followed', [
+                'method' => $method,
+                'endpoint' => $endpoint,
+                'status' => $status,
+            ]);
+
+            throw new LitsrmmClientException(
+                "LITSRMM API redirected {$method} {$endpoint} ({$status}); redirects are not followed",
+                $status,
             );
         }
 
