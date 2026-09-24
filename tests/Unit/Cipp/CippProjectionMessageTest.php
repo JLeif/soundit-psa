@@ -155,22 +155,35 @@ class CippProjectionMessageTest extends TestCase
             is_scalar($value) ? (string) $value : json_encode($value, JSON_PARTIAL_OUTPUT_ON_ERROR)
         );
 
-        // PIN the one call that is allowed, then forbid EVERY other logger
-        // call at every level with the no-argument form, which matches any
-        // arity. This is the idiom test_empty_projection_does_not_assert_its_cause
-        // already uses in this file, and it is strictly stronger than the
-        // arity matrix this control carried a moment ago: that matrix was a
-        // three-word DENYLIST, so a paraphrase naming the same cause in other
-        // words passed it, and each matcher only matched its own arity -- which
-        // is how a notice-level restatement survived the first version.
+        // PIN the one call that is allowed -- exact message AND the whole
+        // context by strict equality -- then forbid EVERY other logger call at
+        // every level with the no-argument form, which matches any arity. The
+        // arity matrix this control carried before was a three-word DENYLIST,
+        // so a paraphrase naming the same cause in other words passed it, and
+        // each matcher only matched its own arity.
         //
-        // Pinning the permitted call closes both holes at once: any extra call,
-        // any paraphrase, any extra context key, at any level or arity, fails.
+        // The context is pinned by VALUE, not just by key list. A key-list pin
+        // leaves every value free: a cause appended to missing_fields or
+        // first_row_keys, in any wording, would pass it. With the whole
+        // context equal to what this fixture determines, no surface of the
+        // permitted call -- message, key or value -- can carry a cause.
+        //
+        // The expected values follow from DEFAULT_FIELDS for this tool, which
+        // declares both casings of the IP fields and has no FIELD_ALIASES
+        // entry for them: the surviving row carries no casing of either, so
+        // the case-insensitive hedge suppresses neither twin and all four are
+        // reported, in DEFAULT_FIELDS order. first_row_keys is the surviving
+        // row's own key order, and row_count the post-filter count.
         Log::shouldHaveReceived('warning')
             ->once()
             ->withArgs(function (string $message, array $context): bool {
                 return $message === '[CippTools] Field(s) never resolved in any row this call projected'
-                    && array_keys($context) === ['tool', 'row_count', 'missing_fields', 'first_row_keys'];
+                    && $context === [
+                        'tool' => 'cipp_list_message_trace',
+                        'row_count' => 1,
+                        'missing_fields' => ['FromIP', 'fromIP', 'ToIP', 'toIP'],
+                        'first_row_keys' => ['MessageTraceId', 'Received', 'SenderAddress', 'RecipientAddress', 'Subject', 'Status'],
+                    ];
             });
 
         foreach (['emergency', 'alert', 'critical', 'error', 'notice', 'info', 'debug', 'log', 'write'] as $level) {
