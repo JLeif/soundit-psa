@@ -251,6 +251,7 @@ class TeamsMessagesController extends Controller
             // so a reader matching on it would call a delivered message
             // withheld and tell the agent there is nothing to recover.
             'text_withheld' => $stored['withheld'],
+            'text_redacted' => $stored['redacted'],
             'ts' => $this->activityTimestamp($activity),
             'direct_mention' => $this->botMentioned($activity),
             'authorized_steer' => $senderUserId !== null
