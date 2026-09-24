@@ -28,14 +28,15 @@ class WikiRedactor
         '/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]+)?/',
         // Shared distinctive-run policy: '+' retains its old behavior; '/' alone
         // additionally requires upper/lower/digit mix in a slash-free segment
-        // of at least 16 characters. Separate path segments cannot supply the mix. Ordinary
+        // of at least 8 characters. The last segment before a short file extension
+        // cannot supply the mix; other segments still can. Ordinary
         // lowercase URL paths are not evidence of base64. C1 bare identifiers stay
         // clean. This is a heuristic, not entropy proof (see scanner coverage report).
         // Webhook paths and signed query values need contextual detection: their
         // credentials can be lowercase/hex, so case mix cannot protect those shapes.
         // No URL or channel exemption: these alternatives apply in redact AND scan.
         '~\b[A-Za-z0-9+/_-]{24,}\+[A-Za-z0-9+/_-]*={0,2}\b'
-        .'|\b(?=(?:[A-Za-z0-9+_-]*/)*(?=[A-Za-z0-9+_-]*[A-Z])(?=[A-Za-z0-9+_-]*[a-z])(?=[A-Za-z0-9+_-]*[0-9])[A-Za-z0-9+_-]{16,})[A-Za-z0-9+/_-]{24,}/[A-Za-z0-9+/_-]*\b'
+        .'|\b(?=(?:[A-Za-z0-9+_-]*/)*(?=[A-Za-z0-9+_-]*[A-Z])(?=[A-Za-z0-9+_-]*[a-z])(?=[A-Za-z0-9+_-]*[0-9])[A-Za-z0-9+_-]{8,}(?:/|(?![A-Za-z0-9+/_-]|\.[A-Za-z][A-Za-z0-9]{0,5}\b)))[A-Za-z0-9+/_-]{24,}/[A-Za-z0-9+/_-]*\b'
         .'|(?i:https?://(?:hooks\.slack\.com/services/|(?:[a-z0-9-]+\.)?webhook\.office\.com/webhookb2/|(?:canary\.|ptb\.)?discord(?:app)?\.com/api(?:/v[0-9]+)?/webhooks/))[^\s<>"\x27]+'
         .'|[?&](?i:sig|signature|x-amz-signature|x-goog-signature)=[^\s&#<>"\x27]+'
         .'~',

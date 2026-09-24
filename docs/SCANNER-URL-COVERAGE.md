@@ -1,6 +1,6 @@
 # Shared scanner URL rule (#3089)
 
-Revision 2 supersedes the whole-run-mix experiment at df2bc197: that version
+The extension-aware N8 design supersedes the whole-run-mix experiment at df2bc197: that version
 still redacted SHA-pinned GitHub links. It also misnamed the mix-only miss:
 **discord-lower**, not slack-lower. The experiment JSON was correct; the prose
 was wrong. This version measures the mix within slash-separated segments.
@@ -8,8 +8,10 @@ was wrong. This version measures the mix within slash-separated segments.
 The distinctive-run rule is shared by `WikiRedactor::scan()` and `redact()`.
 No channel exemptions or URL stripping are introduced. `+` keeps its old rule;
 a slash-only candidate also needs uppercase, lowercase and a digit **inside
-one slash-free segment of at least 16 characters**. Separate path segments
-cannot pool categories. Contextual alternatives in the same rule detect Slack
+one slash-free segment of at least 8 characters**. Separate path segments
+cannot pool categories. The final segment before a short file extension
+(`\.[A-Za-z][A-Za-z0-9]{0,5}\b`) cannot supply the mix; earlier segments still can.
+A sentence period alone is not an extension. Contextual alternatives in the same rule detect Slack
 incoming webhook, Teams Office incoming webhook, Discord webhook URLs and
 signed-query values without requiring case mix. Padding, PEM, JWT, keyword and
 connection rules are unchanged. OperatorNotifier's emergency path is unchanged;
@@ -27,29 +29,35 @@ SHA256(`scanner-3089-v1:` followed by decimal i), i=0..99999. This creates
 100,000 forty-character unpadded base64 samples; 25,274 contain slash but no
 plus or padding. These are AWS-secret-like shapes, **not live AWS keys**.
 
-| Corpus | N | Baseline | Naive drop | Whole-run mix | Segment16 chosen |
+| Corpus | N | Baseline | Naive drop | Whole-run mix | Extension-N8 chosen |
 |---|---:|---:|---:|---:|---:|
-| Unpadded base64 detected | 100000 | 37612 | 20887 | 37593 | 36496 |
+| Unpadded base64 detected | 100000 | 37612 | 20887 | 37593 | 37567 |
 | Synthetic webhook/signed URLs detected | 15 | 9 | 0 | 8 | 15 |
 | Ordinary URLs falsely detected | 13 | 10 | 0 | 5 | 0 |
 
 Naive removes slash as a distinctive trigger, retaining it in the alphabet.
 Newly admitted random samples vs baseline: naive **16725**, whole-run mix **19**,
 segment8 **45**, segment10 **85**, segment12 **182**, segment16 **1116**.
-Thresholds 8/10/12 each leave one ordinary fixture falsely detected (the bare
-WikiRedactor2.php path); 16 clears all thirteen. The PHP numbers differ from
+Without the extension condition, thresholds 8/10/12 each leave one ordinary
+fixture falsely detected (the bare WikiRedactor2.php path); 16 clears all thirteen.
+The chosen extension-aware N8 also clears all thirteen, at only 45 incremental
+misses on the standard corpus. Thus it meets the owner's <=150/100000 standard
+corpus threshold; the N16 fallback is not selected. The PHP numbers differ from
 an approximate segment simulation because the existing word-boundary and
 24-preceding-character trigger constraints are retained.
 
-The chosen incremental cost is **1116/100000**, or **1116/37612** baseline
- detections. This is larger than the first experiment and needs its own owner
-adjudication; the earlier 19-sample acceptance is not acceptance of 1116.
+The chosen incremental cost is **45/100000**, or **45/37612** baseline
+ detections. All samples suffixed with a sentence period also newly admit 45;
+all samples suffixed with `.json` newly admit **152/100000**. The extension-case
+figure is separate from the owner's <=150 standard-corpus condition, not rounded
+away. Removing the extension check and always excluding the final segment also
+newly admits 152 on the standard corpus; seed sample 152 kills that mutant.
 The exact chosen IDs are emitted by the script. The SHA256 of their ascending
 comma-joined decimal IDs, without a final newline, is
-`b05e503ac677347094dada61b657f1cd0c161455c50dbf80866ed3ba35e15343`;
-the unit test pins the count, digest and detection total.
+`88d35b49ab2536476f6b711a4e84387d90fc1945ffdb3c3d39f62dd9c0d6b73c`;
+the unit test pins count, digest and detection total.
 
-Baseline already misses **62388/100000**; chosen misses **63504/100000**.
+Baseline already misses **62388/100000**; chosen misses **62433/100000**.
 The old trigger requires 24 preceding characters before the distinctive
 character, so a slash/plus only early in a run can escape; entirely alphanumeric
 runs are deliberately outside the rule. This is not generic secret detection.
@@ -71,13 +79,15 @@ remain explicit. Legacy positives run without accidental keyword masking.
 ## Limits and tradeoffs
 
 - Ordinary paths with a long mixed-case numbered segment can still match. The
-  16-character threshold is a heuristic, not proof of a secret or universal URL
+  eight-character threshold and extension condition are heuristics, not proof of a secret or universal URL
   clearance. It is selected against the measured ordinary-path corpus.
 - Slash-only secrets without a sufficiently long mixed segment can escape;
-  short or fragmented secrets incur more misses than a forty-character corpus.
+  short or fragmented secrets can incur more misses than a forty-character corpus.
+  A secret whose only qualifying segment immediately precedes `.json` can escape;
+  the 152/100000 experiment measures that incremental cost for this corpus.
 - Known webhook hosts are not exhaustive. Lowercase secret URLs on other hosts
   (e.g. other integration/catch-hook providers) can newly escape systematically;
-  the 1116 random-sample count does NOT measure that separate population.
+  the 45 random-sample count does NOT measure that separate population.
 - Scheme-less webhook pastes, Teams workflow endpoints, encoded wrappers and
   HTML-entity query separators are not claimed covered. Bare identifiers and
   base32 remain gaps. Some of these gaps predate this change.

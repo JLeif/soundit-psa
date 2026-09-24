@@ -62,6 +62,21 @@ class ScannerUrlPolicyTest extends TestCase
         $this->assertSame($text, $r->redact($text));
     }
 
+    public function test_secret_suffix_controls_require_a_real_extension_for_final_segment_exclusion(): void
+    {
+        $r = new WikiRedactor;
+        // Seed sample 152 is detected only through its final mixed segment:
+        // an unconditional final-segment exemption must fail this control.
+        $finalOnly = base64_encode(substr(hash('sha256', ScannerCoverage::SEED.':152', true), 0, 30));
+        foreach ([$finalOnly, $finalOnly.'.', str_repeat('Ab3', 10).'/'.str_repeat('Cd4', 3).'.json'] as $text) {
+            $this->assertContains('credential', array_column($r->scan($text), 'class'));
+            $this->assertNotSame($text, $r->redact($text));
+        }
+        // A real extension excludes only the last segment, never earlier ones.
+        $this->assertSame([], $r->scan($finalOnly.'.json'));
+        $this->assertSame($finalOnly.'.json', $r->redact($finalOnly.'.json'));
+    }
+
     public function test_random_corpus_pins_newly_admitted_cases_not_a_claim_of_zero_misses(): void
     {
         $old = '/\b[A-Za-z0-9+\/_-]{24,}[+\/]+[A-Za-z0-9+\/_-]*={0,2}\b/';
@@ -76,8 +91,8 @@ class ScannerUrlPolicyTest extends TestCase
                 $newlyAdmitted[] = $id;
             }
         }
-        $this->assertSame(36496, $detected);
-        $this->assertCount(1116, $newlyAdmitted);
-        $this->assertSame('b05e503ac677347094dada61b657f1cd0c161455c50dbf80866ed3ba35e15343', hash('sha256', implode(',', $newlyAdmitted)));
+        $this->assertSame(37567, $detected);
+        $this->assertCount(45, $newlyAdmitted);
+        $this->assertSame('88d35b49ab2536476f6b711a4e84387d90fc1945ffdb3c3d39f62dd9c0d6b73c', hash('sha256', implode(',', $newlyAdmitted)));
     }
 }

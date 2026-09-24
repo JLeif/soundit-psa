@@ -12,13 +12,13 @@ $baseline = '/\b[A-Za-z0-9+\/_-]{24,}[+\/]+[A-Za-z0-9+\/_-]*={0,2}\b/';
 $naive = '/\b[A-Za-z0-9+\/_-]{24,}[+]+[A-Za-z0-9+\/_-]*={0,2}\b/';
 $mix = '~\b(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{24,}/[A-Za-z0-9+/_-]*\b|\b[A-Za-z0-9+/_-]{24,}\+[A-Za-z0-9+/_-]*={0,2}\b~';
 // Refuse policy reordering rather than silently measuring the wrong rule.
-if (count($patterns) !== 8 || ! str_starts_with($patterns[6], '~\\b[A-Za-z0-9+/_-]{24,}\\+') || ! str_contains($patterns[6], '[A-Za-z0-9+_-]{16,}')) {
+if (count($patterns) !== 8 || ! str_starts_with($patterns[6], '~\\b[A-Za-z0-9+/_-]{24,}\\+') || ! str_contains($patterns[6], '[A-Za-z0-9+_-]{8,}(?:/|(?![A-Za-z0-9+/_-]|\\.[A-Za-z][A-Za-z0-9]{0,5}\\b))')) {
     throw new RuntimeException('Distinctive-rule position/shape changed; rebind the experiment.');
 }
 // Replace only the distinctive rule in each comparison; other policy remains identical.
 $sets = ['baseline' => $baseline, 'naive' => $naive, 'mix' => $mix, 'chosen' => $patterns[6]];
-foreach ([8, 10, 12] as $minimum) {
-    $sets['segment'.$minimum] = str_replace('[A-Za-z0-9+_-]{16,}', '[A-Za-z0-9+_-]{'.$minimum.',}', $patterns[6]);
+foreach ([8, 10, 12, 16] as $minimum) {
+    $sets['segment'.$minimum] = str_replace('[A-Za-z0-9+_-]{8,}(?:/|(?![A-Za-z0-9+/_-]|\\.[A-Za-z][A-Za-z0-9]{0,5}\\b))', '[A-Za-z0-9+_-]{'.$minimum.',}', $patterns[6]);
 }
 $detected = function (string $text, string $rule) use ($patterns): bool {
     $copy = $patterns;
@@ -36,13 +36,18 @@ $detected = function (string $text, string $rule) use ($patterns): bool {
     return false;
 };
 $report = ['seed' => ScannerCoverage::SEED, 'generator' => 'base64(first 30 bytes SHA256(seed:decimal-index))', 'groups' => []];
-foreach (['random' => ScannerCoverage::randomBase64(), 'signed_urls' => ScannerCoverage::signedUrls(), 'ordinary_urls' => ScannerCoverage::urls()] as $group => $rows) {
+foreach (['random' => ScannerCoverage::randomBase64(), 'random_period' => ScannerCoverage::randomBase64(), 'random_json' => ScannerCoverage::randomBase64(), 'signed_urls' => ScannerCoverage::signedUrls(), 'ordinary_urls' => ScannerCoverage::urls()] as $group => $rows) {
     $counts = array_fill_keys(array_keys($sets), 0);
     $new = array_fill_keys(array_keys($sets), []);
     $n = 0;
     $slashOnly = 0;
     foreach ($rows as $id => $text) {
         $n++;
+        $text .= match ($group) {
+            'random_period' => '.',
+            'random_json' => '.json',
+            default => '',
+        };
         if (str_contains($text, '/') && ! str_contains($text, '+') && ! str_contains($text, '=')) {
             $slashOnly++;
         }
