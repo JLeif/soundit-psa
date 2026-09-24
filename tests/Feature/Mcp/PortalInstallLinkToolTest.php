@@ -72,21 +72,21 @@ class PortalInstallLinkToolTest extends TestCase
     public function test_storage_exception_does_not_reach_response_audit_or_logs(): void
     {
         $client = Client::factory()->create(['tactical_site_id' => 123]);
-        $secret = 'synthetic-bound-install-secret';
+        $boundValue = 'synthetic-bound-install-secret';
         $service = \Mockery::mock(\App\Services\Portal\PortalInstallService::class);
         $service->shouldReceive('getOrCreateInstallLink')->once()->andThrow(
-            new \Illuminate\Database\QueryException('sqlite', 'update clients set portal_install_token = ?', [$secret], new \PDOException('synthetic storage failure'))
+            new \Illuminate\Database\QueryException('sqlite', 'update clients set portal_install_token = ?', [$boundValue], new \PDOException('synthetic storage failure'))
         );
         $this->app->instance(\App\Services\Portal\PortalInstallService::class, $service);
         \Illuminate\Support\Facades\Log::spy();
         $response = $this->callLink($client);
         $response->assertJsonPath('result.isError', true);
         $this->assertStringContainsString('Install-link storage failed', $response->getContent());
-        $this->assertStringNotContainsString($secret, $response->getContent());
-        $this->assertStringNotContainsString($secret, McpAuditLog::all()->toJson());
+        $this->assertStringNotContainsString($boundValue, $response->getContent());
+        $this->assertStringNotContainsString($boundValue, McpAuditLog::all()->toJson());
         foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $level) {
-            \Illuminate\Support\Facades\Log::shouldNotHaveReceived($level, function (...$args) use ($secret) {
-                return str_contains(json_encode($args), $secret);
+            \Illuminate\Support\Facades\Log::shouldNotHaveReceived($level, function (...$args) use ($boundValue) {
+                return str_contains(json_encode($args), $boundValue);
             });
         }
     }
