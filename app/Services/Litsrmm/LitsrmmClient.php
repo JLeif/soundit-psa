@@ -5,6 +5,8 @@ namespace App\Services\Litsrmm;
 use App\Support\LitsrmmConfig;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Psr7\Uri;
+use GuzzleHttp\Psr7\UriResolver;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -109,6 +111,66 @@ class LitsrmmClient
         throw new LitsrmmClientException(
             'LITSRMM base URL must use https (plain http is allowed only for a loopback host)'
         );
+    }
+
+    /**
+     * Resolve an endpoint against the base URL the way Guzzle will, and refuse
+     * anything that lands off the configured host.
+     *
+     * WHY THIS EXISTS SEPARATELY FROM assertTransportIsSafe() (#3337 diff:2).
+     * That method judges the CONFIGURED base_url. Guzzle does not request the
+     * base_url; it requests base_uri resolved against $endpoint under RFC 3986,
+     * and under those rules an absolute endpoint replaces the whole authority
+     * while a protocol-relative one (`//host/path`) replaces the host and
+     * INHERITS the base scheme. So a guard that only reads the configured
+     * string is checking a URL that is not the one the credential crosses.
+     *
+     * Measured on the unfixed code, all of these left the process with the
+     * Authorization header attached:
+     *   base https://rmm.example.com + 'http://rmm.example.com/v1/clients'
+     *      -> plaintext, same host
+     *   base https://rmm.example.com + '//evil.example/v1/x'
+     *      -> https://evil.example/v1/x
+     *   base http://127.0.0.1:8080  + '//evil.example/v1/x'
+     *      -> http://evil.example/v1/x, i.e. the loopback exemption carried
+     *         onto a remote host in cleartext
+     *
+     * The host equality check is what makes this hold for a future caller that
+     * follows a vendor-supplied `next` link, which is exactly how stage 2's
+     * paging will be written. Scheme safety is re-asserted on the RESOLVED URI
+     * rather than inferred, because the loopback exemption is a statement about
+     * a host and must not survive a change of host.
+     */
+    private function assertEndpointStaysOnTheConfiguredHost(string $baseUrl, string $endpoint): void
+    {
+        // UriResolver::resolve, not Uri::resolve: the latter was removed in
+        // guzzlehttp/psr7 v2. This is the SAME resolver Guzzle's own
+        // RedirectMiddleware and base_uri handling call, so the URL judged here
+        // is the URL that will be requested, not a second implementation of
+        // RFC 3986 that could drift from it.
+        $resolved = (string) UriResolver::resolve(
+            new Uri(rtrim($baseUrl, '/').'/'),
+            new Uri($endpoint),
+        );
+
+        $baseHost = strtolower((string) parse_url($baseUrl, PHP_URL_HOST));
+        $host = strtolower((string) parse_url($resolved, PHP_URL_HOST));
+
+        if ($host !== $baseHost) {
+            // The endpoint is logged, the credential is not, and the throw
+            // happens before any Authorization header is built.
+            Log::warning('[LitsrmmClient] refusing an endpoint that resolves off the configured host', [
+                'configured_host' => $baseHost,
+                'resolved_host' => $host,
+            ]);
+
+            throw new LitsrmmClientException(
+                'LITSRMM endpoint resolves to a different host than the configured base URL'
+            );
+        }
+
+        // Same host, but the endpoint may still have downgraded the scheme.
+        self::assertTransportIsSafe($resolved);
     }
 
     private function http(): Client
@@ -228,6 +290,27 @@ class LitsrmmClient
             throw new LitsrmmClientException('LITSRMM base URL not configured');
         }
 
+        // THE AVAILABILITY CHOKE POINT (#3298 diff:2, C-47).
+        //
+        // getClients() and isHealthy() each gated themselves, which held only
+        // because they were the only callers. The public get() reaches this
+        // method directly, so an operator's OFF switch depended on every future
+        // caller remembering to ask; stage 2's device sync is that caller.
+        // Gating here makes OFF=OFF a property of the transport rather than a
+        // convention the next author has to know about. The two methods keep
+        // their own checks because they return a value rather than throwing.
+        //
+        // ORDER IS DELIBERATE. This sits AFTER the two credential checks, not
+        // before them. Both orders are equally safe -- neither reaches the
+        // network -- but a client built with no api_key would otherwise report
+        // "switched off", which is a misdiagnosis: isAvailable() is
+        // isConfigured() AND isEnabled(), so missing credentials make it false
+        // for a reason that has nothing to do with the operator's switch. The
+        // specific refusal is the more useful one and it keeps its meaning.
+        if (! LitsrmmConfig::isAvailable()) {
+            throw new LitsrmmClientException('LITSRMM integration is switched off');
+        }
+
         // Refuse plaintext BEFORE the Authorization header exists, so a refused
         // request cannot have carried the credential. The form validates the
         // same rule, but env and config bypass the form entirely, which is why
@@ -238,6 +321,10 @@ class LitsrmmClient
         // one machine, so there is no network for a bearer token to cross. Any
         // other host is remote from us whatever the vendor's topology is.
         self::assertTransportIsSafe((string) $this->config['base_url']);
+
+        // ...and then the URI Guzzle will ACTUALLY request, which is not the
+        // same string. See the method's docblock.
+        $this->assertEndpointStaysOnTheConfiguredHost((string) $this->config['base_url'], $endpoint);
 
         $options['headers'] = array_merge($options['headers'] ?? [], [
             'Authorization' => 'Bearer '.$apiKey,

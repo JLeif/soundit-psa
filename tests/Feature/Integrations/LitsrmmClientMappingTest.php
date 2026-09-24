@@ -147,6 +147,41 @@ class LitsrmmClientMappingTest extends TestCase
             'a disabled integration must not reach the network at all');
     }
 
+    /**
+     * #3298 diff:2. The sibling control above proves OFF=OFF through the two
+     * GATED methods. This one asks the question that finding actually raises:
+     * the public get() reaches request() directly, so a future caller (stage 2
+     * device sync is the obvious one) can send a credentialed request while an
+     * operator has the vendor switched off.
+     *
+     * It is deliberately a SEPARATE test rather than an extra assertion above:
+     * merged in, a reader cannot tell which path the guarantee rests on, and
+     * that ambiguity is what let the gap survive stage 1's review.
+     */
+    public function test_a_disabled_integration_makes_no_outbound_request_through_the_public_get(): void
+    {
+        $this->configure();
+        Setting::setValue('litsrmm_enabled', '0');
+
+        // A 200 again, for the same reason: a leak must show up as a RECORDED
+        // request, never as an exception the assertion could mistake for a
+        // refusal.
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => []])),
+        ]);
+
+        try {
+            $client->get('v1/devices');
+        } catch (LitsrmmClientException) {
+            // Refusing is the correct behaviour; what is forbidden is reaching
+            // the network, which the history below is what actually decides.
+        }
+
+        $this->assertCount(0, $this->history,
+            'the public get() must be gated too: OFF=OFF has to hold at the request layer, '
+            .'not only in the two methods that happen to check it today');
+    }
+
     // ---- what leaves the process ----
 
     public function test_the_request_carries_bearer_auth_to_the_configured_host(): void
@@ -167,6 +202,118 @@ class LitsrmmClientMappingTest extends TestCase
         $this->assertSame('litsrmm.test', $request->getUri()->getHost(),
             'requests go to the configured host and nowhere else');
         $this->assertStringEndsWith('/v1/clients', $request->getUri()->getPath());
+    }
+
+    /**
+     * #3337 diff:2. assertTransportIsSafe() is handed the CONFIGURED base_url,
+     * but Guzzle sends the URI it resolves from base_uri + endpoint under RFC
+     * 3986. An absolute endpoint replaces the whole authority, and a
+     * protocol-relative one replaces the host while inheriting the scheme. So
+     * the string the guard inspects and the URL the credential actually
+     * crosses are two different things.
+     *
+     * Measured against the unfixed code, all three of these left the process
+     * with the Bearer header attached, including to evil.example.
+     */
+    public static function escapingEndpoints(): array
+    {
+        return [
+            'absolute http downgrades the scheme' => [
+                'https://litsrmm.test', 'http://litsrmm.test/v1/clients',
+            ],
+            'absolute http to another host' => [
+                'https://litsrmm.test', 'http://evil.example/v1/x',
+            ],
+            'protocol-relative replaces the host' => [
+                'https://litsrmm.test', '//evil.example/v1/x',
+            ],
+            // The loopback exemption is what makes this one sharp: the base is
+            // legitimately plain http, so the guard passes it, and the
+            // endpoint then inherits http onto a REMOTE host.
+            'protocol-relative off a loopback base inherits plain http' => [
+                'http://127.0.0.1:8080', '//evil.example/v1/x',
+            ],
+            // These two exist because a mutant survived without them. Writing
+            // the host check as str_contains($host, $baseHost) instead of an
+            // equality passed every case above, and an attacker-controlled
+            // subdomain or a longer registrable name is exactly how that
+            // weaker test gets exploited. hostIsLoopback() already carries the
+            // same lesson in its own docblock; this is that lesson applied one
+            // layer up, as a control rather than as a comment.
+            'a host that merely ENDS WITH the configured one is a different machine' => [
+                'https://litsrmm.test', '//litsrmm.test.evil.example/v1/x',
+            ],
+            'a host that merely CONTAINS the configured one is a different machine' => [
+                'https://litsrmm.test', '//evil-litsrmm.test.example/v1/x',
+            ],
+            // And these two for the SUFFIX form of the same wrong fix, which
+            // survived the two cases above: str_ends_with is false for both of
+            // them, so they proved nothing about it. 'xlitsrmm.test' is a
+            // different registrable domain that ends with the configured name,
+            // and a subdomain is a different machine we were never pointed at.
+            'a different registrable domain ENDING WITH the configured name' => [
+                'https://litsrmm.test', '//xlitsrmm.test/v1/x',
+            ],
+            'a subdomain of the configured host is still not the configured host' => [
+                'https://litsrmm.test', '//evil.litsrmm.test/v1/x',
+            ],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('escapingEndpoints')]
+    public function test_an_endpoint_that_escapes_the_configured_host_is_refused_before_the_credential_exists(
+        string $baseUrl,
+        string $endpoint,
+    ): void {
+        $this->configure();
+
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $this->history = [];
+        $stack->push(Middleware::history($this->history));
+
+        $client = new LitsrmmClient([
+            'api_key' => 'test-token-value',
+            'base_url' => $baseUrl,
+            'handler' => $stack,
+        ]);
+
+        $threw = false;
+        try {
+            $client->get($endpoint);
+        } catch (LitsrmmClientException) {
+            $threw = true;
+        }
+
+        // The history is the load-bearing assertion. A thrown exception that
+        // still let the request out would be a leak wearing a refusal's face.
+        $this->assertCount(0, $this->history,
+            "endpoint {$endpoint} escaped the guard and carried the API key off the configured host");
+        $this->assertTrue($threw, 'and the caller must be told, not silently handed an empty result');
+    }
+
+    /**
+     * The negative half of the pair. A guard that refuses everything would
+     * pass every case above, so this pins that ordinary relative endpoints —
+     * with and without a leading slash, with a query — still go out.
+     */
+    public function test_ordinary_relative_endpoints_still_reach_the_configured_host(): void
+    {
+        $this->configure();
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => []])),
+            new Response(200, [], json_encode(['data' => []])),
+        ]);
+
+        $client->get('v1/clients', ['limit' => 10]);
+        $client->get('/v1/health');
+
+        $this->assertCount(2, $this->history,
+            'the fix must not turn into a refusal of the normal path');
+        foreach ($this->history as $entry) {
+            $this->assertSame('litsrmm.test', $entry['request']->getUri()->getHost());
+            $this->assertSame('https', $entry['request']->getUri()->getScheme());
+        }
     }
 
     public function test_a_missing_base_url_refuses_instead_of_guessing_a_host(): void
