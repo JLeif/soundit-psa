@@ -68,6 +68,27 @@ return Application::configure(basePath: dirname(__DIR__))
         // 'credentials' is the client vault, and its editor is prefilled with
         // the stored copy, so an unflashed edit would be replaced without any
         // sign. clients/_form.blade.php shows a notice when that happens.
+        //
+        // Two names here carry no credential affix at all, so a sweep keyed on
+        // _key/_secret/_token/password will not find them. Both are secrets:
+        //
+        //   'token' is the portal password-reset token (PortalAuthController
+        //   validates a bare 'token'). It is single-use and short-lived, but a
+        //   failed reset -- a weak new password, a mismatched confirmation --
+        //   flashes a still-valid reset token into the session, and the token
+        //   is the whole authentication for that request. Nothing repopulates
+        //   from it: the form sources the token from the route parameter, not
+        //   from old input, so unflashing it costs nothing.
+        //
+        //   'keys' is the PowerDMARC per-client API key map ('keys[<client
+        //   id>]' in the form, vendor JWTs over 1300 characters). An array is
+        //   flashed whole, so one failed submit writes every operator-entered
+        //   key for every client into _old_input. That form re-renders from
+        //   the stored rows behind a mask and never reads old('keys'), so it
+        //   also repopulates unaffected.
+        //
+        // Neither name is used for anything else in a validation rule: they
+        // are unambiguous here, which is why the plain names are safe to list.
         $exceptions->dontFlash([
             'api_key',
             'api_secret',
@@ -80,6 +101,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'hdb_password',
             'hdb_totp_secret',
             'install_account_token',
+            'keys',
             'mcp_client_secret',
             'openai_api_key',
             'secret',
@@ -88,6 +110,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'sip_password',
             'teams_bot_client_secret',
             'technician_teams_webhook_url',
+            'token',
             'totp_secret',
             'wake_secret',
             'webhook_secret',
