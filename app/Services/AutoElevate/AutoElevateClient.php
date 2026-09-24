@@ -10,7 +10,8 @@ use Illuminate\Support\Sleep;
 /**
  * Read-only Partner API client. Stage 1: a status-only connection check. Stage 2 adds
  * `getPage()`, a single validated list-page read used by AutoElevateReadService, which
- * retries a vendor 429 a bounded number of times before failing (see MAX_ATTEMPTS).
+ * retries a vendor 429 a bounded number of times before failing, outside web requests only
+ * (see MAX_ATTEMPTS).
  * Never retains company data or vendor errors; never writes at the vendor.
  *
  * Vendor contract: AutoElevate Partner API (Beta) 1.0.0 OpenAPI
@@ -39,6 +40,10 @@ class AutoElevateClient
      *
      * Worst case: 35 s of waiting with no Retry-After, 180 s if the vendor sends the 60 s
      * ceiling each time. The waits go through the Sleep facade so tests fake them.
+     *
+     * Retries only run when the app is running in the console (the artisan sync). A web request
+     * (the client panel or the company mapping screens) makes one request and fails as
+     * `http_429` straight away, so it never holds a worker through those waits.
      */
     public const MAX_ATTEMPTS = 4;
 
@@ -88,6 +93,9 @@ class AutoElevateClient
             throw new AutoElevateReadException('configuration');
         }
 
+        // Interactive reads must fail fast and scream http_429 (C-56), not outlive a proxy timeout.
+        $maxAttempts = app()->runningInConsole() ? self::MAX_ATTEMPTS : 1;
+
         for ($attempt = 1; ; $attempt++) {
             try {
                 $response = $this->pending($key)->get($path, $query);
@@ -96,7 +104,7 @@ class AutoElevateClient
                 throw new AutoElevateReadException('transport');
             }
 
-            if ($response->status() !== 429 || $attempt >= self::MAX_ATTEMPTS) {
+            if ($response->status() !== 429 || $attempt >= $maxAttempts) {
                 break;
             }
 

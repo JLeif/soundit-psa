@@ -138,4 +138,30 @@ class AutoElevateRateLimitRetryTest extends TestCase
         }
         $this->assertSame(2, $calls);
     }
+
+    private function asWebRequest(): void
+    {
+        // Application memoises runningInConsole(); mark this app as serving HTTP, not artisan.
+        (function () {
+            $this->isRunningInConsole = false;
+        })->call($this->app);
+        $this->assertFalse($this->app->runningInConsole());
+    }
+
+    public function test_a_web_request_is_not_retried_and_fails_as_http_429_at_once(): void
+    {
+        $this->asWebRequest();
+        Http::fake([self::BASE.'/api/v1/computers*' => Http::response('', 429, ['Retry-After' => '60'])]);
+
+        try {
+            $this->service()->computersForCompany(self::COMPANY_A);
+            $this->fail('a 429 in a web request must still fail the read (C-56), not return empty');
+        } catch (AutoElevateReadException $e) {
+            $this->assertSame('http_429', $e->reason);
+            $this->assertNull($e->getPrevious());
+        }
+
+        Http::assertSentCount(1);
+        Sleep::assertNeverSlept();
+    }
 }
