@@ -89,7 +89,12 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Client not found'];
         }
 
-        return app(\App\Services\Portal\PortalInstallService::class)->getOrCreateInstallLink($client);
+        try {
+            return app(\App\Services\Portal\PortalInstallService::class)->getOrCreateInstallLink($client);
+        } catch (\Illuminate\Database\QueryException) {
+            // Query exceptions include bound token values. Do not let the transport log them.
+            return ['error' => 'Install-link storage failed. Retry after the database problem is resolved.'];
+        }
     }
 
     /**
