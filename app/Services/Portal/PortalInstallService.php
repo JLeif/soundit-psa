@@ -69,11 +69,23 @@ class PortalInstallService
                 'effective_rmm' => $client->effectiveInstallRmm(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
             ];
+            // Match Client::operational() on the locked row, including live-link retrieval.
+            if (! $client->is_active || $client->stage !== \App\Enums\ClientStage::Active) {
+                return ['error' => 'Install links are unavailable for non-operational clients.'] + $context;
+            }
             if (empty($context['available_rmms'])) {
                 return ['error' => 'Map this client to an RMM (Ninja, Level, or Tactical) on the Client page before generating an install link.'] + $context;
             }
             if ($context['effective_rmm'] === null) {
                 return ['error' => 'Set the primary RMM on the Client page before generating an install link.'] + $context;
+            }
+
+            $publicRoot = config('app.url');
+            $parts = is_string($publicRoot) ? parse_url($publicRoot) : false;
+            if (! is_array($parts) || ! in_array($parts['scheme'] ?? '', ['http', 'https'], true)
+                || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])
+                || isset($parts['query']) || isset($parts['fragment'])) {
+                return ['error' => 'Configure a public HTTP(S) application URL before requesting an install link.'] + $context;
             }
 
             $expired = (bool) $client->portal_install_token
@@ -86,7 +98,7 @@ class PortalInstallService
             }
 
             return [
-                'url' => route('portal.install.show', ['token' => $client->portal_install_token]),
+                'url' => rtrim($publicRoot, '/').route('portal.install.show', ['token' => $client->portal_install_token], false),
                 'expires_at' => $client->portal_install_token_expires_at?->toIso8601String(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
                 'reissued_expired' => $expired,

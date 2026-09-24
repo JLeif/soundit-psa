@@ -163,6 +163,17 @@ APP_URL=https://psa.yourmsp.com
 
 > **Important:** `APP_DEBUG=false` in production. Debug mode exposes stack traces and environment variables.
 
+Staff MCP install-link responses use `APP_URL` as the public root, not the MCP
+request's host or scheme. Set it to the customer-reachable HTTP(S) application
+URL, including any deployment path prefix, without user information, query or
+fragment. An invalid root refuses issuance/retrieval without changing the client.
+The operator must verify public reachability; syntactic validation is not a
+network check. Refresh Laravel's configuration cache after an authorized change.
+The MCP verb also requires an operational client (`stage=active` and
+`is_active=true`), including when returning an existing link. This does not
+change the staff web buttons or revoke existing public setup links. Tool grants
+and live link issuance remain separate operator actions.
+
 #### Database
 
 ```ini
