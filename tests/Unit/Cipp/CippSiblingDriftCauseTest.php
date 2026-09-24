@@ -167,6 +167,68 @@ class CippSiblingDriftCauseTest extends TestCase
     }
 
     /**
+     * Round 2's must-fix votes, and the negative control the first attempt lacked.
+     *
+     * The identity check began as array_key_exists('id', $row) and was defeated on a
+     * path inside this module. CippMcpClient sends 'id' => 1; decodeJsonRpcPayload()
+     * does `$decoded['result'] ?? $decoded`, so a reply whose result is null or absent
+     * yields the whole envelope, which normalizeRows() wraps as ONE row keyed
+     * ['jsonrpc','id','result']. Driving that row through shape() took the drift arm.
+     * MEASURED before the predicate was changed, not argued.
+     *
+     * Identity is now two or more CA_POLICY_SCALAR_FIELDS. These rows carry exactly one
+     * apiece, so each must take the observation-only wording.
+     *
+     * @dataProvider nonPolicyRowsCarryingAnId
+     */
+    public function test_a_non_policy_row_carrying_an_id_does_not_name_drift(array $rows, array $expectedKeys): void
+    {
+        Http::preventStrayRequests();
+
+        $records = $this->capture(fn () => app(CippToolContract::class)
+            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
+
+        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
+            && str_contains($r[1], 'ListConditionalAccessPolicies')));
+
+        $this->assertCount(1, $warnings, 'a non-policy row must warn exactly once');
+
+        $this->assertSame(
+            [
+                'warning',
+                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible',
+                [
+                    'tool' => 'cipp_list_conditional_access_policies',
+                    'row_count' => 1,
+                    'first_row_keys' => $expectedKeys,
+                ],
+            ],
+            $warnings[0]
+        );
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * @return array<string, array{0: array<string, mixed>, 1: array<int, string>}>
+     */
+    public static function nonPolicyRowsCarryingAnId(): array
+    {
+        return [
+            // Exactly what decodeJsonRpcPayload() yields when result is null or absent.
+            'the client\'s own JSON-RPC envelope' => [
+                ['jsonrpc' => '2.0', 'id' => 1, 'result' => null],
+                ['jsonrpc', 'id', 'result'],
+            ],
+            // Every Graph entity carries a top-level id.
+            'a misrouted single Graph object' => [
+                ['id' => 'abc-123', 'defaultDomainName' => 'contoso.onmicrosoft.com'],
+                ['id', 'defaultDomainName'],
+            ],
+        ];
+    }
+
+    /**
      * The other half of the ruling, and the reason this is a narrowing rather than a
      * deletion: where the rows DO carry the policy identity and still lack every
      * targeting/control key, the schema really has moved and the guard still says so.
@@ -178,6 +240,8 @@ class CippSiblingDriftCauseTest extends TestCase
     {
         Http::preventStrayRequests();
 
+        // Two CA_POLICY_SCALAR_FIELDS: what CIPP's flattener emits for a real row, and
+        // one more than either false payload above can muster.
         $rows = [['id' => '11111111-2222-3333-4444-555555555555', 'state' => 'enabled']];
 
         $records = $this->capture(fn () => app(CippToolContract::class)

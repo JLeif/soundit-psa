@@ -1600,7 +1600,24 @@ class CippToolContract
         // lack every targeting/control key. Everything else states the observation and
         // stops; first_row_keys is in the context either way, so a reader can see which
         // case they have.
+        //
+        // IDENTITY IS SEVERAL SCALARS, NOT A BARE 'id' (round 2, #3408). A first attempt
+        // keyed identity on array_key_exists('id', $row) and that was defeated on a path
+        // in this very module — MEASURED, not reasoned. CippMcpClient sends 'id' => 1 and
+        // decodeJsonRpcPayload() does `$decoded['result'] ?? $decoded`, so a reply whose
+        // result is null or absent yields the WHOLE ENVELOPE; unwrapMcpResult() finds no
+        // content and no isError, unwrapCippEnvelope() finds no Results/value, and
+        // normalizeRows() wraps it as one row keyed ['jsonrpc','id','result']. Driving
+        // that row through shape() took the drift arm. A misrouted single Graph object
+        // (every Graph entity carries 'id') did too. 'id' is the most generic key in any
+        // payload this guard can receive, so it cannot carry the identity claim alone.
+        //
+        // CIPP's flattener emits every scalar for a real policy row, so requiring TWO of
+        // CA_POLICY_SCALAR_FIELDS costs a genuine row nothing while both false payloads
+        // above carry exactly one. Presence only — a null-valued scalar is still the
+        // schema's, which is the distinction the sibling guards got wrong.
         $shapeFields = array_flip(array_merge(self::CA_POLICY_ENUM_FIELDS, self::CA_POLICY_NAME_FIELDS, self::CA_POLICY_NAME_LIST_FIELDS));
+        $scalarFields = array_flip(self::CA_POLICY_SCALAR_FIELDS);
         $sawShapeField = false;
         $sawPolicyIdentity = false;
         foreach ($rows as $row) {
@@ -1608,7 +1625,7 @@ class CippToolContract
                 $sawShapeField = true;
                 break;
             }
-            if (array_key_exists('id', $row)) {
+            if (count(array_intersect_key($row, $scalarFields)) >= 2) {
                 $sawPolicyIdentity = true;
             }
         }
