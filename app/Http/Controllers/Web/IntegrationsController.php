@@ -995,8 +995,25 @@ class IntegrationsController extends Controller
      */
     public function updateLitsrmm(Request $request)
     {
+        // Keep the secrets out of the session on a validation failure.
+        //
+        // A failed validate() redirects withInput(), and the framework's
+        // $dontFlash list covers only password / password_confirmation /
+        // current_password - not api_key or webhook_secret. With
+        // SESSION_ENCRYPT=false that writes a live vendor credential into the
+        // session store in cleartext, where nothing on the page has to render
+        // it for it to be readable.
+        //
+        // So validation runs against a request that does not contain them.
+        // The view never calls old() for these fields, so nothing is lost, and
+        // an operator re-enters a secret they were told is write-only anyway.
+        // Doing this by hand rather than through $dontFlash keeps the rule
+        // beside the fields it protects instead of in a global list a future
+        // vendor would have to remember to extend.
+        $secrets = $request->only(['api_key', 'webhook_secret']);
+        $request->replace($request->except(['api_key', 'webhook_secret']));
+
         $validated = $request->validate([
-            'api_key' => 'nullable|string|min:1|max:500',
             'base_url' => [
                 'nullable',
                 'url',
@@ -1013,14 +1030,41 @@ class IntegrationsController extends Controller
                     }
                 },
             ],
+        ]);
+
+        // Validated separately, after the redirect risk has passed. A refusal
+        // here carries no input back at all.
+        $lengths = validator($secrets, [
+            'api_key' => 'nullable|string|min:1|max:500',
             'webhook_secret' => 'nullable|string|min:1|max:500',
         ]);
+
+        if ($lengths->fails()) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'LITSRMM credentials must each be between 1 and 500 characters.');
+        }
+
+        $validated += $secrets;
+
+        // A host change re-points the stored key at a new destination, so it
+        // requires the key to be supplied again. Otherwise an operator who can
+        // edit settings but cannot read the encrypted key could move base_url
+        // to a host they control and press Test connection, and the key they
+        // were never shown would be sent there. Both fields together, or the
+        // host alone only when it is unchanged.
+        $newHost = ! empty($validated['base_url']) ? rtrim($validated['base_url'], '/') : null;
+        $currentHost = (string) (LitsrmmConfig::get('base_url') ?? '');
+
+        if ($newHost !== null && $newHost !== $currentHost && $currentHost !== '' && empty($validated['api_key'])) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Changing the LITSRMM base URL requires re-entering the API key, so a stored key is never sent to a new host.');
+        }
 
         if (! empty($validated['api_key'])) {
             Setting::setEncrypted('litsrmm_api_key', $validated['api_key']);
         }
-        if (! empty($validated['base_url'])) {
-            Setting::setValue('litsrmm_base_url', rtrim($validated['base_url'], '/'));
+        if ($newHost !== null) {
+            Setting::setValue('litsrmm_base_url', $newHost);
         }
         if (! empty($validated['webhook_secret'])) {
             Setting::setEncrypted('litsrmm_webhook_secret', $validated['webhook_secret']);

@@ -111,11 +111,15 @@ class LitsrmmSettingsPanelTest extends TestCase
     {
         $this->configure();
 
+        // The host is re-submitted UNCHANGED here. That is the case this test
+        // is about: "leave blank to keep current" must be true for the key.
+        // Moving the host to a NEW value additionally requires the key, which
+        // test_changing_the_host_requires_re_entering_the_key covers.
         $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
-            'base_url' => 'https://moved.example.com',
+            'base_url' => 'https://litsrmm.test',
         ]);
 
-        $this->assertSame('https://moved.example.com', Setting::getValue('litsrmm_base_url'));
+        $this->assertSame('https://litsrmm.test', Setting::getValue('litsrmm_base_url'));
         $this->assertSame('panel-token-value', Setting::getEncrypted('litsrmm_api_key'),
             'submitting only the host must not wipe the key: the form says "leave blank to keep current"');
     }
@@ -413,8 +417,11 @@ class LitsrmmSettingsPanelTest extends TestCase
         ])->assertSessionHasNoErrors();
         $this->assertSame('https://rmm.partner.example', Setting::getValue('litsrmm_base_url'));
 
+        // Key supplied with it, because this run moves the host from the
+        // https value set just above.
         $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
             'base_url' => 'http://localhost:8080',
+            'api_key' => 'freshly-entered-key',
         ])->assertSessionHasNoErrors();
         $this->assertSame('http://localhost:8080', Setting::getValue('litsrmm_base_url'));
     }
@@ -432,6 +439,75 @@ class LitsrmmSettingsPanelTest extends TestCase
         $response->assertJson(['success' => false]);
         $this->assertStringContainsString('https', $response->json('message'));
         $this->assertNull(Setting::getValue('litsrmm_connected_at'));
+    }
+
+    public function test_a_failed_submit_does_not_flash_the_credential_into_the_session(): void
+    {
+        // The hazard is NOT the rendered page - the view never calls old() for
+        // these fields. It is the session store: a failed validate() redirects
+        // withInput(), and the framework's $dontFlash covers only the password
+        // fields, so api_key would sit in _old_input in cleartext (this app
+        // runs SESSION_ENCRYPT=false).
+        $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'not-a-url',
+            'api_key' => 'secret-should-not-persist',
+            'webhook_secret' => 'webhook-should-not-persist',
+        ]);
+
+        $response->assertSessionHasErrors('base_url');
+
+        $old = session('_old_input') ?? [];
+        $blob = json_encode($old);
+        $this->assertStringNotContainsString('secret-should-not-persist', (string) $blob,
+            'a rejected submission must not leave the API key in the session store');
+        $this->assertStringNotContainsString('webhook-should-not-persist', (string) $blob,
+            'nor the webhook secret');
+    }
+
+    public function test_changing_the_host_requires_re_entering_the_key(): void
+    {
+        $this->configure();
+
+        $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'https://attacker.example',
+        ]);
+
+        // Otherwise someone who can edit settings but cannot read the
+        // encrypted key could re-point the host and press Test connection,
+        // and the key they were never shown would be sent there.
+        $response->assertSessionHas('error');
+        $this->assertSame('https://litsrmm.test', Setting::getValue('litsrmm_base_url'),
+            'the host must not move while the old key stays behind');
+    }
+
+    public function test_the_host_can_be_changed_when_the_key_is_supplied_with_it(): void
+    {
+        $this->configure();
+
+        $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'https://moved.example.com',
+            'api_key' => 'freshly-entered-key',
+        ])->assertSessionHasNoErrors();
+
+        $this->assertSame('https://moved.example.com', Setting::getValue('litsrmm_base_url'));
+        $this->assertSame('freshly-entered-key', Setting::getEncrypted('litsrmm_api_key'));
+    }
+
+    public function test_the_credential_routes_refuse_a_non_admin(): void
+    {
+        $tech = User::factory()->create(['role' => UserRole::Tech]);
+
+        // Access control was resting entirely on which middleware group the
+        // routes happen to sit in, with no control saying so.
+        $this->actingAs($tech)->post('/settings/integrations/litsrmm', [
+            'base_url' => 'https://rmm.partner.example',
+            'api_key' => 'tech-should-not-write',
+        ])->assertForbidden();
+
+        $this->actingAs($tech)->post('/settings/integrations/litsrmm/test')->assertForbidden();
+
+        $this->assertNull(Setting::getValue('litsrmm_base_url'),
+            'a refused write must not land');
     }
 
     // ---- the three badge states are distinguishable ----
