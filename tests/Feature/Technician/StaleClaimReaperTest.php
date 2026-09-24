@@ -219,6 +219,8 @@ class StaleClaimReaperTest extends TestCase
     {
         // The reaper does NOT auto-return a side-effecting vendor strand, so the message must not
         // promise it will — it points the operator to manual review rather than a naive retry.
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
         $wedged = $this->makeRun(TechnicianRunState::Executing, now()->subMinutes(30), 'tactical_stage_script');
 
         $response = $this->actingAs(User::factory()->create())
