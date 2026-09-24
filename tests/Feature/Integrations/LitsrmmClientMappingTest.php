@@ -217,6 +217,40 @@ class LitsrmmClientMappingTest extends TestCase
         $this->assertSame([['id' => 'c1', 'name' => 'Acme']], $client->getClients());
     }
 
+    public function test_an_unrecognised_envelope_is_reported_not_read_as_no_clients(): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['clients' => [['id' => 'c1', 'name' => 'Acme']]])),
+        ]);
+
+        // A wrapper we do not recognise must not be mapped over as though its
+        // values were rows: that yields [] silently, which reads as "no clients".
+        $this->assertSame([], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'did not return a list'))
+            ->once();
+    }
+
+    public function test_a_list_with_no_mappable_row_is_reported(): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => [['client_id' => 'c1', 'name' => 'Acme']]])),
+        ]);
+
+        $this->assertSame([], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'none were mappable'))
+            ->once();
+    }
+
     public function test_a_row_without_an_id_is_dropped(): void
     {
         $this->configure();

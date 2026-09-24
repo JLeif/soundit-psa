@@ -22,6 +22,9 @@ use Illuminate\Support\Facades\Log;
  *
  *  - The envelope is read as `data` if present, else the top-level array. That
  *    covers both conventions without asserting which one the vendor uses.
+ *    Anything else (another wrapper key, an error object) is not a list and
+ *    is logged, as is a non-empty list in which no row is mappable: a wrong
+ *    shape must not look like a vendor with no clients.
  *  - Pagination is NOT implemented. Level's cursor scheme (`has_more` +
  *    `starting_after`) is a LEVEL convention, and copying it would encode an
  *    assumption as though it were the contract. getClients() therefore fetches
@@ -110,9 +113,10 @@ class LitsrmmClient
 
         $clients = $response['data'] ?? $response;
 
-        if (! is_array($clients)) {
+        if (! is_array($clients) || ! array_is_list($clients)) {
             Log::warning('[LitsrmmClient] /v1/clients did not return a list', [
                 'type' => gettype($clients),
+                'keys' => is_array($clients) ? array_slice(array_keys($clients), 0, 10) : [],
             ]);
 
             return [];
@@ -129,13 +133,21 @@ class LitsrmmClient
             ]);
         }
 
-        return array_values(array_filter(
+        $rows = array_values(array_filter(
             array_map(static fn ($c) => is_array($c) ? [
                 'id' => (string) ($c['id'] ?? ''),
                 'name' => (string) ($c['name'] ?? ''),
             ] : null, $clients),
             static fn ($c) => $c !== null && $c['id'] !== '',
         ));
+
+        if ($clients !== [] && $rows === []) {
+            Log::warning('[LitsrmmClient] /v1/clients returned rows but none were mappable', [
+                'received' => count($clients),
+            ]);
+        }
+
+        return $rows;
     }
 
     public function get(string $endpoint, array $params = []): array
