@@ -269,22 +269,34 @@ class LitsrmmClient
 
         $clients = $response['data'] ?? $response;
 
-        // THE GUARD TESTS THE VALUES, NOT THE KEY SHAPE (#3326 c1:v2:1).
+        // THE GUARD TESTS EACH VALUE AGAINST ITS KEY (#3326 c1:v2:1).
         //
         // The defect this guard exists to catch is a wrapper we do not
-        // recognise -- {"clients": [...]} -- being mapped over as though its
-        // values were rows, which yields [] and reads as "no clients".
+        // recognise -- {"clients": [...]}, {"clients": []}, or a 200 carrying
+        // {"error": {"id": ...}} -- being mapped over as though its values were
+        // rows. That yields [] and reads as "no clients", or it builds a
+        // phantom client from the wrapper's own id.
         //
         // Keying on array_is_list() answered a different question. json_decode
         // turns {"0":{...},"2":{...}} into a gapped array and {"c1":{...}} into
-        // an id-keyed map; both are row collections, both carry every row, and
-        // both were mapped correctly before that guard existed. It also let a
-        // list of scalars through, because ["a","b"] IS a list.
+        // an id-keyed map. Both are row collections, and both carry every row.
+        // It also let a list of scalars through, because ["a","b"] IS a list.
         //
         // A row is a JSON object, so it decodes to an array that is not itself
-        // a list. A wrapper's values are lists or scalars. That is the
-        // distinction, and it does not depend on how the keys are numbered.
-        if (! is_array($clients) || ! $this->valuesLookLikeRows($clients)) {
+        // a non-empty list. Under an integer key that is enough. Under a string
+        // key the row must also carry that key as its id, because that is what
+        // an id-keyed map is. A wrapper's key names a field, not the row
+        // beneath it.
+        //
+        // Only the values that pass are mapped. So one null or scalar element
+        // drops that element and keeps the rest of the collection. The envelope
+        // is refused only when it is non-empty and nothing in it is a row. An
+        // empty collection means "no clients", which is a legitimate answer.
+        $candidates = is_array($clients)
+            ? array_filter($clients, fn ($row, $key) => $this->looksLikeARow($row, $key), ARRAY_FILTER_USE_BOTH)
+            : [];
+
+        if (! is_array($clients) || ($clients !== [] && $candidates === [])) {
             Log::warning('[LitsrmmClient] /v1/clients did not return client rows', [
                 'type' => gettype($clients),
                 'keys' => is_array($clients) ? array_slice(array_keys($clients), 0, 10) : [],
@@ -305,16 +317,16 @@ class LitsrmmClient
         }
 
         $rows = array_values(array_filter(
-            array_map(static fn ($c) => is_array($c) ? [
+            array_map(static fn ($c) => [
                 'id' => (string) ($c['id'] ?? ''),
                 'name' => (string) ($c['name'] ?? ''),
-            ] : null, $clients),
-            static fn ($c) => $c !== null && $c['id'] !== '',
+            ], $candidates),
+            static fn ($c) => $c['id'] !== '',
         ));
 
-        if ($clients !== [] && $rows === []) {
+        if ($candidates !== [] && $rows === []) {
             Log::warning('[LitsrmmClient] /v1/clients returned rows but none were mappable', [
-                'received' => count($clients),
+                'received' => count($candidates),
             ]);
         }
 
@@ -322,26 +334,21 @@ class LitsrmmClient
     }
 
     /**
-     * Is every value of this array a decoded JSON object, i.e. a row?
+     * Is this value, at this key, a decoded client row?
      *
-     * An empty collection is vacuously true: "no clients" is a legitimate
-     * answer and must not be reported as an unreadable envelope.
+     * A non-empty list is a nested collection, not a row. Under a string key
+     * the value must carry that key as its id. This is what separates an
+     * id-keyed map from {"clients": [...]}, {"clients": []} or
+     * {"error": {"id": "rate_limited"}}, whose key names a field.
      */
-    private function valuesLookLikeRows(array $candidate): bool
+    private function looksLikeARow(mixed $row, int|string $key): bool
     {
-        foreach ($candidate as $row) {
-            if (! is_array($row)) {
-                return false;
-            }
-
-            // A non-empty list is a nested collection, not a row: this is the
-            // {"clients": [ ... ]} wrapper the guard must still refuse.
-            if ($row !== [] && array_is_list($row)) {
-                return false;
-            }
+        if (! is_array($row) || ($row !== [] && array_is_list($row))) {
+            return false;
         }
 
-        return true;
+        return is_int($key)
+            || (isset($row['id']) && is_scalar($row['id']) && (string) $row['id'] === $key);
     }
 
     public function get(string $endpoint, array $params = []): array

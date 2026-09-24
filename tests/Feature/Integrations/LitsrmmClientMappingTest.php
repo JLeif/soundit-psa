@@ -552,7 +552,7 @@ class LitsrmmClientMappingTest extends TestCase
     }
 
     /**
-     * The guard reads the VALUES, so how the keys are numbered does not matter.
+     * How integer keys are numbered does not matter, and an id-keyed map is read.
      *
      * Each of these carries every row the vendor sent. Before #3326 the guard
      * asked array_is_list() about the container, so a collection that had been
@@ -664,6 +664,75 @@ class LitsrmmClientMappingTest extends TestCase
         \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
             ->withArgs(fn ($message) => str_contains($message, 'did not return client rows'))
             ->once();
+    }
+
+    /**
+     * One element that is not a row drops only that element, not the whole collection.
+     *
+     * Before #3326 the mapper dropped such an element on its own. Refusing the
+     * whole collection over one null, such as a deleted client serialised as
+     * null, would hide every readable client. That is the #3326 harm, reached
+     * from the other direction.
+     *
+     * @dataProvider rowCollectionsWithOneElementThatIsNotARow
+     */
+    public function test_a_non_row_element_drops_only_itself(string $json): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([new Response(200, [], $json)]);
+
+        $this->assertSame([['id' => 'c1', 'name' => 'Acme']], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('warning');
+    }
+
+    public static function rowCollectionsWithOneElementThatIsNotARow(): array
+    {
+        return [
+            'null' => ['{"data":[{"id":"c1","name":"Acme"},null]}'],
+            'scalar' => ['{"data":[{"id":"c1","name":"Acme"},"x"]}'],
+            'nested list' => ['{"data":[{"id":"c1","name":"Acme"},[1,2]]}'],
+        ];
+    }
+
+    /**
+     * A wrapper whose key names a field, not a row, is refused as an envelope.
+     *
+     * A guard that read values alone admitted each of these. The error object
+     * became a selectable client with an empty name. The empty and
+     * object-valued wrappers were reported as "rows but none were mappable",
+     * which tells the operator rows arrived when in fact a wrapper was misread.
+     * The test asserts exactly one warning, so the mapper's message cannot
+     * fire as well.
+     *
+     * @dataProvider wrappersThatAreNotRowCollections
+     */
+    public function test_a_wrapper_keyed_by_a_field_name_is_refused_as_an_envelope(string $json): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([new Response(200, [], $json)]);
+
+        $this->assertSame([], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')->once();
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'did not return client rows'))
+            ->once();
+    }
+
+    public static function wrappersThatAreNotRowCollections(): array
+    {
+        return [
+            'error object on a 200' => ['{"error":{"id":"rate_limited","message":"slow down"}}'],
+            'request metadata' => ['{"request":{"id":"req_9"}}'],
+            'empty wrapper' => ['{"clients":[]}'],
+            'wrapper around an id-keyed map' => ['{"clients":{"c1":{"id":"c1","name":"Acme"}}}'],
+            'metadata only' => ['{"meta":{"total":0}}'],
+        ];
     }
 
     public function test_an_undocumented_pagination_signal_is_reported_not_swallowed(): void
