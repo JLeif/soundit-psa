@@ -118,6 +118,7 @@ class PortalInstallLinkToolTest extends TestCase
                     $this->assertNotEmpty($client->fresh()->portal_install_token);
                     $this->assertFalse($result['reissued_expired']);
                 } else {
+                    $this->assertArrayHasKey('error', $result);
                     $this->assertSame('Install links are unavailable for non-operational clients.', $result['error']);
                     $this->assertSame($before, $client->fresh()->getAttributes());
                     $this->assertArrayNotHasKey('url', $result);
