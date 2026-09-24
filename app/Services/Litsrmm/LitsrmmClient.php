@@ -300,15 +300,21 @@ class LitsrmmClient
         // convention the next author has to know about. The two methods keep
         // their own checks because they return a value rather than throwing.
         //
-        // ORDER IS DELIBERATE. This sits AFTER the two credential checks, not
-        // before them. Both orders are equally safe -- neither reaches the
-        // network -- but a client built with no api_key would otherwise report
-        // "switched off", which is a misdiagnosis: isAvailable() is
-        // isConfigured() AND isEnabled(), so missing credentials make it false
-        // for a reason that has nothing to do with the operator's switch. The
-        // specific refusal is the more useful one and it keeps its meaning.
-        if (! LitsrmmConfig::isAvailable()) {
+        // isAvailable() is checked as its TWO halves, each with its own
+        // refusal. The two credential checks above read $this->config, the
+        // values captured when this object was built. isConfigured() re-reads
+        // LIVE Settings/config. A long-lived singleton, or a client built with
+        // explicit config, can pass the first pair and fail the second while
+        // the switch is ON. One combined check would then say "switched off"
+        // on a path where the switch is not off (#3500 context:3).
+        // Both halves still refuse before the network, so OFF=OFF and the
+        // stale-credential refusal are unchanged.
+        if (! LitsrmmConfig::isEnabled()) {
             throw new LitsrmmClientException('LITSRMM integration is switched off');
+        }
+
+        if (! LitsrmmConfig::isConfigured()) {
+            throw new LitsrmmClientException('LITSRMM API key or base URL is not currently configured');
         }
 
         // Refuse plaintext BEFORE the Authorization header exists, so a refused
