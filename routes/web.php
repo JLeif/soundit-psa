@@ -367,6 +367,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/ninja/sync-backup', [IntegrationsController::class, 'syncNinjaBackup'])->name('settings.integrations.ninja.sync-backup');
     Route::post('/settings/integrations/level', [IntegrationsController::class, 'updateLevel'])->name('settings.integrations.level.update');
     Route::post('/settings/integrations/level/test', [IntegrationsController::class, 'testLevel'])->name('settings.integrations.level.test');
+    Route::post('/settings/integrations/litsrmm', [IntegrationsController::class, 'updateLitsrmm'])->name('settings.integrations.litsrmm.update');
+    Route::post('/settings/integrations/litsrmm/test', [IntegrationsController::class, 'testLitsrmm'])->name('settings.integrations.litsrmm.test');
     Route::post('/settings/integrations/screenconnect', [IntegrationsController::class, 'updateScreenConnect'])->name('settings.integrations.screenconnect.update');
     Route::post('/settings/integrations/tactical', [IntegrationsController::class, 'updateTactical'])->name('settings.integrations.tactical.update');
     Route::post('/settings/integrations/tactical/test', [IntegrationsController::class, 'testTactical'])->name('settings.integrations.tactical.test');
