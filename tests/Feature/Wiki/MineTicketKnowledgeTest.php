@@ -298,8 +298,8 @@ class MineTicketKnowledgeTest extends TestCase
         $client = Client::factory()->create();
         $ticket = $this->makeClosedTicketWithResolution($client);
         app(WikiSkeletonService::class)->ensureForClient($client);
-        $url = \Tests\Fixtures\ScannerCoverage::urls()['github-issue'];
-        $secret = \Tests\Fixtures\ScannerCoverage::signedUrls()['slack-lower'];
+        $url = \Tests\Fixtures\ScannerCoverage::urls()['github-pinned'];
+        $secret = \Tests\Fixtures\ScannerCoverage::signedUrls()['discord-lower'];
         $facts = [];
         foreach (['reference' => $url, 'credential' => $secret] as $key => $statement) {
             $facts[] = [

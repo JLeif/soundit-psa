@@ -22,6 +22,11 @@ class ScannerCoverage
             'github-issues' => 'https://github.com/sounditsolutions/soundit-psa/issues',
             'github-issue' => 'https://github.com/sounditsolutions/soundit-psa/issues/3089',
             'github-blob' => 'https://github.com/sounditsolutions/soundit-psa/blob/main/README.md',
+            'github-pinned' => 'https://github.com/sounditsolutions/soundit-psa/blob/df2bc1976d6ce3ec2fb68f408700abb6c1e52856/README.md',
+            'github-deep' => 'https://github.com/sounditsolutions/soundit-psa/blob/df2bc1976d6ce3ec2fb68f408700abb6c1e52856/app/Services/Wiki/Mining/WikiRedactor.php',
+            'github-mixed' => 'https://github.com/PowerShell/PowerShell/issues/21234',
+            'code-path' => 'app/Services/Wiki/Mining/WikiRedactor2.php',
+            'dell' => 'https://www.dell.com/support/home/en-us/product-support/servicetag/0-ABC123/overview',
             'graph' => 'https://learn.microsoft.com/en-us/graph/api/user-list',
             'notes' => 'https://psa.example.test/tickets/22846/notes',
             'settings' => 'https://psa.example.test/admin/settings/mcp-tokens/17/edit',
@@ -35,7 +40,7 @@ class ScannerCoverage
         // Deliberately include no-case-mix paths; webhooks are not necessarily base64.
         foreach (['mixed' => 'SyntheticAbCd0123456789EfGhIjKlMnOp', 'lower' => str_repeat('abcdef01', 4), 'upper' => str_repeat('ABCDEF01', 4)] as $kind => $value) {
             $rows['slack-'.$kind] = 'https://hooks.slack.com/services/T00000000/B00000000/'.$value;
-            $rows['teams-'.$kind] = 'https://example.webhook.office.com/webhookb2/00000000-0000-4000-8000-000000000000/IncomingWebhook/'.$value.'/00000000-0000-4000-8000-000000000000';
+            $rows['teams-'.$kind] = 'https://example.webhook.office.com/webhookb2/00000000-0000-4000-8000-000000000000@00000000-0000-4000-8000-000000000001/IncomingWebhook/'.$value.'/00000000-0000-4000-8000-000000000000';
             $rows['discord-'.$kind] = 'https://discord.com/api/webhooks/123456789012345678/'.$value;
             $rows['sas-'.$kind] = 'https://storage.example.test/container/blob?sv=2025-01-01&sig='.$value.'%2Fsynthetic';
             $rows['presigned-'.$kind] = 'https://bucket.example.test/object?X-Amz-Signature='.$value;

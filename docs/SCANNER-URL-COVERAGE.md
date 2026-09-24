@@ -1,77 +1,100 @@
 # Shared scanner URL rule (#3089)
 
+Revision 2 supersedes the whole-run-mix experiment at df2bc197: that version
+still redacted SHA-pinned GitHub links. It also misnamed the mix-only miss:
+**discord-lower**, not slack-lower. The experiment JSON was correct; the prose
+was wrong. This version measures the mix within slash-separated segments.
+
 The distinctive-run rule is shared by `WikiRedactor::scan()` and `redact()`.
 No channel exemptions or URL stripping are introduced. `+` keeps its old rule;
 a slash-only candidate also needs uppercase, lowercase and a digit **inside
-that run**. Contextual alternatives in the same rule detect Slack incoming
-webhook, Teams Office incoming webhook, Discord webhook URLs and signed-query
-values without requiring case mix. Padding, PEM, JWT, keyword and connection
-rules are unchanged. OperatorNotifier's emergency path is unchanged; #3088 and
-#3090 are not included.
+one slash-free segment of at least 16 characters**. Separate path segments
+cannot pool categories. Contextual alternatives in the same rule detect Slack
+incoming webhook, Teams Office incoming webhook, Discord webhook URLs and
+signed-query values without requiring case mix. Padding, PEM, JWT, keyword and
+connection rules are unchanged. OperatorNotifier's emergency path is unchanged;
+#3088 and #3090 are not included.
 
 ## Reproduce
 
-`php scripts/measure-scanner.php` emits exact denominators and newly admitted
-sample IDs (including the full naive-drop list). It executes PHP PCRE and the
-current shared policy, changing only the distinctive rule for the comparisons.
-`tests/Fixtures/ScannerCoverage.php` is synthetic, not captured client traffic.
+`php scripts/measure-scanner.php` emits exact denominators and **every newly
+admitted sample ID**, including naive-drop and threshold-sensitivity lists.
+It executes PHP PCRE and the current shared policy, changing only the
+distinctive rule for comparisons. A position/shape assertion refuses policy
+reordering. `tests/Fixtures/ScannerCoverage.php` is synthetic, not client traffic.
 Seed: `scanner-3089-v1`. Sample i is base64 of the first 30 bytes of
-SHA256(`scanner-3089-v1:` followed by decimal i), for i=0..99999. This creates
+SHA256(`scanner-3089-v1:` followed by decimal i), i=0..99999. This creates
 100,000 forty-character unpadded base64 samples; 25,274 contain slash but no
 plus or padding. These are AWS-secret-like shapes, **not live AWS keys**.
 
-| Corpus | N | Baseline detected | Naive slash-drop | Mix only | Chosen |
+| Corpus | N | Baseline | Naive drop | Whole-run mix | Segment16 chosen |
 |---|---:|---:|---:|---:|---:|
-| Unpadded base64 | 100000 | 37612 | 20887 | 37593 | 37593 |
-| Synthetic webhook/signed URLs | 15 | 9 | 0 | 8 | 15 |
-| Ordinary URLs | 8 | 5 | 0 | 0 | 0 |
+| Unpadded base64 detected | 100000 | 37612 | 20887 | 37593 | 36496 |
+| Synthetic webhook/signed URLs detected | 15 | 9 | 0 | 8 | 15 |
+| Ordinary URLs falsely detected | 13 | 10 | 0 | 5 | 0 |
 
-Naive means removing slash as a **distinctive trigger**, retaining it in the
-run alphabet. Against baseline, naive newly admits 16,725 random samples;
-chosen newly admits **19/100000** (19/37612 baseline detections). Their IDs:
-1413, 10453, 17176, 19899, 22118, 29051, 38721, 38931, 39303, 43865, 45460,
-45878, 63673, 64374, 66616, 68602, 68865, 74334, 79215.
+Naive removes slash as a distinctive trigger, retaining it in the alphabet.
+Newly admitted random samples vs baseline: naive **16725**, whole-run mix **19**,
+segment8 **45**, segment10 **85**, segment12 **182**, segment16 **1116**.
+Thresholds 8/10/12 each leave one ordinary fixture falsely detected (the bare
+WikiRedactor2.php path); 16 clears all thirteen. The PHP numbers differ from
+an approximate segment simulation because the existing word-boundary and
+24-preceding-character trigger constraints are retained.
 
-The baseline already misses **62,388/100000** random samples; chosen misses
-**62,407/100000**. Most importantly, the old trigger requires 24 preceding
-characters before the distinctive character, so a slash/plus only early in a
-run escapes; an entirely alphanumeric run is deliberately outside this rule.
-The fix does not claim to solve generic secret detection. A small *incremental*
-miss count is not a high overall detection rate.
+The chosen incremental cost is **1116/100000**, or **1116/37612** baseline
+ detections. This is larger than the first experiment and needs its own owner
+adjudication; the earlier 19-sample acceptance is not acceptance of 1116.
+The exact chosen IDs are emitted by the script. The SHA256 of their ascending
+comma-joined decimal IDs, without a final newline, is
+`b05e503ac677347094dada61b657f1cd0c161455c50dbf80866ed3ba35e15343`;
+the unit test pins the count, digest and detection total.
 
-The URL corpus has three case variants (mixed, lowercase/hex, uppercase/hex)
-each for Slack, Teams, Discord, SAS sig and presigned X-Amz-Signature. Baseline
-misses the six query signatures; chosen detects all 15 and newly admits none.
-Mix-only misses the lowercase Slack variant: adjacent structural path text can
-supply upper/lower/digits for other webhooks, but that is no reliable token
-property. Contextual alternatives are therefore required. Hosts in the fixtures
-are public vendor endpoints or reserved example domains; nothing is requested.
+Baseline already misses **62388/100000**; chosen misses **63504/100000**.
+The old trigger requires 24 preceding characters before the distinctive
+character, so a slash/plus only early in a run can escape; entirely alphanumeric
+runs are deliberately outside the rule. This is not generic secret detection.
 
-The eight ordinary rows cover #3089 (with a reserved PSA hostname), the inbound
-knowledgebase tail, and a GitHub blob link. Five false positives become clean.
-C1 hex, SHA, UUID and serial tests remain clean. PEM/padding/JWT/keyword/connection
-controls run without a keyword accidentally masking the feature under test.
+The URL corpus has mixed, lowercase/hex and uppercase/hex variants each for
+Slack, Teams (group@tenant path), Discord, SAS sig and X-Amz-Signature. Baseline
+misses six query signatures; chosen detects all 15 and newly admits none.
+Whole-run mix misses discord-lower. A webhook token need not contain all three
+character categories; contextual alternatives protect these named shapes.
+Fixtures are public vendor endpoint shapes or reserved example domains; no
+requests are made, and the constructed tokens cannot authenticate.
 
-## Limits and tradeoffs for adjudication
+The thirteen ordinary rows include #3089 (reserved PSA hostname), inbound
+knowledgebase, GitHub blob/main, SHA-pinned blob, deep code permalink,
+mixed-case PowerShell issue, a bare numbered code path and Dell service-tag URL.
+C1 hex/SHA/UUID/serial and legacy PEM/padding/JWT/keyword/connection controls
+remain explicit. Legacy positives run without accidental keyword masking.
 
-- Mixed-case numbered ordinary paths can still match. This is not a universal
-  URL classifier; it fixes the measured ordinary URL class without exempting URLs.
-- Slash-only secrets lacking a required character category can now escape. The
-  exact 19 newly admitted samples pin that tradeoff, not a zero-miss guarantee.
-- Known webhook shapes are not an exhaustive vendor catalog. New webhook hosts,
-  Teams workflow endpoints, encodings and alternative signature parameter names
-  are not claimed covered. Bare identifiers and base32 remain accepted gaps.
-- The contextual signature rule can flag non-secret `sig`/`signature` query
-  values. It intentionally does not assume hex is safe in a signed URL.
-- Random shapes and constructed URLs measure the supplied corpus, not production
+## Limits and tradeoffs
+
+- Ordinary paths with a long mixed-case numbered segment can still match. The
+  16-character threshold is a heuristic, not proof of a secret or universal URL
+  clearance. It is selected against the measured ordinary-path corpus.
+- Slash-only secrets without a sufficiently long mixed segment can escape;
+  short or fragmented secrets incur more misses than a forty-character corpus.
+- Known webhook hosts are not exhaustive. Lowercase secret URLs on other hosts
+  (e.g. other integration/catch-hook providers) can newly escape systematically;
+  the 1116 random-sample count does NOT measure that separate population.
+- Scheme-less webhook pastes, Teams workflow endpoints, encoded wrappers and
+  HTML-entity query separators are not claimed covered. Bare identifiers and
+  base32 remain gaps. Some of these gaps predate this change.
+- Contextual signature names can flag non-secret values; this deliberately errs
+  toward withholding. Webhook-tail matching can consume adjacent punctuation.
+- Regex engine error handling and worst-case long input behavior are not changed.
+  Forty-character random samples cannot establish large-input safety.
+- These measurements describe the supplied synthetic corpus, not production
   prevalence or empirical credential distributions.
 
-## Consumer controls
+## Independent consumer controls
 
-`ScannerUrlPolicyTest` executes scan/redact, ordinary URL and C1 preservation,
-all 15 URL secret shapes, legacy positives, local-vs-surrounding character mix,
-and exact random-corpus parity/counts. `WikiTicketContextTest` independently
-checks the pre-AI assembled context retains the knowledgebase URL and removes
-a webhook token. `MineTicketKnowledgeTest` independently checks mining's actual
-storage boundary: the GitHub reference is stored and the credential candidate
-is dropped, with the run and quarantine counter asserted.
+`ScannerUrlPolicyTest` executes both APIs, C1/ordinary preservation, URL secret
+shapes, legacy positives, mix locality and exact random-corpus parity/counts.
+`WikiTicketContextTest` checks actual pre-AI assembled context retains the
+knowledgebase URL and removes discord-lower. `MineTicketKnowledgeTest` checks
+actual storage retains the SHA-pinned GitHub reference and drops discord-lower,
+with run status and quarantine count. Both consumer tests independently fail
+when contextual alternatives are removed; the storage test also fails against
+the superseded whole-run rule. No consumer policy or channel routing is changed.

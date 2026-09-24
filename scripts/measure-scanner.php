@@ -11,8 +11,15 @@ $patterns = (new ReflectionClass(WikiRedactor::class))->getConstant('SECRET_PATT
 $baseline = '/\b[A-Za-z0-9+\/_-]{24,}[+\/]+[A-Za-z0-9+\/_-]*={0,2}\b/';
 $naive = '/\b[A-Za-z0-9+\/_-]{24,}[+]+[A-Za-z0-9+\/_-]*={0,2}\b/';
 $mix = '~\b(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{24,}/[A-Za-z0-9+/_-]*\b|\b[A-Za-z0-9+/_-]{24,}\+[A-Za-z0-9+/_-]*={0,2}\b~';
+// Refuse policy reordering rather than silently measuring the wrong rule.
+if (count($patterns) !== 8 || ! str_starts_with($patterns[6], '~\\b[A-Za-z0-9+/_-]{24,}\\+') || ! str_contains($patterns[6], '[A-Za-z0-9+_-]{16,}')) {
+    throw new RuntimeException('Distinctive-rule position/shape changed; rebind the experiment.');
+}
 // Replace only the distinctive rule in each comparison; other policy remains identical.
 $sets = ['baseline' => $baseline, 'naive' => $naive, 'mix' => $mix, 'chosen' => $patterns[6]];
+foreach ([8, 10, 12] as $minimum) {
+    $sets['segment'.$minimum] = str_replace('[A-Za-z0-9+_-]{16,}', '[A-Za-z0-9+_-]{'.$minimum.',}', $patterns[6]);
+}
 $detected = function (string $text, string $rule) use ($patterns): bool {
     $copy = $patterns;
     $copy[6] = $rule;

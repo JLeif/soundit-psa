@@ -76,7 +76,8 @@ class ScannerUrlPolicyTest extends TestCase
                 $newlyAdmitted[] = $id;
             }
         }
-        $this->assertSame(37593, $detected);
-        $this->assertSame([1413, 10453, 17176, 19899, 22118, 29051, 38721, 38931, 39303, 43865, 45460, 45878, 63673, 64374, 66616, 68602, 68865, 74334, 79215], $newlyAdmitted);
+        $this->assertSame(36496, $detected);
+        $this->assertCount(1116, $newlyAdmitted);
+        $this->assertSame('b05e503ac677347094dada61b657f1cd0c161455c50dbf80866ed3ba35e15343', hash('sha256', implode(',', $newlyAdmitted)));
     }
 }
