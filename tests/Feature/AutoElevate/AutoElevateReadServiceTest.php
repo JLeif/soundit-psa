@@ -9,6 +9,7 @@ use App\Services\AutoElevate\AutoElevateReadService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Sleep;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -23,6 +24,8 @@ class AutoElevateReadServiceTest extends TestCase
     {
         parent::setUp();
         Http::preventStrayRequests();
+        // getPage() backs off on 429 (card fh7wGneF); never really wait in a test.
+        Sleep::fake();
         Setting::setEncrypted('autoelevate_api_key', 'synthetic-only-key');
     }
 
