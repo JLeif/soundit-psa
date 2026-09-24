@@ -24,6 +24,20 @@ class WikiTicketContextTest extends TestCase
         ], $attrs));
     }
 
+    public function test_shared_url_policy_at_pre_ai_context_boundary(): void
+    {
+        $url = \Tests\Fixtures\ScannerCoverage::urls()['knowledgebase'];
+        $secret = \Tests\Fixtures\ScannerCoverage::signedUrls()['discord-lower'];
+        $ticket = $this->makeTicket(['description' => $url, 'resolution' => $secret]);
+
+        $context = app(WikiTicketContext::class)->build($ticket);
+
+        $this->assertStringContainsString($url, $context);
+        $this->assertStringNotContainsString($secret, $context);
+        $this->assertStringNotContainsString(str_repeat('abcdef01', 4), $context);
+        $this->assertStringContainsString('[REDACTED:credential]', $context);
+    }
+
     public function test_builds_bounded_context_with_core_fields(): void
     {
         $ticket = $this->makeTicket();
