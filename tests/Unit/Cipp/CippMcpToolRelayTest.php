@@ -830,11 +830,12 @@ class CippMcpToolRelayTest extends TestCase
         // the projection looks healthy, but every flattened targeting/control
         // key is gone — CA posture would be silently invisible again.
         //
-        // The id must be GUID-shaped to reach the drift wording (#3408 round 3).
-        // Graph emits a GUID for every real policy, and every other realistic CA
-        // fixture in this file already uses one; the old 'policy-1' placeholder was
-        // never a shape Graph produces. Identity is now a property of the VALUE
-        // because a bare key is met by the transport's own JSON-RPC envelope.
+        // Re-aimed at first_row_keys (#3408), the same move #3394 made for "never
+        // resolved". The guard no longer says "shape drift" here: an ordinary Graph
+        // user, group, application or device also carries a GUID id and a displayName,
+        // so no cheap predicate separates this row from those, and the word was dropped
+        // rather than narrowed a fourth time. What survives is the structured evidence
+        // a reader acts on — these keys, and no targeting key among them.
         $result = $this->executeConditionalAccess([[
             'id' => '66666666-6666-6666-6666-666666666666',
             'displayName' => 'Require MFA',
@@ -845,7 +846,8 @@ class CippMcpToolRelayTest extends TestCase
 
         Log::shouldHaveReceived('warning')
             ->once()
-            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'shape drift')
+            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'No ListConditionalAccessPolicies row carries any flattened targeting/control field')
+                && ! str_contains($message, 'drift')
                 && ($context['tool'] ?? null) === 'cipp_list_conditional_access_policies'
                 && ($context['row_count'] ?? null) === 1
                 && ($context['first_row_keys'] ?? null) === ['id', 'displayName', 'state']);

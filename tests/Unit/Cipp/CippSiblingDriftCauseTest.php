@@ -167,21 +167,30 @@ class CippSiblingDriftCauseTest extends TestCase
     }
 
     /**
-     * Round 2's must-fix votes, and the negative control the first attempt lacked.
+     * The whole matrix, every row pinned to the OBSERVATION wording.
      *
-     * The identity check began as array_key_exists('id', $row) and was defeated on a
-     * path inside this module. CippMcpClient sends 'id' => 1; decodeJsonRpcPayload()
-     * does `$decoded['result'] ?? $decoded`, so a reply whose result is null or absent
-     * yields the whole envelope, which normalizeRows() wraps as ONE row keyed
-     * ['jsonrpc','id','result']. Driving that row through shape() took the drift arm.
-     * MEASURED before the predicate was changed, not argued.
+     * The word "drift" was DELETED rather than narrowed (Jeeves, #3408). Three
+     * narrowings were each defeated by an input nobody had listed:
      *
-     * Identity is now two or more CA_POLICY_SCALAR_FIELDS. These rows carry exactly one
-     * apiece, so each must take the observation-only wording.
+     *   1. 'id' present  -> defeated by CippMcpClient's own JSON-RPC envelope.
+     *      decodeJsonRpcPayload() does `$decoded['result'] ?? $decoded`, so a reply
+     *      with result null or absent promotes the whole envelope, carrying the
+     *      transport's id (the client sends 1).
+     *   2. two CA scalars -> defeated the same way by ordinary rows, and it LOST a
+     *      genuine capital-'Id' policy row.
+     *   3. GUID id + a companion key -> defeated by ordinary Graph objects. A Graph
+     *      user, group, application and device each carry a GUID id and a
+     *      displayName, so the pairing proves "this is a Graph object", never "this
+     *      is a CA policy". MEASURED end to end through shape(), not argued.
      *
-     * @dataProvider nonPolicyRowsCarryingAnId
+     * So the guard states what it observed and names no cause. first_row_keys already
+     * carries the fact: ['id','displayName','state'] reads as a policy row that lost
+     * its targeting keys, ['jsonrpc','id'] plainly does not. A structured key a reader
+     * can act on beats an adjective the guard cannot establish.
+     *
+     * @dataProvider everyRowTakesTheObservationWording
      */
-    public function test_a_non_policy_row_carrying_an_id_does_not_name_drift(array $rows, array $expectedKeys): void
+    public function test_every_row_states_the_observation_and_names_no_cause(array $rows, array $expectedKeys): void
     {
         Http::preventStrayRequests();
 
@@ -191,7 +200,7 @@ class CippSiblingDriftCauseTest extends TestCase
         $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
             && str_contains($r[1], 'ListConditionalAccessPolicies')));
 
-        $this->assertCount(1, $warnings, 'a non-policy row must warn exactly once');
+        $this->assertCount(1, $warnings, 'the guard must warn exactly once');
 
         $this->assertSame(
             [
@@ -212,74 +221,92 @@ class CippSiblingDriftCauseTest extends TestCase
     /**
      * @return array<string, array{0: array<string, mixed>, 1: array<int, string>}>
      */
-    public static function nonPolicyRowsCarryingAnId(): array
+    public static function everyRowTakesTheObservationWording(): array
     {
+        $guid = '11111111-2222-3333-4444-555555555555';
+
         return [
-            // Exactly what decodeJsonRpcPayload() yields when result is null:
-            // `$decoded['result'] ?? $decoded` hands back the whole envelope.
-            'the client\'s own JSON-RPC envelope' => [
+            // Non-JSON MCP text: CippMcpClient::unwrapMcpResult returns ['text' => …]
+            // ABOVE the unwrapCippEnvelope call, so the queue guard never sees it.
+            'a non-JSON MCP text result' => [
+                ['text' => 'Tenant not found or not onboarded'],
+                ['text'],
+            ],
+            // A REST error body: any keyless JSON object is wrapped as one row.
+            'a REST error body' => [
+                ['error' => 'Insufficient privileges', 'status' => 403],
+                ['error', 'status'],
+            ],
+            // What decodeJsonRpcPayload() yields when result is null.
+            "the client's own JSON-RPC envelope" => [
                 ['jsonrpc' => '2.0', 'id' => 1, 'result' => null],
                 ['jsonrpc', 'id', 'result'],
             ],
-            // Jeeves's seventh fixture: the same fallback when 'result' is absent
-            // entirely. A different row shape, so it is pinned separately.
+            // The same fallback when result is absent entirely.
             'the same envelope with no result key' => [
                 ['jsonrpc' => '2.0', 'id' => 1],
                 ['jsonrpc', 'id'],
             ],
-            // Every Graph entity carries a top-level id.
-            'a misrouted single Graph object' => [
-                ['id' => 'abc-123', 'defaultDomainName' => 'contoso.onmicrosoft.com'],
-                ['id', 'defaultDomainName'],
+            // The rows that defeated narrowing 3. Each is an ordinary Graph object
+            // with a GUID id and a displayName, and none is a CA policy.
+            'a Graph user' => [
+                ['id' => $guid, 'displayName' => 'Ada Lovelace', 'userPrincipalName' => 'ada@contoso.com', 'createdDateTime' => '2026-01-01T00:00:00Z'],
+                ['id', 'displayName', 'userPrincipalName', 'createdDateTime'],
             ],
-            // Chet's attack A: a REST error body carrying a correlation id, which is
-            // not GUID-shaped and so cannot claim policy identity.
-            'a REST error body with a correlation id' => [
-                ['id' => 'req-8f21', 'error' => 'Forbidden', 'status' => 403],
-                ['id', 'error', 'status'],
+            'a Graph group' => [
+                ['id' => $guid, 'displayName' => 'Sales', 'createdDateTime' => '2026-01-01T00:00:00Z', 'mail' => 'sales@contoso.com'],
+                ['id', 'displayName', 'createdDateTime', 'mail'],
             ],
-            // The case that survives a GUID-only rule, and the reason identity is a
-            // PAIR. An error body carrying a GUID-shaped correlation id has a valid
-            // identity value and no companion key. Constructible rather than
-            // demonstrated — Chet searched this repo for request-id,
-            // client-request-id, correlationId and innerError and found none — so it
-            // is pinned because it is cheap, not because it is evidenced.
-            'an error body with a GUID-shaped correlation id' => [
-                ['id' => '11111111-2222-3333-4444-555555555555', 'error' => 'Forbidden'],
-                ['id', 'error'],
+            'a Graph application' => [
+                ['id' => $guid, 'appId' => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'displayName' => 'Reporting', 'createdDateTime' => '2026-01-01T00:00:00Z'],
+                ['id', 'appId', 'displayName', 'createdDateTime'],
             ],
-            // A GUID identity with no companion key at all: still not a policy row.
-            'a bare GUID identity with no companion key' => [
-                ['id' => '11111111-2222-3333-4444-555555555555'],
-                ['id'],
+            'a Graph device' => [
+                ['id' => $guid, 'displayName' => 'LAPTOP-01', 'operatingSystem' => 'Windows'],
+                ['id', 'displayName', 'operatingSystem'],
             ],
-            // The input where SHAPE and PRESENCE disagree, and the only one that can
-            // discriminate them: a non-GUID id sitting beside a companion key. Every
-            // other non-policy row here fails the companion test too, so without this
-            // case a predicate testing mere presence passes the whole suite. Added
-            // because that mutant survived.
-            'a non-GUID id beside a companion key' => [
-                ['id' => 'policy-1', 'displayName' => 'Require MFA'],
-                ['id', 'displayName'],
+            // An error body whose Name is a displayName alias, with a GUID id.
+            'an error body carrying a GUID id and a name' => [
+                ['id' => $guid, 'Name' => 'Something', 'error' => 'Forbidden'],
+                ['id', 'Name', 'error'],
+            ],
+            // THE DECISION THIS ROUND MAKES. A real CA policy row whose targeting keys
+            // are gone is the one input where "the schema moved" is the true cause, and
+            // it now takes the observation wording like everything else. The word was
+            // dropped rather than narrowed because no cheap predicate separates this row
+            // from the Graph objects above; first_row_keys is what tells them apart.
+            'a real CA policy row with its targeting keys gone' => [
+                ['id' => $guid, 'displayName' => 'Require MFA', 'state' => 'enabled'],
+                ['id', 'displayName', 'state'],
             ],
         ];
     }
 
     /**
-     * The is_string() guard in rowCarriesPolicyIdentity(), which no verdict-shaped
-     * mutant can kill.
+     * PRESENCE, NOT EMPTINESS — the sibling defect, from the other direction.
      *
-     * Removing it does not change a single verdict: preg_match() coerces every scalar,
-     * and no integer, bool or null can match a GUID pattern. It matters for one input
-     * only — an ARRAY-valued id, which makes preg_match() raise a TypeError and takes
-     * the whole CA read down instead of logging. Untrusted upstream JSON can nest
-     * anything, so the row is driven end to end rather than asserted about.
+     * shapeAuditLogs and shapeOauthApps filtered on value and called an all-null row
+     * drift; that false cause is what this card removed. This guard must not acquire
+     * it: a policy row whose targeting keys are all PRESENT and all NULL has not lost
+     * its shape, so the guard stays SILENT.
+     *
+     * Owed since Jeeves's 06:38 ruling and missing until now. It is pinned by
+     * assertSame([], …) rather than a count so the failure names what leaked.
      */
-    public function test_a_structured_id_value_does_not_crash_the_guard(): void
+    public function test_an_all_null_targeting_row_stays_silent(): void
     {
         Http::preventStrayRequests();
 
-        $rows = [['id' => ['nested' => 'value'], 'error' => 'Forbidden']];
+        $rows = [[
+            'id' => '11111111-2222-3333-4444-555555555555',
+            'displayName' => 'Require MFA',
+            'state' => 'enabled',
+            'includeUsers' => null,
+            'excludeUsers' => null,
+            'includeApplications' => null,
+            'builtInControls' => null,
+            'clientAppTypes' => null,
+        ]];
 
         $records = $this->capture(fn () => app(CippToolContract::class)
             ->shape('cipp_list_conditional_access_policies', $rows, [], null));
@@ -287,88 +314,7 @@ class CippSiblingDriftCauseTest extends TestCase
         $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
             && str_contains($r[1], 'ListConditionalAccessPolicies')));
 
-        $this->assertCount(1, $warnings, 'a structured id must warn exactly once, not raise');
-        $this->assertStringNotContainsString('drift', $warnings[0][1]);
-
-        Http::assertNothingSent();
-    }
-
-    /**
-     * Chet's attack C, and the case a lowercase-only identity test loses.
-     *
-     * FIELD_ALIASES (:1127) maps 'id' to ['id','Id','ID'] because CIPP's casing varies
-     * by endpoint. A genuine policy row keyed 'Id' with every targeting key absent is
-     * REAL drift — the one thing the word exists for — so resolving identity through
-     * that alias map is what stops the narrowing silently under-reporting.
-     */
-    public function test_a_guid_identity_is_recognised_whatever_its_casing(): void
-    {
-        Http::preventStrayRequests();
-
-        // displayName is the companion key here: identity is a GUID id PLUS a second
-        // flattener key, since a GUID alone is defeated by a correlation id.
-        $rows = [['Id' => '11111111-2222-3333-4444-555555555555', 'displayName' => 'Require MFA']];
-
-        $records = $this->capture(fn () => app(CippToolContract::class)
-            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
-
-        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
-            && str_contains($r[1], 'ListConditionalAccessPolicies')));
-
-        $this->assertCount(1, $warnings, 'a capitalised-Id policy row must warn exactly once');
-
-        $this->assertSame(
-            [
-                'warning',
-                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible',
-                [
-                    'tool' => 'cipp_list_conditional_access_policies',
-                    'row_count' => 1,
-                    'first_row_keys' => ['Id', 'displayName'],
-                ],
-            ],
-            $warnings[0]
-        );
-
-        Http::assertNothingSent();
-    }
-
-    /**
-     * The other half of the ruling, and the reason this is a narrowing rather than a
-     * deletion: where the rows DO carry the policy identity and still lack every
-     * targeting/control key, the schema really has moved and the guard still says so.
-     *
-     * Without this, a fix could satisfy the test above by deleting the word everywhere,
-     * and nothing would notice the guard had stopped naming a cause it can establish.
-     */
-    public function test_a_row_with_policy_identity_and_no_targeting_keys_still_names_drift(): void
-    {
-        Http::preventStrayRequests();
-
-        // A GUID-shaped id: what Graph emits for every real CA policy, and what no
-        // transport envelope or error correlation id can produce.
-        $rows = [['id' => '11111111-2222-3333-4444-555555555555', 'state' => 'enabled']];
-
-        $records = $this->capture(fn () => app(CippToolContract::class)
-            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
-
-        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
-            && str_contains($r[1], 'ListConditionalAccessPolicies')));
-
-        $this->assertCount(1, $warnings, 'a policy row with no targeting keys must warn exactly once');
-
-        $this->assertSame(
-            [
-                'warning',
-                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible',
-                [
-                    'tool' => 'cipp_list_conditional_access_policies',
-                    'row_count' => 1,
-                    'first_row_keys' => ['id', 'state'],
-                ],
-            ],
-            $warnings[0]
-        );
+        $this->assertSame([], $warnings, 'an all-null targeting row is not a shape change');
 
         Http::assertNothingSent();
     }

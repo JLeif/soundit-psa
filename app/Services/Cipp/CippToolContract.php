@@ -1219,13 +1219,6 @@ class CippToolContract
      */
     private const CA_POLICY_SCALAR_FIELDS = ['id', 'state', 'createdDateTime', 'modifiedDateTime'];
 
-    /**
-     * Keys a real CIPP policy row carries beside its id, and an error or transport
-     * envelope has no reason to. Paired with a GUID-shaped id to claim policy
-     * identity for the drift wording (#3408).
-     */
-    private const CA_POLICY_IDENTITY_COMPANION_FIELDS = ['displayName', 'state', 'createdDateTime', 'modifiedDateTime'];
-
     /** Comma-joined Graph enum/ID values — single-line, fixed vocabulary. */
     private const CA_POLICY_ENUM_FIELDS = [
         'clientAppTypes', 'includePlatforms', 'excludePlatforms',
@@ -1539,61 +1532,6 @@ class CippToolContract
      *
      * @return array<string, mixed>
      */
-    /**
-     * Does this row identify itself as a conditional-access policy?
-     *
-     * TWO conditions, because either alone is defeated (#3408 round 3):
-     *
-     * 1. A GUID-shaped id. A Graph CA policy id is always a GUID; the JSON-RPC id
-     *    CippMcpClient sends is the integer 1. Jeeves measured that a reply with
-     *    "result": null or no result key promotes the WHOLE envelope to the payload
-     *    via decodeJsonRpcPayload's `$decoded['result'] ?? $decoded`, so the
-     *    transport's own id reaches this guard. Shape, not presence, is what a
-     *    transport cannot fake.
-     * 2. A second flattener key. A GUID alone is still defeated by an error body
-     *    carrying a GUID-shaped correlation id — constructible, though Chet searched
-     *    this repo for request-id/client-request-id/correlationId/innerError and
-     *    found none, so it is not evidenced as reachable. An error body has no
-     *    reason to carry displayName, so the pairing closes it cheaply.
-     *
-     * The id is resolved through FIELD_ALIASES because CIPP's casing varies by
-     * endpoint. Chet walked most of that case back — resolveKey's comment says the
-     * alias casings are verified against CIPP-API source, so a real CA row should
-     * carry lowercase 'id' and a capital-'Id' row is not a documented vendor shape.
-     * Mechanically reachable, not evidenced; resolving costs nothing and a
-     * lowercase-only test would silently downgrade that drift to the observation
-     * wording, so it resolves.
-     *
-     * @param  array<string, mixed>  $row
-     */
-    private static function rowCarriesPolicyIdentity(array $row): bool
-    {
-        $sawGuidIdentity = false;
-        foreach (self::FIELD_ALIASES['id'] ?? ['id'] as $key) {
-            $value = $row[$key] ?? null;
-            if (is_string($value) && self::looksLikeObjectId($value)) {
-                $sawGuidIdentity = true;
-                break;
-            }
-        }
-
-        if (! $sawGuidIdentity) {
-            return false;
-        }
-
-        // Presence, not emptiness: a null-valued flattener key is still the schema's,
-        // which is the distinction the sibling guards got wrong in the first place.
-        foreach (self::CA_POLICY_IDENTITY_COMPANION_FIELDS as $field) {
-            foreach (self::FIELD_ALIASES[$field] ?? [$field] as $key) {
-                if (array_key_exists($key, $row)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
     private function shapeConditionalAccessPolicies(array $rows): array
     {
         $toolName = 'cipp_list_conditional_access_policies';
@@ -1642,64 +1580,38 @@ class CippToolContract
         // invisible — the exact failure this shaper fixes. Row keys are schema
         // names and safe to log; row values are untrusted tenant data, never logged.
         //
-        // NAMES DRIFT ONLY WHERE DRIFT IS PROVEN (#3408, Jeeves 9/24). This guard tests
-        // key PRESENCE against the RAW row, so on a genuine policy row a missing key does
-        // mean the schema moved: CIPP's flattener (Invoke-ListConditionalAccessPolicies.ps1)
-        // emits a PSCustomObject carrying every key even when the value is empty.
+        // THIS GUARD STATES WHAT IT OBSERVED AND DOES NOT NAME A CAUSE (#3408).
+        // It does not only ever see policy rows: a non-JSON MCP reply, a REST error
+        // body and a JSON-RPC envelope all reach it wrapped as a single row, and none
+        // of them is a schema change. Three attempts to say "shape drift" only for
+        // real policy rows were each defeated by an input nobody had listed, the last
+        // by ordinary Graph users, groups, applications and devices — every one of
+        // which carries a GUID id and a displayName. See card 6ab3d4ad for the full
+        // history; the short version is that no cheap predicate distinguishes a CA
+        // policy from any other Graph object, so the guard stopped guessing.
         //
-        // But the guard does not only ever see policy rows, and that is the false path:
-        // CippMcpClient::unwrapMcpResult returns ['text' => $text] when ExecMCP replies
-        // isError:false with text that is not JSON — ABOVE the unwrapCippEnvelope call, so
-        // CippQueueGuard never runs on it. normalizeRows() then sees a non-list array with
-        // no Results/value key and wraps it as [$rows], giving ONE row keyed ['text'].
-        // $rows !== [] is true, no shape key is present, and the old message told the
-        // operator the CIPP schema had drifted. The REST path wraps any keyless JSON
-        // object (an error body, say) the same way. In neither case had the schema moved:
-        // the payload was never a policy list. MEASURED, not reasoned — driving that exact
-        // row through shape() reproduced the warning with first_row_keys ['text'].
+        // first_row_keys carries the fact instead. A reader seeing ['id','displayName',
+        // 'state'] knows a policy row lost its targeting keys; ['text'] or
+        // ['jsonrpc','id'] is plainly not a policy list at all. The structured key is
+        // better evidence than an adjective the guard cannot establish.
         //
-        // So the cause is asserted only when the rows carry the policy IDENTITY and still
-        // lack every targeting/control key. Everything else states the observation and
-        // stops; first_row_keys is in the context either way, so a reader can see which
-        // case they have.
-        //
-        // IDENTITY IS SEVERAL SCALARS, NOT A BARE 'id' (round 2, #3408). A first attempt
-        // keyed identity on array_key_exists('id', $row) and that was defeated on a path
-        // in this very module — MEASURED, not reasoned. CippMcpClient sends 'id' => 1 and
-        // decodeJsonRpcPayload() does `$decoded['result'] ?? $decoded`, so a reply whose
-        // result is null or absent yields the WHOLE ENVELOPE; unwrapMcpResult() finds no
-        // content and no isError, unwrapCippEnvelope() finds no Results/value, and
-        // normalizeRows() wraps it as one row keyed ['jsonrpc','id','result']. Driving
-        // that row through shape() took the drift arm. A misrouted single Graph object
-        // (every Graph entity carries 'id') did too. 'id' is the most generic key in any
-        // payload this guard can receive, so it cannot carry the identity claim alone.
-        //
-        // IDENTITY IS A GUID-SHAPED id PLUS A COMPANION KEY (Jeeves, #3408 round 3).
-        // A bare 'id' was defeated by the transport's own JSON-RPC envelope; a GUID
-        // alone is still defeated, in principle, by a GUID-shaped correlation id on an
-        // error body. rowCarriesPolicyIdentity() documents both and the evidence for
-        // each. Presence-not-emptiness still governs the targeting test above — a
-        // null-valued key is still the schema's, which is what the siblings got wrong.
+        // Presence, not emptiness: a null-valued targeting key is still the schema's,
+        // which is the distinction the sibling guards at shapeAuditLogs/shapeOauthApps
+        // got wrong — they filtered on value and called an all-null row drift.
         $shapeFields = array_flip(array_merge(self::CA_POLICY_ENUM_FIELDS, self::CA_POLICY_NAME_FIELDS, self::CA_POLICY_NAME_LIST_FIELDS));
         $sawShapeField = false;
-        $sawPolicyIdentity = false;
         foreach ($rows as $row) {
             if (array_intersect_key($row, $shapeFields) !== []) {
                 $sawShapeField = true;
                 break;
             }
-            if (self::rowCarriesPolicyIdentity($row)) {
-                $sawPolicyIdentity = true;
-            }
         }
         if ($rows !== [] && ! $sawShapeField) {
-            Log::warning($sawPolicyIdentity
-                ? '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible'
-                : '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible', [
-                    'tool' => $toolName,
-                    'row_count' => count($rows),
-                    'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
-                ]);
+            Log::warning('[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible', [
+                'tool' => $toolName,
+                'row_count' => count($rows),
+                'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
+            ]);
         }
 
         $result = [
