@@ -117,4 +117,90 @@ class CippSiblingDriftCauseTest extends TestCase
 
         Http::assertNothingSent();
     }
+
+    /**
+     * #3408, site 3: the conditional-access guard at :1591 kept "shape drift", and I
+     * spared it on the ground that it tests key PRESENCE against the raw row. Jeeves
+     * disagreed and named the path; it reproduces exactly.
+     *
+     * CippMcpClient::unwrapMcpResult returns ['text' => $text] when ExecMCP replies
+     * isError:false with text that is not JSON. That return sits ABOVE the
+     * unwrapCippEnvelope call, so CippQueueGuard::assertNotQueueBacked never runs on it.
+     * normalizeRows() sees a non-list array with no Results/value key and wraps it as
+     * [$rows] — ONE row keyed ['text']. $rows !== [] holds, no targeting key is present,
+     * and the operator was told CIPP's schema had drifted. It had not: the payload was
+     * never a policy list. The REST path wraps any keyless JSON object the same way.
+     *
+     * This is the exact row shape that transport produces, driven through the real
+     * shape() dispatch rather than a hand-made approximation of it.
+     */
+    public function test_a_text_only_relay_row_does_not_name_drift_as_the_cause(): void
+    {
+        Http::preventStrayRequests();
+
+        $rows = ['text' => 'Tenant not found or not onboarded'];
+
+        $records = $this->capture(fn () => app(CippToolContract::class)
+            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
+
+        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
+            && str_contains($r[1], 'ListConditionalAccessPolicies')));
+
+        $this->assertCount(1, $warnings, 'a text-only row must warn exactly once');
+
+        $this->assertSame(
+            [
+                'warning',
+                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible',
+                [
+                    'tool' => 'cipp_list_conditional_access_policies',
+                    'row_count' => 1,
+                    'first_row_keys' => ['text'],
+                ],
+            ],
+            $warnings[0]
+        );
+
+        $this->assertStringNotContainsString('drift', $warnings[0][1]);
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * The other half of the ruling, and the reason this is a narrowing rather than a
+     * deletion: where the rows DO carry the policy identity and still lack every
+     * targeting/control key, the schema really has moved and the guard still says so.
+     *
+     * Without this, a fix could satisfy the test above by deleting the word everywhere,
+     * and nothing would notice the guard had stopped naming a cause it can establish.
+     */
+    public function test_a_row_with_policy_identity_and_no_targeting_keys_still_names_drift(): void
+    {
+        Http::preventStrayRequests();
+
+        $rows = [['id' => '11111111-2222-3333-4444-555555555555', 'state' => 'enabled']];
+
+        $records = $this->capture(fn () => app(CippToolContract::class)
+            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
+
+        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
+            && str_contains($r[1], 'ListConditionalAccessPolicies')));
+
+        $this->assertCount(1, $warnings, 'a policy row with no targeting keys must warn exactly once');
+
+        $this->assertSame(
+            [
+                'warning',
+                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible',
+                [
+                    'tool' => 'cipp_list_conditional_access_policies',
+                    'row_count' => 1,
+                    'first_row_keys' => ['id', 'state'],
+                ],
+            ],
+            $warnings[0]
+        );
+
+        Http::assertNothingSent();
+    }
 }

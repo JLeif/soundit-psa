@@ -1579,20 +1579,47 @@ class CippToolContract
         // targeting/control key is absent LOOKS healthy but leaves CA posture
         // invisible — the exact failure this shaper fixes. Row keys are schema
         // names and safe to log; row values are untrusted tenant data, never logged.
+        //
+        // NAMES DRIFT ONLY WHERE DRIFT IS PROVEN (#3408, Jeeves 9/24). This guard tests
+        // key PRESENCE against the RAW row, so on a genuine policy row a missing key does
+        // mean the schema moved: CIPP's flattener (Invoke-ListConditionalAccessPolicies.ps1)
+        // emits a PSCustomObject carrying every key even when the value is empty.
+        //
+        // But the guard does not only ever see policy rows, and that is the false path:
+        // CippMcpClient::unwrapMcpResult returns ['text' => $text] when ExecMCP replies
+        // isError:false with text that is not JSON — ABOVE the unwrapCippEnvelope call, so
+        // CippQueueGuard never runs on it. normalizeRows() then sees a non-list array with
+        // no Results/value key and wraps it as [$rows], giving ONE row keyed ['text'].
+        // $rows !== [] is true, no shape key is present, and the old message told the
+        // operator the CIPP schema had drifted. The REST path wraps any keyless JSON
+        // object (an error body, say) the same way. In neither case had the schema moved:
+        // the payload was never a policy list. MEASURED, not reasoned — driving that exact
+        // row through shape() reproduced the warning with first_row_keys ['text'].
+        //
+        // So the cause is asserted only when the rows carry the policy IDENTITY and still
+        // lack every targeting/control key. Everything else states the observation and
+        // stops; first_row_keys is in the context either way, so a reader can see which
+        // case they have.
         $shapeFields = array_flip(array_merge(self::CA_POLICY_ENUM_FIELDS, self::CA_POLICY_NAME_FIELDS, self::CA_POLICY_NAME_LIST_FIELDS));
         $sawShapeField = false;
+        $sawPolicyIdentity = false;
         foreach ($rows as $row) {
             if (array_intersect_key($row, $shapeFields) !== []) {
                 $sawShapeField = true;
                 break;
             }
+            if (array_key_exists('id', $row)) {
+                $sawPolicyIdentity = true;
+            }
         }
         if ($rows !== [] && ! $sawShapeField) {
-            Log::warning('[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible', [
-                'tool' => $toolName,
-                'row_count' => count($rows),
-                'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
-            ]);
+            Log::warning($sawPolicyIdentity
+                ? '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible'
+                : '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible', [
+                    'tool' => $toolName,
+                    'row_count' => count($rows),
+                    'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
+                ]);
         }
 
         $result = [
