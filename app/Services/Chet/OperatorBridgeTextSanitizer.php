@@ -65,9 +65,10 @@ class OperatorBridgeTextSanitizer
      * something could be appended to. `total_chars` is the character count
      * of the INPUT, before the cap and before redaction (redaction changes
      * length, so a stored length can never be compared to a redacted one to
-     * detect a cut).
+     * detect a cut). `redacted` records a span replacement in this pass,
+     * independently of truncation or whole-message withholding.
      *
-     * @return array{text: string, truncated: bool, total_chars: int, withheld: bool}
+     * @return array{text: string, truncated: bool, total_chars: int, withheld: bool, redacted: bool}
      */
     public function sanitizeForPromptWithMeta(
         string $text,
@@ -81,10 +82,10 @@ class OperatorBridgeTextSanitizer
         if ($this->redactor->scan($redacted) !== []) {
             Log::warning('[OperatorBridge] Operator message failed prompt safety scan');
 
-            return ['text' => $placeholder, 'truncated' => false, 'total_chars' => $totalChars, 'withheld' => true];
+            return ['text' => $placeholder, 'truncated' => false, 'total_chars' => $totalChars, 'withheld' => true, 'redacted' => $redacted !== $capped];
         }
 
-        return ['text' => $redacted, 'truncated' => $totalChars > $maxChars, 'total_chars' => $totalChars, 'withheld' => false];
+        return ['text' => $redacted, 'truncated' => $totalChars > $maxChars, 'total_chars' => $totalChars, 'withheld' => false, 'redacted' => $redacted !== $capped];
     }
 
     /**
@@ -93,7 +94,7 @@ class OperatorBridgeTextSanitizer
      * cap becomes presentation-only — the tail survives in the DB for any
      * reader that needs the full body.
      *
-     * @return array{text: string, truncated: bool, total_chars: int, withheld: bool}
+     * @return array{text: string, truncated: bool, total_chars: int, withheld: bool, redacted: bool}
      */
     public function sanitizeForStorage(
         string $text,
@@ -118,6 +119,7 @@ class OperatorBridgeTextSanitizer
             'truncated' => true,
             'total_chars' => $meta['total_chars'],
             'withheld' => false,
+            'redacted' => $meta['redacted'],
         ];
     }
 }
