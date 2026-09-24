@@ -399,10 +399,17 @@ class CippMcpToolRelayTest extends TestCase
 
         $this->relay([$row])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
 
+        // Bound to the STRUCTURED signal, not to the prose. The earlier
+        // version matched on the substring 'never resolved', which tied this
+        // control to the wording of a sentence it is not about -- and the
+        // wording had to change, because it named a cause warnOnShapeDrift()
+        // cannot establish (#3382). The `missing_fields` key is what
+        // distinguishes this warning from the sibling 'Every row projected
+        // empty', which does not carry it, so the discrimination survives
+        // without pinning a word.
         Log::shouldHaveReceived('warning')
             ->once()
-            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'never resolved')
-                && ($context['tool'] ?? null) === 'cipp_list_mailboxes'
+            ->withArgs(fn (string $message, array $context = []): bool => ($context['tool'] ?? null) === 'cipp_list_mailboxes'
                 && in_array('forwardingSmtpAddress', $context['missing_fields'] ?? [], true));
     }
 
