@@ -165,8 +165,15 @@ APP_URL=https://psa.yourmsp.com
 
 Staff MCP install-link responses use `APP_URL` as the public root, not the MCP
 request's host or scheme. Set it to the customer-reachable HTTP(S) application
-URL, including any deployment path prefix, without user information, query or
-fragment. An invalid root refuses issuance/retrieval without changing the client.
+URL without user information, query or fragment. Schemes are case-insensitive
+HTTP or HTTPS and are rebuilt lowercase; the host must pass PHP hostname-domain
+validation or IP validation (IPv6 uses brackets). Backslashes anywhere are refused.
+An optional deployment prefix must be normalized: no dot or dot-dot segments,
+empty segments or backslashes. A single trailing slash is allowed as the root
+separator. Prefix segments use URI path characters or valid percent escapes;
+encoded dot/dot-dot segments, slashes and backslashes are refused too. The URL is
+rebuilt from the validated parts, preserving the port and prefix. An invalid root
+refuses issuance/retrieval without changing the client or returning its credential.
 The operator must verify public reachability; syntactic validation is not a
 network check. Refresh Laravel's configuration cache after an authorized change.
 The MCP verb also requires an operational client (`stage=active` and

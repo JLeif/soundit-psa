@@ -82,8 +82,26 @@ class PortalInstallService
 
             $publicRoot = config('app.url');
             $parts = is_string($publicRoot) ? parse_url($publicRoot) : false;
-            if (! is_array($parts) || ! in_array($parts['scheme'] ?? '', ['http', 'https'], true)
-                || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])
+            $scheme = strtolower($parts['scheme'] ?? '');
+            $host = $parts['host'] ?? '';
+            $ip = str_starts_with($host, '[') && str_ends_with($host, ']') ? substr($host, 1, -1) : $host;
+            $path = $parts['path'] ?? '';
+            // A single terminal slash is a root separator, not a prefix segment.
+            $prefix = str_ends_with($path, '/') ? substr($path, 0, -1) : $path;
+            $segments = $prefix === '' ? [] : explode('/', substr($prefix, 1));
+            $normalized = true;
+            foreach ($segments as $segment) {
+                $decoded = rawurldecode($segment);
+                if ($decoded === '' || $decoded === '.' || $decoded === '..'
+                    || str_contains($decoded, '/') || str_contains($decoded, '\\')
+                    || ! preg_match('/\A(?:[A-Za-z0-9._~!$&\x27()*+,;=:@-]|%[0-9A-Fa-f]{2})+\z/', $segment)) {
+                    $normalized = false;
+                }
+            }
+            if (! is_array($parts) || ! in_array($scheme, ['http', 'https'], true)
+                || (! filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) && ! filter_var($ip, FILTER_VALIDATE_IP))
+                || str_contains($publicRoot, '\\') || ! $normalized
+                || isset($parts['user']) || isset($parts['pass'])
                 || isset($parts['query']) || isset($parts['fragment'])) {
                 return ['error' => 'Configure a public HTTP(S) application URL before requesting an install link.'] + $context;
             }
@@ -98,7 +116,7 @@ class PortalInstallService
             }
 
             return [
-                'url' => rtrim($publicRoot, '/').route('portal.install.show', ['token' => $client->portal_install_token], false),
+                'url' => $scheme.'://'.$host.(isset($parts['port']) ? ':'.$parts['port'] : '').$prefix.route('portal.install.show', ['token' => $client->portal_install_token], false),
                 'expires_at' => $client->portal_install_token_expires_at?->toIso8601String(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
                 'reissued_expired' => $expired,
