@@ -517,7 +517,7 @@ class LitsrmmClientMappingTest extends TestCase
         $this->assertSame([], $client->getClients());
 
         \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
-            ->withArgs(fn ($message) => str_contains($message, 'did not return a list'))
+            ->withArgs(fn ($message) => str_contains($message, 'did not return client rows'))
             ->once();
     }
 
@@ -549,6 +549,121 @@ class LitsrmmClientMappingTest extends TestCase
 
         $this->assertSame([['id' => 'c2', 'name' => 'Real']], $client->getClients(),
             'an unmappable row must be dropped, not carried with an empty id a technician could select');
+    }
+
+    /**
+     * The guard reads the VALUES, so how the keys are numbered does not matter.
+     *
+     * Each of these carries every row the vendor sent. Before #3326 the guard
+     * asked array_is_list() about the container, so a collection that had been
+     * filtered without reindexing, or keyed by id, was reported as an
+     * unreadable envelope and the mapping screen showed nothing.
+     *
+     * @dataProvider rowCollectionsWhoseKeysAreNotZeroToN
+     */
+    public function test_a_row_collection_is_read_whatever_its_keys_are(string $json, array $expected): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([new Response(200, [], $json)]);
+
+        $this->assertSame($expected, $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('warning');
+    }
+
+    public static function rowCollectionsWhoseKeysAreNotZeroToN(): array
+    {
+        $both = [['id' => 'c1', 'name' => 'Acme'], ['id' => 'c3', 'name' => 'Beta']];
+
+        return [
+            // array_filter() without array_values() on the vendor's side.
+            'gapped numeric keys' => [
+                '{"data":{"0":{"id":"c1","name":"Acme"},"2":{"id":"c3","name":"Beta"}}}',
+                $both,
+            ],
+            // A collection keyed by the entity id.
+            'keyed by id' => [
+                '{"data":{"c1":{"id":"c1","name":"Acme"},"c3":{"id":"c3","name":"Beta"}}}',
+                $both,
+            ],
+            // The bare-collection envelope, same shape, no wrapper.
+            'gapped numeric keys with no data wrapper' => [
+                '{"0":{"id":"c1","name":"Acme"},"2":{"id":"c3","name":"Beta"}}',
+                $both,
+            ],
+        ];
+    }
+
+    /**
+     * A vendor with no clients is a legitimate answer, not a bad envelope.
+     *
+     * The guard reads the values, and an empty collection has none, so it is
+     * vacuously a row collection. Without this the "every value is a row" test
+     * could be tightened into refusing [] and nothing would object: eight
+     * fixtures send {"data":[]} and all of them only assert the returned [],
+     * which is what a false refusal returns too. What separates the two is
+     * whether the operator is told the envelope was unreadable.
+     */
+    public function test_an_empty_client_list_is_not_reported_as_an_unreadable_envelope(): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => []])),
+        ]);
+
+        $this->assertSame([], $client->getClients(),
+            'a vendor with no clients returns no clients');
+
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('warning');
+    }
+
+    /**
+     * A list of scalars is not a row collection, and the old guard admitted it.
+     *
+     * array_is_list(["c1","c2"]) is true, so the key-shape guard passed it
+     * through to the mapper, which produced [] with no warning: a silent empty
+     * result, which is the exact outcome the guard exists to prevent.
+     */
+    public function test_a_list_of_scalars_is_reported_not_read_as_no_clients(): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => ['c1', 'c2']])),
+        ]);
+
+        $this->assertSame([], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'did not return client rows'))
+            ->once();
+    }
+
+    /**
+     * The wrapper refusal still holds: this is what the guard is FOR.
+     *
+     * Pinned beside the widening so a later reader can see the guard was
+     * narrowed toward the real distinction rather than weakened.
+     */
+    public function test_a_nested_collection_is_still_refused_as_an_envelope(): void
+    {
+        $this->configure();
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['clients' => [['id' => 'c1', 'name' => 'Acme']]])),
+        ]);
+
+        $this->assertSame([], $client->getClients());
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'did not return client rows'))
+            ->once();
     }
 
     public function test_an_undocumented_pagination_signal_is_reported_not_swallowed(): void

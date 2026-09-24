@@ -269,8 +269,23 @@ class LitsrmmClient
 
         $clients = $response['data'] ?? $response;
 
-        if (! is_array($clients) || ! array_is_list($clients)) {
-            Log::warning('[LitsrmmClient] /v1/clients did not return a list', [
+        // THE GUARD TESTS THE VALUES, NOT THE KEY SHAPE (#3326 c1:v2:1).
+        //
+        // The defect this guard exists to catch is a wrapper we do not
+        // recognise -- {"clients": [...]} -- being mapped over as though its
+        // values were rows, which yields [] and reads as "no clients".
+        //
+        // Keying on array_is_list() answered a different question. json_decode
+        // turns {"0":{...},"2":{...}} into a gapped array and {"c1":{...}} into
+        // an id-keyed map; both are row collections, both carry every row, and
+        // both were mapped correctly before that guard existed. It also let a
+        // list of scalars through, because ["a","b"] IS a list.
+        //
+        // A row is a JSON object, so it decodes to an array that is not itself
+        // a list. A wrapper's values are lists or scalars. That is the
+        // distinction, and it does not depend on how the keys are numbered.
+        if (! is_array($clients) || ! $this->valuesLookLikeRows($clients)) {
+            Log::warning('[LitsrmmClient] /v1/clients did not return client rows', [
                 'type' => gettype($clients),
                 'keys' => is_array($clients) ? array_slice(array_keys($clients), 0, 10) : [],
             ]);
@@ -304,6 +319,29 @@ class LitsrmmClient
         }
 
         return $rows;
+    }
+
+    /**
+     * Is every value of this array a decoded JSON object, i.e. a row?
+     *
+     * An empty collection is vacuously true: "no clients" is a legitimate
+     * answer and must not be reported as an unreadable envelope.
+     */
+    private function valuesLookLikeRows(array $candidate): bool
+    {
+        foreach ($candidate as $row) {
+            if (! is_array($row)) {
+                return false;
+            }
+
+            // A non-empty list is a nested collection, not a row: this is the
+            // {"clients": [ ... ]} wrapper the guard must still refuse.
+            if ($row !== [] && array_is_list($row)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function get(string $endpoint, array $params = []): array
