@@ -24,6 +24,8 @@ class TacticalWebhookTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
         Setting::setEncrypted('tactical_webhook_key', $this->webhookKey);
     }
 

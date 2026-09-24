@@ -61,6 +61,10 @@ class TriageToolExecutor
      */
     public function execute(string $toolName, array $input): mixed
     {
+        if (str_starts_with($toolName, 'tactical_') && ! TriageToolDefinitions::isTacticalAvailable()) {
+            return ['error' => 'Tactical RMM is disabled or not configured'];
+        }
+
         Log::debug('[Triage] Tool call', [
             'tool' => $toolName,
             'ticket_id' => $this->ticket->id,

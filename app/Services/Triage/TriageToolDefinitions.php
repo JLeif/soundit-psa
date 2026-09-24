@@ -861,15 +861,10 @@ class TriageToolDefinitions
         }
     }
 
-    // Tactical and Comet need no change: for both, isEnabled() is defined AS isConfigured()
-    // (TacticalConfig.php:51, CometConfig.php:35), so there is no separate master switch to
-    // ignore and adding the conjunct would be a no-op. Verified, not assumed — this is a
-    // deliberate exclusion, not an oversight.
-
     public static function isTacticalAvailable(): bool
     {
         try {
-            return TacticalConfig::isConfigured();
+            return TacticalConfig::isEnabled();
         } catch (\Throwable) {
             return false;
         }

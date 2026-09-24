@@ -47,6 +47,8 @@ class TacticalBootTimeRefreshTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
 
         // Fixtures below are absolute instants; without a frozen clock the headline
         // case's "hours ago" would depend on the wall-clock hour the suite runs.

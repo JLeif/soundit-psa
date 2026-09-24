@@ -28,6 +28,13 @@ class TacticalDeviceSyncSweepTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
+    }
+
     private function syncService(array $queue): TacticalDeviceSyncService
     {
         $http = new GuzzleClient([

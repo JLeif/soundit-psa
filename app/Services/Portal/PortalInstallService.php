@@ -115,7 +115,7 @@ class PortalInstallService
             return match ($rmm) {
                 'level' => app(LevelClient::class)->supportsInstall((string) $client->level_group_id, $platform),
                 'ninja' => app(NinjaClient::class)->supportsInstall((int) $client->ninja_org_id, $platform),
-                'tactical' => app(TacticalClient::class)->supportsInstall((string) $client->tactical_site_id, $platform),
+                'tactical' => \App\Support\TacticalConfig::isEnabled() && app(TacticalClient::class)->supportsInstall((string) $client->tactical_site_id, $platform),
                 default => false,
             };
         } catch (\Throwable $e) {
@@ -136,7 +136,9 @@ class PortalInstallService
             return match ($rmm) {
                 'level' => app(LevelClient::class)->getInstallerInfo((string) $client->level_group_id, $platform),
                 'ninja' => app(NinjaClient::class)->getInstallerInfo((int) $client->ninja_org_id, $platform),
-                'tactical' => app(TacticalClient::class)->getInstallerInfo((string) $client->tactical_site_id, $platform, $goarch),
+                'tactical' => \App\Support\TacticalConfig::isEnabled()
+                    ? app(TacticalClient::class)->getInstallerInfo((string) $client->tactical_site_id, $platform, $goarch)
+                    : null,
                 default => null,
             };
         } catch (\Throwable $e) {

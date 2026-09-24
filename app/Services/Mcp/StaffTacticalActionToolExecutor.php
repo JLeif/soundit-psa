@@ -192,8 +192,8 @@ class StaffTacticalActionToolExecutor
     /** @return array<string, mixed> */
     public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
     {
-        if (! TacticalConfig::isConfigured()) {
-            return ['error' => 'Tactical RMM is not configured'];
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM is disabled or not configured'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
@@ -229,6 +229,10 @@ class StaffTacticalActionToolExecutor
 
     public function approveStagedRun(TechnicianRun $run, int $approverId): TechnicianApprovalResult
     {
+        if (! TacticalConfig::isEnabled()) {
+            return new TechnicianApprovalResult('gate_declined', message: 'Tactical RMM is disabled or not configured');
+        }
+
         if (! self::isStagedActionType($run->action_type) || ! $run->claimForExecution()) {
             return new TechnicianApprovalResult('already_handled');
         }
@@ -247,6 +251,10 @@ class StaffTacticalActionToolExecutor
      */
     public function runQueuedOnReconnect(TechnicianRun $run): TechnicianApprovalResult
     {
+        if (! TacticalConfig::isEnabled()) {
+            return new TechnicianApprovalResult('gate_declined', message: 'Tactical RMM is disabled or not configured');
+        }
+
         $approverId = (int) ($run->proposed_meta['queued_approver_id'] ?? 0);
 
         if (! self::isStagedActionType($run->action_type) || ! $run->claimQueuedForExecution()) {

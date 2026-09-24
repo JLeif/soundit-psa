@@ -28,7 +28,7 @@ class OfflineActionSweep
      */
     public function sweepAgent(string $agentId): int
     {
-        if ($agentId === '' || ! TacticalConfig::offlineQueueEnabled()) {
+        if ($agentId === '' || ! TacticalConfig::isEnabled() || ! TacticalConfig::offlineQueueEnabled()) {
             return 0;
         }
 
@@ -85,7 +85,7 @@ class OfflineActionSweep
         $expired = $this->expireDue();
         $ran = 0;
 
-        if (TacticalConfig::offlineQueueEnabled()) {
+        if (TacticalConfig::isEnabled() && TacticalConfig::offlineQueueEnabled()) {
             $agentIds = TechnicianRun::query()
                 ->where('state', TechnicianRunState::QueuedOffline->value)
                 ->where('expires_at', '>', now())

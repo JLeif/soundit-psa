@@ -106,8 +106,8 @@ class TacticalReadOnlyToolset
 
     public function execute(string $toolName, array $input, ?int $clientId): array
     {
-        if (! TacticalConfig::isConfigured()) {
-            return ['error' => 'Tactical RMM is not configured'];
+        if (! TacticalConfig::isEnabled()) {
+            return ['error' => 'Tactical RMM is disabled or not configured'];
         }
 
         if (self::requiresClient($toolName) && $clientId === null) {

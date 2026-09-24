@@ -50,7 +50,7 @@ class TacticalConfig
 
     public static function isEnabled(): bool
     {
-        return self::isConfigured();
+        return self::isConfigured() && Setting::getValue('tactical_enabled', '1') === '1';
     }
 
     /**
