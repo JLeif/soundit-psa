@@ -348,7 +348,14 @@ class CippToolContract
         if ($rows !== [] && array_filter($projected) === []) {
             // Row keys are schema names and safe to log; row values are untrusted
             // tenant data and are never logged.
-            Log::warning('[CippTools] Every audit row projected empty — CIPP audit-log shape has drifted', [
+            //
+            // States what was observed and NOT why (G-14, #3408). This cannot say the shape
+            // drifted: projectAuditRow() filters on $value !== null, so a row whose keys are
+            // all PRESENT but hold null projects empty with the schema exactly where the
+            // contract expects it. projectRows() calls that same case a genuine no-value, and
+            // the two messages must not contradict each other. The keys are in the context;
+            // the reader can see whether they moved.
+            Log::warning('[CippTools] Every audit row projected empty', [
                 'tool' => 'cipp_list_audit_logs',
                 'row_count' => $totalReturned,
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
@@ -726,7 +733,9 @@ class CippToolContract
         }, $rows);
 
         if ($rows !== [] && array_filter($projected) === []) {
-            Log::warning('[CippTools] Every OAuth app row projected empty — CIPP ListOAuthApps shape has drifted', [
+            // Observation without a cause, for the reason recorded at the audit-log warning
+            // above (G-14, #3408): an all-null row projects empty without any drift.
+            Log::warning('[CippTools] Every OAuth app row projected empty', [
                 'tool' => 'cipp_list_oauth_apps',
                 'row_count' => $totalReturned,
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
