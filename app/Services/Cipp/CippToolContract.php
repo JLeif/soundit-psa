@@ -1532,6 +1532,34 @@ class CippToolContract
      *
      * @return array<string, mixed>
      */
+    /**
+     * Does this row identify itself as a conditional-access policy?
+     *
+     * A Graph CA policy id is always a GUID. The JSON-RPC id CippMcpClient sends is the
+     * integer 1, and a REST correlation id is a short token; neither is GUID-shaped, so
+     * a transport or error body cannot claim policy identity however it is keyed. The
+     * id is resolved through FIELD_ALIASES because CIPP's casing varies by endpoint —
+     * that alias map exists for exactly this reason, and a lowercase-only test silently
+     * DOWNGRADES a genuine 'Id'-keyed drift to the observation wording.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    private static function rowCarriesPolicyIdentity(array $row): bool
+    {
+        foreach (self::FIELD_ALIASES['id'] ?? ['id'] as $key) {
+            if (! array_key_exists($key, $row)) {
+                continue;
+            }
+
+            $value = $row[$key];
+            if (is_string($value) && preg_match('/^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i', $value) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function shapeConditionalAccessPolicies(array $rows): array
     {
         $toolName = 'cipp_list_conditional_access_policies';
@@ -1612,12 +1640,18 @@ class CippToolContract
         // (every Graph entity carries 'id') did too. 'id' is the most generic key in any
         // payload this guard can receive, so it cannot carry the identity claim alone.
         //
-        // CIPP's flattener emits every scalar for a real policy row, so requiring TWO of
-        // CA_POLICY_SCALAR_FIELDS costs a genuine row nothing while both false payloads
-        // above carry exactly one. Presence only — a null-valued scalar is still the
-        // schema's, which is the distinction the sibling guards got wrong.
+        // IDENTITY IS A GUID-SHAPED id (Jeeves, #3408 round 2). Requiring two scalars
+        // repels both envelopes above, but MEASUREMENT found two further holes it does
+        // not: a genuine policy row keyed 'Id' (FIELD_ALIASES :1118 exists precisely
+        // because CIPP's casing varies) lost its cause, and Jeeves's own suggested
+        // id+displayName pairing under-reported because displayName is not a scalar
+        // field. A Graph CA policy id is ALWAYS a GUID; the JSON-RPC id the client
+        // sends is the integer 1, and a correlation id like 'req-8f21' is not a GUID
+        // either. So identity is a GUID-shaped id resolved through the alias map, which
+        // is a property of the VALUE and cannot be met by any transport or error body.
+        // Presence-not-emptiness still governs everything else — a null-valued
+        // targeting key is still the schema's, which is what the siblings got wrong.
         $shapeFields = array_flip(array_merge(self::CA_POLICY_ENUM_FIELDS, self::CA_POLICY_NAME_FIELDS, self::CA_POLICY_NAME_LIST_FIELDS));
-        $scalarFields = array_flip(self::CA_POLICY_SCALAR_FIELDS);
         $sawShapeField = false;
         $sawPolicyIdentity = false;
         foreach ($rows as $row) {
@@ -1625,7 +1659,7 @@ class CippToolContract
                 $sawShapeField = true;
                 break;
             }
-            if (count(array_intersect_key($row, $scalarFields)) >= 2) {
+            if (self::rowCarriesPolicyIdentity($row)) {
                 $sawPolicyIdentity = true;
             }
         }

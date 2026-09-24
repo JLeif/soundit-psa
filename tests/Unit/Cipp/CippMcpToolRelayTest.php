@@ -829,8 +829,14 @@ class CippMcpToolRelayTest extends TestCase
         // The insidious drift mode (psa-mybo): scalar fields still resolve so
         // the projection looks healthy, but every flattened targeting/control
         // key is gone — CA posture would be silently invisible again.
+        //
+        // The id must be GUID-shaped to reach the drift wording (#3408 round 3).
+        // Graph emits a GUID for every real policy, and every other realistic CA
+        // fixture in this file already uses one; the old 'policy-1' placeholder was
+        // never a shape Graph produces. Identity is now a property of the VALUE
+        // because a bare key is met by the transport's own JSON-RPC envelope.
         $result = $this->executeConditionalAccess([[
-            'id' => 'policy-1',
+            'id' => '66666666-6666-6666-6666-666666666666',
             'displayName' => 'Require MFA',
             'state' => 'enabled',
         ]]);

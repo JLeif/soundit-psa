@@ -215,17 +215,96 @@ class CippSiblingDriftCauseTest extends TestCase
     public static function nonPolicyRowsCarryingAnId(): array
     {
         return [
-            // Exactly what decodeJsonRpcPayload() yields when result is null or absent.
+            // Exactly what decodeJsonRpcPayload() yields when result is null:
+            // `$decoded['result'] ?? $decoded` hands back the whole envelope.
             'the client\'s own JSON-RPC envelope' => [
                 ['jsonrpc' => '2.0', 'id' => 1, 'result' => null],
                 ['jsonrpc', 'id', 'result'],
+            ],
+            // Jeeves's seventh fixture: the same fallback when 'result' is absent
+            // entirely. A different row shape, so it is pinned separately.
+            'the same envelope with no result key' => [
+                ['jsonrpc' => '2.0', 'id' => 1],
+                ['jsonrpc', 'id'],
             ],
             // Every Graph entity carries a top-level id.
             'a misrouted single Graph object' => [
                 ['id' => 'abc-123', 'defaultDomainName' => 'contoso.onmicrosoft.com'],
                 ['id', 'defaultDomainName'],
             ],
+            // Chet's attack A: a REST error body carrying a correlation id, which is
+            // not GUID-shaped and so cannot claim policy identity.
+            'a REST error body with a correlation id' => [
+                ['id' => 'req-8f21', 'error' => 'Forbidden', 'status' => 403],
+                ['id', 'error', 'status'],
+            ],
         ];
+    }
+
+    /**
+     * The is_string() guard in rowCarriesPolicyIdentity(), which no verdict-shaped
+     * mutant can kill.
+     *
+     * Removing it does not change a single verdict: preg_match() coerces every scalar,
+     * and no integer, bool or null can match a GUID pattern. It matters for one input
+     * only — an ARRAY-valued id, which makes preg_match() raise a TypeError and takes
+     * the whole CA read down instead of logging. Untrusted upstream JSON can nest
+     * anything, so the row is driven end to end rather than asserted about.
+     */
+    public function test_a_structured_id_value_does_not_crash_the_guard(): void
+    {
+        Http::preventStrayRequests();
+
+        $rows = [['id' => ['nested' => 'value'], 'error' => 'Forbidden']];
+
+        $records = $this->capture(fn () => app(CippToolContract::class)
+            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
+
+        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
+            && str_contains($r[1], 'ListConditionalAccessPolicies')));
+
+        $this->assertCount(1, $warnings, 'a structured id must warn exactly once, not raise');
+        $this->assertStringNotContainsString('drift', $warnings[0][1]);
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * Chet's attack C, and the case a lowercase-only identity test loses.
+     *
+     * FIELD_ALIASES (:1127) maps 'id' to ['id','Id','ID'] because CIPP's casing varies
+     * by endpoint. A genuine policy row keyed 'Id' with every targeting key absent is
+     * REAL drift — the one thing the word exists for — so resolving identity through
+     * that alias map is what stops the narrowing silently under-reporting.
+     */
+    public function test_a_guid_identity_is_recognised_whatever_its_casing(): void
+    {
+        Http::preventStrayRequests();
+
+        $rows = [['Id' => '11111111-2222-3333-4444-555555555555', 'displayName' => 'Require MFA']];
+
+        $records = $this->capture(fn () => app(CippToolContract::class)
+            ->shape('cipp_list_conditional_access_policies', $rows, [], null));
+
+        $warnings = array_values(array_filter($records, fn (array $r): bool => $r[0] === 'warning'
+            && str_contains($r[1], 'ListConditionalAccessPolicies')));
+
+        $this->assertCount(1, $warnings, 'a capitalised-Id policy row must warn exactly once');
+
+        $this->assertSame(
+            [
+                'warning',
+                '[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible',
+                [
+                    'tool' => 'cipp_list_conditional_access_policies',
+                    'row_count' => 1,
+                    'first_row_keys' => ['Id', 'displayName'],
+                ],
+            ],
+            $warnings[0]
+        );
+
+        Http::assertNothingSent();
     }
 
     /**
@@ -240,8 +319,8 @@ class CippSiblingDriftCauseTest extends TestCase
     {
         Http::preventStrayRequests();
 
-        // Two CA_POLICY_SCALAR_FIELDS: what CIPP's flattener emits for a real row, and
-        // one more than either false payload above can muster.
+        // A GUID-shaped id: what Graph emits for every real CA policy, and what no
+        // transport envelope or error correlation id can produce.
         $rows = [['id' => '11111111-2222-3333-4444-555555555555', 'state' => 'enabled']];
 
         $records = $this->capture(fn () => app(CippToolContract::class)
