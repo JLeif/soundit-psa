@@ -31,7 +31,6 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class ClientController extends Controller
@@ -564,53 +563,20 @@ class ClientController extends Controller
 
     public function generateInstallLink(Client $client): RedirectResponse
     {
-        if ($client->portal_install_token) {
-            return redirect()->route('clients.show', $client)
-                ->with('error', 'This client already has an install link. Use Rotate to replace it.');
-        }
-
-        if (empty($client->availableRmms())) {
-            return redirect()->route('clients.show', $client)
-                ->with('error', 'Map this client to an RMM (Ninja, Level, or Tactical) before generating an install link.');
-        }
-
-        $available = $client->availableRmms();
-        $client->update([
-            'portal_install_token' => Str::random(32),
-            'portal_install_token_expires_at' => now()->addDays(\App\Support\PortalConfig::installTokenTtlDays()),
-            'portal_primary_rmm' => count($available) === 1 ? $available[0] : $client->portal_primary_rmm,
-        ]);
-
         return redirect()->route('clients.show', $client)
-            ->with('success', 'Install link generated.');
+            ->with(app(\App\Services\Portal\PortalInstallService::class)->generateInstallLink($client));
     }
 
     public function rotateInstallLink(Client $client): RedirectResponse
     {
-        if (! $client->portal_install_token) {
-            return redirect()->route('clients.show', $client)
-                ->with('error', 'No install link to rotate.');
-        }
-
-        $client->update([
-            'portal_install_token' => Str::random(32),
-            'portal_install_token_expires_at' => now()->addDays(\App\Support\PortalConfig::installTokenTtlDays()),
-        ]);
-
         return redirect()->route('clients.show', $client)
-            ->with('success', 'Install link rotated. The previous URL is no longer valid.');
+            ->with(app(\App\Services\Portal\PortalInstallService::class)->rotateInstallLink($client));
     }
 
     public function disableInstallLink(Client $client): RedirectResponse
     {
-        $client->update([
-            'portal_install_token' => null,
-            'portal_install_token_expires_at' => null,
-            'portal_primary_rmm' => null,
-        ]);
-
         return redirect()->route('clients.show', $client)
-            ->with('success', 'Install link disabled.');
+            ->with(app(\App\Services\Portal\PortalInstallService::class)->disableInstallLink($client));
     }
 
     public function updatePortalPrimaryRmm(Request $request, Client $client): RedirectResponse
