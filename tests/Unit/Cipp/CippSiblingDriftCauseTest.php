@@ -238,6 +238,30 @@ class CippSiblingDriftCauseTest extends TestCase
                 ['id' => 'req-8f21', 'error' => 'Forbidden', 'status' => 403],
                 ['id', 'error', 'status'],
             ],
+            // The case that survives a GUID-only rule, and the reason identity is a
+            // PAIR. An error body carrying a GUID-shaped correlation id has a valid
+            // identity value and no companion key. Constructible rather than
+            // demonstrated — Chet searched this repo for request-id,
+            // client-request-id, correlationId and innerError and found none — so it
+            // is pinned because it is cheap, not because it is evidenced.
+            'an error body with a GUID-shaped correlation id' => [
+                ['id' => '11111111-2222-3333-4444-555555555555', 'error' => 'Forbidden'],
+                ['id', 'error'],
+            ],
+            // A GUID identity with no companion key at all: still not a policy row.
+            'a bare GUID identity with no companion key' => [
+                ['id' => '11111111-2222-3333-4444-555555555555'],
+                ['id'],
+            ],
+            // The input where SHAPE and PRESENCE disagree, and the only one that can
+            // discriminate them: a non-GUID id sitting beside a companion key. Every
+            // other non-policy row here fails the companion test too, so without this
+            // case a predicate testing mere presence passes the whole suite. Added
+            // because that mutant survived.
+            'a non-GUID id beside a companion key' => [
+                ['id' => 'policy-1', 'displayName' => 'Require MFA'],
+                ['id', 'displayName'],
+            ],
         ];
     }
 
@@ -281,6 +305,8 @@ class CippSiblingDriftCauseTest extends TestCase
     {
         Http::preventStrayRequests();
 
+        // displayName is the companion key here: identity is a GUID id PLUS a second
+        // flattener key, since a GUID alone is defeated by a correlation id.
         $rows = [['Id' => '11111111-2222-3333-4444-555555555555', 'displayName' => 'Require MFA']];
 
         $records = $this->capture(fn () => app(CippToolContract::class)
