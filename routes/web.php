@@ -367,6 +367,14 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/ninja/sync-backup', [IntegrationsController::class, 'syncNinjaBackup'])->name('settings.integrations.ninja.sync-backup');
     Route::post('/settings/integrations/level', [IntegrationsController::class, 'updateLevel'])->name('settings.integrations.level.update');
     Route::post('/settings/integrations/level/test', [IntegrationsController::class, 'testLevel'])->name('settings.integrations.level.test');
+    // These two carry their own 'admin' middleware rather than relying on the
+    // enclosing group, which is bare 'auth': one writes a vendor credential and
+    // the other sends it to a configured host, so neither should be reachable
+    // by every authenticated user. The sibling integration routes in this group
+    // do not carry it, which is a wider question than this vendor - noted on
+    // the card rather than changed here.
+    Route::post('/settings/integrations/litsrmm', [IntegrationsController::class, 'updateLitsrmm'])->middleware('admin')->name('settings.integrations.litsrmm.update');
+    Route::post('/settings/integrations/litsrmm/test', [IntegrationsController::class, 'testLitsrmm'])->middleware('admin')->name('settings.integrations.litsrmm.test');
     Route::post('/settings/integrations/screenconnect', [IntegrationsController::class, 'updateScreenConnect'])->name('settings.integrations.screenconnect.update');
     Route::post('/settings/integrations/tactical', [IntegrationsController::class, 'updateTactical'])->name('settings.integrations.tactical.update');
     Route::post('/settings/integrations/tactical/test', [IntegrationsController::class, 'testTactical'])->name('settings.integrations.tactical.test');

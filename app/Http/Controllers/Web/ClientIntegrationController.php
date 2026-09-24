@@ -318,6 +318,7 @@ class ClientIntegrationController extends Controller
             'stripe' => 'Stripe',
             'qbo' => 'QuickBooks Online',
             'comet' => 'Comet Backup',
+            'litsrmm' => 'Leif IT Solutions RMM',
         ];
 
         return $labels[$vendor] ?? $vendor;

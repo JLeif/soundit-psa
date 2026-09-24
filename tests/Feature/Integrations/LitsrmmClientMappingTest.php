@@ -50,7 +50,7 @@ class LitsrmmClientMappingTest extends TestCase
         // request that was actually composed.
         return new LitsrmmClient([
             'api_key' => 'test-token-value',
-            'base_url' => 'http://litsrmm.test',
+            'base_url' => 'https://litsrmm.test',
             'handler' => $stack,
             'request_timeout' => 5,
         ]);
@@ -59,7 +59,7 @@ class LitsrmmClientMappingTest extends TestCase
     private function configure(): void
     {
         Setting::setEncrypted('litsrmm_api_key', 'test-token-value');
-        Setting::setValue('litsrmm_base_url', 'http://litsrmm.test');
+        Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
     }
 
     public function test_litsrmm_is_registered_as_a_vendor(): void
@@ -109,7 +109,7 @@ class LitsrmmClientMappingTest extends TestCase
         $this->assertFalse(LitsrmmConfig::isConfigured(),
             'a self-hosted vendor with no base_url is NOT configured: there is no default host to fall back to');
 
-        Setting::setValue('litsrmm_base_url', 'http://litsrmm.test');
+        Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
         $this->assertTrue(LitsrmmConfig::isConfigured());
     }
 
@@ -120,8 +120,9 @@ class LitsrmmClientMappingTest extends TestCase
 
         Setting::setValue('litsrmm_enabled', '0');
 
-        // This is the assertion the Tactical switch cannot make: isEnabled()
-        // there returns isConfigured(), so turning it off changes nothing.
+        // The assertion that matters: isEnabled() must READ the setting. A
+        // vendor whose isEnabled() returns isConfigured() has a switch that
+        // cannot turn anything off, and no test of the credentials can see it.
         $this->assertFalse(LitsrmmConfig::isEnabled(), 'the switch must be READ, not aliased to isConfigured()');
         $this->assertFalse(LitsrmmConfig::isAvailable(), 'off means unavailable even while configured');
         $this->assertTrue(LitsrmmConfig::isConfigured(),
@@ -180,7 +181,7 @@ class LitsrmmClientMappingTest extends TestCase
 
     public function test_a_missing_api_key_refuses(): void
     {
-        $client = new LitsrmmClient(['base_url' => 'http://litsrmm.test']);
+        $client = new LitsrmmClient(['base_url' => 'https://litsrmm.test']);
 
         $this->expectException(LitsrmmClientException::class);
         $this->expectExceptionMessage('API key not configured');
