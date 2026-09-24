@@ -1541,7 +1541,7 @@ class AssetController extends Controller
         // match() (no `checks` arm) -> UnhandledMatchError -> {error}. The page-top
         // Ninja/Level tabs send no source param and keep their existing behavior.
         $asset->loadMissing('tacticalAsset');
-        if (($request->query('source') === 'tactical' || ($asset->tacticalAsset && ! $asset->ninja_device_id && ! $asset->level_device_id))
+        if (($request->query('source') === 'tactical' || ($asset->tacticalAsset && ! $asset->ninja_id && ! $asset->level_id))
             && ! \App\Support\TacticalConfig::isEnabled()) {
             return response()->json(['error' => 'Tactical RMM is disabled or not configured.'], 422);
         }
