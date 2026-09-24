@@ -7,10 +7,93 @@ use App\Services\Level\LevelClient;
 use App\Services\Ninja\NinjaClient;
 use App\Services\Tactical\TacticalClient;
 use App\Support\PortalConfig;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class PortalInstallService
 {
+    /** Web Generate deliberately refuses any existing token, including an expired one. */
+    public function generateInstallLink(Client $client): array
+    {
+        if ($client->portal_install_token) {
+            return ['error' => 'This client already has an install link. Use Rotate to replace it.'];
+        }
+
+        if (empty($client->availableRmms())) {
+            return ['error' => 'Map this client to an RMM (Ninja, Level, or Tactical) before generating an install link.'];
+        }
+
+        $available = $client->availableRmms();
+        $client->update([
+            'portal_install_token' => Str::random(32),
+            'portal_install_token_expires_at' => now()->addDays(PortalConfig::installTokenTtlDays()),
+            'portal_primary_rmm' => count($available) === 1 ? $available[0] : $client->portal_primary_rmm,
+        ]);
+
+        return ['success' => 'Install link generated.'];
+    }
+
+    public function rotateInstallLink(Client $client): array
+    {
+        if (! $client->portal_install_token) {
+            return ['error' => 'No install link to rotate.'];
+        }
+
+        $client->update([
+            'portal_install_token' => Str::random(32),
+            'portal_install_token_expires_at' => now()->addDays(PortalConfig::installTokenTtlDays()),
+        ]);
+
+        return ['success' => 'Install link rotated. The previous URL is no longer valid.'];
+    }
+
+    public function disableInstallLink(Client $client): array
+    {
+        $client->update([
+            'portal_install_token' => null,
+            'portal_install_token_expires_at' => null,
+            'portal_primary_rmm' => null,
+        ]);
+
+        return ['success' => 'Install link disabled.'];
+    }
+
+    /** Staff MCP differs from web Generate: reuse live links and replace expired ones. */
+    public function getOrCreateInstallLink(Client $client): array
+    {
+        return DB::transaction(function () use ($client): array {
+            $client = Client::query()->lockForUpdate()->findOrFail($client->id);
+            $context = [
+                'available_rmms' => $client->availableRmms(),
+                'effective_rmm' => $client->effectiveInstallRmm(),
+                'portal_primary_rmm' => $client->portal_primary_rmm,
+            ];
+            if (empty($context['available_rmms'])) {
+                return ['error' => 'Map this client to an RMM (Ninja, Level, or Tactical) on the Client page before generating an install link.'] + $context;
+            }
+            if ($context['effective_rmm'] === null) {
+                return ['error' => 'Set the primary RMM on the Client page before generating an install link.'] + $context;
+            }
+
+            $expired = (bool) $client->portal_install_token
+                && $client->portal_install_token_expires_at !== null
+                && $client->portal_install_token_expires_at->isPast();
+            if ($expired) {
+                $this->rotateInstallLink($client);
+            } elseif (! $client->portal_install_token) {
+                $this->generateInstallLink($client);
+            }
+
+            return [
+                'url' => route('portal.install.show', ['token' => $client->portal_install_token]),
+                'expires_at' => $client->portal_install_token_expires_at?->toIso8601String(),
+                'portal_primary_rmm' => $client->portal_primary_rmm,
+                'reissued_expired' => $expired,
+            ] + $context;
+        });
+    }
+
     /**
      * Platforms we check against each RMM. Each RMM reports availability
      * per platform; unsupported platforms are dropped from the page.
