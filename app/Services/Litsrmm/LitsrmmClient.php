@@ -148,24 +148,37 @@ class LitsrmmClient
         // RedirectMiddleware and base_uri handling call, so the URL judged here
         // is the URL that will be requested, not a second implementation of
         // RFC 3986 that could drift from it.
-        $resolved = (string) UriResolver::resolve(
-            new Uri(rtrim($baseUrl, '/').'/'),
-            new Uri($endpoint),
-        );
+        $baseUri = new Uri(rtrim($baseUrl, '/').'/');
+        $resolvedUri = UriResolver::resolve($baseUri, new Uri($endpoint));
+        $resolved = (string) $resolvedUri;
 
-        $baseHost = strtolower((string) parse_url($baseUrl, PHP_URL_HOST));
-        $host = strtolower((string) parse_url($resolved, PHP_URL_HOST));
+        // ONE PARSER, ONE OBJECT (#3500). An earlier draft read the hosts with
+        // parse_url() on the resolved STRING, which put a second parser in
+        // front of a URL Guzzle builds from a Uri object -- the exact drift
+        // this method's docblock argues against. Both sides are now read off
+        // the Uri objects themselves.
+        //
+        // AND THE ORIGIN INCLUDES THE PORT. Host equality alone lets
+        // https://rmm.example.com:8443/ pass a guard configured for
+        // https://rmm.example.com/ and carry the Bearer to a different service
+        // on the same machine. Guzzle's own UriComparator::isCrossOrigin
+        // compares host, scheme AND port, so matching that rule keeps this
+        // guard and the one inside the redirect middleware in agreement.
+        // getPort() is null for a default port, which normalises https:443 and
+        // an explicit :443 to the same origin.
+        $origin = static fn (\Psr\Http\Message\UriInterface $u): string => strtolower($u->getHost())
+            .':'.($u->getPort() ?? '');
 
-        if ($host !== $baseHost) {
+        if ($origin($resolvedUri) !== $origin($baseUri)) {
             // The endpoint is logged, the credential is not, and the throw
             // happens before any Authorization header is built.
-            Log::warning('[LitsrmmClient] refusing an endpoint that resolves off the configured host', [
-                'configured_host' => $baseHost,
-                'resolved_host' => $host,
+            Log::warning('[LitsrmmClient] refusing an endpoint that resolves off the configured origin', [
+                'configured_origin' => $origin($baseUri),
+                'resolved_origin' => $origin($resolvedUri),
             ]);
 
             throw new LitsrmmClientException(
-                'LITSRMM endpoint resolves to a different host than the configured base URL'
+                'LITSRMM endpoint resolves to a different host or port than the configured base URL'
             );
         }
 
@@ -179,6 +192,13 @@ class LitsrmmClient
             $options = [
                 'base_uri' => rtrim((string) ($this->config['base_url'] ?? ''), '/').'/',
                 'timeout' => $this->config['request_timeout'] ?? 30,
+                // Every other vendor client here does this (Tactical, Comet,
+                // CIPP x2, Teams, the sinks). A vendor API has no reason to
+                // redirect, and following one sends the REQUEST BODY to the
+                // other host even though Guzzle strips the credential on a
+                // cross-origin hop. Refusing to follow is narrower than
+                // relying on that stripping.
+                'allow_redirects' => false,
             ];
 
             // A test must be able to observe what left the process rather than

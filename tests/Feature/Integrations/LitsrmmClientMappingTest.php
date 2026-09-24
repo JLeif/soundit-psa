@@ -257,6 +257,14 @@ class LitsrmmClientMappingTest extends TestCase
             'a subdomain of the configured host is still not the configured host' => [
                 'https://litsrmm.test', '//evil.litsrmm.test/v1/x',
             ],
+            // THE ORIGIN INCLUDES THE PORT (#3500). A different port on the
+            // same machine is a different service, and Guzzle's own
+            // UriComparator::isCrossOrigin compares host, scheme AND port. A
+            // host-equality-only guard hands the Bearer to whatever answers on
+            // 8443.
+            'a different port on the configured host is a different service' => [
+                'https://litsrmm.test', '//litsrmm.test:8443/v1/x',
+            ],
         ];
     }
 
@@ -314,6 +322,100 @@ class LitsrmmClientMappingTest extends TestCase
             $this->assertSame('litsrmm.test', $entry['request']->getUri()->getHost());
             $this->assertSame('https', $entry['request']->getUri()->getScheme());
         }
+    }
+
+    /**
+     * The other half of the port rule, and the reason the guard normalises on
+     * getPort() rather than on the string. A base URL naming its own default
+     * port is the SAME origin, so a rule written as strict string equality
+     * would refuse the configured host for no reason.
+     */
+    public function test_an_explicit_default_port_is_the_same_origin(): void
+    {
+        $this->configure();
+
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $this->history = [];
+        $stack->push(Middleware::history($this->history));
+
+        $client = new LitsrmmClient([
+            'api_key' => 'test-token-value',
+            'base_url' => 'https://litsrmm.test:443',
+            'handler' => $stack,
+        ]);
+
+        $client->get('v1/clients');
+
+        $this->assertCount(1, $this->history,
+            'https://host:443 and https://host are one origin: the guard must not refuse it');
+    }
+
+    /**
+     * The client must not FOLLOW a redirect (#3500). Guzzle strips the
+     * Authorization header on a cross-origin hop, so the credential is safe
+     * either way — but following one still sends the request body to the other
+     * host, and every other vendor client here refuses to.
+     *
+     * The control asserts on what LEFT the process: exactly ONE request, to
+     * the configured host. A client that followed would record two, the second
+     * to evil.example, and the caller would get the 200 instead of an error.
+     */
+    public function test_a_redirect_is_not_followed(): void
+    {
+        $this->configure();
+        $client = $this->clientWithResponses([
+            new Response(302, ['Location' => 'https://evil.example/v1/clients']),
+            new Response(200, [], json_encode(['data' => [['id' => 'x', 'name' => 'X']]])),
+        ]);
+
+        try {
+            $client->get('v1/clients');
+        } catch (LitsrmmClientException) {
+            // A 3xx surfacing as an error is the correct outcome; what is
+            // forbidden is a second request, which the history decides.
+        }
+
+        $this->assertCount(1, $this->history,
+            'the client must not follow a redirect: the second hop would carry the request body off-host');
+        $this->assertSame('litsrmm.test', $this->history[0]['request']->getUri()->getHost());
+    }
+
+    /**
+     * #3500 context:3, unanimous must-fix. The two credential checks in
+     * request() read $this->config — the values CAPTURED when the object was
+     * built. isConfigured() re-reads LIVE settings. The client is a container
+     * singleton (AppServiceProvider), so a long-lived worker, or any client
+     * built with explicit config, can pass the captured pair and fail the live
+     * one WHILE THE SWITCH IS ON. A single isAvailable() check then reports
+     * "switched off" on a path where nothing is switched off.
+     *
+     * This fixture is exactly that divergence: captured credentials present,
+     * live settings empty, switch untouched. MEASURED before the split, the
+     * message was 'LITSRMM integration is switched off'.
+     */
+    public function test_stale_credentials_are_not_reported_as_a_switched_off_integration(): void
+    {
+        // Deliberately NOT configure(): live settings stay empty while the
+        // client below holds credentials of its own.
+        $this->assertFalse(LitsrmmConfig::isConfigured(), 'precondition: live credentials are absent');
+        $this->assertTrue(LitsrmmConfig::isEnabled(), 'precondition: the operator switch is ON');
+
+        $client = $this->clientWithResponses([
+            new Response(200, [], json_encode(['data' => []])),
+        ]);
+
+        try {
+            $client->get('v1/clients');
+            $this->fail('a client whose live credentials are gone must refuse');
+        } catch (LitsrmmClientException $e) {
+            $this->assertStringNotContainsString('switched off', $e->getMessage(),
+                'the switch is ON: naming it is a misdiagnosis an operator cannot act on');
+            $this->assertStringContainsString('not currently configured', $e->getMessage(),
+                'and the refusal must name the mechanism that is actually true');
+        }
+
+        $this->assertCount(0, $this->history, 'and it refuses before the network either way');
     }
 
     public function test_a_missing_base_url_refuses_instead_of_guessing_a_host(): void
