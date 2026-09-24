@@ -12,6 +12,11 @@ class TacticalSiteController extends Controller
 {
     public function index(TacticalClient $tactical)
     {
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Tactical RMM is disabled or not configured.');
+        }
+
         try {
             $tacticalClients = $tactical->getClients();
         } catch (TacticalClientException) {

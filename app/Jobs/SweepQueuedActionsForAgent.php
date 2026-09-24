@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Enums\TechnicianRunState;
 use App\Models\TechnicianRun;
 use App\Services\Tactical\OfflineActionSweep;
+use App\Support\TacticalConfig;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -40,7 +41,7 @@ class SweepQueuedActionsForAgent implements ShouldQueue
      */
     public static function dispatchIfQueued(string $agentId): void
     {
-        if ($agentId === '') {
+        if ($agentId === '' || ! TacticalConfig::isEnabled()) {
             return;
         }
 

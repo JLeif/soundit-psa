@@ -656,7 +656,7 @@ class TacticalDeviceSyncService
 
                 // Offline→online flip for an agent with queued actions → run its queue.
                 if (isset($queuedAgentStatus[$agentId]) && $queuedAgentStatus[$agentId] !== 'online' && $tacticalAsset->status === 'online') {
-                    SweepQueuedActionsForAgent::dispatch((string) $agentId);
+                    SweepQueuedActionsForAgent::dispatchIfQueued((string) $agentId);
                 }
 
                 // The link keeps its OWN transaction — linkOrCreateAsset already

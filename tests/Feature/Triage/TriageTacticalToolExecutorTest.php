@@ -17,6 +17,13 @@ class TriageTacticalToolExecutorTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
+    }
+
     public function test_tactical_hostname_resolution_searches_within_ticket_client_before_denying_collisions(): void
     {
         $otherClient = Client::factory()->create();

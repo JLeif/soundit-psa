@@ -12,8 +12,6 @@ use App\Services\AttachmentService;
 use App\Services\Comet\CometClient;
 use App\Services\Comet\CometJobService;
 use App\Services\Wiki\Mining\WikiRedactor;
-use App\Support\CometConfig;
-use App\Support\TacticalConfig;
 use App\Support\WikiConfig;
 use Illuminate\Support\Facades\Log;
 
@@ -884,11 +882,7 @@ class ContextBuilder
         if ($client->zorus_customer_id && TriageToolDefinitions::isZorusAvailable()) {
             $available[] = '- Zorus (use zorus_* tools for DNS filtering issues)';
         }
-        // Routed through the predicates for the same anti-drift reason, even though these two
-        // are behaviourally identical today (TacticalConfig/CometConfig define isEnabled() AS
-        // isConfigured(), so there is no separate master switch to miss). If either ever gains
-        // a real switch, it lands here for free instead of becoming the next silent
-        // contradiction between the prompt and the tool surface.
+        // Use the same availability predicates as tool publication.
         if ($asset = $client->assets()->whereNotNull('tactical_asset_id')->exists()) {
             if (TriageToolDefinitions::isTacticalAvailable()) {
                 $available[] = '- Tactical RMM (use tactical_* tools for device diagnostics, checks, services, software)';

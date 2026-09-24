@@ -9,6 +9,7 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Tactical\Actions\InvalidActionParams;
 use App\Services\Tactical\Actions\TacticalAction;
 use App\Services\Tactical\Actions\TacticalActionResult;
+use App\Support\TacticalConfig;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -71,6 +72,13 @@ class TacticalActionService
             return $this->audit(
                 $action, $target, null, $label, $agentId, $params, $ticketId, $correlationId,
                 TacticalActionResult::denied('Not authorized to dispatch Tactical actions'),
+            );
+        }
+
+        if (! TacticalConfig::isEnabled()) {
+            return $this->audit(
+                $action, $target, $actor, $label, $agentId, $params, $ticketId, $correlationId,
+                TacticalActionResult::blocked('Tactical integration is disabled or not configured'),
             );
         }
 

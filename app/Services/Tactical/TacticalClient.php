@@ -704,7 +704,7 @@ class TacticalClient
      */
     public static function cachedPolicies(): array
     {
-        if (! TacticalConfig::isConfigured()) {
+        if (! TacticalConfig::isEnabled()) {
             return [];
         }
 

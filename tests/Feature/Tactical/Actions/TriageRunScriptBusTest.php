@@ -26,6 +26,13 @@ class TriageRunScriptBusTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
+    }
+
     private function bindClient(array $queue): void
     {
         $stack = HandlerStack::create(new MockHandler($queue));

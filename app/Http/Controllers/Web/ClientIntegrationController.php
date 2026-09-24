@@ -183,8 +183,8 @@ class ClientIntegrationController extends Controller
      */
     public function provisionTactical(\Illuminate\Http\Request $request, Client $client)
     {
-        if (! \App\Support\TacticalConfig::isConfigured()) {
-            return back()->with('error', 'Tactical RMM is not configured.');
+        if (! \App\Support\TacticalConfig::isEnabled()) {
+            return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
         if ($client->tactical_site_id) {
@@ -229,7 +229,7 @@ class ClientIntegrationController extends Controller
      */
     private function pushCometCredsToTactical(Client $client): void
     {
-        if (! \App\Support\TacticalConfig::isConfigured() || ! $client->tactical_site_id) {
+        if (! \App\Support\TacticalConfig::isEnabled() || ! $client->tactical_site_id) {
             return;
         }
 

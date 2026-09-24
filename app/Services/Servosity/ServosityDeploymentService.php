@@ -330,8 +330,8 @@ class ServosityDeploymentService
             return;
         }
 
-        if (! TacticalConfig::isConfigured()) {
-            Log::warning('[Servosity] Tactical not configured, skipping field push');
+        if (! TacticalConfig::isEnabled()) {
+            Log::warning('[Servosity] Tactical disabled or not configured, skipping field push');
 
             return;
         }

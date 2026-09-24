@@ -29,8 +29,8 @@ class TacticalProvisionMacosCheck extends Command
 
     public function handle(): int
     {
-        if (! TacticalConfig::isConfigured()) {
-            $this->warn('Tactical RMM is not configured.');
+        if (! TacticalConfig::isEnabled()) {
+            $this->warn('Tactical RMM is disabled or not configured.');
 
             return self::FAILURE;
         }

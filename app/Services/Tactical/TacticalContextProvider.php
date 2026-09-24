@@ -16,6 +16,10 @@ final class TacticalContextProvider
 
     public function forAsset(Asset $asset, int $maxTokens = self::DEFAULT_TOKEN_BUDGET): ?PromptBlock
     {
+        if (! \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable()) {
+            return null;
+        }
+
         // live:true => bounded refresh (LIVE_TIMEOUT_SECONDS), degrades to snapshot, never throws (G5).
         $insight = $this->insights->forAsset($asset, live: true);
         if (! $insight->linked) {
