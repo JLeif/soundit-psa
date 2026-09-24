@@ -71,4 +71,177 @@ class CippProjectionMessageTest extends TestCase
         }
         Http::assertNothingSent();
     }
+
+    /**
+     * The drift warning must not name a cause this function cannot establish.
+     *
+     * Four callers of projectRows() CAN filter rows before calling it, and
+     * every one of those filters is CONDITIONAL: shapeEvents only when
+     * filtered_by_days is an int, shapeMessageTrace on a non-empty
+     * sender/recipient, shapeMailQuarantine on a non-empty recipient,
+     * shapeMailboxRules only when a mailbox was requested. A fifth caller,
+     * shapeTenantMailboxRules, drops an empty-list sentinel, but that CANNOT
+     * hide a tracked field: the sentinel has no resolvable identity and its
+     * name is 'No rules found', and 'name' is itself a DEFAULT_FIELDS entry.
+     *
+     * So when one of the four conditional filters is active, the rows this
+     * function inspects are a SUBSET of the upstream response, and a field
+     * carried only by dropped rows never resolves here while DEFAULT_FIELDS
+     * and FIELD_ALIASES are both correct -- the constants cannot be blamed
+     * from inside this function.
+     *
+     * This control drives that exact case through the real filtering caller:
+     * two message-trace rows, only one carrying FromIP/ToIP, filtered by
+     * sender to the row that does not. The constants are untouched and
+     * correct, and the warning still fires.
+     */
+    public function test_the_drift_warning_does_not_blame_the_constants_for_a_filtered_subset(): void
+    {
+        Http::preventStrayRequests();
+        Log::spy();
+
+        $rows = [
+            [
+                'MessageTraceId' => 'dropped-by-the-sender-filter',
+                'Received' => '2026-09-01T00:00:00Z',
+                'SenderAddress' => 'keep@example.test',
+                'RecipientAddress' => 'r@example.test',
+                'Subject' => 'carries the IP fields',
+                'Status' => 'Delivered',
+                'FromIP' => '203.0.113.1',
+                'ToIP' => '203.0.113.2',
+            ],
+            [
+                'MessageTraceId' => 'survives-the-filter',
+                'Received' => '2026-09-01T00:00:00Z',
+                'SenderAddress' => 'other@example.test',
+                'RecipientAddress' => 'r@example.test',
+                'Subject' => 'no IP fields',
+                'Status' => 'Delivered',
+            ],
+        ];
+
+        app(CippToolContract::class)->shape(
+            'cipp_list_message_trace',
+            $rows,
+            ['sender' => 'other@example.test'],
+            null,
+        );
+
+        // Precondition: the warning really did fire on this submission, so the
+        // assertions below cannot pass because nothing was logged at all.
+        Log::shouldHaveReceived('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => ($context['tool'] ?? null) === 'cipp_list_message_trace'
+                && in_array('FromIP', $context['missing_fields'] ?? [], true)
+        );
+
+        // The claim under test: NO cause is named, at ANY level, in the
+        // message OR anywhere in the context array. Scoping this to warning()
+        // and to the message alone would let a restatement escape by moving
+        // level (a notice) or by moving surface (a 'hint' key in the context),
+        // and the whole point of the change is that the cause is not asserted.
+        // G-14 is in STANDARDS at base 73b08287.
+        $namesACause = static fn (mixed $value): bool => (bool) preg_match(
+            '/DEFAULT_FIELDS|FIELD_ALIASES|out of sync/',
+            is_scalar($value) ? (string) $value : json_encode($value, JSON_PARTIAL_OUTPUT_ON_ERROR)
+        );
+
+        // Matched at EVERY arity: Log::notice($message) takes one argument,
+        // Log::warning($message, $context) two, Log::log($level, $message,
+        // $context) three. An args array only matches a call of the same
+        // arity, so a single two-element matcher would silently miss a
+        // one-argument restatement -- which is exactly how the notice mutant
+        // survived the first version of this control.
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $level) {
+            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause)]);
+            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause), \Mockery::any()]);
+            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::on($namesACause)]);
+            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause), \Mockery::any(), \Mockery::any()]);
+            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::on($namesACause), \Mockery::any()]);
+            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::any(), \Mockery::on($namesACause)]);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * The positive control for the one above. What it covers that nothing else
+     * does: the control above drives a FILTERED call, so it cannot show that
+     * the guard still fires on the UNFILTERED path -- a fix that silenced the
+     * warning whenever no filter had run would keep that control green. This
+     * one pins the unfiltered case and the full context shape (missing_fields,
+     * row_count, first_row_keys) that an operator reads instead of a cause.
+     *
+     * (The "deleting the warning outright" reason this docblock used to give
+     * was already false: the control above asserts warning() once, so a
+     * deletion fails it there.)
+     */
+    public function test_a_genuinely_absent_field_is_still_reported_on_an_unfiltered_call(): void
+    {
+        Http::preventStrayRequests();
+        Log::spy();
+
+        app(CippToolContract::class)->shape(
+            'cipp_list_message_trace',
+            [[
+                'MessageTraceId' => 'only-row',
+                'Received' => '2026-09-01T00:00:00Z',
+                'SenderAddress' => 's@example.test',
+                'RecipientAddress' => 'r@example.test',
+                'Subject' => 'no IP fields',
+                'Status' => 'Delivered',
+            ]],
+            [],
+            null,
+        );
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => ($context['tool'] ?? null) === 'cipp_list_message_trace'
+                && in_array('FromIP', $context['missing_fields'] ?? [], true)
+                && in_array('ToIP', $context['missing_fields'] ?? [], true)
+                && ($context['row_count'] ?? null) === 1
+                && in_array('MessageTraceId', $context['first_row_keys'] ?? [], true)
+        );
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * Round 1 contract:1, verified by execution: resolveKey() is an exact-case
+     * array_key_exists over FIELD_ALIASES[$field] ?? [$field], so a row that
+     * DOES carry the field under an unaliased casing is still reported. The
+     * message must therefore say "never resolved", never "absent" - the latter
+     * is a false claim about the data on precisely the alias-drift path this
+     * guard exists to surface.
+     */
+    public function test_a_field_present_under_an_unaliased_casing_is_not_called_absent(): void
+    {
+        Log::spy();
+        Http::fake();
+
+        // EVERY row carries the field, under a casing FIELD_ALIASES does not map.
+        $rows = [
+            ['AccountEnabled' => true, 'JobTitle' => 'Tech', 'displayName' => 'A', 'userPrincipalName' => 'a@example.test'],
+            ['AccountEnabled' => false, 'JobTitle' => 'Eng', 'displayName' => 'B', 'userPrincipalName' => 'b@example.test'],
+        ];
+
+        app(CippToolContract::class)->shape('cipp_list_users', $rows, [], null);
+
+        // Precondition: the warning fired and named the unresolved field, so
+        // the assertion below cannot pass because nothing was logged.
+        Log::shouldHaveReceived('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => ($context['tool'] ?? null) === 'cipp_list_users'
+                && in_array('accountEnabled', $context['missing_fields'] ?? [], true)
+                && in_array('AccountEnabled', $context['first_row_keys'] ?? [], true)
+        );
+
+        // The claim under test: the row carries the data, so the message must
+        // not assert the field is absent from it.
+        Log::shouldNotHaveReceived('warning', [
+            \Mockery::pattern('/absent from every row/'),
+            \Mockery::any(),
+        ]);
+
+        Http::assertNothingSent();
+    }
 }
