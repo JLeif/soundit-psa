@@ -80,6 +80,13 @@ This retires Jeeves's 2026-09-04 bar on putting integration detail in the public
 
 Source: card `6aa986d5`, retained 2026-09-15. Unknown is refusal, never a pass. A bare grant runs immediate; held-only verbs never offer immediate execution. Do not infer mode authority from a permissive fallback or missing grant data. Preserve the distinction between a capability's catalog presence, caller grant and live availability.
 
+<a id="runtime-mechanism-strings"></a>
+## 2026-09-23 — Runtime mechanism strings
+
+Source: adopted development ruling on runtime mechanism strings, coordination card `Ujy42wr5`, retained by the sweep in issue #3265 and PR #3266. The adoption record and its round-two clarification are held in private coordination; this public record carries the rule without private thread content.
+
+An operator-facing runtime string that asserts why something happened, how a function behaves, or what is true of data is output and must be true on every emitting path. Pure event labels name an event without asserting a mechanism and are outside this rule. Work one site at a time: first delete an explanatory clause when structured keys already carry the fact or it is false or unverifiable on any emitting path; otherwise assert the claim on every emitting arm, killing a swap/merge-arms mutant or a predicate-weakening mutant for a single arm. Logging controls cover every exposed level and generic log calls, not just the expected record's level. Prose with an executable citation is the last resort. Verify truth by isolated execution before pinning text; do not bulk-assert strings or cite suite totals as truth evidence. Cite methods, not unstable line numbers. This governs new mechanism strings too; comments and names keep their separate delete-or-rename remedy. [STANDARDS G-14](../STANDARDS.md#later-development-obligations) indexes this adopted rule.
+
 <a id="reporting"></a>
 ## Measured reporting
 
