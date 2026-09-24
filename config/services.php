@@ -58,6 +58,17 @@ return [
         'webhook_secret' => env('LEVEL_WEBHOOK_SECRET'),
     ],
 
+    // Leif IT Solutions RMM. base_url has NO default on purpose: LITSRMM is
+    // self-hosted, so there is no public host to fall back to, and a guessed
+    // default would aim credentialed requests at whatever answers on that
+    // address. Absent base_url means not configured (LitsrmmConfig).
+    'litsrmm' => [
+        'api_key' => env('LITSRMM_API_KEY'),
+        'base_url' => env('LITSRMM_BASE_URL'),
+        'request_timeout' => (int) env('LITSRMM_REQUEST_TIMEOUT', 30),
+        'webhook_secret' => env('LITSRMM_WEBHOOK_SECRET'),
+    ],
+
     'plivo' => [
         'auth_id' => env('PLIVO_AUTH_ID'),
         'auth_token' => env('PLIVO_AUTH_TOKEN'),
