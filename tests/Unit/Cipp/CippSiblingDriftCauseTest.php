@@ -215,6 +215,14 @@ class CippSiblingDriftCauseTest extends TestCase
             $warnings[0]
         );
 
+        // The forbidden claim, asserted separately from the equality above so a
+        // failure names WHAT leaked rather than only that the string differed. The
+        // guard cannot establish drift for any row it sees, so no CA-guard message
+        // may contain the word — on any arm, for any input.
+        foreach ($warnings as $warning) {
+            $this->assertStringNotContainsString('drift', $warning[1]);
+        }
+
         Http::assertNothingSent();
     }
 
@@ -270,14 +278,31 @@ class CippSiblingDriftCauseTest extends TestCase
                 ['id' => $guid, 'Name' => 'Something', 'error' => 'Forbidden'],
                 ['id', 'Name', 'error'],
             ],
-            // THE DECISION THIS ROUND MAKES. A real CA policy row whose targeting keys
-            // are gone is the one input where "the schema moved" is the true cause, and
-            // it now takes the observation wording like everything else. The word was
-            // dropped rather than narrowed because no cheap predicate separates this row
-            // from the Graph objects above; first_row_keys is what tells them apart.
+            // THE TRUE-DRIFT INPUTS. DO NOT TRIM THESE AS REDUNDANT.
+            //
+            // These two rows are the one case where "the schema moved" is the TRUE
+            // cause: a real CA policy row whose targeting keys are gone. They are kept
+            // deliberately, pinned to the observation wording, because that is what
+            // proves this change narrowed the WORDING without deleting the WARNING.
+            // Each must still warn exactly ONCE. A later reader who removes them as
+            // duplicates of the Graph rows above would leave the suite unable to tell
+            // a narrowed message from a deleted guard.
+            //
+            // The word was dropped rather than narrowed a fourth time because no cheap
+            // predicate separates these rows from the Graph objects above — the guard
+            // sees the output of normalizeRows() and has no idea which endpoint the row
+            // came from. first_row_keys is what tells a reader them apart.
             'a real CA policy row with its targeting keys gone' => [
                 ['id' => $guid, 'displayName' => 'Require MFA', 'state' => 'enabled'],
                 ['id', 'displayName', 'state'],
+            ],
+            // The same true-drift input keyed 'Id'. FIELD_ALIASES (:1127) maps id to
+            // ['id','Id','ID'] because CIPP's casing varies by endpoint, so this row
+            // must be treated identically to the one above rather than falling into a
+            // different arm.
+            'a real CA policy row keyed Id with its targeting keys gone' => [
+                ['Id' => $guid, 'displayName' => 'Require MFA', 'state' => 'enabled'],
+                ['Id', 'displayName', 'state'],
             ],
         ];
     }
