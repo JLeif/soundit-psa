@@ -626,4 +626,95 @@ class LitsrmmClientMappingTest extends TestCase
             })
             ->once();
     }
+
+    /**
+     * The transport guard runs BEFORE the Authorization header is built, and
+     * that ordering is load-bearing (#3361 contract:4).
+     *
+     * Since PHP 7 a backtrace reports the CURRENT value of a modified
+     * parameter, so with the guard below the header the refusal thrown from
+     * request() carries a frame whose $options argument holds the bearer
+     * token. Any reporter that serialises frame args -- an error page, Sentry,
+     * Flare -- then records it. Ordering the guard first means no refused
+     * request can ever have composed the credential.
+     *
+     * THIS CONTROL MUST KILL THE MUTANT ITSELF. zend.exception_ignore_args is
+     * On here and On in production, which strips args from traces and would
+     * make the swapped ordering look identical to the correct one. MEASURED:
+     * with the ini_set below removed, the swapped-ordering mutant PASSES this
+     * test green. So the test turns the protection off for the duration --
+     * the php.ini-development default, and the configuration in which the
+     * exposure is real -- and restores it. Relying on the ambient setting
+     * would be a control that passes because of the environment rather than
+     * because of the code.
+     */
+    public function test_a_refused_transport_never_composed_the_credential(): void
+    {
+        $this->configure();
+
+        // Plaintext to a remote host: refused by assertTransportIsSafe().
+        $client = new LitsrmmClient([
+            'api_key' => 'test-token-value',
+            'base_url' => 'http://litsrmm.test',
+        ]);
+
+        $previous = ini_set('zend.exception_ignore_args', '0');
+
+        $this->assertSame('0', ini_get('zend.exception_ignore_args'),
+            'the control cannot discriminate unless trace args are actually captured');
+
+        try {
+            $client->get('v1/clients');
+
+            $this->fail('a plaintext base URL must refuse before any request is composed');
+        } catch (LitsrmmClientException $e) {
+            $serialised = json_encode($e->getTrace()).' '.$e->getTraceAsString().' '.$e->getMessage();
+
+            $this->assertStringNotContainsString('test-token-value', $serialised,
+                'the refusal carries the credential in its trace: the Authorization header was built before the guard ran');
+            $this->assertStringNotContainsString('Bearer', $serialised,
+                'the refusal carries an Authorization header it should never have composed');
+        } finally {
+            ini_set('zend.exception_ignore_args', $previous === false ? '1' : $previous);
+        }
+
+        // The restore is part of the contract: leaving args captured would
+        // change how every later test in this process reports a failure.
+        $this->assertSame('1', ini_get('zend.exception_ignore_args'),
+            'the control must restore the setting it borrowed');
+    }
+
+    /**
+     * The same ordering guarantee for the endpoint guard one line below it.
+     *
+     * assertEndpointStaysOnTheConfiguredHost() also runs before the header, so
+     * an endpoint that would steer the request off-host refuses without ever
+     * composing the credential either.
+     */
+    public function test_a_refused_endpoint_never_composed_the_credential(): void
+    {
+        $this->configure();
+
+        $client = new LitsrmmClient([
+            'api_key' => 'test-token-value',
+            'base_url' => 'https://litsrmm.test',
+        ]);
+
+        $previous = ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            $client->get('https://evil.example/v1/clients');
+
+            $this->fail('an off-host endpoint must refuse before any request is composed');
+        } catch (LitsrmmClientException $e) {
+            $serialised = json_encode($e->getTrace()).' '.$e->getTraceAsString().' '.$e->getMessage();
+
+            $this->assertStringNotContainsString('test-token-value', $serialised,
+                'the off-host refusal carries the credential in its trace');
+            $this->assertStringNotContainsString('Bearer', $serialised,
+                'the off-host refusal carries an Authorization header it should never have composed');
+        } finally {
+            ini_set('zend.exception_ignore_args', $previous === false ? '1' : $previous);
+        }
+    }
 }
