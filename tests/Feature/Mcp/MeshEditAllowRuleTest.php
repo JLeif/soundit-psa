@@ -50,6 +50,25 @@ class MeshEditAllowRuleTest extends TestCase
 
     private const TENANT = '11111111-2222-3333-4444-555555555555';
 
+    /**
+     * #1416 - every expiry in this file is derived from now(), and several tests
+     * derive one to BUILD a request and derive it AGAIN inside the assertion that
+     * checks the result. Those two derivations straddle a minute boundary roughly
+     * once per hour of CI, and startOfMinute() then makes them differ by exactly
+     * one minute, failing a test no production change touched.
+     *
+     * Freezing here fixes the clock for the whole test, so a single derivation and
+     * a later one are the same instant BY CONSTRUCTION rather than by luck. Tests
+     * that need the clock to move still call travel() explicitly; travel() moves a
+     * frozen clock just as it moves a running one, so nothing here is disarmed.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->freezeTime();
+    }
+
     private function configureMesh(): void
     {
         Setting::setEncrypted('mesh_api_key', 'k');
