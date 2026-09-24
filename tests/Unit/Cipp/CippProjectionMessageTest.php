@@ -75,14 +75,17 @@ class CippProjectionMessageTest extends TestCase
     /**
      * The drift warning must not name a cause this function cannot establish.
      *
-     * Four callers of projectRows() CAN filter rows before calling it, and
-     * every one of those filters is CONDITIONAL: shapeEvents only when
-     * filtered_by_days is an int, shapeMessageTrace on a non-empty
-     * sender/recipient, shapeMailQuarantine on a non-empty recipient,
-     * shapeMailboxRules only when a mailbox was requested. A fifth caller,
-     * shapeTenantMailboxRules, drops an empty-list sentinel, but that CANNOT
-     * hide a tracked field: the sentinel has no resolvable identity and its
-     * name is 'No rules found', and 'name' is itself a DEFAULT_FIELDS entry.
+     * Four callers of projectRows() CAN filter rows before calling it:
+     * shapeEvents only when filtered_by_days is an int, shapeMessageTrace on a
+     * non-empty sender/recipient, shapeMailQuarantine on a non-empty recipient,
+     * and shapeMailboxRules whenever a mailbox was requested -- which is EVERY
+     * call that reaches it, since both transports refuse the tool without a
+     * user_id, so that one is conditional at function scope but effectively
+     * always armed. A fifth caller, shapeTenantMailboxRules, drops an all-clear
+     * sentinel row that DOES carry a tracked key ('name'); it is harmless only
+     * because upstream writes that sentinel as the whole payload, never mixed
+     * with real rules, so the drop leaves zero rows and the $rows !== [] guard
+     * stops projectRows reporting on it.
      *
      * So when one of the four conditional filters is active, the rows this
      * function inspects are a SUBSET of the upstream response, and a field
@@ -104,7 +107,7 @@ class CippProjectionMessageTest extends TestCase
             [
                 'MessageTraceId' => 'dropped-by-the-sender-filter',
                 'Received' => '2026-09-01T00:00:00Z',
-                'SenderAddress' => 'keep@example.test',
+                'SenderAddress' => 'dropped@example.test',
                 'RecipientAddress' => 'r@example.test',
                 'Subject' => 'carries the IP fields',
                 'Status' => 'Delivered',
@@ -114,7 +117,7 @@ class CippProjectionMessageTest extends TestCase
             [
                 'MessageTraceId' => 'survives-the-filter',
                 'Received' => '2026-09-01T00:00:00Z',
-                'SenderAddress' => 'other@example.test',
+                'SenderAddress' => 'kept@example.test',
                 'RecipientAddress' => 'r@example.test',
                 'Subject' => 'no IP fields',
                 'Status' => 'Delivered',
@@ -124,7 +127,7 @@ class CippProjectionMessageTest extends TestCase
         app(CippToolContract::class)->shape(
             'cipp_list_message_trace',
             $rows,
-            ['sender' => 'other@example.test'],
+            ['sender' => 'kept@example.test'],
             null,
         );
 
@@ -133,6 +136,12 @@ class CippProjectionMessageTest extends TestCase
         Log::shouldHaveReceived('warning')->once()->withArgs(
             fn (string $message, array $context): bool => ($context['tool'] ?? null) === 'cipp_list_message_trace'
                 && in_array('FromIP', $context['missing_fields'] ?? [], true)
+                // row_count must be the POST-filter count (1 of the 2 submitted).
+                // The code comment tells operators row_count is what separates
+                // "filtered subset" from "constants wrong", so a mutant that
+                // logged the upstream count would take that signal away while
+                // every other assertion here stayed green.
+                && ($context['row_count'] ?? null) === 1
         );
 
         // The claim under test: NO cause is named, at ANY level, in the
@@ -141,36 +150,65 @@ class CippProjectionMessageTest extends TestCase
         // level (a notice) or by moving surface (a 'hint' key in the context),
         // and the whole point of the change is that the cause is not asserted.
         // G-14 is in STANDARDS at base 73b08287.
-        $namesACause = static fn (mixed $value): bool => (bool) preg_match(
-            '/DEFAULT_FIELDS|FIELD_ALIASES|out of sync/',
-            is_scalar($value) ? (string) $value : json_encode($value, JSON_PARTIAL_OUTPUT_ON_ERROR)
-        );
 
-        // Matched at EVERY arity: Log::notice($message) takes one argument,
-        // Log::warning($message, $context) two, Log::log($level, $message,
-        // $context) three. An args array only matches a call of the same
-        // arity, so a single two-element matcher would silently miss a
-        // one-argument restatement -- which is exactly how the notice mutant
-        // survived the first version of this control.
-        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug', 'log'] as $level) {
-            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause)]);
-            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause), \Mockery::any()]);
-            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::on($namesACause)]);
-            Log::shouldNotHaveReceived($level, [\Mockery::on($namesACause), \Mockery::any(), \Mockery::any()]);
-            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::on($namesACause), \Mockery::any()]);
-            Log::shouldNotHaveReceived($level, [\Mockery::any(), \Mockery::any(), \Mockery::on($namesACause)]);
+        // PIN the one call that is allowed -- exact message AND the whole
+        // context by strict equality -- then pin the warning TOTAL at one and
+        // forbid every other level, both with the no-argument form, which
+        // matches any arity. The total pin is not redundant: a withArgs()
+        // expectation only counts calls whose arguments match it, so once()
+        // on the pinned call alone cannot see a SECOND warning() naming the
+        // cause in any words. The arity matrix this control carried before
+        // was a three-word DENYLIST, so a paraphrase naming the same cause in
+        // other words passed it, and each matcher only matched its own arity.
+        //
+        // The context is pinned by VALUE, not just by key list. A key-list pin
+        // leaves every value free: a cause appended to missing_fields or
+        // first_row_keys, in any wording, would pass it. With the whole
+        // context equal to what this fixture determines, no surface of the
+        // permitted call -- message, key or value -- can carry a cause.
+        //
+        // The expected values follow from DEFAULT_FIELDS for this tool, which
+        // declares both casings of the IP fields and has no FIELD_ALIASES
+        // entry for them: the surviving row carries no casing of either, so
+        // the case-insensitive hedge suppresses neither twin and all four are
+        // reported, in DEFAULT_FIELDS order. first_row_keys is the surviving
+        // row's own key order, and row_count the post-filter count.
+        Log::shouldHaveReceived('warning')
+            ->once()
+            ->withArgs(function (string $message, array $context): bool {
+                return $message === '[CippTools] Field(s) never resolved in any row this call projected'
+                    && $context === [
+                        'tool' => 'cipp_list_message_trace',
+                        'row_count' => 1,
+                        'missing_fields' => ['FromIP', 'fromIP', 'ToIP', 'toIP'],
+                        'first_row_keys' => ['MessageTraceId', 'Received', 'SenderAddress', 'RecipientAddress', 'Subject', 'Status'],
+                    ];
+            });
+
+        // Exactly ONE warning() in total, whatever its arguments. Together with
+        // the pin above, that one call IS the pinned call, and nothing else is
+        // logged at this level.
+        Log::shouldHaveReceived('warning')->once();
+
+        foreach (['emergency', 'alert', 'critical', 'error', 'notice', 'info', 'debug', 'log', 'write'] as $level) {
+            Log::shouldNotHaveReceived($level);
         }
 
         Http::assertNothingSent();
     }
 
     /**
-     * The positive control for the one above. What it covers that nothing else
-     * does: the control above drives a FILTERED call, so it cannot show that
-     * the guard still fires on the UNFILTERED path -- a fix that silenced the
-     * warning whenever no filter had run would keep that control green. This
-     * one pins the unfiltered case and the full context shape (missing_fields,
-     * row_count, first_row_keys) that an operator reads instead of a cause.
+     * The positive control for the one above, on the message-trace tool.
+     *
+     * It does NOT uniquely cover the unfiltered path -- the casing control
+     * below drives cipp_list_users through the unfiltered default arm too,
+     * and so does the relay suite. (An earlier version of this docblock
+     * claimed it did; that claim was false, in the docblock of a control
+     * enforcing a PR about unverified claims.) What it adds is the pairing:
+     * the SAME tool and the SAME field set as the filtered control above,
+     * differing only in whether a filter ran, so the two isolate the filter
+     * as the variable. It also pins the full context shape (tool, row_count,
+     * missing_fields, first_row_keys) that an operator reads instead of a cause.
      *
      * (The "deleting the warning outright" reason this docblock used to give
      * was already false: the control above asserts warning() once, so a
