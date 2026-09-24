@@ -1834,7 +1834,13 @@ class CippToolContract
         // rows the caller dropped is absent here while the constants are
         // correct. An operator who trusted the named cause would go and edit
         // constants that are not wrong. row_count is that post-filter count.
-        Log::warning('[CippTools] Field(s) absent from every row this call projected', [
+        // The wording is "never resolved", not "absent": resolveKey() is an
+        // exact-case array_key_exists over FIELD_ALIASES[$field] ?? [$field],
+        // so a row CAN carry the field under a casing that has no alias and
+        // still be reported here. "Absent" would be a false claim about the
+        // data on exactly that path; "never resolved" is true on every path.
+        // first_row_keys shows the casing actually present.
+        Log::warning('[CippTools] Field(s) never resolved in any row this call projected', [
             'tool' => $toolName,
             'row_count' => count($rows),
             'missing_fields' => array_values($missing),

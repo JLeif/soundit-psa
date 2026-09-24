@@ -176,4 +176,43 @@ class CippProjectionMessageTest extends TestCase
 
         Http::assertNothingSent();
     }
+
+    /**
+     * Round 1 contract:1, verified by execution: resolveKey() is an exact-case
+     * array_key_exists over FIELD_ALIASES[$field] ?? [$field], so a row that
+     * DOES carry the field under an unaliased casing is still reported. The
+     * message must therefore say "never resolved", never "absent" - the latter
+     * is a false claim about the data on precisely the alias-drift path this
+     * guard exists to surface.
+     */
+    public function test_a_field_present_under_an_unaliased_casing_is_not_called_absent(): void
+    {
+        Log::spy();
+        Http::fake();
+
+        // EVERY row carries the field, under a casing FIELD_ALIASES does not map.
+        $rows = [
+            ['AccountEnabled' => true, 'JobTitle' => 'Tech', 'displayName' => 'A', 'userPrincipalName' => 'a@example.test'],
+            ['AccountEnabled' => false, 'JobTitle' => 'Eng', 'displayName' => 'B', 'userPrincipalName' => 'b@example.test'],
+        ];
+
+        app(CippToolContract::class)->shape('cipp_list_users', $rows, [], null);
+
+        // Precondition: the warning fired and named the unresolved field, so
+        // the assertion below cannot pass because nothing was logged.
+        Log::shouldHaveReceived('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => $context['tool'] === 'cipp_list_users'
+                && in_array('accountEnabled', $context['missing_fields'], true)
+                && in_array('AccountEnabled', $context['first_row_keys'], true)
+        );
+
+        // The claim under test: the row carries the data, so the message must
+        // not assert the field is absent from it.
+        Log::shouldNotHaveReceived('warning', [
+            \Mockery::pattern('/absent from every row/'),
+            \Mockery::any(),
+        ]);
+
+        Http::assertNothingSent();
+    }
 }
