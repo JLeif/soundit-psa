@@ -265,6 +265,25 @@ class LitsrmmClientMappingTest extends TestCase
             'a different port on the configured host is a different service' => [
                 'https://litsrmm.test', '//litsrmm.test:8443/v1/x',
             ],
+            // AND THE SCHEME IS PART OF THE KEY, NOT ONLY THE PORT (#3500),
+            // AND THIS IS THE ONLY INPUT SHAPE THAT PROVES IT.
+            //
+            // Dropping the scheme from the origin key leaves it colliding on
+            // several pairs -- measured, https://h:80 == http://h and
+            // https://h:8443 == http://h:8443 -- but on a REMOTE host every
+            // one of those is caught anyway, one line later, by
+            // assertTransportIsSafe() refusing plain http. So a remote data
+            // set cannot tell the two rules apart, and a schemeless key looks
+            // perfectly safe through it.
+            //
+            // A LOOPBACK base is the seam: there plain http is legitimately
+            // exempt, so the origin key is the only thing left holding the
+            // scheme, and a downgrade on the SAME loopback host and port walks
+            // straight through without it. That is a narrow case, and it is
+            // exactly the vendor's documented same-host deployment.
+            'a scheme downgrade on a loopback base is still a different origin' => [
+                'https://localhost:8443', 'http://localhost:8443/v1/x',
+            ],
             // THE ORIGIN INCLUDES THE SCHEME (#3500 diff:1). getPort() is null
             // for each scheme's OWN default, so a host:port key read these as
             // one origin; on a loopback host the plain-http transport rule then
