@@ -78,20 +78,24 @@ class CippProjectionMessageTest extends TestCase
      * Four callers of projectRows() CAN filter rows before calling it:
      * shapeEvents only when filtered_by_days is an int, shapeMessageTrace on a
      * non-empty sender/recipient, shapeMailQuarantine on a non-empty recipient,
-     * and shapeMailboxRules whenever a mailbox was requested -- which is EVERY
-     * call that reaches it, since both transports refuse the tool without a
-     * user_id, so that one is conditional at function scope but effectively
-     * always armed. A fifth caller, shapeTenantMailboxRules, drops an all-clear
+     * and shapeMailboxRules whenever a mailbox was requested. That last one is
+     * armed on every call that arrives through the relay or cippQueryWithUser,
+     * since both refuse the tool without a user_id -- but shape() is PUBLIC and
+     * takes caller-supplied args, and this very file calls it directly, so
+     * "always armed" is a property of those two transports, not of the
+     * function. Treat it as conditional. A fifth caller, shapeTenantMailboxRules, drops an all-clear
      * sentinel row that DOES carry a tracked key ('name'); it is harmless only
      * because upstream writes that sentinel as the whole payload, never mixed
      * with real rules, so the drop leaves zero rows and the $rows !== [] guard
      * stops projectRows reporting on it.
      *
-     * So when one of the four conditional filters is active, the rows this
+     * So when any one of THE FIRST FOUR filters is active, the rows this
      * function inspects are a SUBSET of the upstream response, and a field
      * carried only by dropped rows never resolves here while DEFAULT_FIELDS
      * and FIELD_ALIASES are both correct -- the constants cannot be blamed
-     * from inside this function.
+     * from inside this function. The fifth is deliberately excluded: the
+     * paragraph above says its drop leaves ZERO rows, so it cannot produce a
+     * surviving subset, and including it here would contradict that.
      *
      * This control drives that exact case through the real filtering caller:
      * two message-trace rows, only one carrying FromIP/ToIP, filtered by
