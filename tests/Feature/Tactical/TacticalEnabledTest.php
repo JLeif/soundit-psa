@@ -152,9 +152,10 @@ class TacticalEnabledTest extends TestCase
         Setting::setValue('tactical_enabled', '0');
         $client = Mockery::mock(TacticalClient::class);
         $this->app->instance(TacticalClient::class, $client);
+        $scope = Client::factory()->create();
         $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], app(TacticalReadOnlyToolset::class)->execute('tactical_list_devices', [], 1));
-        $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], app(StaffTacticalActionToolExecutor::class)->execute('tactical_run_script', [], 1, 'test'));
-        $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], app(StaffTacticalAdminToolExecutor::class)->execute('tactical_sync_devices_now', [], null, 'test'));
+        $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], app(StaffTacticalActionToolExecutor::class)->execute('tactical_run_script', [], $scope->id, 'test'));
+        $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], app(StaffTacticalAdminToolExecutor::class)->execute('tactical_sync_devices_now', [], $scope->id, 'test'));
         $run = $this->queued();
         $this->assertSame('gate_declined', app(StaffTacticalActionToolExecutor::class)->runQueuedOnReconnect($run)->status);
         $this->assertSame('gate_declined', app(StaffTacticalActionToolExecutor::class)->approveStagedRun($run, 1)->status);
@@ -213,7 +214,10 @@ class TacticalEnabledTest extends TestCase
         Cache::put('tactical:policies', [['id' => 1, 'name' => 'Synthetic']], 300);
         $this->assertSame([], TacticalClient::cachedPolicies());
         $client = Client::factory()->create(['tactical_site_id' => 'Synthetic|Main']);
-        $this->app->instance(TacticalClient::class, Mockery::mock(TacticalClient::class));
+        $transport = Mockery::mock(TacticalClient::class);
+        $transport->shouldReceive('supportsInstall')->andReturn(true);
+        $transport->shouldReceive('getInstallerInfo')->andReturn(null);
+        $this->app->instance(TacticalClient::class, $transport);
         $service = app(PortalInstallService::class);
         $this->assertSame([], $service->supportedPlatforms($client));
         $this->assertNull($service->buildInstaller($client, 'windows'));
@@ -224,7 +228,9 @@ class TacticalEnabledTest extends TestCase
     public function test_disabled_commands_refuse_operational_work_and_allow_expiry_only_sweep(): void
     {
         Setting::setValue('tactical_enabled', '0');
-        $this->app->instance(TacticalClient::class, Mockery::mock(TacticalClient::class));
+        $transport = Mockery::mock(TacticalClient::class);
+        $transport->shouldReceive('getScripts')->andReturn([]);
+        $this->app->instance(TacticalClient::class, $transport);
         foreach (['tactical:sync-devices', 'tactical:sync-scripts', 'tactical:reconcile-alerts', 'tactical:provision-macos-check'] as $command) {
             $this->artisan($command)->expectsOutputToContain('disabled or not configured')->assertFailed();
         }
@@ -316,6 +322,50 @@ class TacticalEnabledTest extends TestCase
         $ticket = Ticket::factory()->create();
         $executor = new \App\Services\Triage\TriageToolExecutor($ticket);
         $this->assertSame(['error' => 'Tactical RMM is disabled or not configured'], $executor->execute('tactical_get_device', ['hostname' => $asset->hostname]));
+    }
+
+    public function test_servosity_disabled_switch_suppresses_tactical_field_writes(): void
+    {
+        $asset = Asset::factory()->create();
+        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => 'SYNTHETIC']);
+        $calls = 0;
+        $transport = Mockery::mock(TacticalClient::class);
+        $transport->shouldReceive('setAgentCustomField')->andReturnUsing(function () use (&$calls) {
+            $calls++;
+        });
+        $this->app->instance(TacticalClient::class, $transport);
+        Setting::setValue('tactical_enabled', '0');
+        $service = app(\App\Services\Servosity\ServosityDeploymentService::class);
+        $service->disableBackup($asset);
+        $this->assertSame(0, $calls);
+        Setting::setValue('tactical_enabled', '1');
+        $service->disableBackup($asset);
+        $this->assertSame(4, $calls);
+    }
+
+    public function test_disabled_client_provisioning_refuses(): void
+    {
+        $this->actingAs(User::factory()->create());
+        $client = Client::factory()->create();
+        Setting::setValue('tactical_enabled', '0');
+        $this->post('/clients/'.$client->id.'/tactical/provision')->assertRedirect()->assertSessionHas('error', 'Tactical RMM is disabled or not configured.');
+    }
+
+    public function test_disabled_bulk_sync_cannot_dispatch_reconnect_jobs(): void
+    {
+        Queue::fake();
+        $run = $this->queued();
+        Client::factory()->create(['tactical_site_id' => 'Synthetic|Main', 'is_active' => true]);
+        $asset = Asset::factory()->create(['hostname' => 'SYNTHETIC']);
+        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => $run->queued_agent_id, 'hostname' => 'SYNTHETIC', 'status' => 'offline']);
+        $transport = new \GuzzleHttp\Client(['handler' => \GuzzleHttp\HandlerStack::create(new \GuzzleHttp\Handler\MockHandler([
+            new \GuzzleHttp\Psr7\Response(200, [], json_encode([['agent_id' => $run->queued_agent_id, 'hostname' => 'SYNTHETIC', 'client_name' => 'Synthetic', 'site_name' => 'Main', 'status' => 'online']])),
+        ]))]);
+        Setting::setValue('tactical_enabled', '0');
+        (new \App\Services\Tactical\TacticalDeviceSyncService(new TacticalClient($transport)))->syncDevices();
+        $this->assertSame('online', TacticalAsset::where('agent_id', $run->queued_agent_id)->value('status'));
+        Queue::assertNotPushed(SweepQueuedActionsForAgent::class);
+        $this->assertSame(TechnicianRunState::QueuedOffline, $run->fresh()->state);
     }
 
     public function test_dispatch_helper_obeys_switch_and_keeps_queue_intact(): void
