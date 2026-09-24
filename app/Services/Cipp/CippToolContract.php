@@ -1825,7 +1825,16 @@ class CippToolContract
             return;
         }
 
-        Log::warning('[CippTools] Field(s) never resolved in any row — DEFAULT_FIELDS/FIELD_ALIASES out of sync with CIPP response shape', [
+        // States what was observed and stops there. The earlier wording named
+        // DEFAULT_FIELDS/FIELD_ALIASES drift as the cause, which this function
+        // cannot establish: five of the six callers (shapeEvents,
+        // shapeMessageTrace, shapeMailQuarantine, shapeMailboxRules,
+        // shapeTenantMailboxRules) filter rows BEFORE calling projectRows, so
+        // $rows is a subset of the response and a field present only in the
+        // rows the caller dropped is absent here while the constants are
+        // correct. An operator who trusted the named cause would go and edit
+        // constants that are not wrong. row_count is that post-filter count.
+        Log::warning('[CippTools] Field(s) absent from every row this call projected', [
             'tool' => $toolName,
             'row_count' => count($rows),
             'missing_fields' => array_values($missing),
