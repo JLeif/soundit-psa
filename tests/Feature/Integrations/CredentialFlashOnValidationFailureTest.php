@@ -48,7 +48,7 @@ class CredentialFlashOnValidationFailureTest extends TestCase
      */
     public function test_a_failed_level_save_does_not_flash_the_api_key(): void
     {
-        $apiKey = 'level-api-key-'.str_repeat('K', 40);
+        $apiKey = str_repeat('K', 40);
 
         $response = $this->actingAs($this->admin())
             ->from(route('settings.integrations'))
@@ -80,7 +80,7 @@ class CredentialFlashOnValidationFailureTest extends TestCase
      */
     public function test_a_failed_level_save_does_not_flash_the_webhook_secret(): void
     {
-        $secret = 'level-webhook-secret-'.str_repeat('W', 40);
+        $secret = str_repeat('W', 40);
 
         $response = $this->actingAs($this->admin())
             ->from(route('settings.integrations'))
@@ -109,7 +109,7 @@ class CredentialFlashOnValidationFailureTest extends TestCase
      */
     public function test_a_failed_level_save_does_not_flash_the_install_account_token(): void
     {
-        $token = 'level-install-token-'.str_repeat('T', 40);
+        $token = str_repeat('T', 40);
 
         $response = $this->actingAs($this->admin())
             ->from(route('settings.integrations'))
@@ -138,7 +138,7 @@ class CredentialFlashOnValidationFailureTest extends TestCase
      */
     public function test_a_failed_comet_save_does_not_flash_the_admin_password(): void
     {
-        $password = 'comet-admin-'.str_repeat('P', 30);
+        $password = str_repeat('P', 30);
 
         $response = $this->actingAs($this->admin())
             ->from(route('settings.integrations'))

@@ -46,8 +46,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // The alternative is a hand-written strip in every controller method
         // that accepts a secret, which is a rule enforced by ~20 separate
         // remembering-to-do-its and silently absent from the next one
-        // written. Registering it against the handler covers every path that
-        // flashes input, including ones that do not exist yet.
+        // written. Registering it against the handler covers every validation
+        // failure, FormRequests included, and ones that do not exist yet. It
+        // does NOT cover an action that calls ->withInput() itself:
+        // RedirectResponse::withInput() flashes the whole request and never
+        // consults this list, so such an action must strip the secret
+        // locally, as PreferencesController does for sip_password.
         //
         // A local strip is still correct where an action wants the secret
         // out of the request entirely rather than only out of the flash;
@@ -68,13 +72,18 @@ return Application::configure(basePath: dirname(__DIR__))
             'client_secret',
             'comet_admin_password',
             'comet_backup_password',
+            'credentials',
+            'hdb_password',
+            'hdb_totp_secret',
             'install_account_token',
             'mcp_client_secret',
             'openai_api_key',
             'secret',
             'secret_key',
             'signing_secret',
+            'sip_password',
             'teams_bot_client_secret',
+            'technician_teams_webhook_url',
             'totp_secret',
             'wake_secret',
             'webhook_secret',
