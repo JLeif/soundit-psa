@@ -72,7 +72,7 @@ class PortalInstallLinkToolTest extends TestCase
     public function test_storage_exception_does_not_reach_response_audit_or_logs(): void
     {
         $client = Client::factory()->create(['tactical_site_id' => 123]);
-        $boundValue = 'synthetic-bound-install-secret';
+        $boundValue = 'synthetic-bound-install-value';
         $service = \Mockery::mock(\App\Services\Portal\PortalInstallService::class);
         $service->shouldReceive('getOrCreateInstallLink')->once()->andThrow(
             new \Illuminate\Database\QueryException('sqlite', 'update clients set portal_install_token = ?', [$boundValue], new \PDOException('synthetic storage failure'))
