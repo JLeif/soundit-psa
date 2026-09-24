@@ -64,6 +64,10 @@ return Application::configure(basePath: dirname(__DIR__))
         // mcp_token_label (a display label). Those carry a credential-shaped
         // NAME and no credential; suppressing them would break form
         // repopulation for no gain.
+        //
+        // 'credentials' is the client vault, and its editor is prefilled with
+        // the stored copy, so an unflashed edit would be replaced without any
+        // sign. clients/_form.blade.php shows a notice when that happens.
         $exceptions->dontFlash([
             'api_key',
             'api_secret',

@@ -3,6 +3,7 @@
 namespace Tests\Feature\Integrations;
 
 use App\Enums\UserRole;
+use App\Models\Client;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -158,6 +159,47 @@ class CredentialFlashOnValidationFailureTest extends TestCase
             session('_old_input'),
             'The Comet admin password was flashed to the session by a failed save.'
         );
+    }
+
+    /**
+     * The client vault is not flashed either, and its editor falls back to
+     * the stored copy, so the operator's edit would vanish silently. The
+     * edit page must say so when a failed save comes back, and only then.
+     */
+    public function test_a_failed_client_save_does_not_flash_the_vault_and_says_so(): void
+    {
+        $client = Client::factory()->create(['credentials' => 'stored vault text']);
+        $admin = $this->admin();
+        $notice = 'The save failed and the credentials below were not carried back from it';
+
+        $this->actingAs($admin)
+            ->get(route('clients.edit', $client))
+            ->assertOk()
+            ->assertDontSee($notice);
+
+        $response = $this->actingAs($admin)
+            ->from(route('clients.edit', $client))
+            ->patch(route('clients.update', $client), [
+                'name' => $client->name,
+                'website' => 'not-a-valid-url',
+                'credentials' => 'edited vault text',
+            ]);
+
+        $response->assertSessionHasErrors('website');
+        $this->assertNotNull(
+            session('_old_input'),
+            'precondition failed: nothing was flashed, so this control proves nothing'
+        );
+        $this->assertArrayNotHasKey(
+            'credentials',
+            session('_old_input'),
+            'The client credentials vault was flashed to the session by a failed save.'
+        );
+
+        $this->actingAs($admin)
+            ->get(route('clients.edit', $client))
+            ->assertOk()
+            ->assertSee($notice);
     }
 
     /**
