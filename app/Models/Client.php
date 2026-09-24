@@ -23,6 +23,7 @@ class Client extends Model
         'halo_id',
         'ninja_org_id',
         'level_group_id',
+        'litsrmm_client_id',
         'mesh_customer_id',
         'cipp_tenant_domain',
         'cipp_sync_group_id',
