@@ -292,6 +292,30 @@ class MineTicketKnowledgeTest extends TestCase
         $this->assertSame(0, WikiFact::count());
     }
 
+    public function test_shared_url_policy_at_mining_storage_boundary(): void
+    {
+        $this->enableWiki();
+        $client = Client::factory()->create();
+        $ticket = $this->makeClosedTicketWithResolution($client);
+        app(WikiSkeletonService::class)->ensureForClient($client);
+        $url = \Tests\Fixtures\ScannerCoverage::urls()['github-issue'];
+        $secret = \Tests\Fixtures\ScannerCoverage::signedUrls()['slack-lower'];
+        $facts = [];
+        foreach (['reference' => $url, 'credential' => $secret] as $key => $statement) {
+            $facts[] = [
+                'page' => 'network', 'anchor' => 'equipment', 'subject_key' => 'network:'.$key,
+                'statement' => $statement, 'volatility' => 'durable', 'confidence' => 0.9,
+            ];
+        }
+        $this->mockAiRaw(['facts' => $facts]);
+
+        MineTicketKnowledge::dispatchSync($ticket->id);
+
+        $this->assertSame(WikiRunStatus::Completed, WikiRun::first()->status);
+        $this->assertSame([$url], WikiFact::pluck('statement')->all());
+        $this->assertSame(1, WikiRun::first()->stage_results['facts_quarantined_by_scan']);
+    }
+
     public function test_scan_violation_drops_only_the_offending_candidate(): void
     {
         // The billing/licensing vocabulary overlaps the redactor's credential corpus

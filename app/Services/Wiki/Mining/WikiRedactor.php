@@ -26,13 +26,18 @@ class WikiRedactor
         '/\bcredentials?\s+(?:are|is)\s+\S+(?:\s*\/\s*\S+)?/i',
         // JWT-shaped tokens (three base64url segments)
         '/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]+)?/',
-        // Long base64-DISTINCTIVE runs only. Security review C1: the old rule
-        // /[A-Za-z0-9+\/_-]{32,}={0,2}/ also ate 32-char hardware serials, unhyphenated
-        // GUIDs, and RMM/asset IDs — the exact durable identifiers the wiki captures —
-        // silently corrupting real facts. Require a base64-distinctive character (+, /,
-        // or a trailing =) so plain alphanumeric serials/GUIDs (which lack them) survive.
-        // Documented residual gap (accepted v1): base32 TOTP seeds.
-        '/\b[A-Za-z0-9+\/_-]{24,}[+\/]+[A-Za-z0-9+\/_-]*={0,2}\b/',
+        // Shared distinctive-run policy: '+' retains its old behavior; '/' alone
+        // additionally requires upper/lower/digit mix in the same run. Ordinary
+        // lowercase URL paths are not evidence of base64. C1 bare identifiers stay
+        // clean. This is a heuristic, not entropy proof (see scanner coverage report).
+        // Webhook paths and signed query values need contextual detection: their
+        // credentials can be lowercase/hex, so case mix cannot protect those shapes.
+        // No URL or channel exemption: these alternatives apply in redact AND scan.
+        '~\b[A-Za-z0-9+/_-]{24,}\+[A-Za-z0-9+/_-]*={0,2}\b'
+        .'|\b(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{24,}/[A-Za-z0-9+/_-]*\b'
+        .'|(?i:https?://(?:hooks\.slack\.com/services/|(?:[a-z0-9-]+\.)?webhook\.office\.com/webhookb2/|(?:canary\.|ptb\.)?discord(?:app)?\.com/api(?:/v[0-9]+)?/webhooks/))[^\s<>"\x27]+'
+        .'|[?&](?i:sig|signature|x-amz-signature|x-goog-signature)=[^\s&#<>"\x27]+'
+        .'~',
         // Padding boundary: a trailing \b after '=' (a non-word char) only matches when a WORD
         // char follows the padding, so padded tokens at end-of-string or before whitespace (the
         // common case) escaped. Use a non-word lookahead so EOL/whitespace match too.
