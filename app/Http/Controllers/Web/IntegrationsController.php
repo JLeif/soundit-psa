@@ -2850,8 +2850,8 @@ class IntegrationsController extends Controller
 
     public function testTactical()
     {
-        if (! TacticalConfig::isConfigured()) {
-            return response()->json(['success' => false, 'message' => 'API credentials not configured.']);
+        if (! TacticalConfig::isAvailable()) {
+            return response()->json(['success' => false, 'message' => 'Tactical RMM is disabled or its API credentials are not configured.']);
         }
 
         try {
@@ -2871,8 +2871,8 @@ class IntegrationsController extends Controller
 
     public function syncTacticalDevices()
     {
-        if (! TacticalConfig::isConfigured()) {
-            return back()->with('error', 'Tactical RMM is not configured.');
+        if (! TacticalConfig::isAvailable()) {
+            return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
         try {
@@ -2948,8 +2948,8 @@ class IntegrationsController extends Controller
 
     public function syncTacticalScripts()
     {
-        if (! TacticalConfig::isConfigured()) {
-            return back()->with('error', 'Tactical RMM is not configured.');
+        if (! TacticalConfig::isAvailable()) {
+            return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
         try {
@@ -2973,8 +2973,8 @@ class IntegrationsController extends Controller
      */
     public function provisionTacticalAlerts(Request $request)
     {
-        if (! TacticalConfig::isConfigured()) {
-            return response()->json(['success' => false, 'message' => 'Tactical RMM API credentials are not configured.']);
+        if (! TacticalConfig::isAvailable()) {
+            return response()->json(['success' => false, 'message' => 'Tactical RMM is disabled or its API credentials are not configured.']);
         }
 
         try {

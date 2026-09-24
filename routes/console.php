@@ -135,7 +135,7 @@ Schedule::command('tactical:sync-devices')
         && \App\Models\Client::whereNotNull('tactical_site_id')->exists()
         && \App\Support\TacticalConfig::deviceSyncDue());
 
-// Tactical RMM script library sync — daily (only if configured)
+// Tactical RMM script library sync — daily (only if enabled + configured)
 Schedule::command('tactical:sync-scripts')
     ->dailyAt('05:35')
     ->withoutOverlapping()

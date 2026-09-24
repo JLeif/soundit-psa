@@ -93,7 +93,7 @@ class McpToolSurface
             // (no-client) surface. OFF=OFF: gated on CalendarConfig::isAvailable() (switched
             // on AND Graph configured), the same predicate list_tool_surface classifies against.
             CalendarConfig::isAvailable() ? McpToolRegistry::calendarTools() : [],
-            TacticalConfig::isConfigured() ? McpToolRegistry::tacticalAdminTools() : [],
+            TacticalConfig::isAvailable() ? McpToolRegistry::tacticalAdminTools() : [],
             ChetDataSurfaceTools::generalTools(),
             OperatorBridgeTools::definitions(),
         );
