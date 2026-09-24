@@ -150,17 +150,16 @@ class CippProjectionMessageTest extends TestCase
         // level (a notice) or by moving surface (a 'hint' key in the context),
         // and the whole point of the change is that the cause is not asserted.
         // G-14 is in STANDARDS at base 73b08287.
-        $namesACause = static fn (mixed $value): bool => (bool) preg_match(
-            '/DEFAULT_FIELDS|FIELD_ALIASES|out of sync/',
-            is_scalar($value) ? (string) $value : json_encode($value, JSON_PARTIAL_OUTPUT_ON_ERROR)
-        );
 
         // PIN the one call that is allowed -- exact message AND the whole
-        // context by strict equality -- then forbid EVERY other logger call at
-        // every level with the no-argument form, which matches any arity. The
-        // arity matrix this control carried before was a three-word DENYLIST,
-        // so a paraphrase naming the same cause in other words passed it, and
-        // each matcher only matched its own arity.
+        // context by strict equality -- then pin the warning TOTAL at one and
+        // forbid every other level, both with the no-argument form, which
+        // matches any arity. The total pin is not redundant: a withArgs()
+        // expectation only counts calls whose arguments match it, so once()
+        // on the pinned call alone cannot see a SECOND warning() naming the
+        // cause in any words. The arity matrix this control carried before
+        // was a three-word DENYLIST, so a paraphrase naming the same cause in
+        // other words passed it, and each matcher only matched its own arity.
         //
         // The context is pinned by VALUE, not just by key list. A key-list pin
         // leaves every value free: a cause appended to missing_fields or
@@ -185,6 +184,11 @@ class CippProjectionMessageTest extends TestCase
                         'first_row_keys' => ['MessageTraceId', 'Received', 'SenderAddress', 'RecipientAddress', 'Subject', 'Status'],
                     ];
             });
+
+        // Exactly ONE warning() in total, whatever its arguments. Together with
+        // the pin above, that one call IS the pinned call, and nothing else is
+        // logged at this level.
+        Log::shouldHaveReceived('warning')->once();
 
         foreach (['emergency', 'alert', 'critical', 'error', 'notice', 'info', 'debug', 'log', 'write'] as $level) {
             Log::shouldNotHaveReceived($level);
