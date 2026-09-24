@@ -5,6 +5,8 @@ namespace App\Services\Litsrmm;
 use App\Support\LitsrmmConfig;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Psr7\Uri;
+use GuzzleHttp\Psr7\UriResolver;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -111,12 +113,107 @@ class LitsrmmClient
         );
     }
 
+    /**
+     * Resolve an endpoint against the base URL the way Guzzle will, and refuse
+     * anything that lands off the configured host.
+     *
+     * WHY THIS EXISTS SEPARATELY FROM assertTransportIsSafe() (#3337 diff:2).
+     * That method judges the CONFIGURED base_url. Guzzle does not request the
+     * base_url; it requests base_uri resolved against $endpoint under RFC 3986,
+     * and under those rules an absolute endpoint replaces the whole authority
+     * while a protocol-relative one (`//host/path`) replaces the host and
+     * INHERITS the base scheme. So a guard that only reads the configured
+     * string is checking a URL that is not the one the credential crosses.
+     *
+     * Measured on the unfixed code, all of these left the process with the
+     * Authorization header attached:
+     *   base https://rmm.example.com + 'http://rmm.example.com/v1/clients'
+     *      -> plaintext, same host
+     *   base https://rmm.example.com + '//evil.example/v1/x'
+     *      -> https://evil.example/v1/x
+     *   base http://127.0.0.1:8080  + '//evil.example/v1/x'
+     *      -> http://evil.example/v1/x, i.e. the loopback exemption carried
+     *         onto a remote host in cleartext
+     *
+     * The host equality check is what makes this hold for a future caller that
+     * follows a vendor-supplied `next` link, which is exactly how stage 2's
+     * paging will be written. Scheme safety is re-asserted on the RESOLVED URI
+     * rather than inferred, because the loopback exemption is a statement about
+     * a host and must not survive a change of host.
+     */
+    private function assertEndpointStaysOnTheConfiguredHost(string $baseUrl, string $endpoint): void
+    {
+        // UriResolver::resolve, not Uri::resolve: the latter was removed in
+        // guzzlehttp/psr7 v2. This is the SAME resolver Guzzle's own
+        // RedirectMiddleware and base_uri handling call, so the URL judged here
+        // is the URL that will be requested, not a second implementation of
+        // RFC 3986 that could drift from it.
+        $baseUri = new Uri(rtrim($baseUrl, '/').'/');
+        $resolvedUri = UriResolver::resolve($baseUri, new Uri($endpoint));
+        $resolved = (string) $resolvedUri;
+
+        // ONE PARSER, ONE OBJECT (#3500). An earlier draft read the hosts with
+        // parse_url() on the resolved STRING, which put a second parser in
+        // front of a URL Guzzle builds from a Uri object -- the exact drift
+        // this method's docblock argues against. Both sides are now read off
+        // the Uri objects themselves.
+        //
+        // AND THE ORIGIN INCLUDES THE PORT. Host equality alone lets
+        // https://rmm.example.com:8443/ pass a guard configured for
+        // https://rmm.example.com/ and carry the Bearer to a different service
+        // on the same machine. Guzzle's own UriComparator::isCrossOrigin
+        // compares host, scheme AND port, so matching that rule keeps this
+        // guard and the one inside the redirect middleware in agreement.
+        // The scheme is part of the key and the port is the EFFECTIVE one
+        // (#3500 diff:1). getPort() is null for the default port of the URI's
+        // OWN scheme, so a host:getPort() key read https://localhost and
+        // http://localhost as one origin -- ports 443 and 80 -- and the
+        // loopback exemption in assertTransportIsSafe() then admitted the
+        // plain-http side. Filling the default back in keeps an explicit :443
+        // and no port equal, which is what UriComparator::isCrossOrigin
+        // computes too.
+        $origin = static function (\Psr\Http\Message\UriInterface $u): string {
+            $scheme = strtolower($u->getScheme());
+            $port = $u->getPort() ?? match ($scheme) {
+                'https' => 443,
+                'http' => 80,
+                default => null,
+            };
+
+            return $scheme.'://'.strtolower($u->getHost()).':'.($port ?? '');
+        };
+
+        if ($origin($resolvedUri) !== $origin($baseUri)) {
+            // The endpoint is logged, the credential is not, and the throw
+            // happens before any Authorization header is built.
+            Log::warning('[LitsrmmClient] refusing an endpoint that resolves off the configured origin', [
+                'configured_origin' => $origin($baseUri),
+                'resolved_origin' => $origin($resolvedUri),
+            ]);
+
+            throw new LitsrmmClientException(
+                'LITSRMM endpoint resolves to a different scheme, host or port than the configured base URL'
+            );
+        }
+
+        // The origin key already pins the scheme; the transport rule is still
+        // re-asserted on the URL that will actually be requested.
+        self::assertTransportIsSafe($resolved);
+    }
+
     private function http(): Client
     {
         if ($this->http === null) {
             $options = [
                 'base_uri' => rtrim((string) ($this->config['base_url'] ?? ''), '/').'/',
                 'timeout' => $this->config['request_timeout'] ?? 30,
+                // Every other vendor client here does this (Tactical, Comet,
+                // CIPP x2, Teams, the sinks). A vendor API has no reason to
+                // redirect, and following one sends the REQUEST BODY to the
+                // other host even though Guzzle strips the credential on a
+                // cross-origin hop. Refusing to follow is narrower than
+                // relying on that stripping.
+                'allow_redirects' => false,
             ];
 
             // A test must be able to observe what left the process rather than
@@ -228,6 +325,33 @@ class LitsrmmClient
             throw new LitsrmmClientException('LITSRMM base URL not configured');
         }
 
+        // THE AVAILABILITY CHOKE POINT (#3298 diff:2, C-47).
+        //
+        // getClients() and isHealthy() each gated themselves, which held only
+        // because they were the only callers. The public get() reaches this
+        // method directly, so an operator's OFF switch depended on every future
+        // caller remembering to ask; stage 2's device sync is that caller.
+        // Gating here makes OFF=OFF a property of the transport rather than a
+        // convention the next author has to know about. The two methods keep
+        // their own checks because they return a value rather than throwing.
+        //
+        // isAvailable() is checked as its TWO halves, each with its own
+        // refusal. The two credential checks above read $this->config, the
+        // values captured when this object was built. isConfigured() re-reads
+        // LIVE Settings/config. A long-lived singleton, or a client built with
+        // explicit config, can pass the first pair and fail the second while
+        // the switch is ON. One combined check would then say "switched off"
+        // on a path where the switch is not off (#3500 context:3).
+        // Both halves still refuse before the network, so OFF=OFF and the
+        // stale-credential refusal are unchanged.
+        if (! LitsrmmConfig::isEnabled()) {
+            throw new LitsrmmClientException('LITSRMM integration is switched off');
+        }
+
+        if (! LitsrmmConfig::isConfigured()) {
+            throw new LitsrmmClientException('LITSRMM API key or base URL is not currently configured');
+        }
+
         // Refuse plaintext BEFORE the Authorization header exists, so a refused
         // request cannot have carried the credential. The form validates the
         // same rule, but env and config bypass the form entirely, which is why
@@ -238,6 +362,10 @@ class LitsrmmClient
         // one machine, so there is no network for a bearer token to cross. Any
         // other host is remote from us whatever the vendor's topology is.
         self::assertTransportIsSafe((string) $this->config['base_url']);
+
+        // ...and then the URI Guzzle will ACTUALLY request, which is not the
+        // same string. See the method's docblock.
+        $this->assertEndpointStaysOnTheConfiguredHost((string) $this->config['base_url'], $endpoint);
 
         $options['headers'] = array_merge($options['headers'] ?? [], [
             'Authorization' => 'Bearer '.$apiKey,
@@ -263,6 +391,25 @@ class LitsrmmClient
                 "LITSRMM API error: {$method} {$endpoint} returned {$status}",
                 $status,
                 $e,
+            );
+        }
+
+        // allow_redirects is false (see http()) and http_errors only throws
+        // from 400, so a 3xx arrives here as an ordinary response. Decoding it
+        // would turn an empty redirect body into [] -- a healthy vendor with no
+        // clients, the silent degraded read C-56 forbids (#3500 diff:4).
+        $status = $response->getStatusCode();
+
+        if ($status >= 300 && $status < 400) {
+            Log::warning('[LitsrmmClient] refusing a redirect response: redirects are not followed', [
+                'method' => $method,
+                'endpoint' => $endpoint,
+                'status' => $status,
+            ]);
+
+            throw new LitsrmmClientException(
+                "LITSRMM API redirected {$method} {$endpoint} ({$status}); redirects are not followed",
+                $status,
             );
         }
 
