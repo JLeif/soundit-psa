@@ -11,23 +11,28 @@ use App\Models\Setting;
  * API was built to match. Two deliberate differences from that model, both
  * measured rather than assumed:
  *
- *  1. base_url has NO default. Level defaults to its public SaaS host because
- *     there is exactly one. LITSRMM is self-hosted: the proposal says "both
- *     systems already run on the same host, so these are localhost calls",
- *     which describes THEIR deployment, not ours. A baked-in default would be
- *     a guess about someone else's network, and a wrong one would silently aim
- *     credentialed requests at whatever answers on that address here. Absent
- *     base_url means not configured, so the integration stays inert until an
- *     operator supplies it.
+ *  1. base_url has NO default, and it is operator-supplied. Level defaults to
+ *     its public SaaS host because there is exactly one; LITSRMM is
+ *     self-hosted, so the host differs per deployment and we have no basis to
+ *     guess it. A baked-in default would silently aim credentialed requests at
+ *     whatever answers on that address. Absent base_url means not configured,
+ *     so the integration stays inert until an operator supplies one.
+ *
+ *     The scheme is enforced rather than trusted: LitsrmmClient refuses a
+ *     non-https base URL unless the host is loopback, before any Authorization
+ *     header is built. The settings form applies the same rule so an operator
+ *     is told at the field, but the client is where the guarantee lives,
+ *     because env and config bypass the form.
  *
  *  2. isEnabled() is read by isAvailable(), and consumers are expected to call
- *     isAvailable() rather than isConfigured(). The vendor's own proposal
- *     reports the Tactical switch as a live bug for precisely this reason:
- *     TacticalConfig::isEnabled() returns isConfigured(), so the settings
- *     toggle changes nothing. That defect is tracked separately (fR7xvo0f);
- *     this class is written so a twelfth vendor does not arrive carrying the
- *     same shape. Settings deliberately reads get() directly, so an operator
- *     can still see and edit credentials while the integration is switched off.
+ *     isAvailable() rather than isConfigured(). Keeping "we hold credentials"
+ *     and "we are permitted to use them" as separate questions is what makes a
+ *     settings toggle mean something: a vendor whose isEnabled() returns
+ *     isConfigured() has a switch that cannot turn anything off. See
+ *     TacticalConfig for the pattern this one follows, and prefer
+ *     isAvailable() in any new consumer. Settings deliberately reads get()
+ *     directly, so an operator can still see and edit credentials while the
+ *     integration is switched off.
  */
 class LitsrmmConfig
 {

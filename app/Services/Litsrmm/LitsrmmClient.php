@@ -52,6 +52,65 @@ class LitsrmmClient
      * would otherwise be constructed with an empty base_uri at boot for every
      * request in the application, configured or not.
      */
+    /**
+     * Hosts for which plain HTTP carries no network exposure.
+     *
+     * Matched on the parsed host, never on the raw string: a substring test
+     * would accept http://localhost.attacker.example, which is a different
+     * machine with a reassuring name.
+     */
+    private static function hostIsLoopback(string $host): bool
+    {
+        $host = strtolower(trim($host, '[]'));
+
+        if ($host === 'localhost' || $host === '::1') {
+            return true;
+        }
+
+        // 127.0.0.0/8 in full, not just 127.0.0.1.
+        return (bool) filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
+            && str_starts_with($host, '127.');
+    }
+
+    /**
+     * Refuse a base URL that would send the bearer token in cleartext.
+     *
+     * There is deliberately NO override: an operator who needs plain HTTP
+     * across a network is asking for a credential-policy decision, not for a
+     * flag. A malformed URL is refused too, rather than assumed safe, because
+     * an unparseable host is one nobody has checked.
+     */
+    public static function assertTransportIsSafe(string $baseUrl): void
+    {
+        $scheme = strtolower((string) parse_url($baseUrl, PHP_URL_SCHEME));
+        $host = (string) parse_url($baseUrl, PHP_URL_HOST);
+
+        if ($scheme === 'https') {
+            return;
+        }
+
+        if ($host === '') {
+            Log::warning('[LitsrmmClient] refusing a base URL with no parseable host', [
+                'scheme' => $scheme,
+            ]);
+
+            throw new LitsrmmClientException('LITSRMM base URL is not a valid absolute URL');
+        }
+
+        if ($scheme === 'http' && self::hostIsLoopback($host)) {
+            return;
+        }
+
+        Log::warning('[LitsrmmClient] refusing a plaintext request: the API key would cross the network in cleartext', [
+            'scheme' => $scheme,
+            'host' => $host,
+        ]);
+
+        throw new LitsrmmClientException(
+            'LITSRMM base URL must use https (plain http is allowed only for a loopback host)'
+        );
+    }
+
     private function http(): Client
     {
         if ($this->http === null) {
@@ -168,6 +227,17 @@ class LitsrmmClient
         if (empty($this->config['base_url'])) {
             throw new LitsrmmClientException('LITSRMM base URL not configured');
         }
+
+        // Refuse plaintext BEFORE the Authorization header exists, so a refused
+        // request cannot have carried the credential. The form validates the
+        // same rule, but env and config bypass the form entirely, which is why
+        // the real guarantee has to live here.
+        //
+        // Loopback is the one exception, and it is the case the vendor's
+        // proposal describes: their own deployment runs the RMM and the PSA on
+        // one machine, so there is no network for a bearer token to cross. Any
+        // other host is remote from us whatever the vendor's topology is.
+        self::assertTransportIsSafe((string) $this->config['base_url']);
 
         $options['headers'] = array_merge($options['headers'] ?? [], [
             'Authorization' => 'Bearer '.$apiKey,

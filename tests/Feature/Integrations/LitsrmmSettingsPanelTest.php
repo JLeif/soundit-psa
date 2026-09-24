@@ -6,11 +6,13 @@ use App\Enums\UserRole;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\Litsrmm\LitsrmmClient;
+use App\Services\Litsrmm\LitsrmmClientException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -57,7 +59,7 @@ class LitsrmmSettingsPanelTest extends TestCase
 
         $this->app->bind(LitsrmmClient::class, fn () => new LitsrmmClient([
             'api_key' => 'panel-token-value',
-            'base_url' => 'http://litsrmm.test',
+            'base_url' => 'https://litsrmm.test',
             'handler' => $stack,
             'request_timeout' => 5,
         ]));
@@ -66,7 +68,7 @@ class LitsrmmSettingsPanelTest extends TestCase
     private function configure(): void
     {
         Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
-        Setting::setValue('litsrmm_base_url', 'http://litsrmm.test');
+        Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
     }
 
     // ---- the panel renders and can be configured at all ----
@@ -153,7 +155,7 @@ class LitsrmmSettingsPanelTest extends TestCase
         // The counterpart to the control above: hiding the host too would leave
         // an operator unable to tell which instance is configured. This control
         // exists so "hide everything" cannot satisfy the test above.
-        $response->assertSee('http://litsrmm.test', false);
+        $response->assertSee('https://litsrmm.test', false);
     }
 
     // ---- Test connection reaches the real client ----
@@ -192,7 +194,7 @@ class LitsrmmSettingsPanelTest extends TestCase
     {
         // Two different operator actions, so one shared "not configured"
         // message would send them looking at the wrong field.
-        Setting::setValue('litsrmm_base_url', 'http://litsrmm.test');
+        Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
         $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm/test');
         $response->assertJson(['success' => false]);
         $this->assertStringContainsString('API key', $response->json('message'));
@@ -256,6 +258,180 @@ class LitsrmmSettingsPanelTest extends TestCase
             'the button must call the shared helper');
         $this->assertStringContainsString("litsrmm: '".route('settings.integrations.litsrmm.test')."'", $body,
             'and the helper must be able to resolve a URL for it');
+    }
+
+    // ---- plaintext transport is refused in BOTH layers ----
+
+    /**
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function baseUrlSchemes(): array
+    {
+        return [
+            'https remote' => ['https://rmm.partner.example', true],
+            'https loopback' => ['https://127.0.0.1:8443', true],
+            'http remote host' => ['http://rmm.partner.example', false],
+            'http remote ip' => ['http://203.0.113.10', false],
+            'http localhost' => ['http://localhost:8080', true],
+            'http 127.0.0.1' => ['http://127.0.0.1', true],
+            // 127.0.0.0/8 in full, not only .1.
+            'http 127.9.9.9' => ['http://127.9.9.9', true],
+            'http ipv6 loopback' => ['http://[::1]:9000', true],
+            // The trap a substring test falls into: a different machine with a
+            // reassuring name.
+            'http localhost-lookalike' => ['http://localhost.attacker.example', false],
+            'http 127-lookalike' => ['http://127.0.0.1.attacker.example', false],
+            'no scheme' => ['rmm.partner.example', false],
+            'ftp' => ['ftp://rmm.partner.example', false],
+        ];
+    }
+
+    #[DataProvider('baseUrlSchemes')]
+    public function test_the_client_refuses_plaintext_unless_the_host_is_loopback(string $url, bool $allowed): void
+    {
+        if ($allowed) {
+            LitsrmmClient::assertTransportIsSafe($url);
+            $this->assertTrue(true, $url.' must be accepted');
+
+            return;
+        }
+
+        $this->expectException(LitsrmmClientException::class);
+        LitsrmmClient::assertTransportIsSafe($url);
+    }
+
+    public function test_a_refused_plaintext_request_never_builds_the_authorization_header(): void
+    {
+        Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+        Setting::setValue('litsrmm_base_url', 'http://rmm.partner.example');
+
+        // A 200 is queued deliberately: if the guard leaks, the call SUCCEEDS
+        // and the history records the token, so this fails loudly rather than
+        // passing because a fixture happened to error.
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $history = [];
+        $stack->push(Middleware::history($history));
+
+        $client = new LitsrmmClient([
+            'api_key' => 'panel-token-value',
+            'base_url' => 'http://rmm.partner.example',
+            'handler' => $stack,
+        ]);
+
+        try {
+            $client->get('v1/clients');
+            $this->fail('a plaintext base URL must be refused');
+        } catch (LitsrmmClientException $e) {
+            $this->assertStringContainsString('https', $e->getMessage());
+        }
+
+        $this->assertCount(0, $history,
+            'the refusal must happen before any request is composed, so no credential can have left the process');
+
+        // MEASURED LIMIT of this control, stated rather than implied: moving the
+        // guard BELOW the header construction still passes here, because the
+        // assertion observes what LEFT the process and under either ordering
+        // Guzzle is never reached. The two are equivalent for exposure - the
+        // header is built into a local array and discarded - so the early
+        // placement is a defence-in-depth choice, not something this test
+        // pins. What it does pin is that no request is composed at all, which
+        // is the property that matters: a credential cannot leak from a call
+        // that was never made.
+    }
+
+    public function test_the_refusal_message_never_carries_the_credential(): void
+    {
+        Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+        Setting::setValue('litsrmm_base_url', 'http://rmm.partner.example');
+        \Illuminate\Support\Facades\Log::spy();
+
+        $client = new LitsrmmClient([
+            'api_key' => 'panel-token-value',
+            'base_url' => 'http://rmm.partner.example',
+        ]);
+
+        try {
+            $client->get('v1/clients');
+        } catch (LitsrmmClientException $e) {
+            $this->assertStringNotContainsString('panel-token-value', $e->getMessage(),
+                'the exception explaining a credential risk must not itself carry the credential');
+        }
+
+        // The warning names the scheme and host so an operator can act, and
+        // must not name the key. This is the axis the history assertion cannot
+        // see: a refusal that logs the token has leaked it without sending it.
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(function ($message, $context = []) {
+                $blob = $message.' '.json_encode($context);
+
+                return str_contains($blob, 'plaintext') && ! str_contains($blob, 'panel-token-value');
+            })
+            ->once();
+    }
+
+    public function test_a_loopback_http_host_still_reaches_the_network(): void
+    {
+        Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+        Setting::setValue('litsrmm_base_url', 'http://127.0.0.1:8080');
+
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $history = [];
+        $stack->push(Middleware::history($history));
+
+        $client = new LitsrmmClient([
+            'api_key' => 'panel-token-value',
+            'base_url' => 'http://127.0.0.1:8080',
+            'handler' => $stack,
+        ]);
+        $client->getClients();
+
+        // The positive control for the guard: a version that refused every
+        // plain-http host would pass every refusal case above and fail here.
+        $this->assertCount(1, $history);
+        $this->assertSame('Bearer panel-token-value', $history[0]['request']->getHeaderLine('Authorization'));
+    }
+
+    public function test_the_form_refuses_a_plaintext_base_url_and_stores_nothing(): void
+    {
+        $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'http://rmm.partner.example',
+            'api_key' => 'operator-entered-key',
+        ]);
+
+        $response->assertSessionHasErrors('base_url');
+        $this->assertNull(Setting::getValue('litsrmm_base_url'));
+        $this->assertNull(Setting::getValue('litsrmm_api_key'),
+            'a refused submission must not half-apply: the key must not be stored beside a rejected host');
+    }
+
+    public function test_the_form_accepts_https_and_loopback_http(): void
+    {
+        $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'https://rmm.partner.example',
+        ])->assertSessionHasNoErrors();
+        $this->assertSame('https://rmm.partner.example', Setting::getValue('litsrmm_base_url'));
+
+        $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'http://localhost:8080',
+        ])->assertSessionHasNoErrors();
+        $this->assertSame('http://localhost:8080', Setting::getValue('litsrmm_base_url'));
+    }
+
+    public function test_test_connection_names_a_plaintext_host_rather_than_blaming_credentials(): void
+    {
+        // A host set through env, or stored before this rule existed, never
+        // passed the form. isHealthy() would catch the refusal and return a
+        // bare false, which reads as "check your credentials" (diff:7).
+        Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+        Setting::setValue('litsrmm_base_url', 'http://rmm.partner.example');
+
+        $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm/test');
+
+        $response->assertJson(['success' => false]);
+        $this->assertStringContainsString('https', $response->json('message'));
+        $this->assertNull(Setting::getValue('litsrmm_connected_at'));
     }
 
     // ---- the three badge states are distinguishable ----

@@ -12,6 +12,7 @@ use App\Services\Graph\GraphWebhookManager;
 use App\Services\Hdb\HdbAuthClient;
 use App\Services\Level\LevelClient;
 use App\Services\Litsrmm\LitsrmmClient;
+use App\Services\Litsrmm\LitsrmmClientException;
 use App\Services\Ninja\NinjaBackupSyncService;
 use App\Services\Ninja\NinjaClient;
 use App\Support\AiConfig;
@@ -996,7 +997,22 @@ class IntegrationsController extends Controller
     {
         $validated = $request->validate([
             'api_key' => 'nullable|string|min:1|max:500',
-            'base_url' => 'nullable|url|max:255',
+            'base_url' => [
+                'nullable',
+                'url',
+                'max:255',
+                // Same rule the client enforces, applied at the field so an
+                // operator learns about it on save rather than from a failed
+                // Test connection. The client is still the real guarantee:
+                // env and config never pass through this form.
+                function (string $attribute, mixed $value, callable $fail) {
+                    try {
+                        LitsrmmClient::assertTransportIsSafe((string) $value);
+                    } catch (LitsrmmClientException $e) {
+                        $fail($e->getMessage());
+                    }
+                },
+            ],
             'webhook_secret' => 'nullable|string|min:1|max:500',
         ]);
 
@@ -1037,6 +1053,17 @@ class IntegrationsController extends Controller
 
         if (! LitsrmmConfig::get('base_url')) {
             return response()->json(['success' => false, 'message' => 'Base URL not configured. LITSRMM is self-hosted, so there is no default host.']);
+        }
+
+        // A base_url that predates the scheme rule, or one set through env,
+        // reaches here without ever passing the form. Report the refusal as
+        // itself rather than letting it surface as a generic failure - and
+        // report it BEFORE isHealthy(), whose catch would otherwise flatten it
+        // to false and tell the operator to check their credentials (diff:7).
+        try {
+            LitsrmmClient::assertTransportIsSafe((string) LitsrmmConfig::get('base_url'));
+        } catch (LitsrmmClientException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()]);
         }
 
         // isHealthy() is gated on isAvailable(), so a switched-off integration
