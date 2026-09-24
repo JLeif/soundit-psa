@@ -402,8 +402,9 @@ class CippMcpToolRelayTest extends TestCase
         // Bound to the STRUCTURED signal, not to the prose. The earlier
         // version matched on the substring 'never resolved', which tied this
         // control to the wording of a sentence it is not about -- and the
-        // wording had to change, because it named a cause warnOnShapeDrift()
-        // cannot establish (#3382). The `missing_fields` key is what
+        // wording had to change, because it named a cause that function
+        // cannot establish (#3382). It was called warnOnShapeDrift() then and
+        // is warnOnUnresolvedKeys() since #3408, for that same reason. The `missing_fields` key is what
         // distinguishes this warning from the sibling 'Every row projected
         // empty', which does not carry it, so the discrimination survives
         // without pinning a word.

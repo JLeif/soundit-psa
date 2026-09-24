@@ -1754,7 +1754,7 @@ class CippToolContract
         // key present holding null are different things: an unset Exchange
         // property serializes as null, which is a genuine no-value, not an
         // unresolved key. Why this observation is not labelled with a cause:
-        // see warnOnShapeDrift() below.
+        // see warnOnUnresolvedKeys() below.
         $keyResolved = array_fill_keys($fields, false);
 
         $projected = array_map(function (array $row) use ($toolName, $fields, &$keyResolved): array {
@@ -1786,13 +1786,23 @@ class CippToolContract
         }, $rows);
 
         if ($rows !== []) {
-            $this->warnOnShapeDrift($toolName, $rows, $projected, $keyResolved);
+            $this->warnOnUnresolvedKeys($toolName, $rows, $projected, $keyResolved);
         }
 
         return $projected;
     }
 
     /**
+     * Warn when a projection came back empty, or when a tracked key never resolved in any
+     * row this call projected. Named for what it MEASURES, not for a cause.
+     *
+     * Was warnOnShapeDrift() until #3408. The body stopped claiming drift in #3394/#3413 --
+     * this function cannot establish it, because four callers filter rows BEFORE calling
+     * projectRows, so an unresolved key may simply have been carried only by dropped rows --
+     * but the NAME still asserted it, and a name is exactly what a reader carries away. G-14
+     * gives comments and names delete-or-rename; there is nothing to delete here, since the
+     * guard itself is wanted, so it is renamed.
+     *
      * Row keys are schema names and safe to log; row values are untrusted
      * tenant data and are never logged.
      *
@@ -1800,7 +1810,7 @@ class CippToolContract
      * @param  array<int, array<string, mixed>>  $projected
      * @param  array<string, bool>  $keyResolved
      */
-    private function warnOnShapeDrift(string $toolName, array $rows, array $projected, array $keyResolved): void
+    private function warnOnUnresolvedKeys(string $toolName, array $rows, array $projected, array $keyResolved): void
     {
         if (array_filter($projected) === []) {
             Log::warning('[CippTools] Every row projected empty', [
