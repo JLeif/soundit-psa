@@ -46,6 +46,8 @@ class ScannerCoverage
             $rows['presigned-'.$kind] = 'https://bucket.example.test/object?X-Amz-Signature='.$value;
         }
 
+        $rows['slack-triggers'] = 'https://hooks.slack.com/triggers/T00000000/'.str_repeat('abcdef01', 4);
+
         return $rows;
     }
 }

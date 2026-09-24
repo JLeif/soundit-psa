@@ -72,9 +72,55 @@ class ScannerUrlPolicyTest extends TestCase
             $this->assertContains('credential', array_column($r->scan($text), 'class'));
             $this->assertNotSame($text, $r->redact($text));
         }
+        // A trailing slash still terminates the mixed segment before the extension.
+        $trailingSlash = base64_encode(substr(hash('sha256', ScannerCoverage::SEED.':96914', true), 0, 30)).'.json';
+        $this->assertContains('credential', array_column($r->scan($trailingSlash), 'class'));
+        $this->assertNotSame($trailingSlash, $r->redact($trailingSlash));
         // A real extension excludes only the last segment, never earlier ones.
         $this->assertSame([], $r->scan($finalOnly.'.json'));
         $this->assertSame($finalOnly.'.json', $r->redact($finalOnly.'.json'));
+    }
+
+    public function test_long_slash_run_is_linear_and_has_no_engine_error(): void
+    {
+        $r = new WikiRedactor;
+        foreach ([str_repeat('aB3', 10).'+Cd4', str_repeat('aB3', 10).'/Cd4', ' '.str_repeat('aB3', 10).'+Cd4'] as $token) {
+            $text = str_repeat('a/', 30000).$token;
+            $start = microtime(true);
+            $this->assertContains('credential', array_column($r->scan($text), 'class'));
+            $this->assertSame(PREG_NO_ERROR, preg_last_error());
+            $this->assertStringNotContainsString($token, $r->redact($text));
+            $this->assertSame(PREG_NO_ERROR, preg_last_error());
+            $this->assertLessThan(1.0, microtime(true) - $start);
+        }
+    }
+
+    public function test_every_scan_pattern_engine_error_is_a_credential_violation(): void
+    {
+        $this->assertEngineErrors('scan', 17);
+    }
+
+    public function test_every_redact_pattern_engine_error_withholds_the_whole_text(): void
+    {
+        $this->assertEngineErrors('redact', 9);
+    }
+
+    private function assertEngineErrors(string $method, int $count): void
+    {
+        $process = new \Symfony\Component\Process\Process([PHP_BINARY, dirname(__DIR__, 2).'/Fixtures/scanner-engine-error.php', $method]);
+        $process->mustRun();
+        $data = json_decode($process->getOutput(), true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame((new \ReflectionClass(WikiRedactor::class))->getFileName(), $data['source']);
+        $this->assertSame($method === 'scan' ? [] : 'ordinary prose', $data['normal']);
+        $this->assertCount($count, $data['rows']);
+        foreach ($data['rows'] as $row) {
+            $this->assertSame(1, $row['calls']);
+            if ($method === 'scan') {
+                $this->assertContains('credential', array_column($row['result'], 'class'));
+            } else {
+                $this->assertSame('[REDACTED:credential]', $row['result']);
+            }
+        }
     }
 
     public function test_random_corpus_pins_newly_admitted_cases_not_a_claim_of_zero_misses(): void
