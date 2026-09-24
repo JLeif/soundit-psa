@@ -95,8 +95,12 @@ class MislinkedAssetFinder
     ];
 
     /**
-     * Hostname prefixes an OPERATING SYSTEM assigns, never a naming scheme anyone
-     * chose — so no client can own one however many of them it happens to hold.
+     * Hostname prefixes that are NOT a client's naming scheme, so no client can own
+     * one however many of them it happens to hold. An entry qualifies on one of two
+     * grounds: a documented OS or vendor default (DESKTOP-, WIN-, the mac and linux
+     * entries), or a generated name admitted by recorded judgement because the harm
+     * of omitting it outweighs the cost of silencing it — see WINDOWS- below, which
+     * cites no vendor default and says so.
      *
      * buildPrefixOwners() rejects a generic prefix only when 2+ clients hold it
      * DOMINANTLY, and that test needs data thick enough to express the fact. On a
@@ -118,12 +122,41 @@ class MislinkedAssetFinder
      * distinguish "one client owns DESKTOP-" from "one client happens to hold three
      * un-renamed machines", and on this data it guesses wrong.
      *
+     * WINDOWS- IS THE WEAKEST ENTRY ON THIS LIST, AND NO MEASUREMENT HERE MAKES IT
+     * STRONG. It sits at exactly one client, which is also what a deliberate client
+     * scheme looks like. Three rounds of review tried to find a discriminator in
+     * the hostnames and there is none:
+     *
+     *   - A single suffix width proves nothing. Add the prefix back and each lands
+     *     on exactly 15 characters (DESKTOP- 8+7, WINDOWS- 8+7, WIN- 4+11), the
+     *     NetBIOS computer-name cap. Any generator filling the name to the limit
+     *     produces one width per prefix, whatever produced it.
+     *   - "Letters and digits interleaved, no two of seven alike" proves nothing
+     *     either. For a uniform [A-Z0-9] fill, two samples share a letter/digit
+     *     shape with p ~ 0.028, so seven samples show no repeat about 56% of the
+     *     time. A coin flip is not evidence.
+     *   - A client naming machines WINDOWS-<7-character service tag> reproduces
+     *     every one of those facts exactly.
+     *
+     * So the entry does NOT rest on shape. It rests on a JUDGEMENT: the harm is
+     * asymmetric. Leaving it off cost 28 false Tier B rows on the live fleet at
+     * merge 8465d5d8, and WINDOWS- was one asset from adding its own. Putting it
+     * on costs silence for one prefix at one client IF that client turns out to
+     * have chosen the name deliberately — and rule 3 still reports any genuine
+     * cross-client collision, because it reads a contradiction rather than a name.
+     * That trade is accepted deliberately, and it is recorded here rather than in
+     * a commit message so the next reader can re-weigh it rather than re-derive it.
+     *
+     * If the trade is ever revisited, the discriminator is NOT in the hostname. It
+     * is whether the client's other machines follow the same scheme, which is a
+     * question about that client's naming convention and not about this list.
+     *
      * @var array<int, string>
      */
-    private const FACTORY_HOSTNAME_PREFIXES = [
+    public const FACTORY_HOSTNAME_PREFIXES = [
         'DESKTOP-',   // Windows 10/11 default (DESKTOP-XXXXXXX)
         'LAPTOP-',    // Windows default on portable SKUs
-        'WINDOWS-',   // older Windows / imaging default
+        'WINDOWS-',   // no vendor default cited, no discriminating evidence — see the judgement above
         'WIN-',       // Windows Server default (WIN-XXXXXXXXXXX)
         'MACBOOK-',   // macOS default when the model name is hyphenated
         'MACBOOKAIR-',
