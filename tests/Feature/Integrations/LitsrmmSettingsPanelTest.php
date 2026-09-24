@@ -493,6 +493,30 @@ class LitsrmmSettingsPanelTest extends TestCase
         $this->assertSame('freshly-entered-key', Setting::getEncrypted('litsrmm_api_key'));
     }
 
+    public function test_a_stored_key_with_no_host_cannot_be_pointed_at_a_host_without_re_entering_it(): void
+    {
+        // The guard protects the stored KEY, so it must hold whether or not a
+        // host is stored yet. Saving the key before the host leaves exactly
+        // this state, and the first host is as much a new destination as a
+        // changed one.
+        Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+        $this->bindClient([new Response(200, [], json_encode(['ok' => true]))]);
+
+        $response = $this->actingAs($this->admin())->post('/settings/integrations/litsrmm', [
+            'base_url' => 'https://attacker.example',
+        ]);
+
+        $response->assertSessionHas('error');
+        $this->assertNull(Setting::getValue('litsrmm_base_url'),
+            'a host must not be attached to a stored key by someone who did not supply that key');
+
+        // And the end-to-end consequence: Test connection has nowhere to send it.
+        $this->actingAs($this->admin())->post('/settings/integrations/litsrmm/test')
+            ->assertJson(['success' => false]);
+        $this->assertCount(0, $this->history,
+            'the stored key must not have left the process');
+    }
+
     public function test_the_credential_routes_refuse_a_non_admin(): void
     {
         $tech = User::factory()->create(['role' => UserRole::Tech]);

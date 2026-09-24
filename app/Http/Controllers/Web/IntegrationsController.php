@@ -1052,10 +1052,16 @@ class IntegrationsController extends Controller
         // to a host they control and press Test connection, and the key they
         // were never shown would be sent there. Both fields together, or the
         // host alone only when it is unchanged.
+        //
+        // The exemption depends on whether a KEY is held, not whether a host
+        // is: a key saved before any host (or supplied through env) is exactly
+        // as exposed by a first host as by a changed one. Read through
+        // LitsrmmConfig so an env-supplied key counts too.
         $newHost = ! empty($validated['base_url']) ? rtrim($validated['base_url'], '/') : null;
         $currentHost = (string) (LitsrmmConfig::get('base_url') ?? '');
+        $hasStoredKey = (bool) LitsrmmConfig::get('api_key');
 
-        if ($newHost !== null && $newHost !== $currentHost && $currentHost !== '' && empty($validated['api_key'])) {
+        if ($newHost !== null && $newHost !== $currentHost && $hasStoredKey && empty($validated['api_key'])) {
             return redirect()->route('settings.integrations')
                 ->with('error', 'Changing the LITSRMM base URL requires re-entering the API key, so a stored key is never sent to a new host.');
         }
