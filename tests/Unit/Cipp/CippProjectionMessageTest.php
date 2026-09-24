@@ -89,11 +89,13 @@ class CippProjectionMessageTest extends TestCase
      * with real rules, so the drop leaves zero rows and the $rows !== [] guard
      * stops projectRows reporting on it.
      *
-     * So when any one of those filters is active, the rows this
+     * So when any one of THE FIRST FOUR filters is active, the rows this
      * function inspects are a SUBSET of the upstream response, and a field
      * carried only by dropped rows never resolves here while DEFAULT_FIELDS
      * and FIELD_ALIASES are both correct -- the constants cannot be blamed
-     * from inside this function.
+     * from inside this function. The fifth is deliberately excluded: the
+     * paragraph above says its drop leaves ZERO rows, so it cannot produce a
+     * surviving subset, and including it here would contradict that.
      *
      * This control drives that exact case through the real filtering caller:
      * two message-trace rows, only one carrying FromIP/ToIP, filtered by
