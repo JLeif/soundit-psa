@@ -680,7 +680,7 @@ class LitsrmmClientMappingTest extends TestCase
 
         // The restore is part of the contract: leaving args captured would
         // change how every later test in this process reports a failure.
-        $this->assertSame('1', ini_get('zend.exception_ignore_args'),
+        $this->assertSame($previous, ini_get('zend.exception_ignore_args'),
             'the control must restore the setting it borrowed');
     }
 
