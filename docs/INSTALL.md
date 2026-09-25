@@ -163,6 +163,41 @@ APP_URL=https://psa.yourmsp.com
 
 > **Important:** `APP_DEBUG=false` in production. Debug mode exposes stack traces and environment variables.
 
+Staff MCP install-link responses use `APP_URL` as the public root, not the MCP
+request's host or scheme. Set it to the customer-reachable HTTP(S) application
+URL without user information, query or fragment. Schemes are case-insensitive
+HTTP or HTTPS and are rebuilt lowercase. Before parsing, the raw configured URL
+must contain only printable ASCII bytes `\x21`–`\x7E`: controls, spaces, DEL and
+non-ASCII bytes are refused. Configure IDN deployments in punycode. Backslashes
+anywhere are refused.
+
+A bracketed host must contain an IPv6 address accepted by PHP
+`FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV6`; bracketed IPv4 is refused.
+An unbracketed host cannot contain `:` or end in `.` (including ordinary DNS
+names and IPv4 addresses). If its last label is all digits or starts with
+`0x`/`0X`, the entire
+host must pass PHP `FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV4` as a strict
+dotted-quad address, without a terminal dot. This refuses short, hex, leading-zero
+and out-of-range numeric forms rather than letting a browser reinterpret them.
+Other unbracketed hosts must pass `FILTER_VALIDATE_DOMAIN` with
+`FILTER_FLAG_HOSTNAME`. An explicit port must be in the range **1–65535**;
+port zero is refused. The configured host and port must match the rebuilt ones
+exactly: a port must be plain decimal digits with no sign, leading zero or
+trailing characters, and an empty port after `:` is refused.
+
+An optional deployment prefix must be normalized: no dot or dot-dot segments,
+empty segments or backslashes. A single trailing slash is allowed as the root
+separator. Prefix segments use URI path characters or valid percent escapes;
+encoded dot/dot-dot segments, slashes and backslashes are refused too. The URL is
+rebuilt from the validated parts, preserving the port and prefix. An invalid root
+refuses issuance/retrieval without changing the client or returning its credential.
+The operator must verify public reachability; syntactic validation is not a
+network check. Refresh Laravel's configuration cache after an authorized change.
+The MCP verb also requires an operational client (`stage=active` and
+`is_active=true`), including when returning an existing link. This does not
+change the staff web buttons or revoke existing public setup links. Tool grants
+and live link issuance remain separate operator actions.
+
 #### Database
 
 ```ini

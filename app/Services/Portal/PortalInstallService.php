@@ -69,11 +69,61 @@ class PortalInstallService
                 'effective_rmm' => $client->effectiveInstallRmm(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
             ];
+            // Match Client::operational() on the locked row, including live-link retrieval.
+            if (! $client->is_active || $client->stage !== \App\Enums\ClientStage::Active) {
+                return ['error' => 'Install links are unavailable for non-operational clients.'] + $context;
+            }
             if (empty($context['available_rmms'])) {
                 return ['error' => 'Map this client to an RMM (Ninja, Level, or Tactical) on the Client page before generating an install link.'] + $context;
             }
             if ($context['effective_rmm'] === null) {
                 return ['error' => 'Set the primary RMM on the Client page before generating an install link.'] + $context;
+            }
+
+            $publicRoot = config('app.url');
+            // parse_url rewrites raw controls to underscores; refuse before parsing.
+            if (! is_string($publicRoot) || preg_match('/[^\x21-\x7E]/', $publicRoot)) {
+                return ['error' => 'Configure a public HTTP(S) application URL before requesting an install link.'] + $context;
+            }
+            $parts = parse_url($publicRoot);
+            $scheme = strtolower($parts['scheme'] ?? '');
+            $host = $parts['host'] ?? '';
+            $bracketed = str_starts_with($host, '[') && str_ends_with($host, ']');
+            $labels = explode('.', $host);
+            $lastLabel = end($labels);
+            $numericHost = ctype_digit($lastLabel) || str_starts_with(strtolower($lastLabel), '0x');
+            // This is a link a client will click: never hand out a host WHATWG would
+            // reject or rewrite into a different address. Numeric hosts must be strict IPv4.
+            $validHost = $bracketed
+                ? filter_var(substr($host, 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false
+                : (! str_contains($host, ':') && ! str_ends_with($host, '.') && ($numericHost
+                    ? filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
+                    : filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false));
+            $authority = $host.(isset($parts['port']) ? ':'.$parts['port'] : '');
+            // parse_url reads the port with strtol, dropping a sign, leading zeros and trailing
+            // junk; the configured authority must be exactly what we rebuild.
+            $rawAuthority = preg_match('~\A[^:/?#]+://([^/?#]*)~', $publicRoot, $match) ? $match[1] : null;
+            $path = $parts['path'] ?? '';
+            // A single terminal slash is a root separator, not a prefix segment.
+            $prefix = str_ends_with($path, '/') ? substr($path, 0, -1) : $path;
+            $segments = $prefix === '' ? [] : explode('/', substr($prefix, 1));
+            $normalized = true;
+            foreach ($segments as $segment) {
+                $decoded = rawurldecode($segment);
+                if ($decoded === '' || $decoded === '.' || $decoded === '..'
+                    || str_contains($decoded, '/') || str_contains($decoded, '\\')
+                    || ! preg_match('/\A(?:[A-Za-z0-9._~!$&\x27()*+,;=:@-]|%[0-9A-Fa-f]{2})+\z/', $segment)) {
+                    $normalized = false;
+                }
+            }
+            if (! is_array($parts) || ! in_array($scheme, ['http', 'https'], true)
+                || ! $validHost
+                || (isset($parts['port']) && ($parts['port'] < 1 || $parts['port'] > 65535))
+                || $rawAuthority !== $authority
+                || str_contains($publicRoot, '\\') || ! $normalized
+                || isset($parts['user']) || isset($parts['pass'])
+                || isset($parts['query']) || isset($parts['fragment'])) {
+                return ['error' => 'Configure a public HTTP(S) application URL before requesting an install link.'] + $context;
             }
 
             $expired = (bool) $client->portal_install_token
@@ -86,7 +136,7 @@ class PortalInstallService
             }
 
             return [
-                'url' => route('portal.install.show', ['token' => $client->portal_install_token]),
+                'url' => $scheme.'://'.$authority.$prefix.route('portal.install.show', ['token' => $client->portal_install_token], false),
                 'expires_at' => $client->portal_install_token_expires_at?->toIso8601String(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
                 'reissued_expired' => $expired,

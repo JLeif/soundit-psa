@@ -25,11 +25,11 @@ class PortalInstallLinkToolTest extends TestCase
         Http::preventStrayRequests();
     }
 
-    private function callLink(Client $client, array $extra = ['reason' => 'Synthetic setup check'], ?string $token = null): TestResponse
+    private function callLink(Client $client, array $extra = ['reason' => 'Synthetic setup check'], ?string $token = null, string $endpoint = '/api/mcp/staff'): TestResponse
     {
         $token ??= McpConfig::rotateStaffToken(allowedTools: [self::TOOL], label: 'synthetic-operator');
 
-        return $this->withToken($token)->postJson('/api/mcp/staff', [
+        return $this->withToken($token)->postJson($endpoint, [
             'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call',
             'params' => ['name' => self::TOOL, 'arguments' => ['client_id' => $client->id] + $extra],
         ]);
@@ -67,6 +67,219 @@ class PortalInstallLinkToolTest extends TestCase
         $this->assertStringNotContainsString($client->portal_install_token, $audits->toJson());
         $this->assertSame(0, PortalInstallAudit::count());
         Http::assertNothingSent();
+    }
+
+    public function test_non_operational_clients_cannot_create_reissue_or_retrieve_links(): void
+    {
+        foreach ([
+            ['stage' => \App\Enums\ClientStage::Active, 'is_active' => false],
+            ['stage' => \App\Enums\ClientStage::Prospect, 'is_active' => true],
+            ['stage' => \App\Enums\ClientStage::Prospect, 'is_active' => false],
+        ] as $statusIndex => $status) {
+            foreach (['absent', 'live', 'expired', 'unlimited'] as $state) {
+                $client = Client::factory()->create($status + [
+                    'tactical_site_id' => 123,
+                    'portal_install_token' => $state === 'absent' ? null : 'synthetic-status-'.$statusIndex.'-'.$state,
+                    'portal_install_token_expires_at' => match ($state) {
+                        'live' => now()->addDay(),
+                        'expired' => now()->subDay(),
+                        default => null,
+                    },
+                ]);
+                $before = $client->fresh()->getAttributes();
+                $response = $this->callLink($client);
+                $response->assertJsonPath('result.isError', true);
+                $result = $this->decoded($response);
+                $this->assertSame('Install links are unavailable for non-operational clients.', $result['error']);
+                $this->assertArrayNotHasKey('url', $result);
+                $this->assertSame(['tactical'], $result['available_rmms']);
+                $this->assertSame($before, $client->fresh()->getAttributes());
+                if ($before['portal_install_token']) {
+                    $this->assertStringNotContainsString($before['portal_install_token'], $response->getContent());
+                }
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_status_is_checked_on_locked_refresh_not_the_callers_stale_model(): void
+    {
+        foreach (['is_active', 'stage'] as $field) {
+            foreach ([false, true] as $activate) {
+                $active = ['stage' => \App\Enums\ClientStage::Active, 'is_active' => true];
+                $inactive = $active;
+                $inactive[$field] = $field === 'stage' ? \App\Enums\ClientStage::Prospect : false;
+                $client = Client::factory()->create(($activate ? $inactive : $active) + ['tactical_site_id' => 123]);
+                Client::whereKey($client->id)->update($activate ? $active : $inactive);
+                $before = $client->fresh()->getAttributes();
+                $result = app(\App\Services\Portal\PortalInstallService::class)->getOrCreateInstallLink($client);
+                if ($activate) {
+                    $this->assertArrayNotHasKey('error', $result);
+                    $this->assertNotEmpty($client->fresh()->portal_install_token);
+                    $this->assertFalse($result['reissued_expired']);
+                } else {
+                    $this->assertArrayHasKey('error', $result);
+                    $this->assertSame('Install links are unavailable for non-operational clients.', $result['error']);
+                    $this->assertSame($before, $client->fresh()->getAttributes());
+                    $this->assertArrayNotHasKey('url', $result);
+                }
+            }
+        }
+    }
+
+    public function test_public_configured_url_is_used_for_create_reuse_and_reissue(): void
+    {
+        config(['app.url' => 'https://public.example.test/customer/']);
+        foreach (['absent', 'live', 'expired', 'unlimited'] as $state) {
+            $client = Client::factory()->create([
+                'stage' => \App\Enums\ClientStage::Active,
+                'is_active' => true,
+                'tactical_site_id' => 123,
+                'portal_install_token' => $state === 'absent' ? null : 'synthetic-origin-'.$state,
+                'portal_install_token_expires_at' => match ($state) {
+                    'live' => now()->addDay(),
+                    'expired' => now()->subDay(),
+                    default => null,
+                },
+            ]);
+            $before = $client->fresh()->getAttributes();
+            $response = $this->callLink($client, endpoint: 'http://mcp.example.test/api/mcp/staff');
+            $response->assertJsonPath('result.isError', false);
+            $result = $this->decoded($response);
+            $client->refresh();
+            $this->assertSame('https://public.example.test/customer/setup/'.$client->portal_install_token, $result['url']);
+            $this->assertSame($state === 'expired', $result['reissued_expired']);
+            $this->assertStringContainsString('no-store', $response->headers->get('Cache-Control'));
+            if (in_array($state, ['live', 'unlimited'], true)) {
+                $this->assertSame($before, $client->getAttributes());
+            } else {
+                $this->assertNotEmpty($client->portal_install_token);
+                $this->assertNotSame($before['portal_install_token'], $client->portal_install_token);
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_public_root_refuses_before_issuance_or_retrieval(): void
+    {
+        foreach ([
+            null, '', '/relative', 'ftp://public.example.test',
+            'https://operator@public.example.test', 'https://public.example.test?x=1', 'https://public.example.test/#fragment',
+            'https://psa .example.test', 'https://psa_foo.example.test', 'https://-psa.example.test',
+            'https://psa\\evil.example.test/', 'https://public.example.test/a\\b',
+            'https://public.example.test/a/./b', 'https://public.example.test/a/../b',
+            'https://public.example.test/a//b', 'https://public.example.test//', 'https://public.example.test/a//',
+            'https://public.example.test/%2e/b', 'https://public.example.test/%2e%2e/b',
+            'https://public.example.test/a%2fb', 'https://public.example.test/a%5cb',
+            'https://public.example.test/a b', 'https://public.example.test/bad%xy',
+        ] as $rootIndex => $root) {
+            config(['app.url' => $root]);
+            foreach (['absent', 'live', 'expired', 'unlimited'] as $state) {
+                $value = $state === 'absent' ? null : 'synthetic-root-'.$rootIndex.'-'.$state;
+                $client = Client::factory()->create([
+                    'tactical_site_id' => 123, 'portal_install_token' => $value,
+                    'portal_install_token_expires_at' => match ($state) {
+                        'live' => now()->addDay(), 'expired' => now()->subDay(), default => null,
+                    },
+                ]);
+                $before = $client->fresh()->getAttributes();
+                $response = $this->callLink($client, endpoint: 'https://mcp.example.test/api/mcp/staff');
+                $response->assertJsonPath('result.isError', true);
+                $result = $this->decoded($response);
+                $this->assertSame('Configure a public HTTP(S) application URL before requesting an install link.', $result['error']);
+                $this->assertArrayNotHasKey('url', $result);
+                $this->assertSame($before, $client->fresh()->getAttributes());
+                $this->assertArrayNotHasKey('reissued_expired', $result);
+                $this->assertArrayNotHasKey('expires_at', $result);
+                if ($value !== null) {
+                    $this->assertStringNotContainsString($value, $response->getContent());
+                }
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    public static function malformedRootCases(): iterable
+    {
+        $roots = [
+            'bracketed-ipv4' => 'https://[127.0.0.1]/x',
+            'unbracketed-ipv6' => 'https://2001:db8::1:8443/customer',
+            'tab' => "https://public.example.test/cu\tstomer",
+            'space' => 'https://public.example.test/cu stomer',
+            'del' => "https://public.example.test/cu\x7fstomer",
+            'non-ascii' => "https://public.example.test/cu\xc3\xa9stomer",
+            'numeric-range' => 'https://999.1.1.1',
+            'numeric-short' => 'https://1.2.3',
+            'numeric-octal' => 'https://192.0.2.01',
+            'numeric-hex' => 'https://0x7f.1',
+            'numeric-last-hex' => 'https://example.0Xff',
+            'numeric-trailing-dot' => 'https://1.2.3.',
+            'range-trailing-dot' => 'https://999.1.1.1.',
+            'ipv4-trailing-dot' => 'https://192.0.2.1.',
+            'hostname-trailing-dot' => 'https://public.example.test.',
+            'port-zero' => 'https://public.example.test:0',
+            'port-overflow' => 'https://public.example.test:65536',
+            'port-trailing-junk' => 'https://public.example.test:8443x/customer',
+            'port-sign' => 'https://public.example.test:+443/customer',
+            'port-leading-zero' => 'https://public.example.test:08443/customer',
+            'port-empty' => 'https://public.example.test:/customer',
+            'ipv6-port-junk' => 'https://[2001:db8::1]:80z',
+        ];
+        foreach ($roots as $label => $root) {
+            foreach (['absent', 'live', 'expired'] as $state) {
+                yield $label.'-'.$state => [$root, $state];
+            }
+        }
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('malformedRootCases')]
+    public function test_malformed_root_never_issues_reissues_or_returns_a_credential(string $root, string $state): void
+    {
+        config(['app.url' => $root]);
+        $value = $state === 'absent' ? null : 'synthetic-boundary-'.$state;
+        $client = Client::factory()->create([
+            'tactical_site_id' => 123, 'portal_install_token' => $value,
+            'portal_install_token_expires_at' => match ($state) {
+                'live' => now()->addDay(), 'expired' => now()->subDay(), default => null,
+            },
+        ]);
+        $before = $client->fresh()->getAttributes();
+        $response = $this->callLink($client, endpoint: 'https://mcp.example.test/api/mcp/staff');
+        $response->assertJsonPath('result.isError', true);
+        $result = $this->decoded($response);
+        $this->assertSame('Configure a public HTTP(S) application URL before requesting an install link.', $result['error']);
+        $this->assertSame(['tactical'], $result['available_rmms']);
+        $this->assertSame($before, $client->fresh()->getAttributes());
+        foreach (['url', 'token', 'portal_install_token', 'reissued_expired', 'expires_at'] as $key) {
+            $this->assertArrayNotHasKey($key, $result);
+        }
+        $this->assertStringNotContainsString('/setup/', $response->getContent());
+        if ($value !== null) {
+            $this->assertStringNotContainsString($value, $response->getContent());
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_valid_root_parts_are_rebuilt_with_lowercase_scheme(): void
+    {
+        foreach ([
+            'HTTPS://public.example.test' => 'https://public.example.test',
+            'https://[::1]:8443' => 'https://[::1]:8443',
+            'https://[2001:db8::1]' => 'https://[2001:db8::1]',
+            'https://public.example.test:1' => 'https://public.example.test:1',
+            'https://public.example.test:65535' => 'https://public.example.test:65535',
+            'https://xn--bcher-kva.example' => 'https://xn--bcher-kva.example',
+            'HtTp://public.example.test:8080/customer/v1/' => 'http://public.example.test:8080/customer/v1',
+            'https://192.0.2.1/customer' => 'https://192.0.2.1/customer',
+            'https://[2001:db8::1]:8443/customer' => 'https://[2001:db8::1]:8443/customer',
+            'https://public.example.test/a%20b' => 'https://public.example.test/a%20b',
+        ] as $root => $expected) {
+            config(['app.url' => $root]);
+            $client = Client::factory()->create(['tactical_site_id' => 123]);
+            $response = $this->callLink($client, endpoint: 'https://mcp.example.test/api/mcp/staff');
+            $response->assertJsonPath('result.isError', false);
+            $this->assertSame($expected.'/setup/'.$client->fresh()->portal_install_token, $this->decoded($response)['url']);
+        }
     }
 
     public function test_storage_exception_does_not_reach_response_audit_or_logs(): void
