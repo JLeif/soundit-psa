@@ -290,8 +290,8 @@ class StaffHuntressActionToolExecutor
             // This short-circuit sits ABOVE the stranded-claim revive below, and
             // must: a resolve that already committed may never be re-presented
             // for a second POST. But that also puts a run stranded in Executing
-            // by a dead finalization (worker kill mid-approve, a throwing
-            // advanceTo) out of the revive's reach — and this family is excluded
+            // (typically by a dead finalization: worker kill mid-approve, a
+            // throwing advanceTo) out of the revive's reach — and this family is excluded
             // from TechnicianRun::RECOVERY_SAFE_ACTION_TYPES, so no reaper
             // reopens it either. Land it TERMINAL here instead of leaving it
             // wedged forever with manual DB surgery the only exit.
@@ -392,8 +392,10 @@ class StaffHuntressActionToolExecutor
         // escalation PERMANENTLY unresolvable through the tool: every
         // re-stage collides with the same content_hash row forever and gets
         // the same answer, with manual DB surgery the only exit. Past
-        // STALE_CLAIM_SECONDS the claim is provably dead, so the run falls
-        // through to the ordinary revive below.
+        // STALE_CLAIM_SECONDS the claim is provably dead — and an unreadable
+        // stamp counts as stale by fail-safe (claimIsStale()), which proves
+        // nothing about the approval — so the run falls through to the
+        // ordinary revive below.
         //
         // That revive cannot resurrect a resolve that already landed: an
         // executed audit row short-circuits at alreadyExecuted() and a
@@ -469,17 +471,22 @@ class StaffHuntressActionToolExecutor
 
                 $run->state = TechnicianRunState::AwaitingApproval;
 
-                // The recovery is never silent: a run left claimed by a dead
-                // approval is an operational fault, so releasing it leaves a log
-                // line and an audit row rather than quietly re-presenting the
-                // card. Both are written only once the CAS has actually won, so
-                // the record can never claim a recovery that did not happen.
+                // The recovery is never silent: a run judged stale by
+                // claimIsStale() — elapsed past the bound, or with BOTH stamps
+                // unreadable — is an operational fault, so releasing it leaves a
+                // log line and an audit row rather than quietly re-presenting
+                // the card. Both are written only once the CAS has actually won,
+                // so the record can never claim a recovery that did not happen.
+                // Neither names a cause: claimIsStale() is also true when BOTH
+                // stamps are unreadable, and on that arm nothing about the
+                // approval has been established — claimed_at travels in the
+                // structured record instead.
                 Log::warning('[StaffHuntressActionToolExecutor] Recovering a stranded execution claim on re-stage', [
                     'run_id' => $run->id,
                     'escalation_id' => $escalationId,
                     'claimed_at' => $claimedAt?->toIso8601String(),
                 ]);
-                $this->auditAttempt($tool, 'error', $clientId, $ticket, $contentHash, "{$targetKey}: Stranded execution claim (run left Executing by a dead approval) recovered on re-stage; the run returns to awaiting approval and re-verifies the escalation LIVE before any upstream call.", $actorLabel, $run->id);
+                $this->auditAttempt($tool, 'error', $clientId, $ticket, $contentHash, "{$targetKey}: Stranded execution claim (run left Executing) recovered on re-stage; the run returns to awaiting approval and re-verifies the escalation LIVE before any upstream call.", $actorLabel, $run->id);
             } else {
                 $run->update($revival);
             }
@@ -872,7 +879,7 @@ class StaffHuntressActionToolExecutor
      * Whether an Executing run's claim is old enough that no live approval
      * can still be holding it. claimed_at is stamped inside
      * claimForExecution()'s CAS; updated_at is the fallback for rows claimed
-     * before that column existed, and an unreadable stamp counts as STALE
+     * before that column existed, and BOTH stamps unreadable counts as STALE
      * rather than pinning the escalation in Executing forever (mirrors
      * TechnicianRun::scopeStaleExecuting).
      */
@@ -884,7 +891,8 @@ class StaffHuntressActionToolExecutor
     }
 
     /**
-     * Land a run left wedged in Executing by a dead approval when the
+     * Land a run left wedged in Executing, judged stale by claimIsStale()
+     * (elapsed past the bound, or BOTH stamps unreadable), when the
      * escalation now reads RESOLVED upstream — the one strand the re-stage
      * revive cannot reach, because the live already-resolved read
      * short-circuits above it (correctly: whatever resolved it, the record must
@@ -960,12 +968,12 @@ class StaffHuntressActionToolExecutor
 
         // Never silent: a run landed terminal by reconstruction rather than by
         // its own approval is an operational fault, and the record must say so.
-        Log::warning('[StaffHuntressActionToolExecutor] Landing a run stranded in Executing by a dead approval; the escalation now reads resolved upstream, by means this run cannot determine', [
+        Log::warning('[StaffHuntressActionToolExecutor] Landing a run stranded in Executing; the escalation now reads resolved upstream, by means this run cannot determine', [
             'run_id' => $run->id,
             'escalation_id' => $escalationId,
             'claimed_at' => $claimedAt?->toIso8601String(),
         ]);
-        $this->auditAttempt($tool, 'error', $clientId, $ticket, $contentHash, "{$targetKey}: Run left Executing by a dead approval; the escalation now reads RESOLVED upstream. Whether this approval's resolve POST ever landed could NOT be determined — the claim is taken well before the POST and a committed resolve lands the run Done immediately, so an external console resolve is at least as likely. The run is landed terminal here rather than wedged forever. Establish in the Huntress console how this escalation was resolved: if it was resolved through this tool, its resolution_method post-condition was never evaluated, so inspect it for attribute rules the server may have created and escalate to a human.", $actorLabel, $run->id);
+        $this->auditAttempt($tool, 'error', $clientId, $ticket, $contentHash, "{$targetKey}: Run left Executing; the escalation now reads RESOLVED upstream. Whether this approval's resolve POST ever landed could NOT be determined — the claim is taken well before the POST and a committed resolve lands the run Done immediately, so an external console resolve is at least as likely. The run is landed terminal here rather than wedged forever. Establish in the Huntress console how this escalation was resolved: if it was resolved through this tool, its resolution_method post-condition was never evaluated, so inspect it for attribute rules the server may have created and escalate to a human.", $actorLabel, $run->id);
     }
 
     /**
