@@ -81,10 +81,25 @@ class PortalInstallService
             }
 
             $publicRoot = config('app.url');
-            $parts = is_string($publicRoot) ? parse_url($publicRoot) : false;
+            // parse_url rewrites raw controls to underscores; refuse before parsing.
+            if (! is_string($publicRoot) || preg_match('/[^\x21-\x7E]/', $publicRoot)) {
+                return ['error' => 'Configure a public HTTP(S) application URL before requesting an install link.'] + $context;
+            }
+            $parts = parse_url($publicRoot);
             $scheme = strtolower($parts['scheme'] ?? '');
             $host = $parts['host'] ?? '';
-            $ip = str_starts_with($host, '[') && str_ends_with($host, ']') ? substr($host, 1, -1) : $host;
+            $bracketed = str_starts_with($host, '[') && str_ends_with($host, ']');
+            // WHATWG ignores a terminal DNS dot when deciding whether a host is numeric.
+            $labels = explode('.', rtrim($host, '.'));
+            $lastLabel = end($labels);
+            $numericHost = ctype_digit($lastLabel) || str_starts_with(strtolower($lastLabel), '0x');
+            // This is a link a client will click: never hand out a host WHATWG would
+            // reject or rewrite into a different address. Numeric hosts must be strict IPv4.
+            $validHost = $bracketed
+                ? filter_var(substr($host, 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false
+                : (! str_contains($host, ':') && ($numericHost
+                    ? filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
+                    : filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false));
             $path = $parts['path'] ?? '';
             // A single terminal slash is a root separator, not a prefix segment.
             $prefix = str_ends_with($path, '/') ? substr($path, 0, -1) : $path;
@@ -99,7 +114,8 @@ class PortalInstallService
                 }
             }
             if (! is_array($parts) || ! in_array($scheme, ['http', 'https'], true)
-                || (! filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) && ! filter_var($ip, FILTER_VALIDATE_IP))
+                || ! $validHost
+                || (isset($parts['port']) && ($parts['port'] < 1 || $parts['port'] > 65535))
                 || str_contains($publicRoot, '\\') || ! $normalized
                 || isset($parts['user']) || isset($parts['pass'])
                 || isset($parts['query']) || isset($parts['fragment'])) {

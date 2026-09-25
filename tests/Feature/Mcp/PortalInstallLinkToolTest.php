@@ -199,10 +199,68 @@ class PortalInstallLinkToolTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public static function malformedRootCases(): iterable
+    {
+        $roots = [
+            'bracketed-ipv4' => 'https://[127.0.0.1]/x',
+            'unbracketed-ipv6' => 'https://2001:db8::1:8443/customer',
+            'tab' => "https://public.example.test/cu\tstomer",
+            'space' => 'https://public.example.test/cu stomer',
+            'del' => "https://public.example.test/cu\x7fstomer",
+            'non-ascii' => "https://public.example.test/cu\xc3\xa9stomer",
+            'numeric-range' => 'https://999.1.1.1',
+            'numeric-short' => 'https://1.2.3',
+            'numeric-octal' => 'https://192.0.2.01',
+            'numeric-hex' => 'https://0x7f.1',
+            'numeric-last-hex' => 'https://example.0Xff',
+            'numeric-trailing-dot' => 'https://1.2.3.',
+            'port-zero' => 'https://public.example.test:0',
+            'port-overflow' => 'https://public.example.test:65536',
+        ];
+        foreach ($roots as $label => $root) {
+            foreach (['absent', 'live', 'expired'] as $state) {
+                yield $label.'-'.$state => [$root, $state];
+            }
+        }
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('malformedRootCases')]
+    public function test_malformed_root_never_issues_reissues_or_returns_a_credential(string $root, string $state): void
+    {
+        config(['app.url' => $root]);
+        $value = $state === 'absent' ? null : 'synthetic-boundary-'.$state;
+        $client = Client::factory()->create([
+            'tactical_site_id' => 123, 'portal_install_token' => $value,
+            'portal_install_token_expires_at' => match ($state) {
+                'live' => now()->addDay(), 'expired' => now()->subDay(), default => null,
+            },
+        ]);
+        $before = $client->fresh()->getAttributes();
+        $response = $this->callLink($client, endpoint: 'https://mcp.example.test/api/mcp/staff');
+        $response->assertJsonPath('result.isError', true);
+        $result = $this->decoded($response);
+        $this->assertSame('Configure a public HTTP(S) application URL before requesting an install link.', $result['error']);
+        $this->assertSame(['tactical'], $result['available_rmms']);
+        $this->assertSame($before, $client->fresh()->getAttributes());
+        foreach (['url', 'token', 'portal_install_token', 'reissued_expired', 'expires_at'] as $key) {
+            $this->assertArrayNotHasKey($key, $result);
+        }
+        $this->assertStringNotContainsString('/setup/', $response->getContent());
+        if ($value !== null) {
+            $this->assertStringNotContainsString($value, $response->getContent());
+        }
+        Http::assertNothingSent();
+    }
+
     public function test_valid_root_parts_are_rebuilt_with_lowercase_scheme(): void
     {
         foreach ([
             'HTTPS://public.example.test' => 'https://public.example.test',
+            'https://[::1]:8443' => 'https://[::1]:8443',
+            'https://[2001:db8::1]' => 'https://[2001:db8::1]',
+            'https://public.example.test:1' => 'https://public.example.test:1',
+            'https://public.example.test:65535' => 'https://public.example.test:65535',
+            'https://xn--bcher-kva.example' => 'https://xn--bcher-kva.example',
             'HtTp://public.example.test:8080/customer/v1/' => 'http://public.example.test:8080/customer/v1',
             'https://192.0.2.1/customer' => 'https://192.0.2.1/customer',
             'https://[2001:db8::1]:8443/customer' => 'https://[2001:db8::1]:8443/customer',

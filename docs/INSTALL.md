@@ -166,8 +166,22 @@ APP_URL=https://psa.yourmsp.com
 Staff MCP install-link responses use `APP_URL` as the public root, not the MCP
 request's host or scheme. Set it to the customer-reachable HTTP(S) application
 URL without user information, query or fragment. Schemes are case-insensitive
-HTTP or HTTPS and are rebuilt lowercase; the host must pass PHP hostname-domain
-validation or IP validation (IPv6 uses brackets). Backslashes anywhere are refused.
+HTTP or HTTPS and are rebuilt lowercase. Before parsing, the raw configured URL
+must contain only printable ASCII bytes `\x21`–`\x7E`: controls, spaces, DEL and
+non-ASCII bytes are refused. Configure IDN deployments in punycode. Backslashes
+anywhere are refused.
+
+A bracketed host must contain an IPv6 address accepted by PHP
+`FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV6`; bracketed IPv4 is refused.
+An unbracketed host cannot contain `:`. If its last label (ignoring a terminal DNS
+dot for this classification) is all digits or starts with `0x`/`0X`, the entire
+host must pass PHP `FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV4` as a strict
+dotted-quad address, without a terminal dot. This refuses short, hex, leading-zero
+and out-of-range numeric forms rather than letting a browser reinterpret them.
+Other unbracketed hosts must pass `FILTER_VALIDATE_DOMAIN` with
+`FILTER_FLAG_HOSTNAME`. An explicit port must be in the range **1–65535**;
+port zero is refused.
+
 An optional deployment prefix must be normalized: no dot or dot-dot segments,
 empty segments or backslashes. A single trailing slash is allowed as the root
 separator. Prefix segments use URI path characters or valid percent escapes;
