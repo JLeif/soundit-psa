@@ -3047,7 +3047,14 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP write failed for {$tool}; treat the membership change as not applied."];
+            // This catch cannot tell whether the POST left. Some of these throws
+            // are raised before any request is sent: setGroupMembership's input
+            // validation, and send()'s endpointUrl(), safeRequestOptions() and
+            // getToken(). Others are raised after it: send() checks the status only
+            // after posting, and the group endpoint returns HTTP 200 even when it
+            // reports per-member failure. So this string must not claim the
+            // directory was left untouched.
+            return ['error' => "CIPP write failed for {$tool}; the membership change may or may not have applied — verify the group membership in CIPP before retrying."];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} executed — ".$this->groupMembershipAuditDetail((string) $params['operation'], $group['name'], (string) $params['group_id']).": {$reason}", $actorLabel);
@@ -3743,7 +3750,33 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP write failed for {$tool}; treat the licence assignment as not applied."];
+            // On THIS path the exception TYPE answers "did the POST leave?",
+            // because assignUserLicense is a bare send() to api/ExecBulkLicense
+            // with no throws and no body capture. CippWriteHttpException is raised
+            // only by send()'s $response->failed() check, i.e. after ->post();
+            // everything else reaching this catch is a plain CippClientException
+            // from endpointUrl(), safeRequestOptions() or getToken(), all of which
+            // run BEFORE ->post(). So a plain CippClientException means nothing
+            // was sent.
+            //
+            // The 4xx arm is specific to this endpoint, not a general rule about
+            // upstream. In CIPP-API (master 7c756b0d, Invoke-ExecBulkLicense.ps1
+            // last touched 3bbfe443) Set-CIPPUserLicense runs inside an INNER
+            // try/catch that appends a "Failed to process..." line and keeps the
+            // status OK; BadRequest is set only by the OUTER catch, reached by the
+            // user-lookup throws that run before any write. So on ExecBulkLicense
+            // a 4xx means nothing was written and "not applied" is true. Do not
+            // copy this branch to an endpoint whose 4xx has not been checked the
+            // same way.
+            //
+            // Only a 5xx leaves the outcome genuinely unknown. failed() is
+            // serverError()||clientError(), so a CippWriteHttpException status is
+            // always >= 400 and this branch is exhaustive.
+            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
+                return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
+            }
+
+            return ['error' => "CIPP write failed for {$tool}; the licence assignment was not applied."];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} executed — ".$this->licenseTargetAuditDetail($user, $license).": {$reason}", $actorLabel);
@@ -4209,7 +4242,19 @@ class StaffCippWriteToolExecutor
                 // declined() redacts and bounds what it is given, but it cannot
                 // know this reason came from upstream — so the generic sentence
                 // is what it gets, and the specific cause stays in the row.
-                return $this->declined("CIPP write failed for {$run->action_type}; treat the licence assignment as not applied.");
+                // Same derivation as the direct path, including the endpoint-specific
+                // 4xx premise: assignUserLicense is a bare send() to
+                // api/ExecBulkLicense, so CippWriteHttpException means the POST left
+                // (only $response->failed() raises it) and a plain CippClientException
+                // means it did not (endpointUrl/safeRequestOptions/getToken all run
+                // before ->post()); and on that endpoint a 4xx comes only from the
+                // outer catch, which the pre-write user lookup reaches. Hedge only
+                // where the outcome is truly unknown.
+                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
+                    return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
+                }
+
+                return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment was not applied.");
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed — ".$this->licenseTargetAuditDetail($user, $license).'.', $this->approverLabel($approverId), $run->id, $approverId);

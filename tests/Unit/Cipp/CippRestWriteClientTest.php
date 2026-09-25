@@ -1615,4 +1615,152 @@ class CippRestWriteClientTest extends TestCase
 
         Http::assertNothingSent();
     }
+
+    /**
+     * The three "did not confirm" throws are raised AFTER send() has POSTed, so
+     * their operator text must claim neither applied nor not-applied. These
+     * arms assert the MECHANISM (the write request left the process) alongside
+     * the wording, so a message that merely reads well cannot pass while the
+     * claim it makes is false.
+     */
+    private function denialClient(int $status, mixed $results): CippRestWriteClient
+    {
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::preventStrayRequests();
+        Http::fake([
+            'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
+            'cipp.example.test/api/*' => Http::response(['Results' => $results], $status),
+        ]);
+
+        return new CippRestWriteClient([
+            'api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1',
+            'client_id' => 'write-client', 'client_secret' => 'write-secret',
+        ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+    }
+
+    /**
+     * Count only POSTs to the ONE endpoint the call under test writes to.
+     *
+     * The earlier version counted any request whose URL contained '/api/', which
+     * a token request or a future read on the same host would also satisfy - so
+     * "the write left" could have been proven by traffic that was not the write.
+     * Matching the method AND the endpoint makes the counter answer the question
+     * it is being asked.
+     *
+     * @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left
+     */
+    private function countWritePosts(string $endpoint): int
+    {
+        $writes = 0;
+        Http::recorded(function ($request) use (&$writes, $endpoint) {
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), 'cipp.example.test/api/'.$endpoint)) {
+                $writes++;
+            }
+
+            return true;
+        });
+
+        return $writes;
+    }
+
+    /** @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left */
+    private function captureDenial(string $endpoint, callable $call): array
+    {
+        $thrown = null;
+        try {
+            $call();
+        } catch (CippClientException $e) {
+            $thrown = $e;
+        }
+
+        return [$thrown, $this->countWritePosts($endpoint)];
+    }
+
+    private function assertClaimsNeitherOutcome(CippClientException $e): void
+    {
+        $message = $e->getMessage();
+        $this->assertStringNotContainsString('not applied', $message);
+        $this->assertStringNotContainsString('treat it as', $message);
+        $this->assertStringContainsString('may or may not have applied', $message);
+        $this->assertStringContainsString('verify', $message);
+    }
+
+    public function test_group_membership_error_line_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Error - could not add member']);
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_group_membership_empty_results_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        // The endpoint's own documented case: a member it silently dropped
+        // produces no line at all, indistinguishable from a change that landed
+        // and logged nothing.
+        $client = $this->denialClient(200, []);
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_group_membership_http_500_leaves_the_write_sent(): void
+    {
+        $client = $this->denialClient(500, 'upstream exploded');
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(\App\Services\Cipp\CippWriteHttpException::class, $thrown);
+        $this->assertSame(500, $thrown->status);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+    }
+
+    public function test_group_membership_success_marker_returns_without_throwing(): void
+    {
+        // Positive control: the same wiring succeeds when upstream confirms, so
+        // the arms above cannot be an artefact of the harness. It goes through
+        // the SAME counter as the throwing arms - a control that measures the
+        // request a different way is not a control on the measurement.
+        $client = $this->denialClient(200, ['Success - member added']);
+        $result = $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        );
+
+        $this->assertTrue($result['success']);
+        $this->assertSame(1, $this->countWritePosts('EditGroup'), 'the success arm posts exactly the same one write');
+    }
+
+    public function test_onedrive_reassignment_failure_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Failed to set permissions']);
+        [$thrown, $writes] = $this->captureDenial('ExecSharePointPerms', fn () => $client->reassignOneDriveOwnership(
+            'example.onmicrosoft.com', 'owner@example.test', 'successor@example.test'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_edit_user_unconfirmed_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Queued the request']);
+        [$thrown, $writes] = $this->captureDenial('EditUser', fn () => $client->editUser(
+            'example.onmicrosoft.com', 'uid', 'alex@example.test', ['displayName' => 'Alex Example'], [], null
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
 }

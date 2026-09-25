@@ -760,7 +760,8 @@ class CippRestWriteClient
 
         if (! $hasSuccess || $failure !== null) {
             throw new CippClientException(
-                'CIPP did not confirm the group membership change; treat it as not applied.'
+                'CIPP accepted the request but did not confirm the group membership change;'
+                .' it may or may not have applied — verify the group membership in CIPP before retrying.'
                 .($failure !== null ? ' Upstream: '.mb_substr($failure, 0, 300) : '')
             );
         }
@@ -868,7 +869,10 @@ class CippRestWriteClient
             : (string) $results;
 
         if (stripos($text, 'Successfully') === false || stripos($text, 'Failed') !== false) {
-            throw new CippClientException('CIPP did not confirm the OneDrive permission change; treat the reassignment as not applied.');
+            throw new CippClientException(
+                'CIPP accepted the request but did not confirm the OneDrive permission change;'
+                .' it may or may not have applied — verify the OneDrive permissions in CIPP before retrying.'
+            );
         }
 
         return ['success' => true, 'status' => (int) $response['status']];
@@ -982,7 +986,10 @@ class CippRestWriteClient
         }
 
         if (! $editConfirmed) {
-            throw new CippClientException('CIPP did not confirm the user edit; treat the change as not applied and verify in CIPP.');
+            throw new CippClientException(
+                'CIPP accepted the request but did not confirm the user edit;'
+                .' it may or may not have applied — verify the user\'s current state in CIPP before retrying.'
+            );
         }
 
         return ['success' => true, 'status' => (int) $response['status']];
