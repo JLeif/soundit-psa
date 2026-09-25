@@ -149,8 +149,10 @@ class AutoElevateAssetSyncService
         $report = new AutoElevateAssetSyncReport;
 
         $clients = Client::query()
+            // No `!= ''` clause: the column is Laravel ->uuid(), a native `uuid` type on MariaDB
+            // 10.7+, which cannot hold '' — and there `uuid_col != ''` is false for EVERY row, so
+            // that clause selected zero clients on production while the SQLite suite stayed green.
             ->whereNotNull('autoelevate_company_id')
-            ->where('autoelevate_company_id', '!=', '')
             ->operational()
             ->orderBy('id')
             ->get();
