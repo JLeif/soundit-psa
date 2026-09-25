@@ -478,13 +478,26 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
     public function test_a_partial_dispatch_failure_records_how_many_were_queued(): void
     {
         $records = [];
-        $capture = function ($message, $context = []) use (&$records) {
-            $records[] = ['message' => $message, 'context' => $context];
+        $capture = function ($level) use (&$records) {
+            return function ($message, $context = []) use (&$records, $level) {
+                $records[] = ['level' => $level, 'message' => $message, 'context' => $context];
+            };
         };
 
         foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
-            Log::shouldReceive($level)->andReturnUsing($capture);
+            Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // An opted-OUT active user ahead of the throw point (#3605). Without
+        // one, moving $queued++ outside the wantsNotification() block still
+        // gives 2 here and 0 on the sibling, so the mutant survived. This user
+        // is looked at and skipped, so 'recipients seen' and 'jobs dispatched'
+        // now differ and the count can only be right for the right reason.
+        User::factory()->create([
+            'is_active' => true,
+            'email' => 'optedout@example.test',
+            'notification_preferences' => [NotificationEventType::NewVoicemail->value => false],
+        ]);
 
         for ($i = 0; $i < 4; $i++) {
             User::factory()->create(['is_active' => true, 'email' => "tech{$i}@example.test"]);
@@ -505,12 +518,30 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             fn ($r) => str_contains($r['message'], '[Voicemail]') && str_contains($r['message'], 'will not be retried')
         ));
 
-        $this->assertCount(1, $failures, 'exactly one failure record, at any level');
+        $this->assertCount(1, $failures, 'exactly one failure record');
+
+        // Level pinned (#3599). 'at any level' excluded a SECOND record but
+        // let error->debug through, and at LOG_LEVEL=info production would
+        // drop the only record of a lost voicemail notification entirely.
+        $this->assertSame(
+            'error',
+            $failures[0]['level'],
+            'the failure record must be at error level; a demotion hides it in production'
+        );
 
         $this->assertStringNotContainsStringIgnoringCase(
             'could not be queued',
             $failures[0]['message'],
             'the record must not claim nothing was queued when two jobs were'
+        );
+
+        // Property, not vocabulary (#3610). Absence-of-one-phrase let a
+        // reworded false claim through ('No recipients were emailed and will
+        // not be retried' passed). Pin the message itself.
+        $this->assertSame(
+            '[Voicemail] Notification dispatch failed and will not be retried',
+            $failures[0]['message'],
+            'the failure message is the operator-facing record and is pinned exactly'
         );
 
         $this->assertArrayHasKey(
@@ -533,13 +564,24 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
     public function test_a_dispatch_failing_on_the_first_recipient_records_zero_queued(): void
     {
         $records = [];
-        $capture = function ($message, $context = []) use (&$records) {
-            $records[] = ['message' => $message, 'context' => $context];
+        $capture = function ($level) use (&$records) {
+            return function ($message, $context = []) use (&$records, $level) {
+                $records[] = ['level' => $level, 'message' => $message, 'context' => $context];
+            };
         };
 
         foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
-            Log::shouldReceive($level)->andReturnUsing($capture);
+            Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // Opted-out user first here too (#3605): on this arm the increment
+        // mutant must still read 0, which it cannot if it counts recipients
+        // merely looked at.
+        User::factory()->create([
+            'is_active' => true,
+            'email' => 'optedout@example.test',
+            'notification_preferences' => [NotificationEventType::NewVoicemail->value => false],
+        ]);
 
         $this->staffUser();
 
@@ -557,7 +599,17 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             fn ($r) => str_contains($r['message'], '[Voicemail]') && str_contains($r['message'], 'will not be retried')
         ));
 
-        $this->assertCount(1, $failures, 'exactly one failure record, at any level');
+        $this->assertCount(1, $failures, 'exactly one failure record');
+        $this->assertSame(
+            'error',
+            $failures[0]['level'],
+            'the failure record must be at error level on this arm too (#3599)'
+        );
+        $this->assertSame(
+            '[Voicemail] Notification dispatch failed and will not be retried',
+            $failures[0]['message'],
+            'the failure message is pinned exactly here too (#3610)'
+        );
         $this->assertSame(
             0,
             $failures[0]['context']['queued_before_failure'] ?? null,
