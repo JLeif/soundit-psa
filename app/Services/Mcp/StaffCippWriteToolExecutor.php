@@ -49,6 +49,14 @@ class StaffCippWriteToolExecutor
     /** Remove answered "No license changes needed": no write was made. Claims nothing about history. */
     private const LICENSE_NO_CHANGE_MESSAGE = 'CIPP reported the user did not hold this licence, so nothing was removed.';
 
+    /**
+     * result_status of the audit row for that answer (#3744): the value the
+     * phone-call services already write for a no-change action. It is not
+     * 'executed', so alreadyExecuted() and executedRunId() do not match it and
+     * do not refuse an identical removal made after it.
+     */
+    private const RESULT_NO_OP = 'no_op';
+
     /** @var array<string, string> */
     private const STAGED_TO_DIRECT = [
         'cipp_stage_offboard_user' => 'cipp_offboard_user',
@@ -982,7 +990,7 @@ class StaffCippWriteToolExecutor
             }
 
             if ($this->isLicenseNoChange($directTool, $upstream)) {
-                $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
+                $this->auditAttempt($run->action_type, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
                 $run->advanceTo(TechnicianRunState::Done);
 
                 return new TechnicianApprovalResult('executed', message: self::LICENSE_NO_CHANGE_MESSAGE);
@@ -1056,7 +1064,7 @@ class StaffCippWriteToolExecutor
         }
 
         if ($this->isLicenseNoChange($tool, $upstream)) {
-            $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
+            $this->auditAttempt($tool, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
 
             return [
                 'success' => true,
@@ -1498,6 +1506,27 @@ class StaffCippWriteToolExecutor
             $contentHash = $unspent;
         }
 
+        // A staged licence removal that CIPP answered "No license changes needed"
+        // leaves its run Done under this key while its audit row is RESULT_NO_OP,
+        // which the rail below does not match (#3744). firstOrCreate would then
+        // hand back that Done run and the revive branch would overwrite it, so the
+        // spent key is walked forward as for the recreatable verbs. The rail checks
+        // every key the walk passed, so a removal that executed under a walked key
+        // still answers an identical re-stage as already executed.
+        $railHashes = [$contentHash];
+        if ($tool === 'cipp_stage_remove_user_license') {
+            $unspent = $this->unspentContentHash($tool, $ticket->id, $contentHash);
+
+            if ($unspent === null) {
+                $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} re-stage refused; this ticket already holds the maximum number of runs for this exact content.", $actorLabel);
+
+                return ['error' => "{$tool} could not be staged: this ticket already holds the maximum number of runs for this exact content; stage the removal on a new ticket."];
+            }
+
+            $railHashes = $this->walkedContentHashes($contentHash, $unspent);
+            $contentHash = $unspent;
+        }
+
         // The audit log is IMMUTABLE and stays authoritative ONLY for "was this exact
         // content already executed" — an 'executed' row can never go stale the way an
         // 'awaiting_approval' row can (bd psa-k4s0 Root B). Skipped for the verbs whose
@@ -1505,13 +1534,23 @@ class StaffCippWriteToolExecutor
         // (RECREATABLE_TARGET_STAGED_TOOLS): there "identical content" no longer means
         // "the same upstream object", and answering already-executed would report a
         // re-planted inbox rule as removed without reading the mailbox at all.
-        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true) && $this->alreadyExecuted($tool, $client->id, $contentHash)) {
+        $executedHash = null;
+        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true)) {
+            foreach ($railHashes as $railHash) {
+                if ($this->alreadyExecuted($tool, $client->id, $railHash)) {
+                    $executedHash = $railHash;
+
+                    break;
+                }
+            }
+        }
+        if ($executedHash !== null) {
             return [
                 'success' => true,
                 'idempotent' => true,
                 'ticket_id' => $ticket->id,
                 'ticket_display_id' => $ticket->display_id,
-                'run_id' => $this->executedRunId($tool, $client->id, $contentHash),
+                'run_id' => $this->executedRunId($tool, $client->id, $executedHash),
                 'message' => 'Already executed identical action recently; no new proposal was staged.',
             ];
         }
@@ -6315,6 +6354,11 @@ class StaffCippWriteToolExecutor
         return $keys;
     }
 
+    /**
+     * Matches 'executed' rows only. A licence removal that CIPP answered with
+     * "No license changes needed" is audited RESULT_NO_OP, so this check
+     * does not refuse a later identical removal (#3744).
+     */
     private function alreadyExecuted(string $tool, int $clientId, string $contentHash): bool
     {
         return TechnicianActionLog::query()
@@ -6377,13 +6421,17 @@ class StaffCippWriteToolExecutor
 
     /**
      * A content hash for a re-stage that cannot land on a run this ticket has
-     * already SPENT. Used ONLY by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
-     * executed-content rail stageAction() skips.
+     * already SPENT. Used by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
+     * executed-content rail stageAction() skips — and by
+     * cipp_stage_remove_user_license, whose no-op run that rail does not match.
      *
      * Every other staged verb is protected by that rail: identical content that
      * already executed short-circuits before firstOrCreate is ever reached, so the
      * only non-live run its key can return is one that never executed (superseded,
-     * denied, withdrawn) and reviving THAT row in place is correct. With the rail
+     * denied or withdrawn) and reviving THAT row in place is correct. A licence
+     * removal that CIPP answered as a no-op is the exception: its run is Done, but
+     * its audit row is RESULT_NO_OP, which the rail does not match, so without the
+     * walk the revive branch would overwrite that Done run. With the rail
      * skipped the protection is gone, and firstOrCreate on the UNIQUE (ticket_id,
      * action_type, content_hash) key hands back the very run that removed a rule
      * under this name — a terminal Done row the revive branch would flip back to
@@ -6425,6 +6473,24 @@ class StaffCippWriteToolExecutor
         }
 
         return null;
+    }
+
+    /**
+     * Every key unspentContentHash() passed from $contentHash to $unspent, both
+     * included, in walk order. Bounded like that walk.
+     *
+     * @return array<int, string>
+     */
+    private function walkedContentHashes(string $contentHash, string $unspent): array
+    {
+        $hashes = [$contentHash];
+
+        for ($attempt = 0; $contentHash !== $unspent && $attempt < 50; $attempt++) {
+            $contentHash = hash('sha256', $contentHash.'|re-stage');
+            $hashes[] = $contentHash;
+        }
+
+        return $hashes;
     }
 
     /**
@@ -6987,9 +7053,36 @@ class StaffCippWriteToolExecutor
         return $tool === 'cipp_remove_user_license' && is_array($upstream) && ($upstream['no_change'] ?? false) === true;
     }
 
+    /**
+     * The audit summary for a caught CippClientException (#3745).
+     *
+     * Both types below are thrown only after ->post(), so their summaries say
+     * nothing about when the failure happened:
+     *  - CippWriteUnconfirmedException: its own message, which names the
+     *    endpoint and the outcome, (unknown) or (not_applied).
+     *  - CippWriteHttpException: the HTTP status, read from the exception's
+     *    status field. Its message says "failed", which a 5xx does not show.
+     *
+     * Any other CippClientException keeps "failed before completion". On the
+     * licence methods that type is thrown only before ->post(). Some other
+     * methods still throw it after the send (setGroupMembership,
+     * reassignOneDriveOwnership, editUser, and guardReportedFailure()'s
+     * callers), where the phrase says more than is known. Those throws are not
+     * changed here; #3709 covers the first three.
+     */
     private function safeFailureSummary(string $tool, CippClientException $e): string
     {
-        return "{$tool} failed before completion: ".mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+        if ($e instanceof CippWriteHttpException) {
+            return "{$tool}: the CIPP request returned HTTP {$e->status}.";
+        }
+
+        $detail = mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+
+        if ($e instanceof CippWriteUnconfirmedException) {
+            return "{$tool}: {$detail}";
+        }
+
+        return "{$tool} failed before completion: {$detail}";
     }
 
     /**
