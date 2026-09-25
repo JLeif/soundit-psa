@@ -214,6 +214,9 @@ class PortalInstallLinkToolTest extends TestCase
             'numeric-hex' => 'https://0x7f.1',
             'numeric-last-hex' => 'https://example.0Xff',
             'numeric-trailing-dot' => 'https://1.2.3.',
+            'range-trailing-dot' => 'https://999.1.1.1.',
+            'ipv4-trailing-dot' => 'https://192.0.2.1.',
+            'hostname-trailing-dot' => 'https://public.example.test.',
             'port-zero' => 'https://public.example.test:0',
             'port-overflow' => 'https://public.example.test:65536',
         ];

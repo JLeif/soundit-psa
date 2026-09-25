@@ -173,8 +173,9 @@ anywhere are refused.
 
 A bracketed host must contain an IPv6 address accepted by PHP
 `FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV6`; bracketed IPv4 is refused.
-An unbracketed host cannot contain `:`. If its last label (ignoring a terminal DNS
-dot for this classification) is all digits or starts with `0x`/`0X`, the entire
+An unbracketed host cannot contain `:` or end in `.` (including ordinary DNS
+names and IPv4 addresses). If its last label is all digits or starts with
+`0x`/`0X`, the entire
 host must pass PHP `FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV4` as a strict
 dotted-quad address, without a terminal dot. This refuses short, hex, leading-zero
 and out-of-range numeric forms rather than letting a browser reinterpret them.

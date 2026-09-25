@@ -89,15 +89,14 @@ class PortalInstallService
             $scheme = strtolower($parts['scheme'] ?? '');
             $host = $parts['host'] ?? '';
             $bracketed = str_starts_with($host, '[') && str_ends_with($host, ']');
-            // WHATWG ignores a terminal DNS dot when deciding whether a host is numeric.
-            $labels = explode('.', rtrim($host, '.'));
+            $labels = explode('.', $host);
             $lastLabel = end($labels);
             $numericHost = ctype_digit($lastLabel) || str_starts_with(strtolower($lastLabel), '0x');
             // This is a link a client will click: never hand out a host WHATWG would
             // reject or rewrite into a different address. Numeric hosts must be strict IPv4.
             $validHost = $bracketed
                 ? filter_var(substr($host, 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false
-                : (! str_contains($host, ':') && ($numericHost
+                : (! str_contains($host, ':') && ! str_ends_with($host, '.') && ($numericHost
                     ? filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
                     : filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false));
             $path = $parts['path'] ?? '';
