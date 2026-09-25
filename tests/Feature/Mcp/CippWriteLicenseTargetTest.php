@@ -2209,8 +2209,9 @@ class CippWriteLicenseTargetTest extends TestCase
     }
 
     /**
-     * The 5xx arm on the immediate path — the ONLY shape on this path where the
-     * POST provably left and the outcome is provably unknown. send() raises
+     * The 5xx arm on the immediate path — the HTTP-status shape where the POST
+     * provably left and the outcome is unknown (a 200 or 3xx the client cannot
+     * confirm is the other, covered in CippWriteLicenseFalseSuccessTest). send() raises
      * CippWriteHttpException solely from $response->failed(), which runs after
      * ->post(), so a 500 here means CIPP received the write and answered badly.
      *
