@@ -3047,10 +3047,13 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            // The POST has already left by the time any of these throws is raised
-            // (send() checks the status, and the group endpoint returns HTTP 200
-            // even when it reports per-member failure), so this string must not
-            // claim the directory was left untouched.
+            // This catch cannot tell whether the POST left. Some of these throws
+            // are raised before any request is sent: setGroupMembership's input
+            // validation, and send()'s endpointUrl(), safeRequestOptions() and
+            // getToken(). Others are raised after it: send() checks the status only
+            // after posting, and the group endpoint returns HTTP 200 even when it
+            // reports per-member failure. So this string must not claim the
+            // directory was left untouched.
             return ['error' => "CIPP write failed for {$tool}; the membership change may or may not have applied — verify the group membership in CIPP before retrying."];
         }
 

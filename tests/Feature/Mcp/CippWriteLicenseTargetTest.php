@@ -1559,9 +1559,10 @@ class CippWriteLicenseTargetTest extends TestCase
         $this->assertSame('gate_declined', $result->status);
         $this->assertStringNotContainsString(self::TENANT, (string) $result->message);
         $this->assertStringNotContainsString('cipp.internal', (string) $result->message);
-        // A bare CippClientException (and the 500 this fixture models) is raised
-        // after the POST has gone out, so the approver must be told the outcome
-        // is unknown rather than that nothing happened.
+        // This fixture models a 500 relayed as a bare CippClientException. A bare
+        // CippClientException can be raised before the POST (token, URL safety)
+        // or after it, and the catch cannot tell which, so the approver must be
+        // told the outcome is unknown rather than that nothing happened.
         $this->assertStringContainsString('may or may not have applied', (string) $result->message);
         $this->assertStringNotContainsString('was not applied', (string) $result->message);
 
