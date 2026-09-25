@@ -477,7 +477,45 @@ class PhoneCallService
             // also has duration > 0. Use answered_at as the only signal —
             // handleCallAnswered sets it only for genuine answer events.
             if ($call->status === CallStatus::Voicemail) {
-                // Already recorded as voicemail — preserve
+                // Already recorded as voicemail — preserve. Voicemail outranks
+                // answer evidence: a recording is not a conversation, and
+                // Plivo's Duration includes voicemail recording time, which is
+                // the whole reason this method does not infer "answered" from
+                // duration.
+            } elseif ($call->answered_at === null && $this->answerIsObserved($data)) {
+                // THIS PAYLOAD says the dialled leg connected, and nothing has
+                // stamped answered_at. Card 57SuhqPY.
+                //
+                // Before this arm existed, answerIsObserved() was called from
+                // exactly ONE place — handleCallAnswered() — so evidence that
+                // arrived on the HANGUP payload was never offered to the only
+                // method that reads it, and answered_at-alone froze the call as
+                // Missed. That is reachable because
+                // PlivoWebhookController::handle() returns early on a terminal
+                // CallStatus, BEFORE the $dialAction === 'answer' arm: a webhook
+                // that is both terminal AND carries answer evidence never
+                // reaches handleCallAnswered() at all. The controller itself
+                // shows such payloads are expected — its
+                // terminalPayloadPreservingDuration() reads DialBLegDuration on
+                // the terminal path.
+                //
+                // answered_at is a CEILING here (ended_at), not the true answer
+                // moment, for the same reason and with the same bound as the
+                // late-answer branch in handleCallAnswered(): nothing in this
+                // repo computes talk time or billing from this column — duration
+                // and billing run through effectiveDurationSeconds(), which
+                // reads duration and recording_duration — and
+                // handleRecordingReady() replaces it with the honest value the
+                // moment a real duration lands. A visibly wrong status was the
+                // defect; an approximate answer moment is the smaller wrong.
+                //
+                // FAILS CLOSED: answerIsObserved() requires a non-empty
+                // DialBLegUUID, a POSITIVE DialBLegDuration, an affirmative
+                // DialBLegStatus, or DialAction=connected. An unanswered dial
+                // carries an empty B-leg UUID and a zero B-leg duration and so
+                // still lands as Missed below.
+                $call->answered_at = $call->ended_at;
+                $call->status = CallStatus::Completed;
             } elseif ($call->answered_at === null) {
                 $call->status = CallStatus::Missed;
             } else {
