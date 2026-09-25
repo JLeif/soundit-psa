@@ -575,8 +575,8 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
             '3xx' => [302, '', 'CIPP write api/ExecBulkLicense was sent but not confirmed (unknown); upstream: HTTP 302'],
             'two lines' => [200, ['Results' => ['a', 'b']], 'CIPP write api/ExecBulkLicense was sent but not confirmed (unknown)'],
             'user not found' => [200, ['Results' => ['User user-123 not found in tenant acme.onmicrosoft.com']], 'CIPP write api/ExecBulkLicense was sent but not confirmed (not_applied); upstream: User user-123 not found in tenant acme.onmicrosoft.com'],
-            '5xx' => [502, ['Results' => ['x']], 'CIPP answered HTTP 502.'],
-            '4xx' => [400, ['Results' => ['x']], 'CIPP answered HTTP 400.'],
+            '5xx' => [502, ['Results' => ['x']], 'the CIPP request returned HTTP 502.'],
+            '4xx' => [400, ['Results' => ['x']], 'the CIPP request returned HTTP 400.'],
         ];
     }
 

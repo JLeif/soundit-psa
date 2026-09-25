@@ -7073,7 +7073,7 @@ class StaffCippWriteToolExecutor
     private function safeFailureSummary(string $tool, CippClientException $e): string
     {
         if ($e instanceof CippWriteHttpException) {
-            return "{$tool}: CIPP answered HTTP {$e->status}.";
+            return "{$tool}: the CIPP request returned HTTP {$e->status}.";
         }
 
         $detail = mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
