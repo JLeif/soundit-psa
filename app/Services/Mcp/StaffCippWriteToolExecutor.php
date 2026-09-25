@@ -1506,6 +1506,27 @@ class StaffCippWriteToolExecutor
             $contentHash = $unspent;
         }
 
+        // A staged licence removal that CIPP answered "No license changes needed"
+        // leaves its run Done under this key while its audit row is RESULT_NO_OP,
+        // which the rail below does not match (#3744). firstOrCreate would then
+        // hand back that Done run and the revive branch would overwrite it, so the
+        // spent key is walked forward as for the recreatable verbs. The rail checks
+        // every key the walk passed, so a removal that executed under a walked key
+        // still answers an identical re-stage as already executed.
+        $railHashes = [$contentHash];
+        if ($tool === 'cipp_stage_remove_user_license') {
+            $unspent = $this->unspentContentHash($tool, $ticket->id, $contentHash);
+
+            if ($unspent === null) {
+                $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} re-stage refused; this ticket already holds the maximum number of runs for this exact content.", $actorLabel);
+
+                return ['error' => "{$tool} could not be staged: this ticket already holds the maximum number of runs for this exact content; stage the removal on a new ticket."];
+            }
+
+            $railHashes = $this->walkedContentHashes($contentHash, $unspent);
+            $contentHash = $unspent;
+        }
+
         // The audit log is IMMUTABLE and stays authoritative ONLY for "was this exact
         // content already executed" — an 'executed' row can never go stale the way an
         // 'awaiting_approval' row can (bd psa-k4s0 Root B). Skipped for the verbs whose
@@ -1513,13 +1534,23 @@ class StaffCippWriteToolExecutor
         // (RECREATABLE_TARGET_STAGED_TOOLS): there "identical content" no longer means
         // "the same upstream object", and answering already-executed would report a
         // re-planted inbox rule as removed without reading the mailbox at all.
-        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true) && $this->alreadyExecuted($tool, $client->id, $contentHash)) {
+        $executedHash = null;
+        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true)) {
+            foreach ($railHashes as $railHash) {
+                if ($this->alreadyExecuted($tool, $client->id, $railHash)) {
+                    $executedHash = $railHash;
+
+                    break;
+                }
+            }
+        }
+        if ($executedHash !== null) {
             return [
                 'success' => true,
                 'idempotent' => true,
                 'ticket_id' => $ticket->id,
                 'ticket_display_id' => $ticket->display_id,
-                'run_id' => $this->executedRunId($tool, $client->id, $contentHash),
+                'run_id' => $this->executedRunId($tool, $client->id, $executedHash),
                 'message' => 'Already executed identical action recently; no new proposal was staged.',
             ];
         }
@@ -6390,14 +6421,17 @@ class StaffCippWriteToolExecutor
 
     /**
      * A content hash for a re-stage that cannot land on a run this ticket has
-     * already SPENT. Used ONLY by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
-     * executed-content rail stageAction() skips.
+     * already SPENT. Used by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
+     * executed-content rail stageAction() skips — and by
+     * cipp_stage_remove_user_license, whose no-op run that rail does not match.
      *
      * Every other staged verb is protected by that rail: identical content that
      * already executed short-circuits before firstOrCreate is ever reached, so the
      * only non-live run its key can return is one that never executed (superseded,
-     * denied, withdrawn, or a licence removal that ended as a no-op) and reviving
-     * THAT row in place is correct. With the rail
+     * denied or withdrawn) and reviving THAT row in place is correct. A licence
+     * removal that CIPP answered as a no-op is the exception: its run is Done, but
+     * its audit row is RESULT_NO_OP, which the rail does not match, so without the
+     * walk the revive branch would overwrite that Done run. With the rail
      * skipped the protection is gone, and firstOrCreate on the UNIQUE (ticket_id,
      * action_type, content_hash) key hands back the very run that removed a rule
      * under this name — a terminal Done row the revive branch would flip back to
@@ -6439,6 +6473,24 @@ class StaffCippWriteToolExecutor
         }
 
         return null;
+    }
+
+    /**
+     * Every key unspentContentHash() passed from $contentHash to $unspent, both
+     * included, in walk order. Bounded like that walk.
+     *
+     * @return array<int, string>
+     */
+    private function walkedContentHashes(string $contentHash, string $unspent): array
+    {
+        $hashes = [$contentHash];
+
+        for ($attempt = 0; $contentHash !== $unspent && $attempt < 50; $attempt++) {
+            $contentHash = hash('sha256', $contentHash.'|re-stage');
+            $hashes[] = $contentHash;
+        }
+
+        return $hashes;
     }
 
     /**

@@ -480,6 +480,8 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
         $first = $this->stagedPerson('cipp_remove_user_license', $f, $approver);
         $this->assertSame('executed', $first->status);
         $this->assertSame(1, $this->licenceWrites());
+        $firstRun = TechnicianRun::sole();
+        $this->assertSame(TechnicianRunState::Done, $firstRun->state);
 
         $this->answer(200, $this->successBody());
         // Re-stage the identical removal. stageAction() must stage a new
@@ -488,6 +490,7 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
             ->json('result.content.0.text'), true);
         $this->assertArrayNotHasKey('idempotent', $restaged, json_encode($restaged));
         $this->assertTrue($restaged['success'] ?? false, json_encode($restaged));
+        $this->assertNotSame($firstRun->id, $restaged['run_id'], 'the re-stage must not revive the Done no-op run');
         $second = app(StaffCippWriteToolExecutor::class)->approveStagedRun(TechnicianRun::findOrFail($restaged['run_id']), $approver->id);
 
         $this->assertSame('executed', $second->status);
@@ -502,6 +505,25 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
             'Operator-approved cipp_stage_remove_user_license executed.',
             (string) TechnicianActionLog::where('result_status', 'executed')->value('summary')
         );
+
+        // The first run keeps its own record: still Done, its proposal untouched.
+        $kept = $firstRun->fresh();
+        $this->assertSame(TechnicianRunState::Done, $kept->state);
+        $this->assertSame($firstRun->proposed_content, $kept->proposed_content);
+        $this->assertSame($firstRun->proposed_meta, $kept->proposed_meta);
+        $this->assertSame(
+            [$firstRun->id, $firstRun->id, $restaged['run_id'], $restaged['run_id']],
+            TechnicianActionLog::where('action_type', 'cipp_stage_remove_user_license')->orderBy('id')->pluck('run_id')->all()
+        );
+
+        // A third identical re-stage: the executed row sits under the walked
+        // key, and the rail still answers it without a new run or POST.
+        $third = json_decode((string) $this->callTool(['cipp_stage_remove_user_license'], 'cipp_stage_remove_user_license', $this->personArgs($f, staged: true))
+            ->json('result.content.0.text'), true);
+        $this->assertTrue($third['idempotent'] ?? false, json_encode($third));
+        $this->assertSame($restaged['run_id'], $third['run_id']);
+        $this->assertSame(2, TechnicianRun::count());
+        $this->assertSame(2, $this->licenceWrites());
         $this->assertSame([], array_column($logs->getArrayCopy(), 'level'), 'no log record at any level on this path');
     }
 
