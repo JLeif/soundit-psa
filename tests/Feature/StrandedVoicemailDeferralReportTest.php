@@ -877,9 +877,9 @@ class StrandedVoicemailDeferralReportTest extends TestCase
         //
         // Round 2 context:2: THE THROW ALONE IS NOT THE CONTROL. The
         // production remediation path swallows it --
-        // NotificationService::sendVoicemailNotificationOnce() (:554-561)
-        // wraps its dispatch in catch (\Throwable) and logs '[Voicemail]
-        // Notification could not be queued and will not be retried', by
+        // NotificationService::sendVoicemailNotificationOnce() wraps its
+        // dispatch in catch (\Throwable) and logs '[Voicemail] Notification
+        // dispatch failed and will not be retried', by
         // design, because the claim is already taken by then. A
         // \RuntimeException raised inside EmailService on that path therefore
         // never reaches PHPUnit: the command still exits 0 and every
