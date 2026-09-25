@@ -19,6 +19,15 @@ Source: card `6aa664b8`, reaffirmed by card `6i4cN8BC` (Charlie: “Lift it. Yes
 
 Production settings, grants, credentials, live-route activation, schema-destructive operations, client-data migrations and irreversible production actions require Charlie's explicit go for the specific action. Development approval is not production authorization. Escalate ambiguous product/scope judgments, security beyond a mechanical fix, schema/data-loss risks, money, customer impact and irreversibility to Jeeves; they cannot spend Charlie's production authority.
 
+<a id="release-conduct"></a>
+### 2026-09-25 — Merging is not releasing (card `PNxPmLMO`)
+
+A seat that merges to `main` owes the release in the same sitting. Where Jeeves's release go covers the merge, it deploys through the normal gate and verifies at the consumer boundary; without that go, or when it deliberately does not ship, it records the no-deploy as below and names on the owning card who ships it. This entry grants no release or production authority; the authority entry above governs who may deploy. Ending silently between those two is forbidden.
+
+Observed 2026-09-23 on card `57SuhqPY`: a seat merged, ran `psa-deploy-gate.sh`, saw it PASS, and stopped. For about fifteen minutes the ledger, CI and the deploy gate all read green while production ran the old code. **A GATE PASS IS NEITHER RELEASE AUTHORITY NOR A DEPLOY.** It was caught by a later session re-deriving at source, not by any alarm.
+
+A deliberate no-deploy is legitimate and is recorded, not merely intended: the sha goes in the no-ship acknowledgement list with a reason and the owning card names who ships it, so correct inaction is distinguishable from neglect. Detection is a drift gauge comparing `origin/main` against the deployed HEAD; it reports what it measures (two shas, a clock, whether a deploy gate has passed on the tip) and does not assert why, because a gauge may fire correctly and still accuse the wrong cause.
+
 <a id="review"></a>
 ## Review contract retained on 2026-09-15
 
