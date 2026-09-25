@@ -175,10 +175,42 @@ class TicketTimelineScrollTest extends TestCase
             DB::table('ticket_notes')->insert($chunk);
         }
         $max = TicketController::TIMELINE_MAX_ENTRIES;
-        $this->show($ticket)
+        $html = $this->show($ticket)
             ->assertSee('data-timeline-count="'.$max.'"', false)
             ->assertSee("Showing the newest {$max} entries; older entries are not shown on this page.")
-            ->assertDontSee('oldest-beyond-ceiling');
+            ->assertDontSee('oldest-beyond-ceiling')->getContent();
+        // The notice links on to the rest, which starts at the first entry left out.
+        $this->assertSame(1, preg_match('#<a href="([^"]+)"[^>]*data-timeline-continue#', $html, $link));
+        $this->get(html_entity_decode($link[1]))->assertOk()
+            ->assertSee('oldest-beyond-ceiling')->assertSee('data-timeline-count="1"', false)
+            ->assertSee('Back to the newest entries')->assertDontSee('data-timeline-continue', false);
+    }
+
+    public function test_timestamp_ties_across_the_internal_page_seam_neither_drop_nor_double(): void
+    {
+        $ticket = $this->ticket();
+        // 120 entries in groups of 3 sharing one timestamp, mixing notes and tool rows, so
+        // several ties straddle the 50-entry seams (entries 50/51 and 100/101).
+        for ($i = 0; $i < 120; $i++) {
+            $at = Carbon::parse('2026-01-01')->addMinutes(intdiv($i, 3))->toDateTimeString();
+            $i % 2 === 0 ? $this->note($ticket, $at, 'tie-note') : $this->tool($ticket, $at, 'synthetic_tie_tool');
+        }
+        $walk = [];
+        $cursor = null;
+        do {
+            $page = app(TicketTimeline::class)->page($ticket, ['limit' => 50] + ($cursor ? ['before' => $cursor] : []));
+            $walk = array_merge($walk, array_column($page['items'], 'at'));
+            $cursor = $page['next_cursor'];
+        } while ($cursor);
+        $this->assertSame($walk[49], $walk[50], 'fixture must put a tie on the first seam');
+        $html = $this->show($ticket)->assertSee('data-timeline-count="120"', false)->getContent();
+        preg_match_all('#data-timeline-id="(tool_action:\d+)"#', $html, $tools);
+        $this->assertCount(60, $tools[1]);
+        $this->assertCount(60, array_unique($tools[1]));
+        // Each note body also appears in its edit modal, so count note ids, once each.
+        preg_match_all('#id="editNoteModal(\d+)"#', $html, $notes);
+        $this->assertCount(60, $notes[1]);
+        $this->assertCount(60, array_unique($notes[1]));
     }
 
     public function test_query_count_does_not_grow_per_entry(): void

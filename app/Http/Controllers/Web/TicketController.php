@@ -150,12 +150,16 @@ class TicketController extends Controller
         // It walks the shared projection's own older-cursor at its maximum page size, so
         // the MCP limit and cursor contract are untouched. A before/after query param
         // from an old Newer/Older bookmark is ignored: the page starts from the newest entry.
+        // Only a ticket past the ceiling offers a link on; it carries the walk's own older
+        // cursor as 'from', and that page starts at the first entry the previous one left out.
         $timelineInput = request()->validate([
             'types' => 'sometimes|array|min:1|max:5', 'types.*' => 'string|in:note,call,email,ai_chat,tool',
+            'from' => 'sometimes|string|max:4096',
         ]);
+        $cursor = $timelineInput['from'] ?? null;
+        unset($timelineInput['from']);
         $items = [];
         $timelinePage = null;
-        $cursor = null;
         try {
             do {
                 $page = app(\App\Services\Mcp\TicketTimeline::class)->page($ticket,
@@ -168,6 +172,8 @@ class TicketController extends Controller
             abort(422, $e->getMessage());
         }
         $timelinePage['truncated'] = $cursor !== null;
+        $timelinePage['continue_from'] = $cursor;
+        $timelinePage['started_from'] = request()->has('from');
         $timelinePage['shown'] = count($items);
         $timeline = collect($items)->map(fn ($entry) => in_array($entry['kind'], ['tool', 'email'], true) || $entry['model'] === null
                 ? (object) $entry : $entry['model']);

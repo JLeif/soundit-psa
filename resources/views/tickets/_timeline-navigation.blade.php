@@ -7,9 +7,15 @@
 </nav>
 <div class="small text-muted mb-2" data-timeline-states>{{ $timelinePage['states'] }}</div>
 <div class="small text-muted mb-2" data-timeline-count="{{ $timelinePage['shown'] }}">
-    @if($timelinePage['truncated'])
+    @if($timelinePage['started_from'])
+        Showing {{ $timelinePage['shown'] }} older {{ Str::plural('entry', $timelinePage['shown']) }}.
+        <a href="{{ route('tickets.show', array_filter(['ticket' => $ticket, 'types' => request()->query('types')])) }}#notes">Back to the newest entries</a>
+    @elseif($timelinePage['truncated'])
         <i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>Showing the newest {{ $timelinePage['shown'] }} entries; older entries are not shown on this page.
     @else
         {{ $timelinePage['shown'] }} {{ Str::plural('entry', $timelinePage['shown']) }}, full history.
+    @endif
+    @if($timelinePage['truncated'])
+        <a href="{{ route('tickets.show', array_filter(['ticket' => $ticket, 'types' => request()->query('types'), 'from' => $timelinePage['continue_from']])) }}#notes" data-timeline-continue>Continue with the older entries</a>
     @endif
 </div>
