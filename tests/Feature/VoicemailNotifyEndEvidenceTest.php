@@ -388,19 +388,43 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
     }
 
     /**
+     * Recipient user ids of the jobs a dispatcher actually accepted.
+     *
+     * SendTicketNotification::$recipientUserId is private readonly, so the
+     * only honest way to ask WHO a job was for is reflection. Counting jobs
+     * cannot answer it, and counting is exactly what let the #3605 mutant
+     * survive: a control that never names a recipient cannot notice the
+     * wrong one being served.
+     */
+    private function acceptedRecipientIds(array $accepted): array
+    {
+        $ids = [];
+
+        foreach ($accepted as $command) {
+            $this->assertInstanceOf(SendTicketNotification::class, $command);
+            $property = new \ReflectionProperty($command, 'recipientUserId');
+            $property->setAccessible(true);
+            $ids[] = (int) $property->getValue($command);
+        }
+
+        return $ids;
+    }
+
+    /**
      * Replaces the real bus with a dispatcher that records each command and
      * throws on the Nth, so a throw can be placed PARTWAY through
      * dispatchVoicemailNotification()'s per-recipient loop. Queue::fake()
      * cannot do this: it records pushes but never fails one.
      */
-    private function throwOnNthDispatch(int $n, array &$accepted): void
+    private function throwOnNthDispatch(int $n, array &$accepted, ?array &$attempted = null): void
     {
         $seen = 0;
+        $attempted ??= [];
 
-        $this->app->bind(\Illuminate\Contracts\Bus\Dispatcher::class, function () use ($n, &$seen, &$accepted) {
-            return new class($n, $seen, $accepted) implements \Illuminate\Contracts\Bus\Dispatcher
+        $this->app->bind(\Illuminate\Contracts\Bus\Dispatcher::class, function () use ($n, &$seen, &$accepted, &$attempted) {
+            return new class($n, $seen, $accepted, $attempted) implements \Illuminate\Contracts\Bus\Dispatcher
             {
-                public function __construct(private int $n, private int &$seen, private array &$accepted) {}
+                public function __construct(private int $n, private int &$seen, private array &$accepted, private array &$attempted) {}
 
                 public function dispatch($command)
                 {
@@ -420,6 +444,7 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
                 public function dispatchToQueue($command)
                 {
                     $this->seen++;
+                    $this->attempted[] = $command;
 
                     if ($this->seen === $this->n) {
                         throw new \RuntimeException('queue connection lost');
@@ -501,14 +526,21 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
         // gives 2 here and 0 on the sibling, so the mutant survived. This user
         // is looked at and skipped, so 'recipients seen' and 'jobs dispatched'
         // now differ and the count can only be right for the right reason.
-        User::factory()->create([
+        $optedOut = User::factory()->create([
             'is_active' => true,
             'email' => 'optedout@example.test',
             'notification_preferences' => [NotificationEventType::NewVoicemail->value => false],
         ]);
 
+        // The tech users' eligibility is stated, not inherited. Relying on
+        // NewVoicemail->defaultEnabled() staying true would make this control
+        // pass for a reason no assertion here pins.
         for ($i = 0; $i < 4; $i++) {
-            User::factory()->create(['is_active' => true, 'email' => "tech{$i}@example.test"]);
+            User::factory()->create([
+                'is_active' => true,
+                'email' => "tech{$i}@example.test",
+                'notification_preferences' => [NotificationEventType::NewVoicemail->value => true],
+            ]);
         }
 
         $accepted = [];
@@ -520,6 +552,16 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
 
         // The arm exists: jobs really were queued before the throw.
         $this->assertCount(2, $accepted, 'two recipients were queued before the dispatch threw');
+
+        // WHO was served, not merely how many (#3605). Counting alone cannot
+        // tell a correct skip from wantsNotification() silently ignoring an
+        // explicit false: both read 2 here. Naming the opted-out user makes
+        // that mutant fail on this arm.
+        $this->assertNotContains(
+            $optedOut->id,
+            $this->acceptedRecipientIds($accepted),
+            'the opted-out user must never be dispatched to, however many jobs were queued'
+        );
 
         $failures = array_values(array_filter(
             $records,
@@ -590,22 +632,37 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
         // Opted-out user first here too (#3605): on this arm the increment
         // mutant must still read 0, which it cannot if it counts recipients
         // merely looked at.
-        User::factory()->create([
+        $optedOut = User::factory()->create([
             'is_active' => true,
             'email' => 'optedout@example.test',
             'notification_preferences' => [NotificationEventType::NewVoicemail->value => false],
         ]);
 
-        $this->staffUser();
+        // Eligibility stated, not inherited from the enum default.
+        $eligible = $this->staffUser();
+        $eligible->forceFill([
+            'notification_preferences' => [NotificationEventType::NewVoicemail->value => true],
+        ])->save();
 
         $accepted = [];
-        $this->throwOnNthDispatch(1, $accepted);
+        $attempted = [];
+        $this->throwOnNthDispatch(1, $accepted, $attempted);
 
         $call = $this->voicemailCall(['ended_at' => now()]);
 
         app(NotificationService::class)->notifyNewVoicemail($call);
 
         $this->assertCount(0, $accepted, 'nothing reached the queue on this arm');
+
+        // On this arm nothing is ACCEPTED, so a not-contains over $accepted
+        // would pass even if the opted-out user were the one dispatched to.
+        // The attempted list is what discriminates: exactly one recipient was
+        // handed to the bus, and it must be the eligible user (#3605).
+        $this->assertSame(
+            [$eligible->id],
+            $this->acceptedRecipientIds($attempted),
+            'the single dispatch attempt must be for the eligible user, never the opted-out one'
+        );
 
         $failures = array_values(array_filter(
             $records,
