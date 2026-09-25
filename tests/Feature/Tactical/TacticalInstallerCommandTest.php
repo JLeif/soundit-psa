@@ -546,6 +546,8 @@ class TacticalInstallerCommandTest extends TestCase
 
     public function test_generating_a_link_stamps_the_default_thirty_day_expiry(): void
     {
+        // Generate needs an available RMM; Tactical counts only when configured (#3734).
+        $this->configureTactical();
         $user = User::factory()->create();
         $client = Client::factory()->create(['name' => 'Acme', 'tactical_site_id' => 'Acme|Main']);
 
@@ -563,6 +565,7 @@ class TacticalInstallerCommandTest extends TestCase
     public function test_the_expiry_ttl_is_operator_tunable(): void
     {
         Setting::setValue('portal_install_token_ttl_days', '7');
+        $this->configureTactical();
         $user = User::factory()->create();
         $client = Client::factory()->create(['name' => 'Acme', 'tactical_site_id' => 'Acme|Main']);
 
@@ -616,6 +619,8 @@ class TacticalInstallerCommandTest extends TestCase
     /** @return array{0: Client, 1: Mockery\MockInterface&LevelClient} */
     private function levelPortalClient(): array
     {
+        // Level counts as an available RMM only when configured (#3734).
+        Setting::setEncrypted('level_api_key', 'synthetic-level-key');
         $client = Client::factory()->create([
             'name' => 'Acme',
             'level_group_id' => 'R3JvdXA6NDI=',

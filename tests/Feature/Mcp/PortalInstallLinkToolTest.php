@@ -5,6 +5,7 @@ namespace Tests\Feature\Mcp;
 use App\Models\Client;
 use App\Models\McpAuditLog;
 use App\Models\PortalInstallAudit;
+use App\Models\Setting;
 use App\Services\Mcp\PortalMcpToolDefinitions;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -23,6 +24,11 @@ class PortalInstallLinkToolTest extends TestCase
         parent::setUp();
         $this->travelTo(now()->startOfSecond());
         Http::preventStrayRequests();
+        // A mapped RMM counts only while its integration is enabled and
+        // configured (#3734). These fixtures map Level and Tactical.
+        Setting::setEncrypted('level_api_key', 'synthetic-level-key');
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic-tactical-key');
     }
 
     private function callLink(Client $client, array $extra = ['reason' => 'Synthetic setup check'], ?string $token = null, string $endpoint = '/api/mcp/staff'): TestResponse
