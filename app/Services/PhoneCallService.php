@@ -804,8 +804,10 @@ class PhoneCallService
 
         // Never claim a call ended in the future: a recording_duration longer
         // than the time since the call started would otherwise date the hangup
-        // ahead of now. This is the one route by which now() reaches ended_at,
-        // and the record below says so on the rows where it fires.
+        // ahead of now. This is the one route by which now() reaches ended_at.
+        // The record below reports it only on a row that is not already a
+        // voicemail: a stuck voicemail returns before that record, so a clamp
+        // on that arm writes now() and emits nothing.
         $clamped = $endedAt->isFuture();
         $call->ended_at = $clamped ? now() : $endedAt;
 
@@ -821,7 +823,9 @@ class PhoneCallService
         // to re-derive: which column anchored the derivation, whether the
         // future-clamp replaced it with now(), and the status this path wrote.
         // Reporting only "finalised" left the status write invisible, and left
-        // a clamped row indistinguishable from an ordinary derived one.
+        // a clamped row indistinguishable from an ordinary derived one. That
+        // holds only for rows reaching this line: a stuck voicemail returned
+        // above, so its anchor and any clamp on it are not recorded.
         Log::info('[PhoneCall] Finalised a call the hangup webhook never closed', [
             'call_id' => $call->id,
             'derived_ended_at' => $call->ended_at->toDateTimeString(),

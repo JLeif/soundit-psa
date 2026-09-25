@@ -607,7 +607,9 @@ class StuckRingingCallTest extends TestCase
      * An operator reconciling a derived ended_at against started_at on such a
      * row finds nothing and cannot tell whether the derivation misfired or the
      * column is simply absent. The record now names the anchor, so the two are
-     * distinguishable without reading this method.
+     * distinguishable without reading this method - on a row that is not
+     * already a voicemail. A stuck voicemail returns before the record is
+     * written, so its anchor is not reported.
      */
     public function test_a_row_with_no_started_at_anchors_on_created_at_and_says_so(): void
     {
@@ -684,7 +686,9 @@ class StuckRingingCallTest extends TestCase
      * afterwards is INDISTINGUISHABLE from an ordinary derived one - same
      * column, plausible value - so an operator auditing a re-dated call had no
      * way to find the rows where the derivation was discarded. The record now
-     * carries the flag.
+     * carries the flag - on a row that is not already a voicemail. A stuck
+     * voicemail returns before the record is written, so a clamp on that arm
+     * is still unreported; this test's fixture is ringing, not voicemail.
      */
     public function test_a_future_derivation_is_clamped_to_now_and_the_record_says_so(): void
     {
