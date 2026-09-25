@@ -30,8 +30,8 @@ class TicketController extends Controller
 {
     /**
      * Ceiling on entries the staff ticket page renders in one response. Production
-     * measured 2026-09-25: the largest ticket has 367 entries and none exceeds 500, so
-     * every current ticket renders whole. A ticket past the ceiling shows its newest
+     * measured 2026-09-25: the largest ticket had at most 367 entries and none more
+     * than 500, so every ticket then rendered whole. A ticket past the ceiling shows its newest
      * entries and says the rest are not shown, rather than rendering without bound.
      */
     public const TIMELINE_MAX_ENTRIES = 1000;
@@ -149,7 +149,7 @@ class TicketController extends Controller
         // The staff page shows the whole history in one scrollable list (card mSKGIORa).
         // It walks the shared projection's own older-cursor at its maximum page size, so
         // the MCP limit and cursor contract are untouched. A before/after query param
-        // from an old Newer/Older bookmark is ignored: the page is always the full list.
+        // from an old Newer/Older bookmark is ignored: the page starts from the newest entry.
         $timelineInput = request()->validate([
             'types' => 'sometimes|array|min:1|max:5', 'types.*' => 'string|in:note,call,email,ai_chat,tool',
         ]);

@@ -127,10 +127,10 @@ final class TicketTimeline
     }
 
     /**
-     * One query per source kind present on the page (tool rows: one per tool source),
-     * keyed by id, instead of one lookup per row. Each lookup keeps the fence the
-     * per-row find() carried, so a row the fence rejects hydrates as null exactly as
-     * before.
+     * One lookup per source kind present on the page (tool rows: one per tool source),
+     * plus that kind's eager loads, keyed by id, instead of one lookup per row. Each
+     * lookup keeps the fence the per-row find() carried, so a row the fence rejects
+     * hydrates as null exactly as before.
      */
     private function hydrate(Ticket $ticket, $rows, TicketToolActivity $activity, bool $models): array
     {
@@ -146,11 +146,12 @@ final class TicketTimeline
             }
         }
         if (isset($ids['note'])) {
-            $loaded['note'] = $this->noteQuery($models)->with('author', 'attachments', 'contract', 'email', 'editor')
+            $loaded['note'] = $this->noteQuery($models)->with('author', 'attachments', 'contract', 'email')
+                ->when($models, fn ($q) => $q->with('editor'))
                 ->where('ticket_id', $ticket->id)->whereIn('id', $ids['note'])->get()->keyBy('id')->all();
         }
         if (isset($ids['call'])) {
-            $loaded['call'] = PhoneCall::with('answeredBy', 'person', 'client')->where('ticket_id', $ticket->id)
+            $loaded['call'] = PhoneCall::with('answeredBy', 'person')->when($models, fn ($q) => $q->with('client'))->where('ticket_id', $ticket->id)
                 ->where($this->clientFence($ticket))->whereIn('id', $ids['call'])->get()->keyBy('id')->all();
         }
         if (isset($ids['email'])) {
