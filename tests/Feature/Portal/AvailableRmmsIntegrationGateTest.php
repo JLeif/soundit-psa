@@ -158,6 +158,26 @@ class AvailableRmmsIntegrationGateTest extends TestCase
         $this->assertEquals(901, $client->fresh()->ninja_org_id, 'the Ninja mapping is kept');
     }
 
+    /** Jeeves 2026-09-25 (card LdzQqSmH): the mapping is history and no read or generate may clear it. */
+    public function test_reads_and_web_generate_leave_a_disabled_ninja_mapping_unchanged(): void
+    {
+        $this->configureNinja(enabled: false);
+        $this->configureTactical();
+        $client = $this->mappedClient(['ninja_org_id', 'tactical_site_id']);
+        $mapping = fn () => $client->fresh()->only(['ninja_org_id', 'level_group_id', 'tactical_site_id']);
+        $before = $mapping();
+
+        $client->availableRmms();
+        $client->effectiveInstallRmm();
+        $this->post(route('clients.install-link.generate', $client))
+            ->assertSessionHas('success', 'Install link generated.');
+
+        $this->assertSame($before, $mapping());
+        $this->assertEquals(901, $client->fresh()->ninja_org_id);
+        // Generate's existing single-RMM rule now records the sole enabled RMM.
+        $this->assertSame('tactical', $client->fresh()->portal_primary_rmm);
+    }
+
     public function test_client_page_offers_no_primary_dropdown_when_only_one_rmm_is_enabled(): void
     {
         $this->configureNinja(enabled: false);
