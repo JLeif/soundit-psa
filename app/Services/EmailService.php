@@ -1523,9 +1523,15 @@ PROMPT;
 
             $this->graphClient->post("users/{$mailbox}/messages/{$original->graph_id}/reply", $payload);
         } else {
-            // Fallback: sendMail without threading headers (Graph doesn't allow In-Reply-To via sendMail)
-            Log::warning('[EmailService] Replying to email without graph_id — reply will not thread', [
+            // Fallback: sendMail, whose payload carries no In-Reply-To or References header.
+            // Whether the recipient's client threads the result is not observable from here, so
+            // this record names the route taken and the headers omitted, and predicts nothing
+            // about the other end. It is emitted before the send, so it states the route chosen
+            // rather than a completed delivery: a failed post throws and stores no outbound row.
+            Log::warning('[EmailService] Replying to email without graph_id — replying via sendMail, whose payload carries no threading headers', [
                 'email_id' => $original->id,
+                'send_path' => 'sendMail',
+                'threading_headers' => false,
             ]);
 
             $payload = [
