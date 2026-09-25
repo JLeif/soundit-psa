@@ -314,8 +314,8 @@ class Client extends Model
 
     /**
      * Return the RMM slugs this client has a mapping value for, whether or
-     * not that integration is enabled or configured. Use availableRmms()
-     * for anything that resolves or offers an RMM.
+     * not that integration is enabled or configured. Install resolution and
+     * the primary-RMM dropdown use availableRmms() instead.
      *
      * @return array<int, string>
      */
