@@ -7,6 +7,7 @@ use App\Enums\CallStatus;
 use App\Models\PhoneCall;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -592,5 +593,165 @@ class StuckRingingCallTest extends TestCase
             'finaliseCallTheHangupNeverClosed() must REQUIRE $recordingIsComplete: '
             .'a default lets a future caller skip the ceiling guard and finalise a live call, '
             .'and no behavioural test would catch it because the only caller today passes it');
+    }
+
+    /**
+     * THE ANCHOR IS NOT ALWAYS started_at, AND THE RECORD MUST SAY WHICH.
+     *
+     * The docblock read "ended_at is DERIVED as started_at plus the recorded
+     * length" and "never before started_at". Both are false on a row whose
+     * started_at is null: $call->started_at ?? $call->created_at anchors the
+     * derivation to created_at instead, and the derived instant then bears no
+     * relation to started_at at all - there is none to relate it to.
+     *
+     * An operator reconciling a derived ended_at against started_at on such a
+     * row finds nothing and cannot tell whether the derivation misfired or the
+     * column is simply absent. The record now names the anchor, so the two are
+     * distinguishable without reading this method - on a row that is not
+     * already a voicemail. A stuck voicemail returns before the record is
+     * written, so its anchor is not reported.
+     */
+    public function test_a_row_with_no_started_at_anchors_on_created_at_and_says_so(): void
+    {
+        Queue::fake();
+        Log::spy();
+
+        $call = $this->stuckRingingCall('stuck-no-start');
+        // started_at is NOT nullable through create(); clear it on the row the
+        // derivation will read, exactly as the production population has it.
+        // created_at is backdated too: a freshly-created row carries created_at
+        // == now(), so ANY positive length derives an instant in the future and
+        // the clamp fires - which would test the clamp, not the anchor. The
+        // real stuck population is months old. Measured before relying on it.
+        $call->started_at = null;
+        $call->created_at = now()->subMinutes(30);
+        $call->save();
+
+        $createdAt = $call->fresh()->created_at->copy();
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-no-start',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-no-start.mp3',
+            90,
+        );
+
+        $stored = $call->fresh();
+
+        $this->assertNotNull($stored->ended_at, 'the row must still finalise on the created_at anchor');
+        $this->assertTrue(
+            $stored->ended_at->equalTo($createdAt->copy()->addSeconds(90)),
+            'with no started_at the derivation must anchor on created_at'
+        );
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(function (string $message, array $context) {
+                return $message === '[PhoneCall] Finalised a call the hangup webhook never closed'
+                    && ($context['anchor'] ?? null) === 'created_at';
+            })
+            ->once();
+    }
+
+    /**
+     * The ordinary arm, asserted so the anchor key can discriminate rather
+     * than being a constant that happens to read right on one row.
+     */
+    public function test_a_row_with_a_started_at_reports_that_anchor(): void
+    {
+        Queue::fake();
+        Log::spy();
+
+        $this->stuckRingingCall('stuck-with-start');
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-with-start',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-with-start.mp3',
+            90,
+        );
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(function (string $message, array $context) {
+                return $message === '[PhoneCall] Finalised a call the hangup webhook never closed'
+                    && ($context['anchor'] ?? null) === 'started_at'
+                    && ($context['clamped_to_now'] ?? null) === false;
+            })
+            ->once();
+    }
+
+    /**
+     * THE FUTURE-CLAMP IS THE ONE ROUTE BY WHICH now() REACHES ended_at, and
+     * the docblock said flatly "It does not stamp now()".
+     *
+     * A recorded length longer than the time since the anchor derives an
+     * instant in the future; the clamp replaces it with now(). The stored row
+     * afterwards is INDISTINGUISHABLE from an ordinary derived one - same
+     * column, plausible value - so an operator auditing a re-dated call had no
+     * way to find the rows where the derivation was discarded. The record now
+     * carries the flag - on a row that is not already a voicemail. A stuck
+     * voicemail returns before the record is written, so a clamp on that arm
+     * is still unreported; this test's fixture is ringing, not voicemail.
+     */
+    public function test_a_future_derivation_is_clamped_to_now_and_the_record_says_so(): void
+    {
+        Queue::fake();
+        Log::spy();
+
+        $call = $this->stuckRingingCall('stuck-clamped');
+        $startedAt = $call->started_at->copy();
+        $before = now()->subSecond();
+
+        // started_at is 10 minutes ago; a 2-hour recording derives an ended_at
+        // well ahead of now, which is exactly the clamp's trigger.
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-clamped',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-clamped.mp3',
+            7200,
+        );
+
+        $stored = $call->fresh();
+
+        $this->assertTrue(
+            $stored->ended_at->greaterThanOrEqualTo($before),
+            'a clamped row must carry now(), not the future derivation'
+        );
+        $this->assertTrue(
+            $stored->ended_at->lessThan($startedAt->copy()->addSeconds(7200)),
+            'the clamp must have replaced the derived instant, not kept it'
+        );
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(function (string $message, array $context) {
+                return $message === '[PhoneCall] Finalised a call the hangup webhook never closed'
+                    && ($context['clamped_to_now'] ?? null) === true;
+            })
+            ->once();
+    }
+
+    /**
+     * THE SAME PATH WRITES status, WHICH THE RECORD DID NOT MENTION.
+     *
+     * "Finalised a call the hangup webhook never closed" reads as one write.
+     * It is two: ended_at, and - on a row that is not already a voicemail -
+     * status, decided from answered_at alone. An operator reading the record
+     * could not see that the status on the row was this path's decision.
+     */
+    public function test_the_record_names_the_status_this_path_decided(): void
+    {
+        Queue::fake();
+        Log::spy();
+
+        $this->stuckRingingCall('stuck-status-missed');
+
+        app(PhoneCallService::class)->handleRecordingReady(
+            'stuck-status-missed',
+            'https://media.plivo.com/v1/Account/MA/Recording/rec-status.mp3',
+            45,
+        );
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(function (string $message, array $context) {
+                return $message === '[PhoneCall] Finalised a call the hangup webhook never closed'
+                    && ($context['status'] ?? null) === CallStatus::Missed->value;
+            })
+            ->once();
     }
 }

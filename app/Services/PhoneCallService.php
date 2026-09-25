@@ -691,18 +691,36 @@ class PhoneCallService
      *  3. It does not resurrect a voicemail. Status is only ever written for a
      *     row that is not already Voicemail; a stuck voicemail gets its
      *     ended_at and keeps its status.
-     *  4. It does not stamp now(). These rows can be months old, so now()
-     *     would re-date a spring call to whenever this shipped and corrupt
-     *     every report reading the column. ended_at is DERIVED as started_at
-     *     plus the recorded length.
+     *  4. It does not stamp now() FROM THE DERIVATION. These rows can be
+     *     months old, so now() would re-date a spring call to whenever this
+     *     shipped and corrupt every report reading the column. The anchor is
+     *     started_at, or created_at where started_at is null; the offset is
+     *     the recorded length where there is one. now() IS written, but only
+     *     by the future-clamp below, and only when the derived instant lands
+     *     ahead of it - a row whose recorded length exceeds the time since
+     *     its anchor. Read the clamp as the exception to this rule, not as a
+     *     contradiction of it.
      *
      * The derivation is approximate and that is stated rather than hidden: it
      * assumes the recording covers the call, so on a call that rang for a
      * while before recording began the end time is early by the ring time. It
-     * is bounded by two real values (never before started_at, never later than
+     * is bounded by two real values (never before the ANCHOR, never later than
      * now) and is a far smaller wrong than a row that claims to still be
      * ringing four months on. With no usable duration at all the end time
-     * falls back to started_at - the last moment the row itself can defend.
+     * falls back to the anchor - the last moment the row itself can defend.
+     *
+     * THE ANCHOR IS NOT ALWAYS started_at. It is started_at ?? created_at, so
+     * on a row that never got a started_at the end time is bounded by the
+     * moment the ROW was created rather than the moment the CALL began. The
+     * two are usually close and created_at is the better of the two available
+     * wrongs, but a reader reconciling a derived ended_at against started_at
+     * on such a row will find no relation at all - there is no started_at to
+     * relate it to. With neither column the method declines outright.
+     *
+     * AND IT DOES NOT ONLY WRITE ended_at. On a row that is not already a
+     * voicemail this same path also writes status - Missed where answered_at
+     * is null, Completed otherwise - so a call reported as merely "finalised"
+     * has had its status decided here too, from answered_at alone.
      *
      * ONE CASE THIS MUST NOT TOUCH, and the reason the $recordingIsComplete
      * argument exists. The recording callback does not only fire at hangup:
@@ -774,6 +792,7 @@ class PhoneCallService
 
         $seconds = $call->effectiveDurationSeconds();
         $startedAt = $call->started_at ?? $call->created_at;
+        $anchorColumn = $call->started_at !== null ? 'started_at' : 'created_at';
 
         if ($startedAt === null) {
             return;
@@ -785,8 +804,12 @@ class PhoneCallService
 
         // Never claim a call ended in the future: a recording_duration longer
         // than the time since the call started would otherwise date the hangup
-        // ahead of now.
-        $call->ended_at = $endedAt->isFuture() ? now() : $endedAt;
+        // ahead of now. This is the one route by which now() reaches ended_at.
+        // The record below reports it only on a row that is not already a
+        // voicemail: a stuck voicemail returns before that record, so a clamp
+        // on that arm writes now() and emits nothing.
+        $clamped = $endedAt->isFuture();
+        $call->ended_at = $clamped ? now() : $endedAt;
 
         if ($call->status === CallStatus::Voicemail) {
             return;
@@ -796,10 +819,20 @@ class PhoneCallService
             ? CallStatus::Missed
             : CallStatus::Completed;
 
+        // The record carries the three things an operator would otherwise have
+        // to re-derive: which column anchored the derivation, whether the
+        // future-clamp replaced it with now(), and the status this path wrote.
+        // Reporting only "finalised" left the status write invisible, and left
+        // a clamped row indistinguishable from an ordinary derived one. That
+        // holds only for rows reaching this line: a stuck voicemail returned
+        // above, so its anchor and any clamp on it are not recorded.
         Log::info('[PhoneCall] Finalised a call the hangup webhook never closed', [
             'call_id' => $call->id,
             'derived_ended_at' => $call->ended_at->toDateTimeString(),
             'duration_seconds' => $seconds,
+            'anchor' => $anchorColumn,
+            'clamped_to_now' => $clamped,
+            'status' => $call->status->value,
         ]);
     }
 
