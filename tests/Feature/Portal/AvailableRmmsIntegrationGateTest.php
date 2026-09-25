@@ -156,6 +156,54 @@ class AvailableRmmsIntegrationGateTest extends TestCase
         $this->assertSame(['tactical'], $result['available_rmms']);
         $this->assertSame('tactical', $result['effective_rmm']);
         $this->assertEquals(901, $client->fresh()->ninja_org_id, 'the Ninja mapping is kept');
+        $this->assertNull($client->fresh()->portal_primary_rmm, 'no primary is recorded while the second mapping is only disabled');
+    }
+
+    public function test_generate_and_the_install_link_tool_keep_a_stored_primary_naming_a_disabled_rmm(): void
+    {
+        $this->configureNinja(enabled: false);
+        $this->configureTactical();
+        $viaWeb = $this->mappedClient(['ninja_org_id', 'tactical_site_id'], ['portal_primary_rmm' => 'ninja']);
+        $viaTool = $this->mappedClient(['ninja_org_id', 'tactical_site_id'], ['portal_primary_rmm' => 'ninja']);
+
+        $this->post(route('clients.install-link.generate', $viaWeb))
+            ->assertSessionHas('success', 'Install link generated.');
+        $result = app(\App\Services\Portal\PortalInstallService::class)->getOrCreateInstallLink($viaTool);
+        $this->assertSame('tactical', $result['effective_rmm']);
+
+        foreach ([$viaWeb, $viaTool] as $client) {
+            $this->assertNotNull($client->fresh()->portal_install_token);
+            $this->assertSame('ninja', $client->fresh()->portal_primary_rmm, 'the stored primary is kept');
+            $this->assertSame('tactical', $client->fresh()->effectiveInstallRmm(), 'read past while Ninja is disabled');
+        }
+
+        Setting::setValue('ninja_enabled', '1');
+        foreach ([$viaWeb, $viaTool] as $client) {
+            $this->assertSame('ninja', $client->fresh()->effectiveInstallRmm(), 'the stored choice returns on re-enable');
+        }
+    }
+
+    public function test_generate_still_records_the_sole_mapped_rmm_when_no_primary_is_stored(): void
+    {
+        $this->configureTactical();
+        $client = $this->mappedClient(['tactical_site_id']);
+
+        $this->post(route('clients.install-link.generate', $client))
+            ->assertSessionHas('success', 'Install link generated.');
+
+        $this->assertSame('tactical', $client->fresh()->portal_primary_rmm);
+    }
+
+    public function test_generate_never_overwrites_a_stored_primary_even_with_one_mapping(): void
+    {
+        $this->configureTactical();
+        $client = $this->mappedClient(['tactical_site_id'], ['portal_primary_rmm' => 'level']);
+
+        $this->post(route('clients.install-link.generate', $client))
+            ->assertSessionHas('success', 'Install link generated.');
+
+        $this->assertSame('level', $client->fresh()->portal_primary_rmm);
+        $this->assertSame('tactical', $client->fresh()->effectiveInstallRmm(), 'a stored value naming an unavailable RMM is read past');
     }
 
     /** Jeeves 2026-09-25 (card LdzQqSmH): the mapping is history and no read or generate may clear it. */
@@ -174,8 +222,12 @@ class AvailableRmmsIntegrationGateTest extends TestCase
 
         $this->assertSame($before, $mapping());
         $this->assertEquals(901, $client->fresh()->ninja_org_id);
-        // Generate's existing single-RMM rule now records the sole enabled RMM.
-        $this->assertSame('tactical', $client->fresh()->portal_primary_rmm);
+        // Two RMMs are mapped, so Generate records no primary even though only
+        // one is enabled; resolution still reaches Tactical at read time.
+        $this->assertNull($client->fresh()->portal_primary_rmm);
+        $this->assertSame('tactical', $client->fresh()->effectiveInstallRmm());
+        Setting::setValue('ninja_enabled', '1');
+        $this->assertNull($client->fresh()->effectiveInstallRmm(), 'after re-enable the operator must choose again');
     }
 
     public function test_client_page_offers_no_primary_dropdown_when_only_one_rmm_is_enabled(): void

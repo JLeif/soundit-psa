@@ -313,6 +313,22 @@ class Client extends Model
     }
 
     /**
+     * Return the RMM slugs this client has a mapping value for, whether or
+     * not that integration is enabled or configured. Use availableRmms()
+     * for anything that resolves or offers an RMM.
+     *
+     * @return array<int, string>
+     */
+    public function mappedRmms(): array
+    {
+        return array_keys(array_filter([
+            'ninja' => ! empty($this->ninja_org_id),
+            'level' => ! empty($this->level_group_id),
+            'tactical' => ! empty($this->tactical_site_id),
+        ]));
+    }
+
+    /**
      * Returns the RMM slug to use for portal self-service install.
      * Uses `portal_primary_rmm` if it names an RMM in availableRmms(),
      * otherwise the only available RMM (returns null if several are
