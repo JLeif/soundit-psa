@@ -1559,7 +1559,11 @@ class CippWriteLicenseTargetTest extends TestCase
         $this->assertSame('gate_declined', $result->status);
         $this->assertStringNotContainsString(self::TENANT, (string) $result->message);
         $this->assertStringNotContainsString('cipp.internal', (string) $result->message);
-        $this->assertStringContainsString('treat the licence assignment as not applied', (string) $result->message);
+        // A bare CippClientException (and the 500 this fixture models) is raised
+        // after the POST has gone out, so the approver must be told the outcome
+        // is unknown rather than that nothing happened.
+        $this->assertStringContainsString('may or may not have applied', (string) $result->message);
+        $this->assertStringNotContainsString('was not applied', (string) $result->message);
 
         // And the cause is NOT lost — it moved, it did not vanish. A sanitizer
         // that also blinds the audit trail trades one defect for a worse one.
@@ -1601,7 +1605,8 @@ class CippWriteLicenseTargetTest extends TestCase
         $body = (string) $response->json('result.content.0.text');
         $this->assertStringNotContainsString(self::TENANT, $body);
         $this->assertStringNotContainsString('cipp.internal', $body);
-        $this->assertStringContainsString('treat the licence assignment as not applied', $body);
+        $this->assertStringContainsString('may or may not have applied', $body);
+        $this->assertStringNotContainsString('was not applied', $body);
         $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
         $this->assertStringContainsString(
             'ExecAddLicense',
@@ -2164,5 +2169,35 @@ class CippWriteLicenseTargetTest extends TestCase
                 'params' => [],
             ])
             ->json('result.tools') ?? [];
+    }
+
+    /**
+     * The 4xx half of the same branch. Upstream declined BEFORE acting, so
+     * "was not applied" is sound there — and asserting it separately is what
+     * proves the status branch discriminates rather than always hedging.
+     */
+    public function test_a_4xx_refusal_on_the_immediate_path_still_says_the_licence_was_not_applied(): void
+    {
+        $this->configureCipp();
+        $f = $this->fixture();
+        $token = $this->token(['cipp_assign_tenant_user_license']);
+
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $client->shouldReceive('assignUserLicense')->once()
+            ->andThrow(new \App\Services\Cipp\CippWriteHttpException(400));
+        $this->app->instance(CippRestWriteClient::class, $client);
+
+        $response = $this->callTool($token, 'cipp_assign_tenant_user_license', [
+            'client_id' => $f['client']->id,
+            'target_upn' => self::TARGET_UPN,
+            'sku_id' => self::SKU,
+            'reason' => 'Contractor needs a seat.',
+        ]);
+
+        $body = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('was not applied', $body);
+        $this->assertStringNotContainsString('may or may not have applied', $body);
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
     }
 }

@@ -3047,7 +3047,11 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP write failed for {$tool}; treat the membership change as not applied."];
+            // The POST has already left by the time any of these throws is raised
+            // (send() checks the status, and the group endpoint returns HTTP 200
+            // even when it reports per-member failure), so this string must not
+            // claim the directory was left untouched.
+            return ['error' => "CIPP write failed for {$tool}; the membership change may or may not have applied — verify the group membership in CIPP before retrying."];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} executed — ".$this->groupMembershipAuditDetail((string) $params['operation'], $group['name'], (string) $params['group_id']).": {$reason}", $actorLabel);
@@ -3743,7 +3747,14 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP write failed for {$tool}; treat the licence assignment as not applied."];
+            // A 4xx is a refusal upstream declined before acting, so "not applied"
+            // is sound there. A 5xx is raised after the POST has gone out and says
+            // nothing about whether the licence was assigned.
+            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                return ['error' => "CIPP write failed for {$tool}; the licence assignment was not applied."];
+            }
+
+            return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} executed — ".$this->licenseTargetAuditDetail($user, $license).": {$reason}", $actorLabel);
@@ -4209,7 +4220,11 @@ class StaffCippWriteToolExecutor
                 // declined() redacts and bounds what it is given, but it cannot
                 // know this reason came from upstream — so the generic sentence
                 // is what it gets, and the specific cause stays in the row.
-                return $this->declined("CIPP write failed for {$run->action_type}; treat the licence assignment as not applied.");
+                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
+                    return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment was not applied.");
+                }
+
+                return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed — ".$this->licenseTargetAuditDetail($user, $license).'.', $this->approverLabel($approverId), $run->id, $approverId);
