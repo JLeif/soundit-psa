@@ -46,7 +46,7 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
 
     private const SKU = 'sku-from-tenant-sync';
 
-    private const UNKNOWN_TAIL = "but did not confirm it; it may or may not have applied — verify the user's licences in CIPP before retrying.";
+    private const UNKNOWN_TAIL = "was sent to CIPP but not confirmed; it may or may not have applied — verify the user's licences in CIPP before retrying.";
 
     /** Upstream text that must never reach the operator. */
     private const UPSTREAM_MARKER = 'UPSTREAM-DETAIL-7731';
@@ -196,12 +196,12 @@ class CippWriteLicenseFalseSuccessTest extends TestCase
 
     private function unknown(string $tool, string $action): string
     {
-        return "CIPP received the licence {$action} for {$tool} ".self::UNKNOWN_TAIL;
+        return "The licence {$action} for {$tool} ".self::UNKNOWN_TAIL;
     }
 
     private function notFound(string $tool, string $action): string
     {
-        return "CIPP write failed for {$tool}; CIPP reported it found no matching user and made no licence change, so the licence {$action} was not applied.";
+        return "CIPP write failed for {$tool}; CIPP reported it could not identify the user and made no licence change, so the licence {$action} was not applied.";
     }
 
     private function failedToProcess(): array

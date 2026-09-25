@@ -1849,6 +1849,13 @@ class CippRestWriteClientTest extends TestCase
         $this->assertSame(1, $writes, 'the request left; CIPP answered that it made no write');
     }
 
+    public function test_licence_no_valid_user_id_is_definitely_not_applied(): void
+    {
+        [, $thrown] = $this->runLicense('remove', 200, ['Results' => ['No valid user ID found in request for tenant acme.onmicrosoft.com']]);
+
+        $this->assertUnconfirmed($thrown, 'not_applied');
+    }
+
     #[\PHPUnit\Framework\Attributes\DataProvider('licenseOperations')]
     public function test_licence_failed_to_process_inner_catch_is_unknown(string $operation): void
     {

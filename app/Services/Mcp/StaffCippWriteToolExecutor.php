@@ -6967,10 +6967,10 @@ class StaffCippWriteToolExecutor
     {
         if ($e instanceof CippWriteUnconfirmedException) {
             if ($e->outcome === CippWriteUnconfirmedException::NOT_APPLIED) {
-                return "CIPP write failed for {$tool}; CIPP reported it found no matching user and made no licence change, so the licence {$action} was not applied.";
+                return "CIPP write failed for {$tool}; CIPP reported it could not identify the user and made no licence change, so the licence {$action} was not applied.";
             }
 
-            return "CIPP received the licence {$action} for {$tool} but did not confirm it; it may or may not have applied — verify the user's licences in CIPP before retrying."
+            return "The licence {$action} for {$tool} was sent to CIPP but not confirmed; it may or may not have applied — verify the user's licences in CIPP before retrying."
                 .($e->usageLocationMayHaveChanged ? " CIPP may already have set the user's usage location." : '');
         }
 
