@@ -527,6 +527,13 @@ class NotificationService
      * because by then the claim is taken: letting it out would fail the webhook
      * that triggered it - re-stamping ended_at and re-running the debit on
      * redelivery - without making the email retryable.
+     *
+     * dispatchVoicemailNotification() queues one job per opted-in recipient, so
+     * a throw partway through leaves the earlier jobs queued. The failure record
+     * therefore carries queued_before_failure rather than saying nothing was
+     * queued. The recipient the throw landed on, and any after it, do not get
+     * the email; whether the earlier jobs then deliver is the queue's business
+     * and is not established here.
      */
     private function sendVoicemailNotificationOnce(PhoneCall $call, bool $requireOutstandingDeferral): void
     {
@@ -551,17 +558,27 @@ class NotificationService
         $call->voicemail_notify_deferred_at = null;
         $call->voicemail_notified_at = $claimedAt;
 
+        $queued = 0;
+
         try {
-            $this->dispatchVoicemailNotification($call);
+            $this->dispatchVoicemailNotification($call, $queued);
         } catch (\Throwable $e) {
-            Log::error('[Voicemail] Notification could not be queued and will not be retried', [
+            Log::error('[Voicemail] Notification dispatch failed and will not be retried', [
                 'call_id' => $call->id,
+                'queued_before_failure' => $queued,
                 'error' => $e->getMessage(),
             ]);
         }
     }
 
-    private function dispatchVoicemailNotification(PhoneCall $call): void
+    /**
+     * Queue the voicemail email to every opted-in recipient.
+     *
+     * $queued counts the jobs actually handed to the queue. It is passed by
+     * reference so that a throw partway through the loop leaves the caller
+     * holding the count reached at that point.
+     */
+    private function dispatchVoicemailNotification(PhoneCall $call, int &$queued = 0): void
     {
         $call->loadMissing(['person', 'client']);
 
@@ -586,6 +603,8 @@ class NotificationService
                     null,
                     $context,
                 );
+
+                $queued++;
             }
         }
     }

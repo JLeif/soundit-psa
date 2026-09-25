@@ -12,6 +12,7 @@ use App\Services\NotificationService;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -383,6 +384,184 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
         $this->assertNull(
             $call->refresh()->voicemail_notify_deferred_at,
             'and no marker may be left outstanding on a row that has already ended'
+        );
+    }
+
+    /**
+     * Replaces the real bus with a dispatcher that records each command and
+     * throws on the Nth, so a throw can be placed PARTWAY through
+     * dispatchVoicemailNotification()'s per-recipient loop. Queue::fake()
+     * cannot do this: it records pushes but never fails one.
+     */
+    private function throwOnNthDispatch(int $n, array &$accepted): void
+    {
+        $seen = 0;
+
+        $this->app->bind(\Illuminate\Contracts\Bus\Dispatcher::class, function () use ($n, &$seen, &$accepted) {
+            return new class($n, $seen, $accepted) implements \Illuminate\Contracts\Bus\Dispatcher
+            {
+                public function __construct(private int $n, private int &$seen, private array &$accepted) {}
+
+                public function dispatch($command)
+                {
+                    return $this->dispatchToQueue($command);
+                }
+
+                public function dispatchSync($command, $handler = null)
+                {
+                    return $this->dispatchToQueue($command);
+                }
+
+                public function dispatchNow($command, $handler = null)
+                {
+                    return $this->dispatchToQueue($command);
+                }
+
+                public function dispatchToQueue($command)
+                {
+                    $this->seen++;
+
+                    if ($this->seen === $this->n) {
+                        throw new \RuntimeException('queue connection lost');
+                    }
+
+                    $this->accepted[] = $command;
+
+                    return null;
+                }
+
+                public function hasCommandHandler($command)
+                {
+                    return false;
+                }
+
+                public function getCommandHandler($command)
+                {
+                    return false;
+                }
+
+                public function pipeThrough(array $pipes)
+                {
+                    return $this;
+                }
+
+                public function map(array $map)
+                {
+                    return $this;
+                }
+
+                public function findBatch(string $batchId) {}
+
+                public function batch($jobs) {}
+
+                public function chain($jobs) {}
+            };
+        });
+    }
+
+    /**
+     * K5qwIx3B #17. dispatchVoicemailNotification() queues one job per opted-in
+     * recipient, so a throw partway through the loop leaves the earlier jobs
+     * QUEUED. The old record said 'could not be queued', which is false on
+     * exactly that arm - measured here, not argued: two jobs are accepted by
+     * the bus before the third throws.
+     *
+     * What is pinned is the STATE (how many were queued before the failure),
+     * not a cause. 'will not be retried' is kept because it is true on every
+     * arm: the claim at sendVoicemailNotificationOnce() is already stamped
+     * before the dispatch runs, and the stranded-deferral gauge excludes a
+     * claimed row, so no writer comes back for it.
+     *
+     * Every level the logger exposes is captured, per G-14 step 2: a record
+     * moved to another level must not pass unseen.
+     */
+    public function test_a_partial_dispatch_failure_records_how_many_were_queued(): void
+    {
+        $records = [];
+        $capture = function ($message, $context = []) use (&$records) {
+            $records[] = ['message' => $message, 'context' => $context];
+        };
+
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
+            Log::shouldReceive($level)->andReturnUsing($capture);
+        }
+
+        for ($i = 0; $i < 4; $i++) {
+            User::factory()->create(['is_active' => true, 'email' => "tech{$i}@example.test"]);
+        }
+
+        $accepted = [];
+        $this->throwOnNthDispatch(3, $accepted);
+
+        $call = $this->voicemailCall(['ended_at' => now()]);
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+
+        // The arm exists: jobs really were queued before the throw.
+        $this->assertCount(2, $accepted, 'two recipients were queued before the dispatch threw');
+
+        $failures = array_values(array_filter(
+            $records,
+            fn ($r) => str_contains($r['message'], '[Voicemail]') && str_contains($r['message'], 'will not be retried')
+        ));
+
+        $this->assertCount(1, $failures, 'exactly one failure record, at any level');
+
+        $this->assertStringNotContainsStringIgnoringCase(
+            'could not be queued',
+            $failures[0]['message'],
+            'the record must not claim nothing was queued when two jobs were'
+        );
+
+        $this->assertArrayHasKey(
+            'queued_before_failure',
+            $failures[0]['context'],
+            'the count must travel in the structured record'
+        );
+        $this->assertSame(
+            2,
+            $failures[0]['context']['queued_before_failure'],
+            'and it must be the number actually handed to the queue'
+        );
+    }
+
+    /**
+     * The counterpart: when the FIRST dispatch throws, nothing was queued and
+     * the count must say so. Without this, a mutant hard-coding a non-zero
+     * count would pass the partial-arm control above.
+     */
+    public function test_a_dispatch_failing_on_the_first_recipient_records_zero_queued(): void
+    {
+        $records = [];
+        $capture = function ($message, $context = []) use (&$records) {
+            $records[] = ['message' => $message, 'context' => $context];
+        };
+
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
+            Log::shouldReceive($level)->andReturnUsing($capture);
+        }
+
+        $this->staffUser();
+
+        $accepted = [];
+        $this->throwOnNthDispatch(1, $accepted);
+
+        $call = $this->voicemailCall(['ended_at' => now()]);
+
+        app(NotificationService::class)->notifyNewVoicemail($call);
+
+        $this->assertCount(0, $accepted, 'nothing reached the queue on this arm');
+
+        $failures = array_values(array_filter(
+            $records,
+            fn ($r) => str_contains($r['message'], '[Voicemail]') && str_contains($r['message'], 'will not be retried')
+        ));
+
+        $this->assertCount(1, $failures, 'exactly one failure record, at any level');
+        $this->assertSame(
+            0,
+            $failures[0]['context']['queued_before_failure'] ?? null,
+            'a failure on the first recipient must record zero, not a constant'
         );
     }
 }
