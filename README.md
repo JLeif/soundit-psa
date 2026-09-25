@@ -54,6 +54,7 @@ Sound PSA is a **standalone MSP PSA** — not a wrapper or companion app. Each m
 | Entity | Table | Key relationships |
 |--------|-------|-------------------|
 | Client | `clients` | assets, people, contracts, invoices, licenses |
+| Person | `people` | client, contracts, portal login, `person_emails` |
 | Contract | `contracts` | profiles, invoices, assigned assets/people/licenses, rules, activities |
 | SKU | `skus` | profile lines, invoice lines, QBO item sync |
 | License Type | `license_types` | licenses, linked SKU for cost |
@@ -62,6 +63,16 @@ Sound PSA is a **standalone MSP PSA** — not a wrapper or companion app. Each m
 | Invoice | `invoices` | line items with cost tracking, QBO sync, margin |
 | Asset | `assets` | synced from Ninja/Level/Halo, assigned to contracts |
 | Ticket | `tickets` | linked to contracts, assets, contacts |
+
+A Client's own `email` is a separate field from its People's emails. It is written through
+`ClientService`: `createClient`/`updateClient`, reached from the Clients create/edit forms
+(validated request) and from the staff MCP `create_client`/`update_client` tools; and
+`mergeClients`, which fills a blank survivor Email from the merged duplicate Client. None of
+these copies a Person's email onto their Client, and marking a Person **Primary** moves that
+badge without changing the Client's Email. Editing a Person updates that Person's row
+(`PersonObserver` mirrors it into `person_emails` only), and the People list on the Client page
+shows each Person's own email — so a Person's email changing there is easily mistaken for the
+Client's Email changing.
 
 ### Web routes
 
