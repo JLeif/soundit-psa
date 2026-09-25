@@ -105,9 +105,31 @@ class AutoElevateRateLimitRetryTest extends TestCase
         Sleep::assertSequence([Sleep::for(7)->seconds()]);
     }
 
+    /**
+     * #3415. `Retry-After: 0` ("retry now") must not collapse the backoff: sent through
+     * getPage() on every 429, the waits asked for are still the schedule, not four requests in a
+     * burst. The first answer carries 0, the second 7 (under the 10 s step), the third 00.
+     */
+    public function test_a_zero_retry_after_does_not_collapse_the_backoff_end_to_end(): void
+    {
+        Http::fake([self::BASE.'/api/v1/computers*' => Http::sequence()
+            ->push('', 429, ['Retry-After' => '0'])
+            ->push('', 429, ['Retry-After' => '7'])
+            ->push('', 429, ['Retry-After' => '00'])
+            ->push(self::envelope([self::computer()]), 200)]);
+
+        $this->assertCount(1, $this->service()->computersForCompany(self::COMPANY_A));
+        Http::assertSentCount(4);
+        Sleep::assertSequence([Sleep::for(5)->seconds(), Sleep::for(10)->seconds(), Sleep::for(20)->seconds()]);
+    }
+
     public function test_retry_after_parsing_is_bounded_to_a_plain_integer(): void
     {
-        $this->assertSame(0, AutoElevateClient::retryDelaySeconds('0', 1));
+        // #3415: the header is a floor on the schedule step, never a replacement for it.
+        $this->assertSame(5, AutoElevateClient::retryDelaySeconds('0', 1), 'Retry-After: 0 → the schedule step');
+        $this->assertSame(10, AutoElevateClient::retryDelaySeconds('1', 2), 'a header under the step → the step');
+        $this->assertSame(20, AutoElevateClient::retryDelaySeconds('000', 3));
+        $this->assertSame(12, AutoElevateClient::retryDelaySeconds('12', 2), 'a header above the step lengthens the wait');
         $this->assertSame(60, AutoElevateClient::retryDelaySeconds('60', 1), 'the ceiling itself is honoured');
         $this->assertSame(5, AutoElevateClient::retryDelaySeconds('61', 1), 'over the ceiling → schedule');
         $this->assertSame(10, AutoElevateClient::retryDelaySeconds('3600', 2));

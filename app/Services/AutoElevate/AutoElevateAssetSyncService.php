@@ -7,6 +7,7 @@ use App\Models\Client;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 
 /**
  * AutoElevate stage 3a: link vendor computers to PSA assets. Pattern: ControlDDeviceSyncService.
@@ -29,9 +30,29 @@ use Illuminate\Support\Facades\Log;
  * "audit"; an unrecognised value is kept and flagged at render), lastCheckedInAt (already a UTC
  * instant from normalizeComputer), synced_at. `autoelevate_agent_version` is NOT written: the
  * Partner API 1.0.0 Computer schema has no such field (verified 2026-09-22).
+ *
+ * PACING AND EARLY STOP (#3420, #3414). The vendor rate-limits reads per route (see RATE
+ * LIMITS in AutoElevateReadService's class docblock). Measured 2026-09-23: back-to-back reads of 57
+ * clients gave 33 × http_429; reads 4-8 s apart gave 8 of 8 ok. So sync() waits
+ * CLIENT_SPACING_SECONDS before every client read except the first. It stops reading once
+ * STOP_AFTER_CONSECUTIVE_429 clients IN A ROW fail with http_429 (the limiter is not
+ * recovering, and every further client would spend its retries for the same failure), or once
+ * MAX_RUN_SECONDS have passed; the deadline is checked between clients, so a read already in
+ * progress runs to its own bound. Clients left unread are reported as SKIPPED: no read was
+ * made, so exactly as for a failed read their links and recorded outcome are left unchanged,
+ * and clearUnmappedClients() still treats them as mapped.
  */
 class AutoElevateAssetSyncService
 {
+    /** Wait before each client read after the first (vendor refill is about one request per 3 s). */
+    public const CLIENT_SPACING_SECONDS = 4;
+
+    /** Consecutive clients failing with http_429 after which the run stops reading. */
+    public const STOP_AFTER_CONSECUTIVE_429 = 3;
+
+    /** Run deadline, checked before each client read. */
+    public const MAX_RUN_SECONDS = 1800;
+
     public function __construct(private readonly AutoElevateReadService $reads) {}
 
     /**
@@ -134,7 +155,31 @@ class AutoElevateAssetSyncService
             ->orderBy('id')
             ->get();
 
-        foreach ($clients as $client) {
+        $deadline = now()->addSeconds(self::MAX_RUN_SECONDS);
+        $consecutive429 = 0;
+
+        foreach ($clients->values() as $i => $client) {
+            if ($report->stoppedEarly === null) {
+                if ($consecutive429 >= self::STOP_AFTER_CONSECUTIVE_429) {
+                    $report->stoppedEarly = AutoElevateAssetSyncReport::STOP_CONSECUTIVE_429;
+                } elseif ($i > 0 && now()->greaterThanOrEqualTo($deadline)) {
+                    $report->stoppedEarly = AutoElevateAssetSyncReport::STOP_DEADLINE;
+                }
+                if ($report->stoppedEarly !== null) {
+                    Log::warning('[AutoElevateAssetSync] stopped early', ['reason' => $report->stoppedEarly]);
+                }
+            }
+            if ($report->stoppedEarly !== null) {
+                // Not read: links and recorded outcome stay exactly as they were.
+                $report->recordSkipped($client->id);
+
+                continue;
+            }
+
+            if ($i > 0) {
+                Sleep::for(self::CLIENT_SPACING_SECONDS)->seconds();
+            }
+
             $report->forClient($client->id);
             try {
                 $computers = $this->reads->computersForCompany($client->autoelevate_company_id);
@@ -143,13 +188,18 @@ class AutoElevateAssetSyncService
                 Log::warning('[AutoElevateAssetSync] read failed', ['client_id' => $client->id, 'reason' => $e->reason]);
                 $report->recordFailure($client->id, $e->reason);
                 self::recordClientOutcome($client->id, $client->autoelevate_company_id, false, $e->reason);
+                $consecutive429 = $e->reason === 'http_429' ? $consecutive429 + 1 : 0;
 
                 continue;
             }
+            $consecutive429 = 0;
 
             $considered = DB::transaction(fn () => $this->syncClient($client, $computers, $report));
             self::recordClientOutcome($client->id, $client->autoelevate_company_id, true, null, $considered);
         }
+
+        // Every MAPPED client, skipped ones included: a skipped client is still mapped, and
+        // clearing its links here would turn "not read" into "links cleared".
 
         $this->clearUnmappedClients($clients->pluck('id')->all(), $report);
 

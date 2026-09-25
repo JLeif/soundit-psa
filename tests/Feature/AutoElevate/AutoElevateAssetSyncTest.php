@@ -11,6 +11,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Sleep;
 use Tests\TestCase;
 
 /**
@@ -29,6 +30,8 @@ class AutoElevateAssetSyncTest extends TestCase
     {
         parent::setUp();
         Http::preventStrayRequests();
+        // sync() paces between clients (#3420) and getPage() backs off on 429: never really wait.
+        Sleep::fake();
         Cache::flush();
         Setting::setEncrypted('autoelevate_api_key', 'synthetic-only-key');
     }

@@ -29,6 +29,16 @@ class AutoElevateAssetSyncReport
     /** @var array<int, string> client id => AutoElevateReadException reason */
     public array $failedClients = [];
 
+    public const STOP_CONSECUTIVE_429 = 'consecutive_http_429';
+
+    public const STOP_DEADLINE = 'run_deadline';
+
+    /** Why the run stopped reading before the last client (a STOP_* constant), or null. */
+    public ?string $stoppedEarly = null;
+
+    /** @var list<int> client ids NOT read because the run stopped early; their links were left unchanged */
+    public array $skippedClients = [];
+
     public function forClient(int $clientId): void
     {
         $this->perClient[$clientId] ??= ['unmatched' => [], 'ambiguous' => [], 'linked' => 0];
@@ -60,16 +70,23 @@ class AutoElevateAssetSyncReport
         $this->failedClients[$clientId] = $reason;
     }
 
+    public function recordSkipped(int $clientId): void
+    {
+        $this->skippedClients[] = $clientId;
+    }
+
+    /** A failed read OR an early stop: either way some mapped client was not synced this run. */
     public function hasFailures(): bool
     {
-        return $this->failedClients !== [];
+        return $this->failedClients !== [] || $this->stoppedEarly !== null;
     }
 
     public function summary(): string
     {
         return sprintf(
-            '%d linked, %d unmatched, %d ambiguous, %d cleared, %d client read(s) failed',
+            '%d linked, %d unmatched, %d ambiguous, %d cleared, %d client read(s) failed, %d client(s) skipped',
             $this->linked, $this->unmatched, $this->ambiguous, $this->cleared, count($this->failedClients),
+            count($this->skippedClients),
         );
     }
 }

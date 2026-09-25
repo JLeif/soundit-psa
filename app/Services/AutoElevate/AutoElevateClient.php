@@ -33,10 +33,12 @@ class AutoElevateClient
      * apart, 8 of 8 ok. So a 429 is transient pacing, not a failure: wait and retry, bounded.
      *
      * MAX_ATTEMPTS counts requests in total (1 initial + 3 retries). The waits are
-     * RETRY_BACKOFF_SECONDS in order, unless the vendor sends a plain-integer Retry-After of
-     * at most RETRY_AFTER_CEILING_SECONDS; then that value is used for that wait. After the
-     * last attempt the read fails as `http_429` exactly as before, so a degraded read still
-     * SCREAMS (C-56). Only 429 is retried; every other status fails on its first answer.
+     * RETRY_BACKOFF_SECONDS in order. A vendor Retry-After that is a plain integer of at most
+     * RETRY_AFTER_CEILING_SECONDS can LENGTHEN a wait but never shorten it (#3415): a
+     * `Retry-After: 0` would otherwise spend every attempt back to back, which is the pacing
+     * measured to fail. After the last attempt the read fails as `http_429` exactly as before,
+     * so a degraded read still SCREAMS (C-56). Only 429 is retried; every other status fails on
+     * its first answer.
      *
      * Worst case: 35 s of waiting with no Retry-After, 180 s if the vendor sends the 60 s
      * ceiling each time. The waits go through the Sleep facade so tests fake them.
@@ -136,21 +138,23 @@ class AutoElevateClient
     }
 
     /**
-     * Seconds to wait before retry number $attempt (1-based). A Retry-After is honoured only
-     * when it is a plain non-negative integer of at most RETRY_AFTER_CEILING_SECONDS; an HTTP
-     * date, a larger value or anything else falls back to the fixed schedule.
+     * Seconds to wait before retry number $attempt (1-based): the fixed schedule step, raised
+     * to the vendor's Retry-After when that is a plain non-negative integer of at most
+     * RETRY_AFTER_CEILING_SECONDS. The header is a floor, never a replacement (#3415). An HTTP
+     * date, a larger value or anything else is ignored and the schedule step is used.
      */
     public static function retryDelaySeconds(string $retryAfter, int $attempt): int
     {
+        $schedule = self::RETRY_BACKOFF_SECONDS;
+        $step = $schedule[max(1, min($attempt, count($schedule))) - 1];
+
         $retryAfter = trim($retryAfter);
         if ($retryAfter !== '' && strlen($retryAfter) <= 3 && ctype_digit($retryAfter)
             && (int) $retryAfter <= self::RETRY_AFTER_CEILING_SECONDS) {
-            return (int) $retryAfter;
+            return max((int) $retryAfter, $step);
         }
 
-        $schedule = self::RETRY_BACKOFF_SECONDS;
-
-        return $schedule[max(1, min($attempt, count($schedule))) - 1];
+        return $step;
     }
 
     private function storedKey(): ?string
