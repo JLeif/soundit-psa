@@ -13,8 +13,10 @@ use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Services\Cipp\CippClientException;
 use App\Services\Cipp\CippRestWriteClient;
 use App\Services\Cipp\CippToolContract;
+use App\Services\Cipp\CippWriteHttpException;
 use App\Services\Cipp\CippWriteScopeException;
 use App\Services\Cipp\CippWriteScopeResolver;
+use App\Services\Cipp\CippWriteUnconfirmedException;
 use App\Services\Cipp\ResolvedCippLicense;
 use App\Services\Cipp\ResolvedCippPerson;
 use App\Services\Cipp\ResolvedIntuneDevice;
@@ -30,6 +32,22 @@ use Illuminate\Support\Str;
 class StaffCippWriteToolExecutor
 {
     private const DIRECT_DEDUP_HOURS = 24;
+
+    /**
+     * The direct licence tools, mapped to the word their operator sentence
+     * uses. Every path that calls assignUserLicense/removeUserLicense takes its
+     * failure sentence from licenseWriteFailureMessage() through this map.
+     *
+     * @var array<string, string>
+     */
+    private const LICENSE_WRITE_ACTIONS = [
+        'cipp_assign_user_license' => 'assignment',
+        'cipp_remove_user_license' => 'removal',
+        'cipp_assign_tenant_user_license' => 'assignment',
+    ];
+
+    /** Remove answered "No license changes needed": no write was made. Claims nothing about history. */
+    private const LICENSE_NO_CHANGE_MESSAGE = 'CIPP reported the user did not hold this licence, so nothing was removed.';
 
     /** @var array<string, string> */
     private const STAGED_TO_DIRECT = [
@@ -949,12 +967,25 @@ class StaffCippWriteToolExecutor
             }
 
             try {
-                $this->executeUpstream($directTool, $tenant, $person, $license, $state, $mailbox);
+                $upstream = $this->executeUpstream($directTool, $tenant, $person, $license, $state, $mailbox);
             } catch (CippClientException $e) {
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, $license, $run->content_hash, $this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
+                // The licence pair gets a sentence built from the exception's
+                // type, never the upstream text (see licenseWriteFailureMessage()).
+                if ($licenseAction = self::LICENSE_WRITE_ACTIONS[$directTool] ?? null) {
+                    return $this->declined($this->licenseWriteFailureMessage($run->action_type, $licenseAction, $e));
+                }
+
                 return $this->declined($e->getMessage());
+            }
+
+            if ($this->isLicenseNoChange($directTool, $upstream)) {
+                $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
+                $run->advanceTo(TechnicianRunState::Done);
+
+                return new TechnicianApprovalResult('executed', message: self::LICENSE_NO_CHANGE_MESSAGE);
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type} executed.".$this->executedAuditSuffix($directTool, $mailbox), $this->approverLabel($approverId), $run->id, $approverId);
@@ -1013,11 +1044,28 @@ class StaffCippWriteToolExecutor
         }
 
         try {
-            $this->executeUpstream($tool, $tenant, $person, $license, $state, $mailbox);
+            $upstream = $this->executeUpstream($tool, $tenant, $person, $license, $state, $mailbox);
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, $license, $contentHash, $this->safeFailureSummary($tool, $e), $actorLabel);
 
+            if ($licenseAction = self::LICENSE_WRITE_ACTIONS[$tool] ?? null) {
+                return ['error' => $this->licenseWriteFailureMessage($tool, $licenseAction, $e)];
+            }
+
             return ['error' => "CIPP write failed for {$tool}; no response body returned."];
+        }
+
+        if ($this->isLicenseNoChange($tool, $upstream)) {
+            $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
+
+            return [
+                'success' => true,
+                'no_change' => true,
+                'tool' => $tool,
+                'person_id' => $person->person->id,
+                'ticket_id' => $ticket?->id,
+                'message' => self::LICENSE_NO_CHANGE_MESSAGE,
+            ];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, $license, $contentHash, "{$tool} executed: {$reason}", $actorLabel);
@@ -3750,33 +3798,9 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            // On THIS path the exception TYPE answers "did the POST leave?",
-            // because assignUserLicense is a bare send() to api/ExecBulkLicense
-            // with no throws and no body capture. CippWriteHttpException is raised
-            // only by send()'s $response->failed() check, i.e. after ->post();
-            // everything else reaching this catch is a plain CippClientException
-            // from endpointUrl(), safeRequestOptions() or getToken(), all of which
-            // run BEFORE ->post(). So a plain CippClientException means nothing
-            // was sent.
-            //
-            // The 4xx arm is specific to this endpoint, not a general rule about
-            // upstream. In CIPP-API (master 7c756b0d, Invoke-ExecBulkLicense.ps1
-            // last touched 3bbfe443) Set-CIPPUserLicense runs inside an INNER
-            // try/catch that appends a "Failed to process..." line and keeps the
-            // status OK; BadRequest is set only by the OUTER catch, reached by the
-            // user-lookup throws that run before any write. So on ExecBulkLicense
-            // a 4xx means nothing was written and "not applied" is true. Do not
-            // copy this branch to an endpoint whose 4xx has not been checked the
-            // same way.
-            //
-            // Only a 5xx leaves the outcome genuinely unknown. failed() is
-            // serverError()||clientError(), so a CippWriteHttpException status is
-            // always >= 400 and this branch is exhaustive.
-            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
-                return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
-            }
-
-            return ['error' => "CIPP write failed for {$tool}; the licence assignment was not applied."];
+            // Which sentence is true depends on the exception type; the
+            // derivation lives on licenseWriteFailureMessage().
+            return ['error' => $this->licenseWriteFailureMessage($tool, self::LICENSE_WRITE_ACTIONS[$tool], $e)];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} executed — ".$this->licenseTargetAuditDetail($user, $license).": {$reason}", $actorLabel);
@@ -4242,19 +4266,9 @@ class StaffCippWriteToolExecutor
                 // declined() redacts and bounds what it is given, but it cannot
                 // know this reason came from upstream — so the generic sentence
                 // is what it gets, and the specific cause stays in the row.
-                // Same derivation as the direct path, including the endpoint-specific
-                // 4xx premise: assignUserLicense is a bare send() to
-                // api/ExecBulkLicense, so CippWriteHttpException means the POST left
-                // (only $response->failed() raises it) and a plain CippClientException
-                // means it did not (endpointUrl/safeRequestOptions/getToken all run
-                // before ->post()); and on that endpoint a 4xx comes only from the
-                // outer catch, which the pre-write user lookup reaches. Hedge only
-                // where the outcome is truly unknown.
-                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
-                    return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
-                }
-
-                return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment was not applied.");
+                // The sentence is chosen from the exception type alone; the
+                // derivation lives on licenseWriteFailureMessage().
+                return $this->declined($this->licenseWriteFailureMessage($run->action_type, self::LICENSE_WRITE_ACTIONS[$directTool], $e));
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed — ".$this->licenseTargetAuditDetail($user, $license).'.', $this->approverLabel($approverId), $run->id, $approverId);
@@ -4957,9 +4971,10 @@ class StaffCippWriteToolExecutor
         ];
     }
 
-    private function executeUpstream(string $tool, string $tenant, ResolvedCippPerson $person, ?ResolvedCippLicense $license, ?string $state, ?array $mailbox): void
+    /** Returns the client's result so a caller can read a licence no_change; other tools' results are ignored. */
+    private function executeUpstream(string $tool, string $tenant, ResolvedCippPerson $person, ?ResolvedCippLicense $license, ?string $state, ?array $mailbox): mixed
     {
-        match ($tool) {
+        return match ($tool) {
             'cipp_disable_user_sign_in' => $this->client->setUserSignInState($tenant, $person->userId, false),
             'cipp_enable_user_sign_in' => $this->client->setUserSignInState($tenant, $person->userId, true),
             'cipp_revoke_user_sessions' => $this->client->revokeUserSessions($tenant, $person->userId, $person->userPrincipalName),
@@ -6924,6 +6939,52 @@ class StaffCippWriteToolExecutor
         }
 
         return $display;
+    }
+
+    /**
+     * The operator sentence for a failed licence write, on all four paths
+     * (person-keyed and licence-target, direct and staged). Built from the
+     * exception TYPE only; upstream text stays in the audit row via
+     * safeFailureSummary().
+     *
+     * Both licence methods send() to api/ExecBulkLicense and read the answer
+     * in CippRestWriteClient::confirmLicenseWrite(). So:
+     *  - CippWriteUnconfirmedException: the request left. NOT_APPLIED means
+     *    CIPP named a reason it made no write; UNKNOWN means it may have.
+     *  - CippWriteHttpException: raised only by send()'s failed() check, after
+     *    ->post(). A 5xx is unknown. A 4xx is "not applied" on this endpoint
+     *    only: in CIPP-API 7c756b0d the script sets BadRequest only in its
+     *    outer catch, reached by the user-lookup throws before any write, and
+     *    a 401/403/429 from the function host or its auth layer is returned
+     *    before the script runs. Do not copy this to another endpoint unchecked.
+     *  - any other CippClientException: raised by endpointUrl(),
+     *    safeRequestOptions() or getToken(), all before ->post(), so nothing
+     *    was sent.
+     * This covers only the types that reach a CippClientException catch. A
+     * ConnectionException is not one and does not reach it (#3712, #3709).
+     */
+    private function licenseWriteFailureMessage(string $tool, string $action, CippClientException $e): string
+    {
+        if ($e instanceof CippWriteUnconfirmedException) {
+            if ($e->outcome === CippWriteUnconfirmedException::NOT_APPLIED) {
+                return "CIPP write failed for {$tool}; CIPP reported it could not identify the user and made no licence change, so the licence {$action} was not applied.";
+            }
+
+            return "The licence {$action} for {$tool} was sent to CIPP but not confirmed; it may or may not have applied — verify the user's licences in CIPP before retrying."
+                .($e->usageLocationMayHaveChanged ? " CIPP may already have set the user's usage location." : '');
+        }
+
+        if ($e instanceof CippWriteHttpException && $e->status >= 500) {
+            return "CIPP write failed for {$tool}; the licence {$action} may or may not have applied — verify the user's licences in CIPP before retrying.";
+        }
+
+        return "CIPP write failed for {$tool}; the licence {$action} was not applied.";
+    }
+
+    /** @param  mixed  $upstream  the licence client method's return */
+    private function isLicenseNoChange(string $tool, mixed $upstream): bool
+    {
+        return $tool === 'cipp_remove_user_license' && is_array($upstream) && ($upstream['no_change'] ?? false) === true;
     }
 
     private function safeFailureSummary(string $tool, CippClientException $e): string
