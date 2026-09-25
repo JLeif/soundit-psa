@@ -18,6 +18,8 @@ use App\Services\Tactical\Actions\ActionRedactor;
 use App\Support\McpConfig;
 use App\Support\McpToolRegistry;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Testing\TestResponse;
 use Mockery;
 use Tests\TestCase;
@@ -896,5 +898,98 @@ class HuntressResolveEscalationTest extends TestCase
         $response->assertJson(['ok' => false, 'status' => 'executed_with_fault']);
         $this->assertStringContainsString('HARD FAULT', (string) $response->json('message'));
         $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+    }
+
+    /**
+     * Put an Executing run on claimIsStale()'s NULL arm: both claimed_at and
+     * updated_at unreadable. Written with a raw query on purpose — an Eloquent
+     * save() would restamp updated_at and land the row on the other arm.
+     */
+    private function strandWithUnreadableStamps(TechnicianRun $run): void
+    {
+        DB::table('technician_runs')->where('id', $run->id)->update([
+            'state' => TechnicianRunState::Executing->value,
+            'claimed_at' => null,
+            'updated_at' => null,
+        ]);
+        $this->assertNull($run->fresh()->claimed_at);
+        $this->assertNull($run->fresh()->updated_at);
+    }
+
+    /**
+     * Operator-facing strings on the stale-claim recoveries assert only what
+     * the code established (K5qwIx3B #14). claimIsStale() is true on two
+     * disjoint arms: a stamp older than STALE_CLAIM_SECONDS, and BOTH stamps
+     * unreadable — a deliberate fail-safe that has established nothing about
+     * elapsed time or about the approval. So the audit summary and the log
+     * line may not name a "dead approval" as the cause; the structured
+     * record (run_id, claimed_at, target key) carries the facts.
+     *
+     * Pins the CLAUSE only, not the whole literal: the hedge sentence and the
+     * operator instruction are asserted PRESENT as a positive control so a
+     * deletion that takes too much fails loudly; every other word is free to
+     * change without touching this test.
+     */
+    public function test_a_run_stranded_with_unreadable_stamps_is_landed_without_asserting_a_dead_approval(): void
+    {
+        $this->configureHuntress();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+        $token = $this->token(['huntress_stage_resolve_escalation']);
+        $this->mockWriteClientNeverCalled();
+        $run = $this->stageRun($fixture, $token);
+
+        $this->strandWithUnreadableStamps($run);
+
+        $warnings = [];
+        Log::shouldReceive('warning')->andReturnUsing(function (string $message, array $context = []) use (&$warnings): void {
+            $warnings[] = $message;
+        });
+        Log::shouldReceive('info', 'debug', 'error')->andReturnNull();
+
+        // The escalation now reads RESOLVED upstream: the already-resolved
+        // short-circuit fires and finalizeStrandedResolvedRun() lands the run.
+        $this->mockReadClient($this->escalation(['status' => 'resolved', 'resolved_at' => '2026-08-20T10:00:00Z']));
+        $result = $this->decodedResult($this->callTool($token, 'huntress_stage_resolve_escalation', $this->stageArguments($fixture)));
+
+        $this->assertTrue((bool) ($result['already_resolved'] ?? false));
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'the NULL arm must still land the stranded run terminal');
+
+        $summary = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'error')->firstOrFail()->summary;
+        $this->assertStringNotContainsStringIgnoringCase('dead approval', $summary, 'the audit clause may not assert a cause the NULL arm never established');
+        $this->assertStringNotContainsStringIgnoringCase('past the stale', $summary, 'nor may it assert an elapsed time the NULL arm never measured');
+        $this->assertStringContainsString('could NOT be determined', $summary, 'the hedge sentence must survive the deletion');
+        $this->assertStringContainsString('Establish in the Huntress console how this escalation was resolved', $summary, 'the operator instruction must survive the deletion');
+        $this->assertStringContainsString('escalate to a human', $summary, 'the operator instruction tail must survive the deletion');
+
+        $landing = array_values(array_filter($warnings, fn (string $m): bool => str_contains($m, 'StaffHuntressActionToolExecutor')));
+        $this->assertCount(1, $landing, 'exactly one landing warning is expected; got: '.implode(' | ', $warnings));
+        $this->assertStringNotContainsStringIgnoringCase('dead approval', $landing[0]);
+        $this->assertStringNotContainsStringIgnoringCase('past the stale', $landing[0], 'the landing warning may not assert an elapsed time the NULL arm never measured');
+    }
+
+    /** Same clause on the revive sibling: the re-stage recovery reached on the NULL arm. */
+    public function test_a_run_revived_with_unreadable_stamps_is_recovered_without_asserting_a_dead_approval(): void
+    {
+        $this->configureHuntress();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+        $token = $this->token(['huntress_stage_resolve_escalation']);
+        $this->mockWriteClientNeverCalled();
+        $run = $this->stageRun($fixture, $token);
+
+        $this->strandWithUnreadableStamps($run);
+
+        $this->mockReadClient($this->escalation());
+        $result = $this->decodedResult($this->callTool($token, 'huntress_stage_resolve_escalation', $this->stageArguments($fixture)));
+
+        $this->assertArrayNotHasKey('idempotent', $result, 'the NULL arm must still revive rather than answer "currently executing" forever');
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+
+        $summary = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'error')->firstOrFail()->summary;
+        $this->assertStringNotContainsStringIgnoringCase('dead approval', $summary, 'the revive audit may not assert a cause the NULL arm never established');
+        $this->assertStringNotContainsStringIgnoringCase('past the stale', $summary, 'the revive audit may not assert an elapsed time the NULL arm never measured');
+        $this->assertStringContainsString('recovered on re-stage', $summary, 'the recovery statement must survive');
+        $this->assertStringContainsString('re-verifies the escalation LIVE', $summary, 'the safety statement must survive');
     }
 }
