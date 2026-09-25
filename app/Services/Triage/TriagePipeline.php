@@ -379,7 +379,7 @@ class TriagePipeline
         $systemUserId = TriageConfig::systemUserId();
 
         if (! $systemUserId) {
-            Log::warning('[Triage] Cannot close junk ticket — no system user configured', [
+            Log::warning('[Triage] Cannot close junk ticket — no system user', [
                 'ticket_id' => $ticket->id,
             ]);
 
