@@ -24,11 +24,17 @@ class PortalInstallService
             return ['error' => 'Map this client to an RMM (Ninja, Level, or Tactical) before generating an install link.'];
         }
 
-        $available = $client->availableRmms();
+        // Record a primary only when none is stored and the client has exactly
+        // one mapping. The count uses mappedRmms(), not availableRmms(): a
+        // mapping whose integration is disabled must not make this write fire,
+        // so re-enabling that integration needs no data work (#3734).
+        $mapped = $client->mappedRmms();
         $client->update([
             'portal_install_token' => Str::random(32),
             'portal_install_token_expires_at' => now()->addDays(PortalConfig::installTokenTtlDays()),
-            'portal_primary_rmm' => count($available) === 1 ? $available[0] : $client->portal_primary_rmm,
+            'portal_primary_rmm' => $client->portal_primary_rmm === null && count($mapped) === 1
+                ? $mapped[0]
+                : $client->portal_primary_rmm,
         ]);
 
         return ['success' => 'Install link generated.'];

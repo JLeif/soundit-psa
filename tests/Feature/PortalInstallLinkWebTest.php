@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Client;
+use App\Models\Setting;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -18,6 +19,14 @@ class PortalInstallLinkWebTest extends TestCase
         Bus::fake();
         $this->travelTo(now()->startOfSecond());
         $this->actingAs(User::factory()->create());
+        // A mapped RMM counts only while its integration is enabled and
+        // configured (#3734). These tests exercise all three, so enable all three.
+        Setting::setValue('ninja_enabled', '1');
+        Setting::setValue('ninja_client_id', 'synthetic-ninja-id');
+        Setting::setEncrypted('ninja_client_secret', 'synthetic-ninja-secret');
+        Setting::setEncrypted('level_api_key', 'synthetic-level-key');
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic-tactical-key');
     }
 
     public function test_generate_sets_token_ttl_and_each_single_rmm_primary(): void
