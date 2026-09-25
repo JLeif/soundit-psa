@@ -147,9 +147,11 @@
                 @include('tickets._action-status')
 
                 @include('tickets._timeline-navigation')
-                {{-- Unified activity timeline, newest first --}}
-                @forelse($timeline as $item)
-                    @if($item instanceof stdClass)
+                {{-- Unified activity timeline, newest first; adjacent tool entries fold into one row --}}
+                @forelse($timelineRows as $item)
+                    @if($item instanceof App\Support\TimelineToolRun)
+                        @include('tickets._timeline-tool-group', ['run' => $item])
+                    @elseif($item instanceof stdClass)
                         @include('tickets._timeline-entry', ['entry' => $item])
                     @elseif($item instanceof App\Models\AssistantConversation)
                         @include('tickets._timeline-ai-chat', ['conversation' => $item])
@@ -177,7 +179,7 @@
                                             @endif
                                         </span>
                                     @endif
-                                    <span class="text-muted small ms-auto" title="{{ $item->started_at?->toAppTz()->format('Y-m-d H:i T') }}">
+                                    <span class="text-muted small ms-auto" title="{{ $item->started_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                         {{ $item->started_at?->diffForHumans() }}
                                     </span>
                                     <div class="btn-group btn-group-sm ms-2">
@@ -290,7 +292,7 @@
                                         @if($note->is_private)
                                             <span class="badge bg-warning text-dark small"><i class="bi bi-lock-fill me-1"></i>Private</span>
                                         @endif
-                                        <span class="text-muted small ms-auto" title="{{ $note->noted_at?->toAppTz()->format('Y-m-d H:i T') }}">
+                                        <span class="text-muted small ms-auto" title="{{ $note->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                             {{ $note->noted_at?->diffForHumans() }}
                                         </span>
                                     </div>
@@ -334,7 +336,7 @@
                                         &mdash; {{ Str::limit(strip_tags($note->body), 100) }}
                                     @endif
                                 </span>
-                                <span class="ms-auto" title="{{ $note->noted_at?->toAppTz()->format('Y-m-d H:i T') }}">
+                                <span class="ms-auto" title="{{ $note->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                     {{ $note->noted_at?->diffForHumans() }}
                                 </span>
                             </div>
@@ -378,10 +380,10 @@
                                                 <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
                                             </span>
                                         @endif
-                                        <span class="text-muted small ms-auto" title="{{ $note->noted_at?->toAppTz()->format('Y-m-d H:i T') }}">
+                                        <span class="text-muted small ms-auto" title="{{ $note->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                             {{ $note->noted_at?->diffForHumans() }}
                                             @if($note->edited_at)
-                                                <span class="text-muted" title="Edited {{ $note->edited_at->toAppTz()->format('Y-m-d H:i T') }} by {{ $note->editor?->name ?? 'unknown' }}">(edited)</span>
+                                                <span class="text-muted" title="Edited {{ $note->edited_at->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }} by {{ $note->editor?->name ?? 'unknown' }}">(edited)</span>
                                             @endif
                                         </span>
                                         @if(!$note->note_type->isSystemGenerated())
@@ -470,8 +472,8 @@
                                         <div class="col-auto">
                                             <label class="form-label small">Date/time</label>
                                             <input type="datetime-local" name="noted_at" class="form-control form-control-sm"
-                                                   value="{{ $item->noted_at?->toAppTz()->format('Y-m-d\TH:i') }}"
-                                                   max="{{ now()->toAppTz()->format('Y-m-d\TH:i') }}" style="width: 200px;"
+                                                   value="{{ $item->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d\TH:i') }}"
+                                                   max="{{ now()->copy()->setTimezone($timelineTz)->format('Y-m-d\TH:i') }}" style="width: 200px;"
                                                    title="Adjust when this note is dated — controls its position in the timeline">
                                         </div>
                                         <div class="col-auto">

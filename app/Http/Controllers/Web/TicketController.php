@@ -28,6 +28,15 @@ use Illuminate\Support\Facades\Log;
 
 class TicketController extends Controller
 {
+    /**
+     * Ceiling on entries the staff ticket page renders in one response. Production
+     * measured 2026-09-25: the largest ticket had at most 367 entries and none more
+     * than 500, so every ticket then rendered whole. A ticket past the ceiling shows its newest
+     * entries, says the rest are not shown and links on to them, rather than rendering
+     * without bound.
+     */
+    public const TIMELINE_MAX_ENTRIES = 1000;
+
     public function __construct(
         private readonly TicketService $ticketService,
     ) {}
@@ -138,16 +147,36 @@ class TicketController extends Controller
                 ->get(['id', 'name', 'asset_type']);
         }
 
+        // The staff page shows the whole history in one scrollable list (card mSKGIORa).
+        // It walks the shared projection's own older-cursor at its maximum page size, so
+        // the MCP limit and cursor contract are untouched. A before/after query param
+        // from an old Newer/Older bookmark is ignored: the page starts from the newest entry.
+        // Only a ticket past the ceiling offers a link on; it carries the walk's own older
+        // cursor as 'from', and that page starts at the first entry the previous one left out.
         $timelineInput = request()->validate([
-            'before' => 'sometimes|string|max:4096', 'after' => 'sometimes|string|max:4096',
             'types' => 'sometimes|array|min:1|max:5', 'types.*' => 'string|in:note,call,email,ai_chat,tool',
+            'from' => 'sometimes|string|max:4096',
         ]);
+        $cursor = $timelineInput['from'] ?? null;
+        unset($timelineInput['from']);
+        $items = [];
+        $timelinePage = null;
         try {
-            $timelinePage = app(\App\Services\Mcp\TicketTimeline::class)->page($ticket, $timelineInput, models: true);
+            do {
+                $page = app(\App\Services\Mcp\TicketTimeline::class)->page($ticket,
+                    $timelineInput + ['limit' => 50] + ($cursor === null ? [] : ['before' => $cursor]), models: true);
+                $timelinePage ??= $page;
+                array_push($items, ...$page['items']);
+                $cursor = $page['next_cursor'];
+            } while ($cursor !== null && count($items) < self::TIMELINE_MAX_ENTRIES);
         } catch (\InvalidArgumentException $e) {
             abort(422, $e->getMessage());
         }
-        $timeline = collect($timelinePage['items'])->map(fn ($entry) => in_array($entry['kind'], ['tool', 'email'], true) || $entry['model'] === null
+        $timelinePage['truncated'] = $cursor !== null;
+        $timelinePage['continue_from'] = $cursor;
+        $timelinePage['started_from'] = request()->has('from');
+        $timelinePage['shown'] = count($items);
+        $timeline = collect($items)->map(fn ($entry) => in_array($entry['kind'], ['tool', 'email'], true) || $entry['model'] === null
                 ? (object) $entry : $entry['model']);
 
         // Contacts for the ticket's client (for contact reassignment dropdown)
@@ -162,6 +191,9 @@ class TicketController extends Controller
         return view('tickets.show', [
             'ticket' => $ticket,
             'timeline' => $timeline,
+            'timelineRows' => \App\Support\TimelineToolRun::fold($timeline),
+            // toAppTz() reads the setting on every call; the full timeline resolves it once.
+            'timelineTz' => \App\Support\AppTimezone::get(),
             'timelinePage' => $timelinePage,
             'users' => User::active()->orderBy('name')->get(['id', 'name']),
             'statuses' => TicketStatus::cases(),

@@ -34,7 +34,7 @@
             @if($isActive)
                 <span class="badge bg-success" style="font-size: 0.65rem;">Active</span>
             @endif
-            <span class="text-muted small ms-auto" title="{{ $conversation->created_at->toAppTz()->format('Y-m-d H:i T') }}">
+            <span class="text-muted small ms-auto" title="{{ $conversation->created_at->copy()->setTimezone($timelineTz ?? App\Support\AppTimezone::get())->format('Y-m-d H:i T') }}">
                 {{ $conversation->created_at->diffForHumans() }}
             </span>
         </div>
