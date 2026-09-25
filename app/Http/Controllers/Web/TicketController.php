@@ -32,7 +32,8 @@ class TicketController extends Controller
      * Ceiling on entries the staff ticket page renders in one response. Production
      * measured 2026-09-25: the largest ticket had at most 367 entries and none more
      * than 500, so every ticket then rendered whole. A ticket past the ceiling shows its newest
-     * entries and says the rest are not shown, rather than rendering without bound.
+     * entries, says the rest are not shown and links on to them, rather than rendering
+     * without bound.
      */
     public const TIMELINE_MAX_ENTRIES = 1000;
 
