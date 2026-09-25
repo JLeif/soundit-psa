@@ -1559,12 +1559,14 @@ class CippWriteLicenseTargetTest extends TestCase
         $this->assertSame('gate_declined', $result->status);
         $this->assertStringNotContainsString(self::TENANT, (string) $result->message);
         $this->assertStringNotContainsString('cipp.internal', (string) $result->message);
-        // This fixture models a 500 relayed as a bare CippClientException. A bare
-        // CippClientException can be raised before the POST (token, URL safety)
-        // or after it, and the catch cannot tell which, so the approver must be
-        // told the outcome is unknown rather than that nothing happened.
-        $this->assertStringContainsString('may or may not have applied', (string) $result->message);
-        $this->assertStringNotContainsString('was not applied', (string) $result->message);
+        // The fixture's relay text SAYS "returned 500", but the shape it throws is
+        // a bare CippClientException, and on this path the real client raises that
+        // only from endpointUrl/safeRequestOptions/getToken - all before ->post().
+        // A real 500 here is CippWriteHttpException(500), covered separately. So
+        // "not applied" is the correct sentence for THIS shape; the relay text is
+        // kept because redaction is what this test exists to pin.
+        $this->assertStringContainsString('was not applied', (string) $result->message);
+        $this->assertStringNotContainsString('may or may not have applied', (string) $result->message);
 
         // And the cause is NOT lost — it moved, it did not vanish. A sanitizer
         // that also blinds the audit trail trades one defect for a worse one.
@@ -1606,8 +1608,10 @@ class CippWriteLicenseTargetTest extends TestCase
         $body = (string) $response->json('result.content.0.text');
         $this->assertStringNotContainsString(self::TENANT, $body);
         $this->assertStringNotContainsString('cipp.internal', $body);
-        $this->assertStringContainsString('may or may not have applied', $body);
-        $this->assertStringNotContainsString('was not applied', $body);
+        // Same shape as the staged arm: a bare CippClientException is pre-POST on
+        // this path whatever its text claims, so the sentence is "not applied".
+        $this->assertStringContainsString('was not applied', $body);
+        $this->assertStringNotContainsString('may or may not have applied', $body);
         $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
         $this->assertStringContainsString(
             'ExecAddLicense',
@@ -2173,9 +2177,11 @@ class CippWriteLicenseTargetTest extends TestCase
     }
 
     /**
-     * The 4xx half of the same branch. Upstream declined BEFORE acting, so
-     * "was not applied" is sound there — and asserting it separately is what
-     * proves the status branch discriminates rather than always hedging.
+     * The 4xx arm. Upstream answered and declined, so "was not applied" is
+     * sound. It shares the sentence with the pre-POST arm, which is why the 5xx
+     * arm below is the one that proves the branch discriminates at all: without
+     * it, deleting the status test would leave every case saying "not applied"
+     * and this test would still pass.
      */
     public function test_a_4xx_refusal_on_the_immediate_path_still_says_the_licence_was_not_applied(): void
     {
@@ -2199,6 +2205,95 @@ class CippWriteLicenseTargetTest extends TestCase
         $body = (string) $response->json('result.content.0.text');
         $this->assertStringContainsString('was not applied', $body);
         $this->assertStringNotContainsString('may or may not have applied', $body);
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
+    }
+
+    /**
+     * The 5xx arm on the immediate path — the ONLY shape on this path where the
+     * POST provably left and the outcome is provably unknown. send() raises
+     * CippWriteHttpException solely from $response->failed(), which runs after
+     * ->post(), so a 500 here means CIPP received the write and answered badly.
+     *
+     * This is the assertion the whole status branch exists for. Nothing else in
+     * this file throws a 5xx CippWriteHttpException, so without this test the
+     * hedge arm is unreached and the branch could be deleted with every case
+     * collapsing to "not applied" and the suite staying green.
+     */
+    public function test_a_5xx_on_the_immediate_path_says_the_licence_may_or_may_not_have_applied(): void
+    {
+        $this->configureCipp();
+        $f = $this->fixture();
+        $token = $this->token(['cipp_assign_tenant_user_license']);
+
+        $called = 0;
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $client->shouldReceive('assignUserLicense')->once()
+            ->andReturnUsing(function () use (&$called) {
+                $called++;
+                throw new \App\Services\Cipp\CippWriteHttpException(500);
+            });
+        $this->app->instance(CippRestWriteClient::class, $client);
+
+        $response = $this->callTool($token, 'cipp_assign_tenant_user_license', [
+            'client_id' => $f['client']->id,
+            'target_upn' => self::TARGET_UPN,
+            'sku_id' => self::SKU,
+            'reason' => 'Contractor needs a seat.',
+        ]);
+
+        // The write was attempted — the premise of the hedge, asserted rather
+        // than assumed from the exception type alone.
+        $this->assertSame(1, $called);
+
+        $body = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('may or may not have applied', $body);
+        $this->assertStringNotContainsString('was not applied', $body);
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
+    }
+
+    /**
+     * The staged twin of the 5xx arm. The two catches carry the same branch and
+     * have drifted apart before in this file's history, so each is pinned where
+     * it lives rather than trusting one to stand for both.
+     */
+    public function test_a_5xx_at_approval_says_the_licence_may_or_may_not_have_applied(): void
+    {
+        $this->configureCipp();
+        $f = $this->fixture();
+        $token = $this->token(['cipp_stage_assign_tenant_user_license']);
+        $approver = User::factory()->create(['name' => 'Approver']);
+
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $this->app->instance(CippRestWriteClient::class, $client);
+
+        $staged = $this->decodedResult($this->callTool($token, 'cipp_stage_assign_tenant_user_license', [
+            'client_id' => $f['client']->id,
+            'ticket_id' => $f['ticket']->id,
+            'target_upn' => self::TARGET_UPN,
+            'sku_id' => self::SKU,
+            'reason' => 'Contractor needs a seat.',
+        ]));
+        $this->assertTrue($staged['success'] ?? false);
+
+        $called = 0;
+        $failing = Mockery::mock(CippRestWriteClient::class);
+        $failing->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $failing->shouldReceive('assignUserLicense')->once()
+            ->andReturnUsing(function () use (&$called) {
+                $called++;
+                throw new \App\Services\Cipp\CippWriteHttpException(500);
+            });
+        $this->app->instance(CippRestWriteClient::class, $failing);
+
+        $run = TechnicianRun::findOrFail($staged['run_id']);
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $approver->id);
+
+        $this->assertSame(1, $called);
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertStringContainsString('may or may not have applied', (string) $result->message);
+        $this->assertStringNotContainsString('was not applied', (string) $result->message);
         $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
     }
 }

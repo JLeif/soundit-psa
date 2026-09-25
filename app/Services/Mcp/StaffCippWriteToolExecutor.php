@@ -3750,14 +3750,22 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            // A 4xx is a refusal upstream declined before acting, so "not applied"
-            // is sound there. A 5xx is raised after the POST has gone out and says
-            // nothing about whether the licence was assigned.
-            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
-                return ['error' => "CIPP write failed for {$tool}; the licence assignment was not applied."];
+            // On THIS path the exception TYPE answers "did the POST leave?",
+            // because assignUserLicense is a bare send() with no throws and no
+            // body capture. CippWriteHttpException is raised only by send()'s
+            // $response->failed() check, i.e. after ->post(); everything else
+            // reaching this catch is a plain CippClientException from
+            // endpointUrl(), safeRequestOptions() or getToken(), all of which run
+            // BEFORE ->post(). So a plain CippClientException means nothing was
+            // sent, and a 4xx means upstream refused: "not applied" is earned for
+            // both. Only a 5xx leaves the outcome genuinely unknown. (failed() is
+            // serverError()||clientError(), so a CippWriteHttpException status is
+            // always >= 400 and this branch is exhaustive.)
+            if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
+                return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
             }
 
-            return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
+            return ['error' => "CIPP write failed for {$tool}; the licence assignment was not applied."];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: {$tool} executed — ".$this->licenseTargetAuditDetail($user, $license).": {$reason}", $actorLabel);
@@ -4223,11 +4231,16 @@ class StaffCippWriteToolExecutor
                 // declined() redacts and bounds what it is given, but it cannot
                 // know this reason came from upstream — so the generic sentence
                 // is what it gets, and the specific cause stays in the row.
-                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 400 && $e->status < 500) {
-                    return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment was not applied.");
+                // Same derivation as the direct path: assignUserLicense is a bare
+                // send(), so CippWriteHttpException means the POST left (only
+                // $response->failed() raises it) and a plain CippClientException
+                // means it did not (endpointUrl/safeRequestOptions/getToken all run
+                // before ->post()). Hedge only where the outcome is truly unknown.
+                if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
+                    return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
                 }
 
-                return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
+                return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment was not applied.");
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed — ".$this->licenseTargetAuditDetail($user, $license).'.', $this->approverLabel($approverId), $run->id, $approverId);
