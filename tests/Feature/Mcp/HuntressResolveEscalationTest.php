@@ -946,13 +946,23 @@ class HuntressResolveEscalationTest extends TestCase
         // accepted those calls without reading them, so a cause moved off
         // 'warning' onto any other level passed unseen (#3586).
         $records = [];
-        $capture = function ($message, $context = []) use (&$records): void {
-            $records[] = (string) $message;
+        $capture = function (string $level) use (&$records) {
+            return function ($message, $context = []) use (&$records, $level): void {
+                $records[] = ['level' => $level, 'message' => (string) $message];
+            };
         };
 
-        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
-            Log::shouldReceive($level)->andReturnUsing($capture);
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency'] as $level) {
+            Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // The generic entry point is log($level, $message, $context): level
+        // FIRST. Sharing the per-level closure would record the level word as
+        // the message and drop the text, so a Log::log() record escaped every
+        // check below.
+        Log::shouldReceive('log')->andReturnUsing(function ($level, $message, $context = []) use (&$records): void {
+            $records[] = ['level' => (string) $level, 'message' => (string) $message];
+        });
 
         // The escalation now reads RESOLVED upstream: the already-resolved
         // short-circuit fires and finalizeStrandedResolvedRun() lands the run.
@@ -980,30 +990,35 @@ class HuntressResolveEscalationTest extends TestCase
         );
 
         // Forbidden on EVERY level, not merely on the warning (#3586).
-        foreach ($records as $line) {
+        foreach (array_column($records, 'message') as $line) {
             $this->assertStringNotContainsStringIgnoringCase('dead approval', $line, 'no log record at any level may assert a dead approval: '.$line);
             $this->assertStringNotContainsStringIgnoringCase('past the stale', $line, 'no log record at any level may assert an elapsed time: '.$line);
         }
 
-        $landing = array_values(array_filter($records, fn (string $m): bool => str_contains($m, 'StaffHuntressActionToolExecutor')));
-        $this->assertCount(1, $landing, 'exactly one landing warning is expected; got: '.implode(' | ', $records));
+        $landing = array_values(array_filter($records, fn (array $r): bool => str_contains($r['message'], 'StaffHuntressActionToolExecutor')));
+        $this->assertCount(1, $landing, 'exactly one landing warning is expected; got: '.implode(' | ', array_column($records, 'message')));
+
+        // Level pinned: once every level feeds one list, the count alone lets a
+        // warning->debug demotion through (the #3599 class), and at
+        // LOG_LEVEL=info that drops the only record of the landing.
+        $this->assertSame('warning', $landing[0]['level'], 'the landing record must stay at warning; a demotion hides it in production');
 
         // Positive control (#3588): without this, deleting the state text down
         // to the bare class prefix keeps the count at 1 and both absence checks
         // green, so over-deletion passed silently.
         $this->assertStringContainsString(
             'Landing a run stranded in Executing',
-            $landing[0],
+            $landing[0]['message'],
             'the landing warning must still say what happened'
         );
         $this->assertStringContainsString(
             'reads resolved upstream',
-            $landing[0],
+            $landing[0]['message'],
             'and that the escalation now reads resolved upstream'
         );
         $this->assertStringContainsString(
             'by means this run cannot determine',
-            $landing[0],
+            $landing[0]['message'],
             'and that the means are undetermined - the hedge is the point of the round'
         );
     }
@@ -1024,13 +1039,20 @@ class HuntressResolveEscalationTest extends TestCase
         // Log::warning was unpinned and a cause reinstated there passed both
         // tests (#3587). Same all-level capture as the landing arm.
         $records = [];
-        $capture = function ($message, $context = []) use (&$records): void {
-            $records[] = (string) $message;
+        $capture = function (string $level) use (&$records) {
+            return function ($message, $context = []) use (&$records, $level): void {
+                $records[] = ['level' => $level, 'message' => (string) $message];
+            };
         };
 
-        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
-            Log::shouldReceive($level)->andReturnUsing($capture);
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency'] as $level) {
+            Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // log($level, $message, $context) takes the level first; see the landing arm.
+        Log::shouldReceive('log')->andReturnUsing(function ($level, $message, $context = []) use (&$records): void {
+            $records[] = ['level' => (string) $level, 'message' => (string) $message];
+        });
 
         $this->mockReadClient($this->escalation());
         $result = $this->decodedResult($this->callTool($token, 'huntress_stage_resolve_escalation', $this->stageArguments($fixture)));
@@ -1051,16 +1073,17 @@ class HuntressResolveEscalationTest extends TestCase
             'the revive summary must open with the state statement; any cause inserted here fails regardless of wording'
         );
 
-        foreach ($records as $line) {
+        foreach (array_column($records, 'message') as $line) {
             $this->assertStringNotContainsStringIgnoringCase('dead approval', $line, 'no log record at any level may assert a dead approval: '.$line);
             $this->assertStringNotContainsStringIgnoringCase('past the stale', $line, 'no log record at any level may assert an elapsed time: '.$line);
         }
 
-        $revive = array_values(array_filter($records, fn (string $m): bool => str_contains($m, 'StaffHuntressActionToolExecutor')));
-        $this->assertCount(1, $revive, 'exactly one revive warning is expected; got: '.implode(' | ', $records));
+        $revive = array_values(array_filter($records, fn (array $r): bool => str_contains($r['message'], 'StaffHuntressActionToolExecutor')));
+        $this->assertCount(1, $revive, 'exactly one revive warning is expected; got: '.implode(' | ', array_column($records, 'message')));
+        $this->assertSame('warning', $revive[0]['level'], 'the revive record must stay at warning; a demotion hides it in production');
         $this->assertStringContainsString(
             'Recovering a stranded execution claim on re-stage',
-            $revive[0],
+            $revive[0]['message'],
             'the revive warning must still say what happened'
         );
     }

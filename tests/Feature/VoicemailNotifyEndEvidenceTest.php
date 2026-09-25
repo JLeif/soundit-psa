@@ -484,9 +484,17 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             };
         };
 
-        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency'] as $level) {
             Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // The generic entry point is log($level, $message, $context): level
+        // FIRST. Sharing the per-level closure would record the level word as
+        // the message and drop the text, so a Log::log() record escaped the
+        // '[Voicemail]' filter and the one-record count below.
+        Log::shouldReceive('log')->andReturnUsing(function ($level, $message, $context = []) use (&$records) {
+            $records[] = ['level' => (string) $level, 'message' => $message, 'context' => $context];
+        });
 
         // An opted-OUT active user ahead of the throw point (#3605). Without
         // one, moving $queued++ outside the wantsNotification() block still
@@ -570,9 +578,14 @@ class VoicemailNotifyEndEvidenceTest extends TestCase
             };
         };
 
-        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency', 'log'] as $level) {
+        foreach (['error', 'warning', 'info', 'debug', 'notice', 'critical', 'alert', 'emergency'] as $level) {
             Log::shouldReceive($level)->andReturnUsing($capture($level));
         }
+
+        // log($level, $message, $context) takes the level first; see the partial arm.
+        Log::shouldReceive('log')->andReturnUsing(function ($level, $message, $context = []) use (&$records) {
+            $records[] = ['level' => (string) $level, 'message' => $message, 'context' => $context];
+        });
 
         // Opted-out user first here too (#3605): on this arm the increment
         // mutant must still read 0, which it cannot if it counts recipients
