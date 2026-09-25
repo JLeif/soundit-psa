@@ -219,6 +219,11 @@ class PortalInstallLinkToolTest extends TestCase
             'hostname-trailing-dot' => 'https://public.example.test.',
             'port-zero' => 'https://public.example.test:0',
             'port-overflow' => 'https://public.example.test:65536',
+            'port-trailing-junk' => 'https://public.example.test:8443x/customer',
+            'port-sign' => 'https://public.example.test:+443/customer',
+            'port-leading-zero' => 'https://public.example.test:08443/customer',
+            'port-empty' => 'https://public.example.test:/customer',
+            'ipv6-port-junk' => 'https://[2001:db8::1]:80z',
         ];
         foreach ($roots as $label => $root) {
             foreach (['absent', 'live', 'expired'] as $state) {

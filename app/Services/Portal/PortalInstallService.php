@@ -99,6 +99,10 @@ class PortalInstallService
                 : (! str_contains($host, ':') && ! str_ends_with($host, '.') && ($numericHost
                     ? filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
                     : filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false));
+            $authority = $host.(isset($parts['port']) ? ':'.$parts['port'] : '');
+            // parse_url reads the port with strtol, dropping a sign, leading zeros and trailing
+            // junk; the configured authority must be exactly what we rebuild.
+            $rawAuthority = preg_match('~\A[^:/?#]+://([^/?#]*)~', $publicRoot, $match) ? $match[1] : null;
             $path = $parts['path'] ?? '';
             // A single terminal slash is a root separator, not a prefix segment.
             $prefix = str_ends_with($path, '/') ? substr($path, 0, -1) : $path;
@@ -115,6 +119,7 @@ class PortalInstallService
             if (! is_array($parts) || ! in_array($scheme, ['http', 'https'], true)
                 || ! $validHost
                 || (isset($parts['port']) && ($parts['port'] < 1 || $parts['port'] > 65535))
+                || $rawAuthority !== $authority
                 || str_contains($publicRoot, '\\') || ! $normalized
                 || isset($parts['user']) || isset($parts['pass'])
                 || isset($parts['query']) || isset($parts['fragment'])) {
@@ -131,7 +136,7 @@ class PortalInstallService
             }
 
             return [
-                'url' => $scheme.'://'.$host.(isset($parts['port']) ? ':'.$parts['port'] : '').$prefix.route('portal.install.show', ['token' => $client->portal_install_token], false),
+                'url' => $scheme.'://'.$authority.$prefix.route('portal.install.show', ['token' => $client->portal_install_token], false),
                 'expires_at' => $client->portal_install_token_expires_at?->toIso8601String(),
                 'portal_primary_rmm' => $client->portal_primary_rmm,
                 'reissued_expired' => $expired,

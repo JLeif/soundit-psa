@@ -181,7 +181,9 @@ dotted-quad address, without a terminal dot. This refuses short, hex, leading-ze
 and out-of-range numeric forms rather than letting a browser reinterpret them.
 Other unbracketed hosts must pass `FILTER_VALIDATE_DOMAIN` with
 `FILTER_FLAG_HOSTNAME`. An explicit port must be in the range **1–65535**;
-port zero is refused.
+port zero is refused. The configured host and port must match the rebuilt ones
+exactly: a port must be plain decimal digits with no sign, leading zero or
+trailing characters, and an empty port after `:` is refused.
 
 An optional deployment prefix must be normalized: no dot or dot-dot segments,
 empty segments or backslashes. A single trailing slash is allowed as the root
