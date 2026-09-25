@@ -1638,8 +1638,34 @@ class CippRestWriteClientTest extends TestCase
         ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
     }
 
+    /**
+     * Count only POSTs to the ONE endpoint the call under test writes to.
+     *
+     * The earlier version counted any request whose URL contained '/api/', which
+     * a token request or a future read on the same host would also satisfy - so
+     * "the write left" could have been proven by traffic that was not the write.
+     * Matching the method AND the endpoint makes the counter answer the question
+     * it is being asked.
+     *
+     * @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left
+     */
+    private function countWritePosts(string $endpoint): int
+    {
+        $writes = 0;
+        Http::recorded(function ($request) use (&$writes, $endpoint) {
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), 'cipp.example.test/api/'.$endpoint)) {
+                $writes++;
+            }
+
+            return true;
+        });
+
+        return $writes;
+    }
+
     /** @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left */
-    private function captureDenial(callable $call): array
+    private function captureDenial(string $endpoint, callable $call): array
     {
         $thrown = null;
         try {
@@ -1648,16 +1674,7 @@ class CippRestWriteClientTest extends TestCase
             $thrown = $e;
         }
 
-        $writes = 0;
-        Http::recorded(function ($request) use (&$writes) {
-            if (str_contains($request->url(), 'cipp.example.test/api/')) {
-                $writes++;
-            }
-
-            return true;
-        });
-
-        return [$thrown, $writes];
+        return [$thrown, $this->countWritePosts($endpoint)];
     }
 
     private function assertClaimsNeitherOutcome(CippClientException $e): void
@@ -1672,7 +1689,7 @@ class CippRestWriteClientTest extends TestCase
     public function test_group_membership_error_line_leaves_the_write_sent_and_claims_neither_outcome(): void
     {
         $client = $this->denialClient(200, ['Error - could not add member']);
-        [$thrown, $writes] = $this->captureDenial(fn () => $client->setGroupMembership(
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
             'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
         ));
 
@@ -1687,7 +1704,7 @@ class CippRestWriteClientTest extends TestCase
         // produces no line at all, indistinguishable from a change that landed
         // and logged nothing.
         $client = $this->denialClient(200, []);
-        [$thrown, $writes] = $this->captureDenial(fn () => $client->setGroupMembership(
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
             'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
         ));
 
@@ -1699,7 +1716,7 @@ class CippRestWriteClientTest extends TestCase
     public function test_group_membership_http_500_leaves_the_write_sent(): void
     {
         $client = $this->denialClient(500, 'upstream exploded');
-        [$thrown, $writes] = $this->captureDenial(fn () => $client->setGroupMembership(
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
             'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
         ));
 
@@ -1711,20 +1728,22 @@ class CippRestWriteClientTest extends TestCase
     public function test_group_membership_success_marker_returns_without_throwing(): void
     {
         // Positive control: the same wiring succeeds when upstream confirms, so
-        // the arms above cannot be an artefact of the harness.
+        // the arms above cannot be an artefact of the harness. It goes through
+        // the SAME counter as the throwing arms - a control that measures the
+        // request a different way is not a control on the measurement.
         $client = $this->denialClient(200, ['Success - member added']);
         $result = $client->setGroupMembership(
             'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
         );
 
         $this->assertTrue($result['success']);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/api/EditGroup'));
+        $this->assertSame(1, $this->countWritePosts('EditGroup'), 'the success arm posts exactly the same one write');
     }
 
     public function test_onedrive_reassignment_failure_leaves_the_write_sent_and_claims_neither_outcome(): void
     {
         $client = $this->denialClient(200, ['Failed to set permissions']);
-        [$thrown, $writes] = $this->captureDenial(fn () => $client->reassignOneDriveOwnership(
+        [$thrown, $writes] = $this->captureDenial('ExecSharePointPerms', fn () => $client->reassignOneDriveOwnership(
             'example.onmicrosoft.com', 'owner@example.test', 'successor@example.test'
         ));
 
@@ -1736,7 +1755,7 @@ class CippRestWriteClientTest extends TestCase
     public function test_edit_user_unconfirmed_leaves_the_write_sent_and_claims_neither_outcome(): void
     {
         $client = $this->denialClient(200, ['Queued the request']);
-        [$thrown, $writes] = $this->captureDenial(fn () => $client->editUser(
+        [$thrown, $writes] = $this->captureDenial('EditUser', fn () => $client->editUser(
             'example.onmicrosoft.com', 'uid', 'alex@example.test', ['displayName' => 'Alex Example'], [], null
         ));
 

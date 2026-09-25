@@ -2253,6 +2253,46 @@ class CippWriteLicenseTargetTest extends TestCase
     }
 
     /**
+     * The staged twin of the 4xx arm. Without it, the staged catch's `if` is
+     * killed by no assertion at all: only the direct path had a 4xx test, so
+     * deleting the staged branch left the suite green.
+     */
+    public function test_a_4xx_at_approval_still_says_the_licence_was_not_applied(): void
+    {
+        $this->configureCipp();
+        $f = $this->fixture();
+        $token = $this->token(['cipp_stage_assign_tenant_user_license']);
+        $approver = User::factory()->create(['name' => 'Approver']);
+
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $this->app->instance(CippRestWriteClient::class, $client);
+
+        $staged = $this->decodedResult($this->callTool($token, 'cipp_stage_assign_tenant_user_license', [
+            'client_id' => $f['client']->id,
+            'ticket_id' => $f['ticket']->id,
+            'target_upn' => self::TARGET_UPN,
+            'sku_id' => self::SKU,
+            'reason' => 'Contractor needs a seat.',
+        ]));
+        $this->assertTrue($staged['success'] ?? false);
+
+        $failing = Mockery::mock(CippRestWriteClient::class);
+        $failing->shouldReceive('listUsers')->once()->with(self::TENANT)->andReturn([$this->userRow()]);
+        $failing->shouldReceive('assignUserLicense')->once()
+            ->andThrow(new \App\Services\Cipp\CippWriteHttpException(400));
+        $this->app->instance(CippRestWriteClient::class, $failing);
+
+        $run = TechnicianRun::findOrFail($staged['run_id']);
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $approver->id);
+
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertStringContainsString('was not applied', (string) $result->message);
+        $this->assertStringNotContainsString('may or may not have applied', (string) $result->message);
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
+    }
+
+    /**
      * The staged twin of the 5xx arm. The two catches carry the same branch and
      * have drifted apart before in this file's history, so each is pinned where
      * it lives rather than trusting one to stand for both.

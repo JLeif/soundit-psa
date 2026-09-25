@@ -3751,16 +3751,27 @@ class StaffCippWriteToolExecutor
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, $license, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
             // On THIS path the exception TYPE answers "did the POST leave?",
-            // because assignUserLicense is a bare send() with no throws and no
-            // body capture. CippWriteHttpException is raised only by send()'s
-            // $response->failed() check, i.e. after ->post(); everything else
-            // reaching this catch is a plain CippClientException from
-            // endpointUrl(), safeRequestOptions() or getToken(), all of which run
-            // BEFORE ->post(). So a plain CippClientException means nothing was
-            // sent, and a 4xx means upstream refused: "not applied" is earned for
-            // both. Only a 5xx leaves the outcome genuinely unknown. (failed() is
+            // because assignUserLicense is a bare send() to api/ExecBulkLicense
+            // with no throws and no body capture. CippWriteHttpException is raised
+            // only by send()'s $response->failed() check, i.e. after ->post();
+            // everything else reaching this catch is a plain CippClientException
+            // from endpointUrl(), safeRequestOptions() or getToken(), all of which
+            // run BEFORE ->post(). So a plain CippClientException means nothing
+            // was sent.
+            //
+            // The 4xx arm is specific to this endpoint, not a general rule about
+            // upstream. In CIPP-API (master 7c756b0d, Invoke-ExecBulkLicense.ps1
+            // last touched 3bbfe443) Set-CIPPUserLicense runs inside an INNER
+            // try/catch that appends a "Failed to process..." line and keeps the
+            // status OK; BadRequest is set only by the OUTER catch, reached by the
+            // user-lookup throws that run before any write. So on ExecBulkLicense
+            // a 4xx means nothing was written and "not applied" is true. Do not
+            // copy this branch to an endpoint whose 4xx has not been checked the
+            // same way.
+            //
+            // Only a 5xx leaves the outcome genuinely unknown. failed() is
             // serverError()||clientError(), so a CippWriteHttpException status is
-            // always >= 400 and this branch is exhaustive.)
+            // always >= 400 and this branch is exhaustive.
             if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
                 return ['error' => "CIPP write failed for {$tool}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying."];
             }
@@ -4231,11 +4242,14 @@ class StaffCippWriteToolExecutor
                 // declined() redacts and bounds what it is given, but it cannot
                 // know this reason came from upstream — so the generic sentence
                 // is what it gets, and the specific cause stays in the row.
-                // Same derivation as the direct path: assignUserLicense is a bare
-                // send(), so CippWriteHttpException means the POST left (only
-                // $response->failed() raises it) and a plain CippClientException
+                // Same derivation as the direct path, including the endpoint-specific
+                // 4xx premise: assignUserLicense is a bare send() to
+                // api/ExecBulkLicense, so CippWriteHttpException means the POST left
+                // (only $response->failed() raises it) and a plain CippClientException
                 // means it did not (endpointUrl/safeRequestOptions/getToken all run
-                // before ->post()). Hedge only where the outcome is truly unknown.
+                // before ->post()); and on that endpoint a 4xx comes only from the
+                // outer catch, which the pre-write user lookup reaches. Hedge only
+                // where the outcome is truly unknown.
                 if ($e instanceof \App\Services\Cipp\CippWriteHttpException && $e->status >= 500) {
                     return $this->declined("CIPP write failed for {$run->action_type}; the licence assignment may or may not have applied — verify the user's licences in CIPP before retrying.");
                 }
