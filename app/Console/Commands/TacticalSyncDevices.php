@@ -17,7 +17,7 @@ class TacticalSyncDevices extends Command
 
     public function handle(): int
     {
-        if (! TacticalConfig::isAvailable()) {
+        if (! TacticalConfig::isEnabled()) {
             $this->error('Tactical RMM is disabled or not configured. Check Settings → Integrations.');
 
             return self::FAILURE;

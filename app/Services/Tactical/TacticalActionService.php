@@ -86,6 +86,13 @@ class TacticalActionService
             );
         }
 
+        if (! TacticalConfig::isEnabled()) {
+            return $this->audit(
+                $action, $target, $actor, $label, $agentId, $params, $ticketId, $correlationId,
+                TacticalActionResult::blocked('Tactical integration is disabled or not configured'),
+            );
+        }
+
         // 3. validate + normalize params.
         try {
             $params = $action->validateParams($params);

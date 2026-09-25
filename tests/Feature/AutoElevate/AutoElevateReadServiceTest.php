@@ -9,6 +9,7 @@ use App\Services\AutoElevate\AutoElevateReadService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Sleep;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -23,6 +24,8 @@ class AutoElevateReadServiceTest extends TestCase
     {
         parent::setUp();
         Http::preventStrayRequests();
+        // getPage() backs off on 429 (card fh7wGneF); never really wait in a test.
+        Sleep::fake();
         Setting::setEncrypted('autoelevate_api_key', 'synthetic-only-key');
     }
 
@@ -186,7 +189,7 @@ class AutoElevateReadServiceTest extends TestCase
 
     /**
      * #2124. An over-cap tenant is knowable from the FIRST page's `totalCount`, so it must
-     * cost one request, not fifty against a 100/hour bucket — and it must not wear the
+     * cost one request, not fifty rate-limited ones — and it must not wear the
      * `paging_bound` label, which means something else (see the next test).
      */
     public function test_a_tenant_larger_than_the_walk_is_named_from_the_first_page(): void

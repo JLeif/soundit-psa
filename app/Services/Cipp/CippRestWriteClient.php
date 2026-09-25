@@ -71,10 +71,18 @@ class CippRestWriteClient
         ]);
     }
 
-    /** @return array<int|string, mixed> */
+    /**
+     * Assign one SKU to one user through api/ExecBulkLicense.
+     *
+     * That endpoint answers HTTP 200 whether or not it wrote, so the body is
+     * captured and read by confirmLicenseWrite(); a 200 without the vendor's
+     * success line is never reported as done.
+     *
+     * @return array{success: true, status: int, no_change: bool}
+     */
     public function assignUserLicense(string $tenantFilter, string $userId, string $skuId): array
     {
-        return $this->send('api/ExecBulkLicense', [[
+        $response = $this->send('api/ExecBulkLicense', [[
             'tenantFilter' => $tenantFilter,
             'userIds' => [$userId],
             'LicenseOperation' => 'Add',
@@ -82,13 +90,21 @@ class CippRestWriteClient
             'LicensesToRemove' => [],
             'RemoveAllLicenses' => false,
             'ReplaceAllLicenses' => false,
-        ]]);
+        ]], captureBody: true);
+
+        return $this->confirmLicenseWrite($response, 'Add');
     }
 
-    /** @return array<int|string, mixed> */
+    /**
+     * Remove one SKU from one user through api/ExecBulkLicense. Same body
+     * rule as assignUserLicense(), plus one extra outcome: no_change, when CIPP
+     * found the user did not hold the SKU and so made no write.
+     *
+     * @return array{success: true, status: int, no_change: bool}
+     */
     public function removeUserLicense(string $tenantFilter, string $userId, string $skuId): array
     {
-        return $this->send('api/ExecBulkLicense', [[
+        $response = $this->send('api/ExecBulkLicense', [[
             'tenantFilter' => $tenantFilter,
             'userIds' => [$userId],
             'LicenseOperation' => 'Remove',
@@ -96,7 +112,78 @@ class CippRestWriteClient
             'LicensesToRemove' => [['value' => $skuId]],
             'RemoveAllLicenses' => false,
             'ReplaceAllLicenses' => false,
-        ]]);
+        ]], captureBody: true);
+
+        return $this->confirmLicenseWrite($response, 'Remove');
+    }
+
+    /**
+     * Read an ExecBulkLicense answer for ONE user and fail closed on anything
+     * but the vendor's own success line.
+     *
+     * Vendor source, CIPP-API master 7c756b0d (Invoke-ExecBulkLicense.ps1 and
+     * Set-CIPPUserLicense.ps1): the status stays OK and the outcome is only in
+     * Results. One user goes in, so exactly one line is expected:
+     *  - "Successfully set licenses for <upn>…" (also the form after a
+     *    usage-location retry): the write succeeded.
+     *  - "User <id> not found in tenant <t>" / "No valid user ID found…":
+     *    emitted before Set-CIPPUserLicense is called, so nothing was written.
+     *  - "No license changes needed for user <upn>": Remove only (Add does not
+     *    filter its list). The user did not hold the SKU in CIPP's lookup, so
+     *    no write was made; reported as no_change, not as a removal.
+     *  - "Failed to assign licenses for user <upn>…": Graph answered non-2xx
+     *    for the assignLicense request. The line does not carry that status,
+     *    and New-GraphBulkRequest retries only 429/503/504 before handing the
+     *    last status back, so a server-side timeout reads the same as a
+     *    refusal: unknown. The "after setting usage location" form has also
+     *    sent a usageLocation PATCH first.
+     *  - "Failed to process bulk license operation for tenant…": the inner
+     *    catch; Set-CIPPUserLicense threw part-way, so unknown.
+     *  - anything else (another count, an unknown line, a non-array body, or
+     *    a 3xx, which send() does not treat as failed because redirects are
+     *    not followed): unknown.
+     *
+     * @param  array{status: int, body: mixed}  $response
+     * @return array{success: true, status: int, no_change: bool}
+     */
+    private function confirmLicenseWrite(array $response, string $operation): array
+    {
+        $endpoint = 'api/ExecBulkLicense';
+        $status = (int) $response['status'];
+
+        if ($status < 200 || $status > 299) {
+            throw new CippWriteUnconfirmedException($endpoint, CippWriteUnconfirmedException::UNKNOWN, "HTTP {$status}");
+        }
+
+        $body = $response['body'] ?? null;
+        $results = is_array($body) ? ($body['Results'] ?? null) : null;
+        if (is_string($results)) {
+            $results = [$results];
+        }
+        if (! is_array($results) || count($results) !== 1 || ! is_string(reset($results))) {
+            throw new CippWriteUnconfirmedException($endpoint, CippWriteUnconfirmedException::UNKNOWN);
+        }
+
+        $line = ltrim((string) reset($results));
+
+        if (str_starts_with($line, 'Successfully set licenses for ')) {
+            return ['success' => true, 'status' => $status, 'no_change' => false];
+        }
+        if ($operation === 'Remove' && str_starts_with($line, 'No license changes needed for user ')) {
+            return ['success' => true, 'status' => $status, 'no_change' => true];
+        }
+        if ((str_starts_with($line, 'User ') && str_contains($line, ' not found in tenant '))
+            || str_starts_with($line, 'No valid user ID found in request')) {
+            throw new CippWriteUnconfirmedException($endpoint, CippWriteUnconfirmedException::NOT_APPLIED, $line);
+        }
+
+        throw new CippWriteUnconfirmedException(
+            $endpoint,
+            CippWriteUnconfirmedException::UNKNOWN,
+            $line,
+            usageLocationMayHaveChanged: str_starts_with($line, 'Failed to assign licenses for user ')
+                && str_contains($line, ' after setting usage location'),
+        );
     }
 
     /** @return array<int|string, mixed> */
@@ -760,7 +847,8 @@ class CippRestWriteClient
 
         if (! $hasSuccess || $failure !== null) {
             throw new CippClientException(
-                'CIPP did not confirm the group membership change; treat it as not applied.'
+                'CIPP accepted the request but did not confirm the group membership change;'
+                .' it may or may not have applied — verify the group membership in CIPP before retrying.'
                 .($failure !== null ? ' Upstream: '.mb_substr($failure, 0, 300) : '')
             );
         }
@@ -868,7 +956,10 @@ class CippRestWriteClient
             : (string) $results;
 
         if (stripos($text, 'Successfully') === false || stripos($text, 'Failed') !== false) {
-            throw new CippClientException('CIPP did not confirm the OneDrive permission change; treat the reassignment as not applied.');
+            throw new CippClientException(
+                'CIPP accepted the request but did not confirm the OneDrive permission change;'
+                .' it may or may not have applied — verify the OneDrive permissions in CIPP before retrying.'
+            );
         }
 
         return ['success' => true, 'status' => (int) $response['status']];
@@ -982,7 +1073,10 @@ class CippRestWriteClient
         }
 
         if (! $editConfirmed) {
-            throw new CippClientException('CIPP did not confirm the user edit; treat the change as not applied and verify in CIPP.');
+            throw new CippClientException(
+                'CIPP accepted the request but did not confirm the user edit;'
+                .' it may or may not have applied — verify the user\'s current state in CIPP before retrying.'
+            );
         }
 
         return ['success' => true, 'status' => (int) $response['status']];

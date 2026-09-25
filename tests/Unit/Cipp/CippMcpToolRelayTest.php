@@ -399,10 +399,18 @@ class CippMcpToolRelayTest extends TestCase
 
         $this->relay([$row])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
 
+        // Bound to the STRUCTURED signal, not to the prose. The earlier
+        // version matched on the substring 'never resolved', which tied this
+        // control to the wording of a sentence it is not about -- and the
+        // wording had to change, because it named a cause that function
+        // cannot establish (#3382). It was called warnOnShapeDrift() then and
+        // is warnOnUnresolvedKeys() since #3408, for that same reason. The `missing_fields` key is what
+        // distinguishes this warning from the sibling 'Every row projected
+        // empty', which does not carry it, so the discrimination survives
+        // without pinning a word.
         Log::shouldHaveReceived('warning')
             ->once()
-            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'never resolved')
-                && ($context['tool'] ?? null) === 'cipp_list_mailboxes'
+            ->withArgs(fn (string $message, array $context = []): bool => ($context['tool'] ?? null) === 'cipp_list_mailboxes'
                 && in_array('forwardingSmtpAddress', $context['missing_fields'] ?? [], true));
     }
 
@@ -821,8 +829,15 @@ class CippMcpToolRelayTest extends TestCase
         // The insidious drift mode (psa-mybo): scalar fields still resolve so
         // the projection looks healthy, but every flattened targeting/control
         // key is gone — CA posture would be silently invisible again.
+        //
+        // Re-aimed at first_row_keys (#3408), the same move #3394 made for "never
+        // resolved". The guard no longer says "shape drift" here: an ordinary Graph
+        // user, group, application or device also carries a GUID id and a displayName,
+        // so no cheap predicate separates this row from those, and the word was dropped
+        // rather than narrowed a fourth time. What survives is the structured evidence
+        // a reader acts on — these keys, and no targeting key among them.
         $result = $this->executeConditionalAccess([[
-            'id' => 'policy-1',
+            'id' => '66666666-6666-6666-6666-666666666666',
             'displayName' => 'Require MFA',
             'state' => 'enabled',
         ]]);
@@ -831,7 +846,8 @@ class CippMcpToolRelayTest extends TestCase
 
         Log::shouldHaveReceived('warning')
             ->once()
-            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'shape drift')
+            ->withArgs(fn (string $message, array $context = []): bool => str_contains($message, 'No ListConditionalAccessPolicies row carries any flattened targeting/control field')
+                && ! str_contains($message, 'drift')
                 && ($context['tool'] ?? null) === 'cipp_list_conditional_access_policies'
                 && ($context['row_count'] ?? null) === 1
                 && ($context['first_row_keys'] ?? null) === ['id', 'displayName', 'state']);

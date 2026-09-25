@@ -207,6 +207,7 @@ class McpStaffController extends Controller
 
     /** PSA records write-surface (P2a/P2b/P2c) — native client + contact + asset CRUD, dispatched through StaffPsaActionToolExecutor. */
     private const PSA_RECORDS_TOOLS = [
+        'portal_get_or_create_install_link',
         'create_client',
         'update_client',
         'update_client_site_notes',
@@ -228,6 +229,7 @@ class McpStaffController extends Controller
 
     /** psa_records tools that act on an existing client — client_id is the required target, not ambient scope. */
     private const PSA_RECORDS_CLIENT_SCOPED_TOOLS = [
+        'portal_get_or_create_install_link',
         'update_client',
         'update_client_site_notes',
         'delete_client',
@@ -1431,7 +1433,7 @@ class McpStaffController extends Controller
                 ],
             ]);
 
-            if (in_array((string) $name, ['tactical_open_remote_control', 'tactical_get_or_create_installer', 'tactical_generate_installer', 'cipp_reset_user_password', 'cipp_create_user'], true) && ! $isError) {
+            if (in_array((string) $name, ['portal_get_or_create_install_link', 'tactical_open_remote_control', 'tactical_get_or_create_installer', 'tactical_generate_installer', 'cipp_reset_user_password', 'cipp_create_user'], true) && ! $isError) {
                 $response->headers->set('Cache-Control', 'no-store');
             }
 

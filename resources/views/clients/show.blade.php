@@ -1148,7 +1148,7 @@
 
                 {{-- Unmapped integrations --}}
                 {{-- Tactical RMM card (standalone — Tactical's Client|Site model is managed via the bulk mapping page, not the registry). --}}
-                @if(\App\Support\TacticalConfig::isAvailable())
+                @if(\App\Support\TacticalConfig::isEnabled())
                 <div class="row g-3 mb-3">
                     <div class="col-md-6">
                         <div class="card shadow-sm card-static h-100">

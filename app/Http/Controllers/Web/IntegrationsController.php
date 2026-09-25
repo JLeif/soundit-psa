@@ -11,6 +11,8 @@ use App\Services\Graph\GraphClient;
 use App\Services\Graph\GraphWebhookManager;
 use App\Services\Hdb\HdbAuthClient;
 use App\Services\Level\LevelClient;
+use App\Services\Litsrmm\LitsrmmClient;
+use App\Services\Litsrmm\LitsrmmClientException;
 use App\Services\Ninja\NinjaBackupSyncService;
 use App\Services\Ninja\NinjaClient;
 use App\Support\AiConfig;
@@ -23,6 +25,7 @@ use App\Support\ControlDConfig;
 use App\Support\HdbPortalConfig;
 use App\Support\HuntressConfig;
 use App\Support\LevelConfig;
+use App\Support\LitsrmmConfig;
 use App\Support\MeshConfig;
 use App\Support\PlivoConfig;
 use App\Support\PowerDmarcConfig;
@@ -78,7 +81,6 @@ class IntegrationsController extends Controller
         'zorus' => 'AI triage',
         'unifi' => 'MCP',
         'powerdmarc' => 'MCP',
-        'tactical' => 'AI triage and MCP',
     ];
 
     public function index(NinjaClient $ninja, LevelClient $level)
@@ -359,6 +361,20 @@ class IntegrationsController extends Controller
         // Integration enabled toggles
         $ninjaEnabled = \App\Support\NinjaConfig::isEnabled();
         $levelEnabled = LevelConfig::isEnabled();
+
+        // LITSRMM: read credentials through get() directly rather than through
+        // isAvailable(), so the panel can still show what is configured while
+        // the integration is switched off - otherwise switching it off would
+        // hide the fields needed to switch it back on. isHealthy() is NOT
+        // called here: it is a live outbound request, and a settings page that
+        // dials a self-hosted host on every render would make one operator's
+        // page load depend on another network being up. Reachability is the
+        // Test connection button's job.
+        $litsrmmHasApiKey = (bool) LitsrmmConfig::get('api_key');
+        $litsrmmBaseUrl = (string) (LitsrmmConfig::get('base_url') ?? '');
+        $litsrmmConfigured = LitsrmmConfig::isConfigured();
+        $litsrmmEnabled = LitsrmmConfig::isEnabled();
+        $litsrmmConnectedAt = $fmtTs(Setting::getValue('litsrmm_connected_at'));
         $meshEnabled = MeshConfig::isEnabled();
         $cippEnabled = CippConfig::isEnabled();
         $cippMcpEnabled = CippConfig::isMcpRelayEnabled();
@@ -552,6 +568,7 @@ class IntegrationsController extends Controller
             'benjipaysPayOnline',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
+            'litsrmmHasApiKey', 'litsrmmBaseUrl', 'litsrmmConfigured', 'litsrmmEnabled', 'litsrmmConnectedAt',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
             'huntressConfigured', 'huntressConnected', 'huntressEnabled',
             'huntressWebhookSecretStored', 'huntressWebhookAccountId', 'huntressWebhooksEnabled',
@@ -598,7 +615,7 @@ class IntegrationsController extends Controller
     {
         $allowed = [
             'ninja', 'level', 'mesh', 'cipp', 'cipp_mcp', 'cipp_contact_sync', 'cipp_device_sync', 'cipp_mcp_catalog_sync', 'huntress', 'unifi', 'powerdmarc', 'servosity', 'controld', 'controld_onboarding', 'zorus', 'appriver', 'printix',
-            'plivo', 'graph', 'stripe', 't2t', 'ai', 'screenconnect', 'tactical',
+            'plivo', 'graph', 'stripe', 't2t', 'ai', 'screenconnect', 'tactical', 'litsrmm',
         ];
 
         $request->validate([
@@ -958,6 +975,161 @@ class IntegrationsController extends Controller
         }
 
         return response()->json(['success' => false, 'message' => 'Could not connect to Level RMM. Check API key.']);
+    }
+
+    // --- LITSRMM (Leif IT Solutions RMM) ---
+
+    /**
+     * Save LITSRMM credentials.
+     *
+     * base_url is a REQUIRED field here, unlike Level's, because LITSRMM is
+     * self-hosted and there is no public host to fall back on. It is stored
+     * with setValue() rather than setEncrypted(): a hostname is configuration
+     * an operator needs to read back on this page to confirm what it is set
+     * to, and encrypting it would only hide it from its own operator. The API
+     * key is encrypted and is never rendered back into the form.
+     *
+     * Each field is written only when submitted non-empty, so saving one field
+     * does not clear another. That also makes "leave blank to keep current"
+     * true rather than a caption over a destructive form.
+     */
+    public function updateLitsrmm(Request $request)
+    {
+        // Keep the secrets out of the session on a validation failure.
+        //
+        // A failed validate() redirects withInput(), and the framework's
+        // $dontFlash list covers only password / password_confirmation /
+        // current_password - not api_key or webhook_secret. With
+        // SESSION_ENCRYPT=false that writes a live vendor credential into the
+        // session store in cleartext, where nothing on the page has to render
+        // it for it to be readable.
+        //
+        // So validation runs against a request that does not contain them.
+        // The view never calls old() for these fields, so nothing is lost, and
+        // an operator re-enters a secret they were told is write-only anyway.
+        // Doing this by hand rather than through $dontFlash keeps the rule
+        // beside the fields it protects instead of in a global list a future
+        // vendor would have to remember to extend.
+        $secrets = $request->only(['api_key', 'webhook_secret']);
+        $request->replace($request->except(['api_key', 'webhook_secret']));
+
+        $validated = $request->validate([
+            'base_url' => [
+                'nullable',
+                'url',
+                'max:255',
+                // Same rule the client enforces, applied at the field so an
+                // operator learns about it on save rather than from a failed
+                // Test connection. The client is still the real guarantee:
+                // env and config never pass through this form.
+                function (string $attribute, mixed $value, callable $fail) {
+                    try {
+                        LitsrmmClient::assertTransportIsSafe((string) $value);
+                    } catch (LitsrmmClientException $e) {
+                        $fail($e->getMessage());
+                    }
+                },
+            ],
+        ]);
+
+        // Validated separately, after the redirect risk has passed. A refusal
+        // here carries no input back at all.
+        $lengths = validator($secrets, [
+            'api_key' => 'nullable|string|min:1|max:500',
+            'webhook_secret' => 'nullable|string|min:1|max:500',
+        ]);
+
+        if ($lengths->fails()) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'LITSRMM credentials must each be between 1 and 500 characters.');
+        }
+
+        $validated += $secrets;
+
+        // A host change re-points the stored key at a new destination, so it
+        // requires the key to be supplied again. Otherwise an operator who can
+        // edit settings but cannot read the encrypted key could move base_url
+        // to a host they control and press Test connection, and the key they
+        // were never shown would be sent there. Both fields together, or the
+        // host alone only when it is unchanged.
+        //
+        // The exemption depends on whether a KEY is held, not whether a host
+        // is: a key saved before any host (or supplied through env) is exactly
+        // as exposed by a first host as by a changed one. Read through
+        // LitsrmmConfig so an env-supplied key counts too.
+        $newHost = ! empty($validated['base_url']) ? rtrim($validated['base_url'], '/') : null;
+        $currentHost = (string) (LitsrmmConfig::get('base_url') ?? '');
+        $hasStoredKey = (bool) LitsrmmConfig::get('api_key');
+
+        if ($newHost !== null && $newHost !== $currentHost && $hasStoredKey && empty($validated['api_key'])) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Changing the LITSRMM base URL requires re-entering the API key, so a stored key is never sent to a new host.');
+        }
+
+        if (! empty($validated['api_key'])) {
+            Setting::setEncrypted('litsrmm_api_key', $validated['api_key']);
+        }
+        if ($newHost !== null) {
+            Setting::setValue('litsrmm_base_url', $newHost);
+        }
+        if (! empty($validated['webhook_secret'])) {
+            Setting::setEncrypted('litsrmm_webhook_secret', $validated['webhook_secret']);
+        }
+
+        return redirect()->route('settings.integrations')
+            ->with('success', 'LITSRMM credentials saved.');
+    }
+
+    /**
+     * Test connection, wired to LitsrmmClient::isHealthy().
+     *
+     * Deliberately NOT modelled on testLevel(), which builds its own Guzzle
+     * client and hardcodes the vendor URL. Doing that here would mean the
+     * button tests a request this application does not otherwise make: the
+     * timeout, the auth header and the path would all be second copies, free
+     * to drift from LitsrmmClient without any test noticing. Resolving the
+     * real client means a green result is evidence about the code that will
+     * actually run.
+     *
+     * It reports the two not-configured cases SEPARATELY, because "no API key"
+     * and "no host" need different actions from the operator, and a single
+     * "not configured" message would send them looking at the wrong field.
+     */
+    public function testLitsrmm(LitsrmmClient $litsrmm)
+    {
+        if (! LitsrmmConfig::get('api_key')) {
+            return response()->json(['success' => false, 'message' => 'API key not configured.']);
+        }
+
+        if (! LitsrmmConfig::get('base_url')) {
+            return response()->json(['success' => false, 'message' => 'Base URL not configured. LITSRMM is self-hosted, so there is no default host.']);
+        }
+
+        // A base_url that predates the scheme rule, or one set through env,
+        // reaches here without ever passing the form. Report the refusal as
+        // itself rather than letting it surface as a generic failure - and
+        // report it BEFORE isHealthy(), whose catch would otherwise flatten it
+        // to false and tell the operator to check their credentials (diff:7).
+        try {
+            LitsrmmClient::assertTransportIsSafe((string) LitsrmmConfig::get('base_url'));
+        } catch (LitsrmmClientException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()]);
+        }
+
+        // isHealthy() is gated on isAvailable(), so a switched-off integration
+        // reports unreachable without asking. Say so rather than leaving the
+        // operator to read a failure as a credential problem.
+        if (! LitsrmmConfig::isEnabled()) {
+            return response()->json(['success' => false, 'message' => 'Integration is switched off. Turn it on to test the connection.']);
+        }
+
+        if ($litsrmm->isHealthy()) {
+            Setting::setValue('litsrmm_connected_at', now()->toDateTimeString());
+
+            return response()->json(['success' => true, 'message' => 'Connected to LITSRMM successfully!']);
+        }
+
+        return response()->json(['success' => false, 'message' => 'Could not connect to LITSRMM. Check the base URL and API key.']);
     }
 
     // --- ScreenConnect ---
@@ -2850,8 +3022,8 @@ class IntegrationsController extends Controller
 
     public function testTactical()
     {
-        if (! TacticalConfig::isAvailable()) {
-            return response()->json(['success' => false, 'message' => 'Tactical RMM is disabled or its API credentials are not configured.']);
+        if (! TacticalConfig::isConfigured()) {
+            return response()->json(['success' => false, 'message' => 'API credentials not configured.']);
         }
 
         try {
@@ -2871,7 +3043,7 @@ class IntegrationsController extends Controller
 
     public function syncTacticalDevices()
     {
-        if (! TacticalConfig::isAvailable()) {
+        if (! TacticalConfig::isEnabled()) {
             return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
@@ -2948,7 +3120,7 @@ class IntegrationsController extends Controller
 
     public function syncTacticalScripts()
     {
-        if (! TacticalConfig::isAvailable()) {
+        if (! TacticalConfig::isEnabled()) {
             return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
@@ -2973,8 +3145,8 @@ class IntegrationsController extends Controller
      */
     public function provisionTacticalAlerts(Request $request)
     {
-        if (! TacticalConfig::isAvailable()) {
-            return response()->json(['success' => false, 'message' => 'Tactical RMM is disabled or its API credentials are not configured.']);
+        if (! TacticalConfig::isEnabled()) {
+            return response()->json(['success' => false, 'message' => 'Tactical RMM is disabled or not configured.']);
         }
 
         try {

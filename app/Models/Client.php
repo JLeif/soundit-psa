@@ -4,6 +4,9 @@ namespace App\Models;
 
 use App\Helpers\MarkdownRenderer;
 use App\Support\AvatarHelper;
+use App\Support\LevelConfig;
+use App\Support\NinjaConfig;
+use App\Support\TacticalConfig;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -23,6 +26,7 @@ class Client extends Model
         'halo_id',
         'ninja_org_id',
         'level_group_id',
+        'litsrmm_client_id',
         'mesh_customer_id',
         'cipp_tenant_domain',
         'cipp_sync_group_id',
@@ -281,22 +285,27 @@ class Client extends Model
     }
 
     /**
-     * Return a list of RMM slugs this client has mapped.
+     * Return the RMM slugs this client has mapped AND whose integration is
+     * currently enabled and configured.
      * Used to populate the primary-RMM dropdown and to pick a default.
+     *
+     * A mapping column alone does not make an RMM available: a disabled
+     * integration keeps its mapping values as history, but they do not count
+     * here. Re-enabling a configured integration makes them count again.
      *
      * @return array<int, string> e.g. ['ninja', 'level'] or ['tactical']
      */
     public function availableRmms(): array
     {
         $rmms = [];
-        if (! empty($this->ninja_org_id)) {
+        if (! empty($this->ninja_org_id) && NinjaConfig::isEnabled() && NinjaConfig::isConfigured()) {
             $rmms[] = 'ninja';
         }
-        if (! empty($this->level_group_id)) {
+        if (! empty($this->level_group_id) && LevelConfig::isEnabled() && LevelConfig::isConfigured()) {
             $rmms[] = 'level';
         }
-        // A mapped Tactical site only counts while the integration is switched on (OFF=OFF).
-        if (! empty($this->tactical_site_id) && \App\Support\TacticalConfig::isEnabled()) {
+        // TacticalConfig::isEnabled() already requires isConfigured().
+        if (! empty($this->tactical_site_id) && TacticalConfig::isEnabled()) {
             $rmms[] = 'tactical';
         }
 
@@ -304,9 +313,26 @@ class Client extends Model
     }
 
     /**
+     * Return the RMM slugs this client has a mapping value for, whether or
+     * not that integration is enabled or configured. Install resolution and
+     * the primary-RMM dropdown use availableRmms() instead.
+     *
+     * @return array<int, string>
+     */
+    public function mappedRmms(): array
+    {
+        return array_keys(array_filter([
+            'ninja' => ! empty($this->ninja_org_id),
+            'level' => ! empty($this->level_group_id),
+            'tactical' => ! empty($this->tactical_site_id),
+        ]));
+    }
+
+    /**
      * Returns the RMM slug to use for portal self-service install.
-     * Uses `portal_primary_rmm` if set, otherwise the only mapped RMM
-     * (returns null if multiple are mapped and none is chosen).
+     * Uses `portal_primary_rmm` if it names an RMM in availableRmms(),
+     * otherwise the only available RMM (returns null if several are
+     * available and none is validly chosen).
      */
     public function effectiveInstallRmm(): ?string
     {

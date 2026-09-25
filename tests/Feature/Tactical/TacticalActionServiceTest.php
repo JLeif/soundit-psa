@@ -35,6 +35,13 @@ class TacticalActionServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-test-key');
+    }
+
     private function asset(bool $linked = true, string $agentId = 'AGENT-1'): Asset
     {
         $asset = Asset::factory()->create(['hostname' => 'WORKSTATION-01']);

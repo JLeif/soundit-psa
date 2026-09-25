@@ -19,6 +19,15 @@ Source: card `6aa664b8`, reaffirmed by card `6i4cN8BC` (Charlie: “Lift it. Yes
 
 Production settings, grants, credentials, live-route activation, schema-destructive operations, client-data migrations and irreversible production actions require Charlie's explicit go for the specific action. Development approval is not production authorization. Escalate ambiguous product/scope judgments, security beyond a mechanical fix, schema/data-loss risks, money, customer impact and irreversibility to Jeeves; they cannot spend Charlie's production authority.
 
+<a id="release-conduct"></a>
+### 2026-09-25 — Merging is not releasing (card `PNxPmLMO`)
+
+A seat that merges to `main` owes the release in the same sitting. Where Jeeves's release go covers the merge, it deploys through the normal gate and verifies at the consumer boundary; without that go, or when it deliberately does not ship, it records the no-deploy as below and names on the owning card who ships it. This entry grants no release or production authority; the authority entry above governs who may deploy. Ending silently between those two is forbidden.
+
+Observed 2026-09-23 on card `57SuhqPY`: a seat merged, ran `psa-deploy-gate.sh`, saw it PASS, and stopped. For about fifteen minutes the ledger, CI and the deploy gate all read green while production ran the old code. **A GATE PASS IS NEITHER RELEASE AUTHORITY NOR A DEPLOY.** It was caught by a later session re-deriving at source, not by any alarm.
+
+A deliberate no-deploy is legitimate and is recorded, not merely intended: the sha goes in the no-ship acknowledgement list with a reason and the owning card names who ships it, so correct inaction is distinguishable from neglect. Detection is a drift gauge comparing `origin/main` against the deployed HEAD; it reports what it measures (two shas, a clock, whether a deploy gate has passed on the tip) and does not assert why, because a gauge may fire correctly and still accuse the wrong cause.
+
 <a id="review"></a>
 ## Review contract retained on 2026-09-15
 
@@ -79,6 +88,13 @@ This retires Jeeves's 2026-09-04 bar on putting integration detail in the public
 ## Fail-closed MCP modes
 
 Source: card `6aa986d5`, retained 2026-09-15. Unknown is refusal, never a pass. A bare grant runs immediate; held-only verbs never offer immediate execution. Do not infer mode authority from a permissive fallback or missing grant data. Preserve the distinction between a capability's catalog presence, caller grant and live availability.
+
+<a id="runtime-mechanism-strings"></a>
+## 2026-09-23 — Runtime mechanism strings
+
+Source: adopted development ruling on runtime mechanism strings, coordination card `Ujy42wr5`, retained by the sweep in issue #3265 and PR #3266. The adoption record and its round-two clarification are held in private coordination; this public record carries the rule without private thread content.
+
+An operator-facing runtime string that asserts why something happened, how a function behaves, or what is true of data is output and must be true on every emitting path. Pure event labels name an event without asserting a mechanism and are outside this rule. Work one site at a time: first delete an explanatory clause when structured keys already carry the fact or it is false or unverifiable on any emitting path; otherwise assert the claim on every emitting arm, killing a swap/merge-arms mutant or a predicate-weakening mutant for a single arm. Logging controls cover every exposed level and the generic entry `Log::log($level, $message, $context)` by name, not just the expected record's level. The generic entry takes the level FIRST, so a control that registers a per-level closure expecting `($message, $context)` binds the level word as its message and the real sentence as its context: the closure's own filter then discards every generic record, and the control reports green while asserting nothing about it. Measured by execution on 2026-09-25: a generic `Log::log('warning', ...)` does not satisfy a per-level `warning` expectation at all (Mockery raises `InvalidCountException`), and a per-level closure handed the generic argument list binds `$message = 'warning'`. This sweep records one instance of this binding hole: PR #3614's round-one `diff:1`, in the fix for issues #3586 and #3599. A separate hole is a control that accepts or captures other levels without asserting which level the record arrived at. Assert the level, not only the record count: a control that captures every level but asserts none cannot see a demotion. This sweep records these instances of it: issues #3586 (info/debug/error stubbed and never read, so moving the cause onto another level survived) and #3599 (an any-level capture letting a demotion survive), both folded into PR #3614; PR #3614's round-one `contract:1` (a warning-to-debug demotion still produced the single record `assertCount(1)` expected); and a pre-commit draft of the #3675 reply-threading control, a `Log::listen` capture of every level in which mutant m5's warning-to-debug demotion survived. Prose with an executable citation is the last resort. Verify truth by isolated execution before pinning text; do not bulk-assert strings or cite suite totals as truth evidence. Cite methods, not unstable line numbers. This governs new mechanism strings too; comments and names keep their separate delete-or-rename remedy. [STANDARDS G-14](../STANDARDS.md#later-development-obligations) indexes this adopted rule.
 
 <a id="reporting"></a>
 ## Measured reporting

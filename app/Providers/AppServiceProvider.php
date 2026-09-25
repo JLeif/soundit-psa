@@ -127,6 +127,24 @@ class AppServiceProvider extends ServiceProvider
             return new LevelClient($config);
         });
 
+        // LITSRMM reads both credentials through LitsrmmConfig, which resolves
+        // setting-then-config for each. base_url is a SETTING too (not just
+        // env) because the host is per-deployment and an operator supplies it
+        // on the settings screen; Level can read its host from config alone
+        // because there is only ever one.
+        $this->app->singleton(\App\Services\Litsrmm\LitsrmmClient::class, function () {
+            $config = config('services.litsrmm') ?? [];
+
+            try {
+                $config['api_key'] = \App\Support\LitsrmmConfig::get('api_key');
+                $config['base_url'] = \App\Support\LitsrmmConfig::get('base_url');
+            } catch (\Throwable $e) {
+                Log::warning('[LitsrmmClient] Could not load credentials from settings', ['error' => $e->getMessage()]);
+            }
+
+            return new \App\Services\Litsrmm\LitsrmmClient($config);
+        });
+
         $this->app->singleton(MeshClient::class, function () {
             return new MeshClient([
                 'api_key' => MeshConfig::get('api_key'),

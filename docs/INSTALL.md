@@ -163,6 +163,41 @@ APP_URL=https://psa.yourmsp.com
 
 > **Important:** `APP_DEBUG=false` in production. Debug mode exposes stack traces and environment variables.
 
+Staff MCP install-link responses use `APP_URL` as the public root, not the MCP
+request's host or scheme. Set it to the customer-reachable HTTP(S) application
+URL without user information, query or fragment. Schemes are case-insensitive
+HTTP or HTTPS and are rebuilt lowercase. Before parsing, the raw configured URL
+must contain only printable ASCII bytes `\x21`–`\x7E`: controls, spaces, DEL and
+non-ASCII bytes are refused. Configure IDN deployments in punycode. Backslashes
+anywhere are refused.
+
+A bracketed host must contain an IPv6 address accepted by PHP
+`FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV6`; bracketed IPv4 is refused.
+An unbracketed host cannot contain `:` or end in `.` (including ordinary DNS
+names and IPv4 addresses). If its last label is all digits or starts with
+`0x`/`0X`, the entire
+host must pass PHP `FILTER_VALIDATE_IP` with `FILTER_FLAG_IPV4` as a strict
+dotted-quad address, without a terminal dot. This refuses short, hex, leading-zero
+and out-of-range numeric forms rather than letting a browser reinterpret them.
+Other unbracketed hosts must pass `FILTER_VALIDATE_DOMAIN` with
+`FILTER_FLAG_HOSTNAME`. An explicit port must be in the range **1–65535**;
+port zero is refused. The configured host and port must match the rebuilt ones
+exactly: a port must be plain decimal digits with no sign, leading zero or
+trailing characters, and an empty port after `:` is refused.
+
+An optional deployment prefix must be normalized: no dot or dot-dot segments,
+empty segments or backslashes. A single trailing slash is allowed as the root
+separator. Prefix segments use URI path characters or valid percent escapes;
+encoded dot/dot-dot segments, slashes and backslashes are refused too. The URL is
+rebuilt from the validated parts, preserving the port and prefix. An invalid root
+refuses issuance/retrieval without changing the client or returning its credential.
+The operator must verify public reachability; syntactic validation is not a
+network check. Refresh Laravel's configuration cache after an authorized change.
+The MCP verb also requires an operational client (`stage=active` and
+`is_active=true`), including when returning an existing link. This does not
+change the staff web buttons or revoke existing public setup links. Tool grants
+and live link issuance remain separate operator actions.
+
 #### Database
 
 ```ini
@@ -340,10 +375,10 @@ These commands execute automatically based on their schedule:
 |---------|----------|---------|
 | `ninja:sync-devices` | Every 4 hours | Full device sync from NinjaRMM (inventory, hardware detail, status, creates, deletes) — only runs when `ninja_enabled=1` |
 | `level:sync-devices` | Every 4 hours | Sync devices from Level RMM (online status updated in real-time via webhooks) |
-| `tactical:reconcile-alerts` | Hourly | Resolve PSA alerts whose Tactical alerts have closed — the at-least-once backstop for dropped resolve webhooks (resolves the alert only; does not auto-resolve a linked auto-ticket — only if Tactical enabled + configured) |
-| `tactical:sync-devices` | Daily at 05:32 | Sync devices from Tactical RMM into `tactical_assets` and hostname-link to assets (only if enabled + configured + clients mapped to a Tactical site) |
-| `tactical:sync-scripts` | Daily at 05:35 | Sync the script library from Tactical RMM (only if enabled + configured) |
-| `tactical:sweep-queued-actions` | Every `tactical_offline_queue_sweep_minutes` (default 10 min) | Offline-script queue fallback (only if Tactical enabled + configured): run approved actions whose device is back online and expire stale ones. The device-sync hook + resolved-alert webhook are the low-latency triggers; this is the safety net |
+| `tactical:reconcile-alerts` | Hourly | Resolve PSA alerts whose Tactical alerts have closed — the at-least-once backstop for dropped resolve webhooks (resolves the alert only; does not auto-resolve a linked auto-ticket — only if Tactical configured) |
+| `tactical:sync-devices` | Daily at 05:32 | Sync devices from Tactical RMM into `tactical_assets` and hostname-link to assets (only if configured + clients mapped to a Tactical site) |
+| `tactical:sync-scripts` | Daily at 05:35 | Sync the script library from Tactical RMM (only if configured) |
+| `tactical:sweep-queued-actions` | Every `tactical_offline_queue_sweep_minutes` (default 10 min) | Offline-script queue fallback (only if Tactical configured): run approved actions whose device is back online and expire stale ones. The device-sync hook + resolved-alert webhook are the low-latency triggers; this is the safety net |
 | `mesh:sync-licenses` | Daily at 04:30 | Sync license counts from Mesh Email Security |
 | `cipp:sync-licenses` | Daily at 04:45 | Sync M365 license counts from CIPP |
 | `huntress:sync-licenses` | Daily at 05:00 | Sync EDR/ITDR license counts from Huntress (only if configured) |
@@ -624,8 +659,6 @@ Self-hosted RMM (amidaware/tacticalrmm). Syncs device inventory and a script lib
 2. Enter your Tactical **API URL** (e.g. `https://api-rmm.yourmsp.com`) and **API key**, then click **Test Connection**. The API key comes from Tactical under **Settings > Global Settings > API Keys**.
 3. Map PSA clients to Tactical client/site pairs in **Site Mapping** (`settings.tactical-sites`). Devices only sync for clients that have a `tactical_site_id` set.
 4. Click **Sync Devices** / **Sync Scripts**, or wait for the daily crons (`tactical:sync-devices` at 05:32, `tactical:sync-scripts` at 05:35).
-
-   **Integration enabled switch (`tactical_enabled`, default on):** turning it off makes PSA ignore Tactical everywhere while keeping the API credentials and all synced data. No request is sent to the Tactical API; the Tactical crons, AI triage and MCP tools, asset/ticket/client Tactical cards and actions, portal self-service install link and offline-action queue all stand down; inbound Tactical webhooks are acknowledged (204) but neither stored nor processed. Turn it back on and everything returns. Use it when the Tactical server is unreachable — otherwise pages that show Tactical data wait on its timeouts.
 5. **Alert → ticket pipeline (one-click provisioning):**
 
    PSA can create the URLAction and AlertTemplate in Tactical for you. In the Tactical settings card, click **Provision alert→ticket**. PSA will:
@@ -648,7 +681,9 @@ Self-hosted RMM (amidaware/tacticalrmm). Syncs device inventory and a script lib
 
    **Auto-resolve (not auto-close):** when Tactical fires the resolve event for an alert, PSA sets the corresponding ticket to **Resolved** status — it does **not** close the ticket immediately. The daily `tickets:close-resolved` sweep closes resolved tickets after the configured auto-close window (so a tech still has a chance to review before closure). The no-clobber rule applies: the auto-resolve only updates the ticket if it has not been modified by a human since the alert fired.
 
-   **Deprovision / manual cleanup:** if you disable the Tactical integration, the URLAction and AlertTemplate created by provisioning remain in Tactical. They will continue firing webhook POST requests to PSA (which PSA acknowledges and discards while the integration is switched off, or rejects once the webhook key is removed). To fully clean up, go to Tactical → Settings → URL Actions and delete "PSA Ticket Webhook", and Tactical → Settings → Alert Templates and delete "PSA Auto-Ticket". If PSA's template was your global default, set a new default (or clear it) in Tactical → Settings → Core Settings.
+   **Integration enabled:** Tactical runs only when API credentials are configured and `tactical_enabled` is exactly `1` (a missing setting defaults to `1`). Switching it off stops operational reads, actions, syncs and AI/MCP publication. Test Connection remains available with configured credentials. Pending webhook events are skipped, not paused or replayed. Approved offline actions stay queued without execution or reconnect-sweep dispatch; their existing expiry and reconfirmation still apply, including the expiry-only scheduled sweep while disabled.
+
+   **Deprovision / manual cleanup:** if you disable the Tactical integration, the URLAction and AlertTemplate created by provisioning remain in Tactical. They will continue firing webhook POST requests to PSA (with a configured webhook key, PSA authenticates and persists them, then records pending events as skipped with reason `Tactical integration is disabled`; an absent webhook key is rejected with HTTP 401). To fully clean up, go to Tactical → Settings → URL Actions and delete "PSA Ticket Webhook", and Tactical → Settings → Alert Templates and delete "PSA Auto-Ticket". If PSA's template was your global default, set a new default (or clear it) in Tactical → Settings → Core Settings.
 
    **Manual setup (fallback):** if one-click provisioning fails (e.g. your key lacks the provisioning permissions and you prefer not to grant them), you can configure the webhook manually:
    - In the Tactical card, click **Generate Webhook Key** and copy the generated key.

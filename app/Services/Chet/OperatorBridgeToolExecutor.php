@@ -272,6 +272,9 @@ class OperatorBridgeToolExecutor
                 'sender_name' => $row->sender?->name,
                 'text' => $this->promptFence->fence('operator message', $meta['text']),
                 'text_withheld' => $withheld,
+                // An observed poll-side replacement is positive evidence;
+                // otherwise preserve the nullable ingest fact, not a body marker.
+                'text_redacted' => $meta['redacted'] ? true : $row->text_redacted,
                 'text_truncated' => $truncated,
                 'text_total_chars' => $row->text_chars,
                 'ts' => $row->ts?->toIso8601String(),

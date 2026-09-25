@@ -93,7 +93,7 @@ class McpToolSurface
             // (no-client) surface. OFF=OFF: gated on CalendarConfig::isAvailable() (switched
             // on AND Graph configured), the same predicate list_tool_surface classifies against.
             CalendarConfig::isAvailable() ? McpToolRegistry::calendarTools() : [],
-            TacticalConfig::isAvailable() ? McpToolRegistry::tacticalAdminTools() : [],
+            \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable() ? McpToolRegistry::tacticalAdminTools() : [],
             ChetDataSurfaceTools::generalTools(),
             OperatorBridgeTools::definitions(),
         );
@@ -140,7 +140,7 @@ class McpToolSurface
             // StaffCippAdminToolExecutor refuses on exactly isEnabled() &&
             // isConfigured() — publish and dispatch answering one question (psa-wzjzz).
             $cippRestLive ? McpToolRegistry::cippAdminTools() : [],
-            TacticalConfig::isAvailable() ? McpToolRegistry::tacticalActionTools() : [],
+            \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable() ? McpToolRegistry::tacticalActionTools() : [],
             // Huntress escalation actions: gated on exactly the predicate
             // StaffHuntressActionToolExecutor refuses on — integration on,
             // read pair configured, AND the separate user-based write key

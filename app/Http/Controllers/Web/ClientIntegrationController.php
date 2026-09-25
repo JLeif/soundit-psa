@@ -183,7 +183,7 @@ class ClientIntegrationController extends Controller
      */
     public function provisionTactical(\Illuminate\Http\Request $request, Client $client)
     {
-        if (! \App\Support\TacticalConfig::isAvailable()) {
+        if (! \App\Support\TacticalConfig::isEnabled()) {
             return back()->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
@@ -229,7 +229,7 @@ class ClientIntegrationController extends Controller
      */
     private function pushCometCredsToTactical(Client $client): void
     {
-        if (! \App\Support\TacticalConfig::isAvailable() || ! $client->tactical_site_id) {
+        if (! \App\Support\TacticalConfig::isEnabled() || ! $client->tactical_site_id) {
             return;
         }
 
@@ -318,6 +318,7 @@ class ClientIntegrationController extends Controller
             'stripe' => 'Stripe',
             'qbo' => 'QuickBooks Online',
             'comet' => 'Comet Backup',
+            'litsrmm' => 'Leif IT Solutions RMM',
         ];
 
         return $labels[$vendor] ?? $vendor;

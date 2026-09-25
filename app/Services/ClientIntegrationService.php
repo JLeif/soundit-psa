@@ -10,6 +10,7 @@ use App\Services\ControlD\ControlDClient;
 use App\Services\ControlD\ControlDOrganizationMapping;
 use App\Services\Huntress\HuntressClient;
 use App\Services\Level\LevelClient;
+use App\Services\Litsrmm\LitsrmmClient;
 use App\Services\Mesh\MeshClient;
 use App\Services\Ninja\NinjaClient;
 use App\Services\Qbo\QboClient;
@@ -23,6 +24,7 @@ use App\Support\CometConfig;
 use App\Support\ControlDConfig;
 use App\Support\HuntressConfig;
 use App\Support\LevelConfig;
+use App\Support\LitsrmmConfig;
 use App\Support\MeshConfig;
 use App\Support\ServosityConfig;
 use App\Support\StripeConfig;
@@ -37,6 +39,7 @@ class ClientIntegrationService
     public const VENDORS = [
         'ninja', 'mesh', 'cipp', 'huntress', 'level',
         'controld', 'zorus', 'servosity', 'stripe', 'qbo', 'comet',
+        'litsrmm',
     ];
 
     /**
@@ -338,6 +341,22 @@ class ClientIntegrationService
                 'licenseVendor' => null,
                 'configCheck' => fn () => LevelConfig::isConfigured(),
                 'fetchEntities' => fn () => app(LevelClient::class)->getGroups(),
+                'entityId' => fn ($e) => $e['id'] ?? '',
+                'entityName' => fn ($e) => $e['name'] ?? '',
+            ],
+            // Leif IT Solutions RMM: a partner's self-hosted RMM, added as the
+            // twelfth vendor on their proposal (card 6ab46339). configCheck
+            // asks isAvailable() rather than isConfigured() so the settings
+            // toggle actually gates the vendor -- the Tactical switch's failure
+            // to do that is the bug the same proposal reports (fR7xvo0f).
+            'litsrmm' => [
+                'label' => 'Leif IT Solutions RMM',
+                'icon' => 'bi-pc-display',
+                'column' => 'litsrmm_client_id',
+                'cast' => 'string',
+                'licenseVendor' => null,
+                'configCheck' => fn () => LitsrmmConfig::isAvailable(),
+                'fetchEntities' => fn () => app(LitsrmmClient::class)->getClients(),
                 'entityId' => fn ($e) => $e['id'] ?? '',
                 'entityName' => fn ($e) => $e['name'] ?? '',
             ],

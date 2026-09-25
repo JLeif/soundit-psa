@@ -776,6 +776,102 @@
             </div>
         </div>
 
+        {{-- LITSRMM (Leif IT Solutions RMM) Card --}}
+        {{--
+            The badge reads three states, and "Configured (disabled)" is a
+            distinct one on purpose: a configured-but-switched-off vendor is not
+            the same as an unconfigured one, and collapsing them is how an
+            operator concludes their credentials were lost. It does NOT show
+            "Connected" from a stored timestamp, because a past successful test
+            is not a present connection - that is what the test button is for.
+        --}}
+        <div class="card card-static shadow-sm mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <i class="bi bi-pc-display-horizontal me-2"></i>LITSRMM (Leif IT Solutions RMM)
+                </div>
+                @if($litsrmmConfigured && $litsrmmEnabled)
+                    <span class="badge bg-success">Active</span>
+                @elseif($litsrmmConfigured)
+                    <span class="badge bg-warning text-dark">Configured (disabled)</span>
+                @else
+                    <span class="badge bg-secondary">Not configured</span>
+                @endif
+            </div>
+            <div class="card-body">
+                <p class="text-muted small mb-3">
+                    Map clients to their LITSRMM counterparts. LITSRMM is self-hosted, so
+                    both the base URL of your instance and an API key are required &mdash;
+                    there is no default host.
+                </p>
+
+                <form method="POST" action="{{ route('settings.integrations.litsrmm.update') }}">
+                    @csrf
+
+                    <div class="mb-3">
+                        <label for="litsrmm_base_url" class="form-label">Base URL</label>
+                        {{-- Shown in clear, unlike the key: an operator has to be able to
+                             confirm which host is configured. --}}
+                        <input type="url"
+                               class="form-control @error('base_url') is-invalid @enderror"
+                               name="base_url"
+                               id="litsrmm_base_url"
+                               value="{{ old('base_url', $litsrmmBaseUrl) }}"
+                               placeholder="https://rmm.example.com">
+                        @error('base_url')<div class="invalid-feedback">{{ $message }}</div>@enderror
+                        <div class="form-text">The root of your LITSRMM instance, without a trailing path.</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="litsrmm_api_key" class="form-label">API Key</label>
+                        {{-- Never rendered back: no value attribute, so the stored key
+                             cannot be read off the page or out of its HTML source. --}}
+                        <input type="password"
+                               class="form-control @error('api_key') is-invalid @enderror"
+                               name="api_key"
+                               id="litsrmm_api_key"
+                               placeholder="{{ $litsrmmHasApiKey ? 'Leave blank to keep current' : 'Enter LITSRMM API key' }}">
+                        @error('api_key')<div class="invalid-feedback">{{ $message }}</div>@enderror
+                        <div class="form-text">Sent as a bearer token. Stored encrypted and never shown again.</div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Save LITSRMM Settings</button>
+                </form>
+
+                @if($litsrmmConnectedAt)
+                    <div class="mt-3">
+                        <small class="text-muted">
+                            <i class="bi bi-check-circle text-success me-1"></i>Last successful test: {{ $litsrmmConnectedAt }}
+                        </small>
+                    </div>
+                @endif
+
+                <div class="mt-3">
+                    <button type="button" class="btn btn-outline-secondary" id="test-litsrmm-btn" onclick="testConnection('litsrmm')">
+                        <i class="bi bi-plug me-1"></i>Test Connection
+                    </button>
+                </div>
+                <div id="test-result-litsrmm" class="mt-3" style="display: none;"></div>
+
+                @if($litsrmmConfigured)
+                <div class="border-top pt-3 mt-3">
+                    <form method="POST" action="{{ route('settings.integrations.toggle') }}">
+                        @csrf
+                        <input type="hidden" name="integration" value="litsrmm">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="enabled" value="1"
+                                   id="litsrmm_enabled" {{ $litsrmmEnabled ? 'checked' : '' }} onchange="this.form.submit()">
+                            <label class="form-check-label" for="litsrmm_enabled">
+                                Integration enabled
+                                <small class="text-muted d-block">Turning this off stops all LITSRMM requests, including client lookups on the client page. Credentials are kept so it can be turned back on.</small>
+                            </label>
+                        </div>
+                    </form>
+                </div>
+                @endif
+            </div>
+        </div>
+
         {{-- ScreenConnect (ConnectWise Control) Card --}}
         <div class="card card-static shadow-sm mb-4">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -5126,6 +5222,7 @@ function testConnection(service) {
         ai: '{{ route("settings.integrations.ai.test") }}',
         transcription: '{{ route("settings.integrations.transcription.test") }}',
         hdb: '{{ route("settings.integrations.hdb.test") }}',
+        litsrmm: '{{ route("settings.integrations.litsrmm.test") }}',
     };
 
     fetch(routes[service], {

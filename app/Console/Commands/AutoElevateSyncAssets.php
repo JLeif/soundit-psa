@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Services\AutoElevate\AutoElevateAssetSyncReport;
 use App\Services\AutoElevate\AutoElevateAssetSyncService;
 use App\Support\AutoElevateConfig;
 use Illuminate\Console\Command;
@@ -36,6 +37,15 @@ class AutoElevateSyncAssets extends Command
         }
         foreach ($report->failedClients as $clientId => $reason) {
             $this->warn("  client #{$clientId}: read failed ({$reason}) — its asset links were left unchanged");
+        }
+        if ($report->stoppedEarly !== null) {
+            $why = $report->stoppedEarly === AutoElevateAssetSyncReport::STOP_CONSECUTIVE_429
+                ? sprintf('%d clients in a row were rate-limited (http_429)', AutoElevateAssetSyncService::STOP_AFTER_CONSECUTIVE_429)
+                : sprintf('the run deadline of %d s was reached', AutoElevateAssetSyncService::MAX_RUN_SECONDS);
+            $this->error("Stopped early: {$why}.");
+            $this->warn(sprintf('  %d client(s) were not read and their asset links were left unchanged: %s',
+                count($report->skippedClients),
+                implode(', ', array_map(fn (int $id) => "#{$id}", $report->skippedClients))));
         }
 
         return $report->hasFailures() ? self::FAILURE : self::SUCCESS;

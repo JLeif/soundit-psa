@@ -28,8 +28,6 @@ class OfflineActionSweep
      */
     public function sweepAgent(string $agentId): int
     {
-        // Integration switched off (OFF=OFF): queued rows wait; they expire, never
-        // auto-run stale, once the integration comes back.
         if ($agentId === '' || ! TacticalConfig::isEnabled() || ! TacticalConfig::offlineQueueEnabled()) {
             return 0;
         }
@@ -87,7 +85,7 @@ class OfflineActionSweep
         $expired = $this->expireDue();
         $ran = 0;
 
-        if (TacticalConfig::offlineQueueEnabled()) {
+        if (TacticalConfig::isEnabled() && TacticalConfig::offlineQueueEnabled()) {
             $agentIds = TechnicianRun::query()
                 ->where('state', TechnicianRunState::QueuedOffline->value)
                 ->where('expires_at', '>', now())

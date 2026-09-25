@@ -19,6 +19,16 @@ use Carbon\CarbonImmutable;
  * Timestamps are EPOCH MILLISECONDS, never ISO strings or seconds.
  * `managementSystemCompanyId` is a partner-supplied free string (usually the company name
  * again) and is NOT a usable foreign key; matching is by normalized name + manual override.
+ *
+ * RATE LIMITS (#3420). What is known, and how:
+ *   - Documented: the same OpenAPI's "Rate Limits" section (re-read 2026-09-25) gives a
+ *     per-MSP, per-method, per-route leaky bucket, beta default 20 requests per minute
+ *     (refill about one request every 3 s), answered with 429 + Retry-After, and "may change".
+ *   - Measured 2026-09-23 on production: 57 back-to-back computer reads got 33 × 429;
+ *     reads spaced 4-8 s apart got 8 of 8 ok. That fits a short-window limiter.
+ *   - An hourly bucket (earlier comments here said "100/hour") is UNVERIFIED: it is not in
+ *     the current document and has not been measured. Page-cost reasoning below still holds
+ *     whatever the window; do not size anything to 100/hour.
  */
 class AutoElevateReadService
 {
@@ -217,7 +227,7 @@ class AutoElevateReadService
      *   paging_over_cap        the FIRST page's `totalCount` already exceeds what this walk
      *                          can ever collect (MAX_PAGES × take = 10,000 rows). Known from
      *                          one request, so the tenant is named immediately instead of
-     *                          after spending 49 more requests against a 100/hour bucket.
+     *                          after spending 49 more rate-limited requests (see RATE LIMITS).
      *   paging_incomplete      a short page while the vendor still claims more rows.
      *   paging_bound           MAX_PAGES spent without reaching the total. Still reachable,
      *                          and still needed: `totalCount` may GROW mid-walk, so a walk
@@ -233,8 +243,8 @@ class AutoElevateReadService
      *
      * De-duplication is by `id`, but `skip` ADVANCES BY ROWS RECEIVED, never by unique rows
      * kept: `skip` is the vendor's cursor into its own result set. Advancing it by the smaller
-     * unique count would re-request rows already seen, re-spending pages against a 100/hour
-     * bucket and pushing the walk into `paging_bound` without ever reaching the end. (It would
+     * unique count would re-request rows already seen, re-spending rate-limited requests (see
+     * RATE LIMITS) and pushing the walk into `paging_bound` without ever reaching the end. (It would
      * not spin forever — the MAX_PAGES bound always terminates — so the cursor choice is about
      * coverage and request cost, not termination. Do not read it as the loop's safety net.)
      * On a repeat, the FIRST copy seen is kept and later copies are discarded; the vendor does

@@ -1202,6 +1202,7 @@ class McpToolRegistry
             self::createClientTool(),
             self::updateClientTool(),
             self::updateClientSiteNotesTool(),
+            self::portalGetOrCreateInstallLinkTool(),
             self::deleteClientTool(),
             self::createContactTool(),
             self::updateContactTool(),
@@ -1879,6 +1880,23 @@ class McpToolRegistry
                     'reseller_id' => ['type' => 'integer', 'description' => 'Optional reseller (parent client) ID.'],
                 ],
                 'required' => ['client_id'],
+            ],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public static function portalGetOrCreateInstallLinkTool(): array
+    {
+        return [
+            'name' => 'portal_get_or_create_install_link',
+            'description' => 'Return the existing live self-service setup URL, or create one when absent or expired. A live link and its expiry are unchanged; expired links are replaced with reissued_expired=true. Requires a mapped RMM and an effective primary RMM. The URL is a bearer credential: do not log it. Requires an explicit staff token grant and a reason. Does not enroll a device or send email.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'client_id' => ['type' => 'integer', 'description' => 'Target client ID.'],
+                    'reason' => ['type' => 'string', 'description' => 'Reason for requesting the install link; no credentials or URLs.'],
+                ],
+                'required' => ['client_id', 'reason'],
             ],
         ];
     }

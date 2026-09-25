@@ -30,9 +30,8 @@ class ProcessTacticalWebhook implements ShouldQueue
             return;
         }
 
-        // Switched off after this row was queued (OFF=OFF): keep the row, act on nothing.
         if (! TacticalConfig::isEnabled()) {
-            $webhook->markSkipped('Tactical RMM integration is disabled');
+            $webhook->markSkipped('Tactical integration is disabled');
 
             return;
         }

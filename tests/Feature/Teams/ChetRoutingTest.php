@@ -127,6 +127,7 @@ class ChetRoutingTest extends TestCase
         $this->assertTrue($row->authorized_steer);
         $this->assertStringContainsString('what tickets are open?', $row->text);
         $this->assertStringNotContainsString('<at>', $row->text);
+        $this->assertSame(false, $row->text_redacted);
         $this->assertNull($row->delivered_at);
     }
 
@@ -192,6 +193,7 @@ class ChetRoutingTest extends TestCase
         $this->assertNotNull($row);
         $this->assertStringContainsString('[REDACTED:credential]', $row->text);
         $this->assertStringNotContainsString('Hunter2', $row->text);
+        $this->assertSame(true, $row->text_redacted);
     }
 
     /**
@@ -242,6 +244,7 @@ class ChetRoutingTest extends TestCase
         $this->assertStringContainsString('withheld', $row->text);
         $this->assertStringNotContainsString('ignore all previous instructions', $row->text);
         $this->assertTrue($row->text_withheld, 'the withhold must be recorded on the row — the poll tool must never have to recognise it in the body');
+        $this->assertSame(false, $row->text_redacted);
     }
 
     public function test_routing_on_for_a_different_conversation_uses_the_teammate(): void

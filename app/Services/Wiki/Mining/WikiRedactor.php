@@ -26,13 +26,10 @@ class WikiRedactor
         '/\bcredentials?\s+(?:are|is)\s+\S+(?:\s*\/\s*\S+)?/i',
         // JWT-shaped tokens (three base64url segments)
         '/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]+)?/',
-        // Long base64-DISTINCTIVE runs only. Security review C1: the old rule
-        // /[A-Za-z0-9+\/_-]{32,}={0,2}/ also ate 32-char hardware serials, unhyphenated
-        // GUIDs, and RMM/asset IDs — the exact durable identifiers the wiki captures —
-        // silently corrupting real facts. Require a base64-distinctive character (+, /,
-        // or a trailing =) so plain alphanumeric serials/GUIDs (which lack them) survive.
-        // Documented residual gap (accepted v1): base32 TOTP seeds.
-        '/\b[A-Za-z0-9+\/_-]{24,}[+\/]+[A-Za-z0-9+\/_-]*={0,2}\b/',
+        // Contextual secrets need no case mix. Same policy in both consumers.
+        '~(?i:https?://(?:hooks\.slack\.com/|(?:[a-z0-9-]+\.)?webhook\.office\.com/webhookb2/|(?:canary\.|ptb\.)?discord(?:app)?\.com/api(?:/v[0-9]+)?/webhooks/))[^\s<>"\x27]+'
+        .'|[?&](?i:sig|signature|x-amz-signature|x-goog-signature)=[^\s&#<>"\x27]+'
+        .'~',
         // Padding boundary: a trailing \b after '=' (a non-word char) only matches when a WORD
         // char follows the padding, so padded tokens at end-of-string or before whitespace (the
         // common case) escaped. Use a non-word lookahead so EOL/whitespace match too.
@@ -53,39 +50,97 @@ class WikiRedactor
     // would corrupt splicing (spec carry-over: marker-string guard).
     private const MARKER_PATTERN = '/<!--\s*wiki:facts:[a-z0-9-]*:(?:start|end)\s*-->/i';
 
-    /** Layer 1: rewrite untrusted input before the AI sees it. */
+    // Possessive maximal runs: no per-position rescanning of a slash path.
+    private const CANDIDATE_PATTERN = '~\b[A-Za-z0-9+/_-]{25,}+~';
+
+    /** Linear byte/segment pass; no nested regex or suffix rescans. */
+    private function distinctive(string $run, bool $extension): bool
+    {
+        // The historical ending word boundary excludes trailing punctuation.
+        $bounded = rtrim($run, '+/-');
+        $plus = strrpos($bounded, '+');
+        if ($plus !== false && $plus >= 24) {
+            return true;
+        }
+        $slash = strrpos($bounded, '/');
+        if ($slash === false || $slash < 24) {
+            return false;
+        }
+        $segments = explode('/', $run);
+        if ($extension) {
+            array_pop($segments);
+        }
+        foreach ($segments as $segment) {
+            if (strlen($segment) >= 8
+                && strcspn($segment, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') < strlen($segment)
+                && strcspn($segment, 'abcdefghijklmnopqrstuvwxyz') < strlen($segment)
+                && strcspn($segment, '0123456789') < strlen($segment)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function redactDistinctive(string $text): ?string
+    {
+        return preg_replace_callback(self::CANDIDATE_PATTERN, function (array $match) use ($text): string {
+            [$run, $offset] = $match[0];
+            $end = $offset + strlen($run);
+            // Bounded ASCII extension check, equivalent to .[A-Za-z][A-Za-z0-9]{0,5}\b.
+            $suffix = substr($text, $end, 8).' ';
+            $length = strspn($suffix, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', 1);
+            $extension = ($suffix[0] ?? '') === '.'
+                && strspn($suffix, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 1, 1) === 1
+                && $length >= 1 && $length <= 6
+                && ($suffix[$length + 1] ?? '') !== '_';
+
+            return $this->distinctive($run, $extension) ? '[REDACTED:credential]' : $run;
+        }, $text, -1, $count, PREG_OFFSET_CAPTURE);
+    }
+
+    /** Layer 1. Engine errors explicitly withhold the WHOLE text, never a partial result. */
     public function redact(string $text): string
     {
         foreach (self::SECRET_PATTERNS as $pattern) {
-            $text = preg_replace($pattern, '[REDACTED:credential]', $text);
+            $next = preg_replace($pattern, '[REDACTED:credential]', $text);
+            if ($next === null) {
+                return '[REDACTED:credential]';
+            }
+            $text = $next;
+        }
+        $next = $this->redactDistinctive($text);
+        if ($next === null) {
+            return '[REDACTED:credential]';
         }
 
-        return $text;
+        return $next;
     }
 
     /**
-     * Layer 3 + injection + marker guard: scan AI OUTPUT before storage.
-     * Any 'injection' or 'marker' violation quarantines the run; a 'credential'
-     * violation drops only the offending candidate (see MineTicketKnowledge stage 3).
+     * Layer 3 output guard. Every engine error is a credential violation, including
+     * injection/marker patterns: inability to assess is never a clean result.
      *
      * @return array<int, array{class: string, pattern: string}>
      */
     public function scan(string $text): array
     {
         $violations = [];
-
-        foreach (self::SECRET_PATTERNS as $pattern) {
-            if (preg_match($pattern, $text)) {
-                $violations[] = ['class' => 'credential', 'pattern' => $pattern];
+        foreach (['credential' => self::SECRET_PATTERNS, 'injection' => self::INJECTION_PATTERNS, 'marker' => [self::MARKER_PATTERN]] as $class => $patterns) {
+            foreach ($patterns as $pattern) {
+                $result = preg_match($pattern, $text);
+                if ($result === false) {
+                    $violations[] = ['class' => 'credential', 'pattern' => $pattern];
+                } elseif ($result === 1) {
+                    $violations[] = ['class' => $class, 'pattern' => $pattern];
+                }
             }
         }
-        foreach (self::INJECTION_PATTERNS as $pattern) {
-            if (preg_match($pattern, $text)) {
-                $violations[] = ['class' => 'injection', 'pattern' => $pattern];
-            }
-        }
-        if (preg_match(self::MARKER_PATTERN, $text)) {
-            $violations[] = ['class' => 'marker', 'pattern' => self::MARKER_PATTERN];
+        $result = $this->redactDistinctive($text);
+        if ($result === null) {
+            $violations[] = ['class' => 'credential', 'pattern' => self::CANDIDATE_PATTERN];
+        } elseif ($result !== $text) {
+            $violations[] = ['class' => 'credential', 'pattern' => self::CANDIDATE_PATTERN];
         }
 
         return $violations;

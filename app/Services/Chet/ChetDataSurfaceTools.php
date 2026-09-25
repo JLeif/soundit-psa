@@ -8,6 +8,7 @@ use App\Services\PowerDmarc\PowerDmarcReadOnlyToolset;
 use App\Services\ScreenConnect\ScreenConnectReadOnlyToolset;
 use App\Services\Servosity\ServosityReadOnlyToolset;
 use App\Services\Tactical\TacticalReadOnlyToolset;
+use App\Services\Triage\TriageToolDefinitions;
 use App\Services\Unifi\UnifiReadOnlyToolset;
 use App\Services\Zorus\ZorusReadOnlyToolset;
 use App\Support\CometConfig;
@@ -15,7 +16,6 @@ use App\Support\HuntressConfig;
 use App\Support\PowerDmarcConfig;
 use App\Support\ScreenConnectConfig;
 use App\Support\ServosityConfig;
-use App\Support\TacticalConfig;
 use App\Support\TeamsBotConfig;
 use App\Support\UnifiConfig;
 use App\Support\ZorusConfig;
@@ -29,7 +29,7 @@ class ChetDataSurfaceTools
             ? TeamsChatReadToolset::definitions()
             : [];
 
-        if (TacticalConfig::isAvailable()) {
+        if (TriageToolDefinitions::isTacticalAvailable()) {
             $tools = array_merge($tools, TacticalReadOnlyToolset::generalDefinitions());
         }
 
@@ -56,7 +56,7 @@ class ChetDataSurfaceTools
     /** @return array<int, array<string, mixed>> */
     public static function clientTools(): array
     {
-        $tools = TacticalConfig::isAvailable()
+        $tools = TriageToolDefinitions::isTacticalAvailable()
             ? TacticalReadOnlyToolset::clientDefinitions()
             : [];
 

@@ -79,11 +79,31 @@ class StaffPsaActionToolExecutor
     ) {}
 
     /** @return array<string, mixed> */
+    private function portalGetOrCreateInstallLink(array $arguments, int $clientId): array
+    {
+        if ($this->requiredString($arguments, 'reason') === null) {
+            return ['error' => 'reason is required'];
+        }
+        $client = Client::find($clientId);
+        if (! $client) {
+            return ['error' => 'Client not found'];
+        }
+
+        try {
+            return app(\App\Services\Portal\PortalInstallService::class)->getOrCreateInstallLink($client);
+        } catch (\Illuminate\Database\QueryException) {
+            // Query exceptions include bound token values. Do not let the transport log them.
+            return ['error' => 'Install-link storage failed. Retry after the database problem is resolved.'];
+        }
+    }
+
     /**
      * $actorLabel is the prefixed audit label (McpStaffToken::actorLabel()); $tokenLabel
      * is the caller's BARE McpToken.label. They are NOT interchangeable: only the bare
      * one resolves a Teams persona for the client-facing tagline (psa-u51h). Handlers
      * that emit no client-facing text take $actorLabel alone, as before.
+     *
+     * @return array<string, mixed>
      */
     public function execute(string $name, array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
@@ -114,6 +134,7 @@ class StaffPsaActionToolExecutor
             'create_client' => $this->createClient($arguments, $actorLabel),
             'update_client' => $this->updateClient($arguments, $clientId, $actorLabel),
             'update_client_site_notes' => $this->updateClientSiteNotes($arguments, $clientId, $actorLabel),
+            'portal_get_or_create_install_link' => $this->portalGetOrCreateInstallLink($arguments, $clientId),
             'delete_client' => $this->deleteClient($arguments, $clientId, $actorLabel),
             'create_contact' => $this->createContact($arguments, $clientId, $actorLabel),
             'update_contact' => $this->updateContact($arguments, $actorLabel),

@@ -14,7 +14,7 @@ class TacticalSiteController extends Controller
     {
         if (! \App\Support\TacticalConfig::isEnabled()) {
             return redirect()->route('settings.integrations')
-                ->with('error', 'Tactical RMM integration is disabled. Enable it to manage site mappings.');
+                ->with('error', 'Tactical RMM is disabled or not configured.');
         }
 
         try {

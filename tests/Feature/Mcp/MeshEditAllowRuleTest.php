@@ -50,6 +50,25 @@ class MeshEditAllowRuleTest extends TestCase
 
     private const TENANT = '11111111-2222-3333-4444-555555555555';
 
+    /**
+     * #1416 - every expiry in this file is derived from now(), and several tests
+     * derive one to BUILD a request and derive it AGAIN inside the assertion that
+     * checks the result. Those two derivations straddle a minute boundary roughly
+     * once per hour of CI, and startOfMinute() then makes them differ by exactly
+     * one minute, failing a test no production change touched.
+     *
+     * Freezing here fixes the clock for the whole test, so a single derivation and
+     * a later one are the same instant BY CONSTRUCTION rather than by luck. Tests
+     * that need the clock to move still call travel() explicitly; travel() moves a
+     * frozen clock just as it moves a running one, so nothing here is disarmed.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->freezeTime();
+    }
+
     private function configureMesh(): void
     {
         Setting::setEncrypted('mesh_api_key', 'k');
@@ -140,6 +159,30 @@ class MeshEditAllowRuleTest extends TestCase
         return $client;
     }
 
+    /**
+     * #3464 - the date a re-read shows when Mesh has NOT taken the edit.
+     *
+     * It must differ from newExpiry() on every calendar day, so it is derived
+     * from the same clock rather than written as a literal. The literal it
+     * replaced was '2026-12-01', which equals now()+60d on 2026-10-02: on that
+     * one day the stale display would have matched the requested expiry, the
+     * fault would not have been raised, and the tests that exist to prove the
+     * fault would have failed for a reason no production change caused.
+     * freezeTime() cannot help - it freezes at the real date, collision and all.
+     *
+     * MEASURED, not assumed: reverting each site to the literal one at a time
+     * with the clock pinned to 2026-10-02 fails at exactly ONE of them, the
+     * post-PATCH re-read in test_a_display_that_did_not_move_is_a_fault... The
+     * upstreamRow() default and the two permanence tests keep passing, because
+     * their faults do not turn on the date matching. The other three sites are
+     * changed for consistency, so a future test copying this fixture does not
+     * reintroduce the collision - they are not themselves broken today.
+     */
+    private function staleDisplayDate(): string
+    {
+        return now()->addDays(120)->startOfMinute()->toDateString();
+    }
+
     /** @return array<string, mixed> */
     private function upstreamRow(array $overrides = []): array
     {
@@ -149,7 +192,7 @@ class MeshEditAllowRuleTest extends TestCase
             'comment' => 'PSA allow ABCDEFGHIJ',
             'ab' => MeshWriteClient::ALLOW_RULE,
             'created_by' => 'owner@soundit.example',
-            'date_expiry' => '2026-12-01',
+            'date_expiry' => $this->staleDisplayDate(),
         ], $overrides);
     }
 
@@ -836,7 +879,7 @@ class MeshEditAllowRuleTest extends TestCase
         $run = $this->stagedRun($fixture, ['expires_at' => 'never']);
 
         $write->shouldReceive('patchRule')->once()->andReturn([]);
-        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => '2026-12-01']));
+        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => $this->staleDisplayDate()]));
 
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
         $this->assertStringContainsString('Mesh did not take the display update', (string) session('error'));
@@ -886,7 +929,7 @@ class MeshEditAllowRuleTest extends TestCase
         $run = $this->stagedRun($fixture, ['expires_at' => 'never']);
 
         $write->shouldReceive('patchRule')->once()->andReturn([]);
-        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => ['value' => '2026-12-01']]));
+        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => ['value' => $this->staleDisplayDate()]]));
 
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
         $this->assertStringContainsString('an expiry this system cannot read', (string) session('error'));
@@ -998,7 +1041,7 @@ class MeshEditAllowRuleTest extends TestCase
 
         // Exactly one PATCH, whatever the re-read says.
         $write->shouldReceive('patchRule')->once()->andReturn([]);
-        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => '2026-12-01']));
+        $write->shouldReceive('findRuleById')->once()->andReturn($this->upstreamRow(['date_expiry' => $this->staleDisplayDate()]));
 
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
         $error = (string) session('error');

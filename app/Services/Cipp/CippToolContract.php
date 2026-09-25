@@ -348,7 +348,14 @@ class CippToolContract
         if ($rows !== [] && array_filter($projected) === []) {
             // Row keys are schema names and safe to log; row values are untrusted
             // tenant data and are never logged.
-            Log::warning('[CippTools] Every audit row projected empty — CIPP audit-log shape has drifted', [
+            //
+            // States what was observed and NOT why (G-14, #3408). This cannot say the shape
+            // drifted: projectAuditRow() filters on $value !== null, so a row whose keys are
+            // all PRESENT but hold null projects empty with the schema exactly where the
+            // contract expects it. projectRows() calls that same case a genuine no-value, and
+            // the two messages must not contradict each other. The keys are in the context;
+            // the reader can see whether they moved.
+            Log::warning('[CippTools] Every audit row projected empty', [
                 'tool' => 'cipp_list_audit_logs',
                 'row_count' => $totalReturned,
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
@@ -726,7 +733,9 @@ class CippToolContract
         }, $rows);
 
         if ($rows !== [] && array_filter($projected) === []) {
-            Log::warning('[CippTools] Every OAuth app row projected empty — CIPP ListOAuthApps shape has drifted', [
+            // Observation without a cause, for the reason recorded at the audit-log warning
+            // above (G-14, #3408): an all-null row projects empty without any drift.
+            Log::warning('[CippTools] Every OAuth app row projected empty', [
                 'tool' => 'cipp_list_oauth_apps',
                 'row_count' => $totalReturned,
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
@@ -1570,6 +1579,25 @@ class CippToolContract
         // targeting/control key is absent LOOKS healthy but leaves CA posture
         // invisible — the exact failure this shaper fixes. Row keys are schema
         // names and safe to log; row values are untrusted tenant data, never logged.
+        //
+        // THIS GUARD STATES WHAT IT OBSERVED AND DOES NOT NAME A CAUSE (#3408).
+        // It does not only ever see policy rows: a non-JSON MCP reply, a REST error
+        // body and a JSON-RPC envelope all reach it wrapped as a single row, and none
+        // of them is a schema change. Three attempts to say "shape drift" only for
+        // real policy rows were each defeated by an input nobody had listed, the last
+        // by ordinary Graph users, groups, applications and devices — every one of
+        // which carries a GUID id and a displayName. See card 6ab3d4ad for the full
+        // history; the short version is that no cheap predicate distinguishes a CA
+        // policy from any other Graph object, so the guard stopped guessing.
+        //
+        // first_row_keys carries the fact instead. A reader seeing ['id','displayName',
+        // 'state'] knows a policy row lost its targeting keys; ['text'] or
+        // ['jsonrpc','id'] is plainly not a policy list at all. The structured key is
+        // better evidence than an adjective the guard cannot establish.
+        //
+        // Presence, not emptiness: a null-valued targeting key is still the schema's,
+        // which is the distinction the sibling guards at shapeAuditLogs/shapeOauthApps
+        // got wrong — they filtered on value and called an all-null row drift.
         $shapeFields = array_flip(array_merge(self::CA_POLICY_ENUM_FIELDS, self::CA_POLICY_NAME_FIELDS, self::CA_POLICY_NAME_LIST_FIELDS));
         $sawShapeField = false;
         foreach ($rows as $row) {
@@ -1579,7 +1607,7 @@ class CippToolContract
             }
         }
         if ($rows !== [] && ! $sawShapeField) {
-            Log::warning('[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — shape drift, CA posture would be invisible', [
+            Log::warning('[CippTools] No ListConditionalAccessPolicies row carries any flattened targeting/control field — CA posture would be invisible', [
                 'tool' => $toolName,
                 'row_count' => count($rows),
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
@@ -1740,10 +1768,12 @@ class CippToolContract
     {
         $fields = self::DEFAULT_FIELDS[$toolName] ?? [];
 
-        // Tracks whether each field's key was ever FOUND upstream, independent
-        // of its value. "Key absent from every row" is schema drift; "key
-        // present holding null" is a genuine no-value (an unset Exchange
-        // property serializes as null) and must not be mistaken for drift.
+        // Tracks whether each field's key was ever RESOLVED upstream,
+        // independent of its value. A key that never resolves in any row and a
+        // key present holding null are different things: an unset Exchange
+        // property serializes as null, which is a genuine no-value, not an
+        // unresolved key. Why this observation is not labelled with a cause:
+        // see warnOnUnresolvedKeys() below.
         $keyResolved = array_fill_keys($fields, false);
 
         $projected = array_map(function (array $row) use ($toolName, $fields, &$keyResolved): array {
@@ -1775,13 +1805,23 @@ class CippToolContract
         }, $rows);
 
         if ($rows !== []) {
-            $this->warnOnShapeDrift($toolName, $rows, $projected, $keyResolved);
+            $this->warnOnUnresolvedKeys($toolName, $rows, $projected, $keyResolved);
         }
 
         return $projected;
     }
 
     /**
+     * Warn when a projection came back empty, or when a tracked key never resolved in any
+     * row this call projected. Named for what it MEASURES, not for a cause.
+     *
+     * Was warnOnShapeDrift() until #3408. The body stopped claiming drift in #3394/#3413 --
+     * this function cannot establish it, because four callers filter rows BEFORE calling
+     * projectRows, so an unresolved key may simply have been carried only by dropped rows --
+     * but the NAME still asserted it, and a name is exactly what a reader carries away. G-14
+     * gives comments and names delete-or-rename; there is nothing to delete here, since the
+     * guard itself is wanted, so it is renamed.
+     *
      * Row keys are schema names and safe to log; row values are untrusted
      * tenant data and are never logged.
      *
@@ -1789,13 +1829,10 @@ class CippToolContract
      * @param  array<int, array<string, mixed>>  $projected
      * @param  array<string, bool>  $keyResolved
      */
-    private function warnOnShapeDrift(string $toolName, array $rows, array $projected, array $keyResolved): void
+    private function warnOnUnresolvedKeys(string $toolName, array $rows, array $projected, array $keyResolved): void
     {
-        // Every row projecting to {} means DEFAULT_FIELDS has drifted wholesale
-        // from the live CIPP response shape, and the tool reports a false "no
-        // results" (psa-3twu).
         if (array_filter($projected) === []) {
-            Log::warning('[CippTools] Every row projected empty — DEFAULT_FIELDS out of sync with CIPP response shape', [
+            Log::warning('[CippTools] Every row projected empty', [
                 'tool' => $toolName,
                 'row_count' => count($rows),
                 'first_row_keys' => array_slice(array_keys($rows[0]), 0, 12),
@@ -1828,7 +1865,59 @@ class CippToolContract
             return;
         }
 
-        Log::warning('[CippTools] Field(s) never resolved in any row — DEFAULT_FIELDS/FIELD_ALIASES out of sync with CIPP response shape', [
+        // States what was observed and stops there. The earlier wording named
+        // DEFAULT_FIELDS/FIELD_ALIASES drift as the cause, which this function
+        // cannot establish: four callers can filter rows BEFORE calling
+        // projectRows, so $rows may be a SUBSET of the upstream response and a
+        // field carried only by dropped rows never resolves here while both
+        // constants are correct.
+        //
+        // MEASURED, not assumed, per caller:
+        //   shapeEvents          only when filtered_by_days is an int
+        //   shapeMessageTrace    only on a non-empty sender/recipient
+        //   shapeMailQuarantine  only on a non-empty recipient
+        //   shapeMailboxRules    whenever a mailbox was requested. The relay
+        //                        and cippQueryWithUser both refuse the tool
+        //                        without a user_id, so on THOSE transports it
+        //                        is armed on every call -- it just normally
+        //                        drops nothing. That is a property of the two
+        //                        transports, NOT of this function: shape() is
+        //                        public and takes caller-supplied args, so a
+        //                        direct caller can reach here unarmed. Treat
+        //                        it as conditional.
+        //
+        // shapeTenantMailboxRules is a DIFFERENT case and the argument is
+        // narrower than it first looks. Its sentinel drop DOES remove a row
+        // carrying a tracked key ('name' is in DEFAULT_FIELDS for that tool).
+        // What makes it harmless is that Push-ListMailboxRulesQueue writes the
+        // all-clear sentinel as the WHOLE payload -- @(@{ Name = 'No rules
+        // found' }) -- never mixed with real rules, so the drop leaves zero
+        // rows and the $rows !== [] guard at the call site means projectRows
+        // never reports on it. If upstream ever mixed the sentinel with real
+        // rows, that drop COULD hide a field and this paragraph would be wrong.
+        //
+        // That premise is the producer's three writes, documented on
+        // shapeTenantMailboxRules above (Push-ListMailboxRulesQueue.ps1,
+        // verified 2026-07-16): real rules, the all-clear, or the error
+        // sentinel -- the all-clear branch assigns the whole $Rules column.
+        // Note this is the EMPTY sentinel ('No rules found'), not the ERROR
+        // sentinel ('Could not connect to tenant'). The error sentinel CAN
+        // arrive mixed with real rows under AllTenants aggregation, which is
+        // what CippTenantMailboxRulesTest::test_the_error_sentinel_is_detected_
+        // among_real_rules_too pins -- and it hard-errors before any drop, so
+        // it never reaches this filter. Do not read that test as evidence
+        // about the all-clear row: they are different constants on different
+        // paths.
+        //
+        // An operator who trusted a named cause would go and edit constants
+        // that are not wrong. row_count is that post-filter count.
+        // The wording is "never resolved", not "absent": resolveKey() is an
+        // exact-case array_key_exists over FIELD_ALIASES[$field] ?? [$field],
+        // so a row CAN carry the field under a casing that has no alias and
+        // still be reported here. "Absent" would be a false claim about the
+        // data on exactly that path; "never resolved" is true on every path.
+        // first_row_keys shows the casing actually present.
+        Log::warning('[CippTools] Field(s) never resolved in any row this call projected', [
             'tool' => $toolName,
             'row_count' => count($rows),
             'missing_fields' => array_values($missing),

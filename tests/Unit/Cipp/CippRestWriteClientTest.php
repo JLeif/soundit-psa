@@ -673,7 +673,10 @@ class CippRestWriteClientTest extends TestCase
                 'access_token' => 'WRITE-TOKEN',
                 'expires_in' => 3600,
             ]),
-            'cipp.example.test/api/*' => Http::response(['Results' => [['ok' => true]]]),
+            // The vendor's own success line: the licence methods now require it
+            // (CippRestWriteClient::confirmLicenseWrite), so the old
+            // [['ok' => true]] fixture would be refused as unconfirmed.
+            'cipp.example.test/api/*' => Http::response(['Results' => ['Successfully set licenses for alex@acme.example. It may take 2–5 minutes before the changes become visible.']]),
         ]);
 
         $client = new CippRestWriteClient([
@@ -1614,5 +1617,362 @@ class CippRestWriteClientTest extends TestCase
         }
 
         Http::assertNothingSent();
+    }
+
+    /**
+     * The three "did not confirm" throws are raised AFTER send() has POSTed, so
+     * their operator text must claim neither applied nor not-applied. These
+     * arms assert the MECHANISM (the write request left the process) alongside
+     * the wording, so a message that merely reads well cannot pass while the
+     * claim it makes is false.
+     */
+    private function denialClient(int $status, mixed $results): CippRestWriteClient
+    {
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::preventStrayRequests();
+        Http::fake([
+            'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
+            'cipp.example.test/api/*' => Http::response(['Results' => $results], $status),
+        ]);
+
+        return new CippRestWriteClient([
+            'api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1',
+            'client_id' => 'write-client', 'client_secret' => 'write-secret',
+        ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+    }
+
+    /**
+     * Count only POSTs to the ONE endpoint the call under test writes to.
+     *
+     * The earlier version counted any request whose URL contained '/api/', which
+     * a token request or a future read on the same host would also satisfy - so
+     * "the write left" could have been proven by traffic that was not the write.
+     * Matching the method AND the endpoint makes the counter answer the question
+     * it is being asked.
+     *
+     * @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left
+     */
+    private function countWritePosts(string $endpoint): int
+    {
+        $writes = 0;
+        Http::recorded(function ($request) use (&$writes, $endpoint) {
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), 'cipp.example.test/api/'.$endpoint)) {
+                $writes++;
+            }
+
+            return true;
+        });
+
+        return $writes;
+    }
+
+    /** @return array{0:?CippClientException,1:int} exception and the number of write POSTs that left */
+    private function captureDenial(string $endpoint, callable $call): array
+    {
+        $thrown = null;
+        try {
+            $call();
+        } catch (CippClientException $e) {
+            $thrown = $e;
+        }
+
+        return [$thrown, $this->countWritePosts($endpoint)];
+    }
+
+    private function assertClaimsNeitherOutcome(CippClientException $e): void
+    {
+        $message = $e->getMessage();
+        $this->assertStringNotContainsString('not applied', $message);
+        $this->assertStringNotContainsString('treat it as', $message);
+        $this->assertStringContainsString('may or may not have applied', $message);
+        $this->assertStringContainsString('verify', $message);
+    }
+
+    public function test_group_membership_error_line_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Error - could not add member']);
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_group_membership_empty_results_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        // The endpoint's own documented case: a member it silently dropped
+        // produces no line at all, indistinguishable from a change that landed
+        // and logged nothing.
+        $client = $this->denialClient(200, []);
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_group_membership_http_500_leaves_the_write_sent(): void
+    {
+        $client = $this->denialClient(500, 'upstream exploded');
+        [$thrown, $writes] = $this->captureDenial('EditGroup', fn () => $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        ));
+
+        $this->assertInstanceOf(\App\Services\Cipp\CippWriteHttpException::class, $thrown);
+        $this->assertSame(500, $thrown->status);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+    }
+
+    public function test_group_membership_success_marker_returns_without_throwing(): void
+    {
+        // Positive control: the same wiring succeeds when upstream confirms, so
+        // the arms above cannot be an artefact of the harness. It goes through
+        // the SAME counter as the throwing arms - a control that measures the
+        // request a different way is not a control on the measurement.
+        $client = $this->denialClient(200, ['Success - member added']);
+        $result = $client->setGroupMembership(
+            'example.onmicrosoft.com', 'gid', 'Group', 'Security', 'uid', 'alex@example.test', 'add'
+        );
+
+        $this->assertTrue($result['success']);
+        $this->assertSame(1, $this->countWritePosts('EditGroup'), 'the success arm posts exactly the same one write');
+    }
+
+    public function test_onedrive_reassignment_failure_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Failed to set permissions']);
+        [$thrown, $writes] = $this->captureDenial('ExecSharePointPerms', fn () => $client->reassignOneDriveOwnership(
+            'example.onmicrosoft.com', 'owner@example.test', 'successor@example.test'
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    public function test_edit_user_unconfirmed_leaves_the_write_sent_and_claims_neither_outcome(): void
+    {
+        $client = $this->denialClient(200, ['Queued the request']);
+        [$thrown, $writes] = $this->captureDenial('EditUser', fn () => $client->editUser(
+            'example.onmicrosoft.com', 'uid', 'alex@example.test', ['displayName' => 'Alex Example'], [], null
+        ));
+
+        $this->assertInstanceOf(CippClientException::class, $thrown);
+        $this->assertSame(1, $writes, 'the write POST must have left before this throw');
+        $this->assertClaimsNeitherOutcome($thrown);
+    }
+
+    /*
+     * ExecBulkLicense answers HTTP 200 whether or not it wrote (CIPP-API
+     * 7c756b0d, Invoke-ExecBulkLicense.ps1 + Set-CIPPUserLicense.ps1). Each arm
+     * below is one Results shape that script can produce for one user, run
+     * through the REAL send() via Http::fake, for both assign and remove.
+     */
+
+    /** @return array<string, array{0: string}> */
+    public static function licenseOperations(): array
+    {
+        return ['assign' => ['assign'], 'remove' => ['remove']];
+    }
+
+    private function licenseClient(int $status, mixed $body): CippRestWriteClient
+    {
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::preventStrayRequests();
+        Http::fake([
+            'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
+            'cipp.example.test/api/*' => Http::response($body, $status),
+        ]);
+
+        return new CippRestWriteClient([
+            'api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1',
+            'client_id' => 'write-client', 'client_secret' => 'write-secret',
+        ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+    }
+
+    /** @return array{0: ?array, 1: ?CippClientException, 2: int} result, exception, write POSTs */
+    private function runLicense(string $operation, int $status, mixed $body): array
+    {
+        $client = $this->licenseClient($status, $body);
+        $result = null;
+        $thrown = null;
+        try {
+            $result = $operation === 'assign'
+                ? $client->assignUserLicense('acme.onmicrosoft.com', 'user-123', 'sku-1')
+                : $client->removeUserLicense('acme.onmicrosoft.com', 'user-123', 'sku-1');
+        } catch (CippClientException $e) {
+            $thrown = $e;
+        }
+
+        return [$result, $thrown, $this->countWritePosts('ExecBulkLicense')];
+    }
+
+    private function assertUnconfirmed(?CippClientException $e, string $outcome): \App\Services\Cipp\CippWriteUnconfirmedException
+    {
+        $this->assertInstanceOf(\App\Services\Cipp\CippWriteUnconfirmedException::class, $e);
+        $this->assertSame($outcome, $e->outcome);
+        $this->assertSame('api/ExecBulkLicense', $e->endpoint);
+
+        return $e;
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('licenseOperations')]
+    public function test_licence_success_line_returns_success(string $operation): void
+    {
+        [$result, $thrown, $writes] = $this->runLicense($operation, 200, ['Results' => ['Successfully set licenses for alex@acme.example. It may take 2–5 minutes before the changes become visible.']]);
+
+        $this->assertNull($thrown);
+        $this->assertSame(['success' => true, 'status' => 200, 'no_change' => false], $result);
+        $this->assertSame(1, $writes);
+    }
+
+    public function test_licence_success_after_usage_location_retry_returns_success(): void
+    {
+        [$result, $thrown] = $this->runLicense('assign', 200, ['Results' => ['Successfully set licenses for alex@acme.example after setting usage location. It may take 2–5 minutes before the changes become visible.']]);
+
+        $this->assertNull($thrown);
+        $this->assertTrue($result['success']);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('licenseOperations')]
+    public function test_licence_user_not_found_is_definitely_not_applied(string $operation): void
+    {
+        [, $thrown, $writes] = $this->runLicense($operation, 200, ['Results' => ['User user-123 not found in tenant acme.onmicrosoft.com']]);
+
+        $e = $this->assertUnconfirmed($thrown, 'not_applied');
+        $this->assertSame('User user-123 not found in tenant acme.onmicrosoft.com', $e->upstreamLine);
+        $this->assertSame(1, $writes, 'the request left; CIPP answered that it made no write');
+    }
+
+    public function test_licence_no_valid_user_id_is_definitely_not_applied(): void
+    {
+        [, $thrown] = $this->runLicense('remove', 200, ['Results' => ['No valid user ID found in request for tenant acme.onmicrosoft.com']]);
+
+        $this->assertUnconfirmed($thrown, 'not_applied');
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('licenseOperations')]
+    public function test_licence_failed_to_process_inner_catch_is_unknown(string $operation): void
+    {
+        [, $thrown] = $this->runLicense($operation, 200, ['Results' => ['Failed to process bulk license operation for tenant acme.onmicrosoft.com. Error: The operation timed out']]);
+
+        $this->assertUnconfirmed($thrown, 'unknown');
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('licenseOperations')]
+    public function test_licence_failed_to_assign_graph_line_is_unknown(string $operation): void
+    {
+        // The line does not carry Graph's status, so a refusal and a
+        // server-side timeout read the same.
+        [, $thrown] = $this->runLicense($operation, 200, ['Results' => ['Failed to assign licenses for user alex@acme.example: Subscription has no available licenses']]);
+
+        $e = $this->assertUnconfirmed($thrown, 'unknown');
+        $this->assertFalse($e->usageLocationMayHaveChanged);
+    }
+
+    public function test_licence_failed_after_usage_location_is_unknown_and_flags_the_patch(): void
+    {
+        [, $thrown] = $this->runLicense('assign', 200, ['Results' => ['Failed to assign licenses for user alex@acme.example after setting usage location: License assignment failed']]);
+
+        $e = $this->assertUnconfirmed($thrown, 'unknown');
+        $this->assertTrue($e->usageLocationMayHaveChanged);
+    }
+
+    public function test_remove_no_changes_needed_is_a_no_change_success(): void
+    {
+        [$result, $thrown] = $this->runLicense('remove', 200, ['Results' => ['No license changes needed for user alex@acme.example']]);
+
+        $this->assertNull($thrown);
+        $this->assertSame(['success' => true, 'status' => 200, 'no_change' => true], $result);
+    }
+
+    public function test_assign_no_changes_needed_is_not_accepted(): void
+    {
+        // Add does not filter its SKU list, so this line cannot answer an
+        // assign; if it ever does, it is not a success.
+        [, $thrown] = $this->runLicense('assign', 200, ['Results' => ['No license changes needed for user alex@acme.example']]);
+
+        $this->assertUnconfirmed($thrown, 'unknown');
+    }
+
+    /** @return array<string, array{0: string, 1: int, 2: mixed}> */
+    public static function unconfirmedShapes(): array
+    {
+        $ok = 'Successfully set licenses for alex@acme.example.';
+
+        return [
+            'assign empty Results' => ['assign', 200, ['Results' => []]],
+            'remove empty Results' => ['remove', 200, ['Results' => []]],
+            'assign unknown line' => ['assign', 200, ['Results' => ['Queued for processing']]],
+            'remove unknown line' => ['remove', 200, ['Results' => ['Queued for processing']]],
+            'assign two lines' => ['assign', 200, ['Results' => [$ok, $ok]]],
+            'remove two lines' => ['remove', 200, ['Results' => [$ok, 'Failed to remove licenses for user alex@acme.example: x']]],
+            'assign non-array body' => ['assign', 200, 'Successfully set licenses for alex@acme.example.'],
+            'remove non-array body' => ['remove', 200, 'Successfully set licenses for alex@acme.example.'],
+            'assign no Results key' => ['assign', 200, ['ok' => true]],
+            'remove non-string line' => ['remove', 200, ['Results' => [['ok' => true]]]],
+            'assign 302 with success line' => ['assign', 302, ['Results' => [$ok]]],
+            'remove 301' => ['remove', 301, ['Results' => [$ok]]],
+            'assign 204' => ['assign', 204, ''],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('unconfirmedShapes')]
+    public function test_licence_unrecognised_answer_is_unknown_never_success(string $operation, int $status, mixed $body): void
+    {
+        [$result, $thrown, $writes] = $this->runLicense($operation, $status, $body);
+
+        $this->assertNull($result);
+        $this->assertUnconfirmed($thrown, 'unknown');
+        $this->assertSame(1, $writes, 'the write POST left before the answer was read');
+    }
+
+    public function test_licence_3xx_is_not_followed(): void
+    {
+        // A redirect is not failed() and is not followed (allow_redirects=false),
+        // so exactly one request reaches CIPP and nothing is sent to the Location.
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::preventStrayRequests();
+        Http::fake([
+            'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
+            'cipp.example.test/api/*' => Http::response('', 302, ['Location' => 'https://elsewhere.example.test/login']),
+        ]);
+        $client = new CippRestWriteClient([
+            'api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1',
+            'client_id' => 'write-client', 'client_secret' => 'write-secret',
+        ], Cache::store(), fn (string $host): array => ['93.184.216.34']);
+
+        try {
+            $client->assignUserLicense('acme.onmicrosoft.com', 'user-123', 'sku-1');
+            $this->fail('a 3xx must not be reported as a completed licence write');
+        } catch (CippClientException $e) {
+            $this->assertUnconfirmed($e, 'unknown');
+            $this->assertSame('HTTP 302', $e->upstreamLine);
+        }
+    }
+
+    public function test_licence_http_500_is_still_the_status_exception(): void
+    {
+        [, $thrown] = $this->runLicense('assign', 500, ['Results' => ['synthetic-sensitive-body']]);
+
+        $this->assertInstanceOf(\App\Services\Cipp\CippWriteHttpException::class, $thrown);
+        $this->assertNotInstanceOf(\App\Services\Cipp\CippWriteUnconfirmedException::class, $thrown);
+        $this->assertStringNotContainsString('synthetic-sensitive-body', $thrown->getMessage());
+    }
+
+    public function test_unconfirmed_exception_keeps_only_a_bounded_flattened_line(): void
+    {
+        $long = "Failed to process bulk license operation\nfor tenant x. ".str_repeat('A', 500);
+        $e = new \App\Services\Cipp\CippWriteUnconfirmedException('api/ExecBulkLicense', 'unknown', $long);
+
+        $this->assertSame(200, mb_strlen((string) $e->upstreamLine));
+        $this->assertStringNotContainsString("\n", (string) $e->upstreamLine);
+        $this->assertStringNotContainsString(str_repeat('A', 300), $e->getMessage());
+        $this->assertInstanceOf(CippClientException::class, $e);
     }
 }

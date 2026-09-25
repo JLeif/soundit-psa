@@ -812,4 +812,46 @@ class CippWriteGroupMembershipTest extends TestCase
         $this->assertTrue((bool) $response->json('result.isError'));
         $this->assertStringContainsString('group_id must be', (string) $response->json('result.content.0.text'));
     }
+
+    /**
+     * The direct path replaces the client's own message with its own sentence,
+     * so fixing the three client throws alone would not change what a direct
+     * operator reads. The client throw is raised after the POST has gone out
+     * (EditGroup returns HTTP 200 even when it reports per-member failure), so
+     * this string must claim neither applied nor not-applied.
+     */
+    public function test_a_direct_membership_write_failure_claims_neither_outcome(): void
+    {
+        $this->configureCipp();
+        $this->configureAiActor();
+        $fixture = $this->cippFixture();
+        $token = $this->token(['cipp_set_group_membership']);
+
+        $client = Mockery::mock(CippRestWriteClient::class);
+        $client->shouldReceive('listGroups')->once()
+            ->with('acme.onmicrosoft.com')
+            ->andReturn([$this->groupRow(), $this->securityGroupRow()]);
+        $client->shouldReceive('setGroupMembership')->once()
+            ->andThrow(new \App\Services\Cipp\CippClientException(
+                'CIPP accepted the request but did not confirm the group membership change;'
+                .' it may or may not have applied — verify the group membership in CIPP before retrying.'
+            ));
+        $this->app->instance(CippRestWriteClient::class, $client);
+
+        $response = $this->callTool($token, 'cipp_set_group_membership', [
+            'client_id' => $fixture['client']->id,
+            'person_id' => $fixture['person']->id,
+            'group_id' => self::GROUP_ID,
+            'operation' => 'add',
+            'ticket_id' => $fixture['ticket']->id,
+            'confirm_group_name' => 'Sales Team',
+            'confirm_upn' => 'alex@acme.example',
+            'reason' => 'Add the new hire to the sales collaboration group.',
+        ]);
+
+        $body = (string) $response->json('result.content.0.text');
+        $this->assertStringContainsString('may or may not have applied', $body);
+        $this->assertStringNotContainsString('not applied', $body);
+        $this->assertSame(0, TechnicianActionLog::where('result_status', 'executed')->count());
+    }
 }
