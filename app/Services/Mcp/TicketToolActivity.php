@@ -26,7 +26,7 @@ final class TicketToolActivity
             'coverage' => 'Explicitly associated staff calls and ticket action records only; unassociated calls and legacy MCP calls are absent, not proof of no activity. Raw outputs withheld.'];
     }
 
-    public const STATES = 'proposed = staged, not executed; executed = execution recorded; executed_with_fault = execution recorded WITH a fault (the write landed — follow up, do not re-run); failure = refusal or failure, no execution recorded; pending = outcome not confirmed; read = read returned.';
+    public const STATES = 'proposed = staged, not executed; executed = execution recorded; executed_with_fault = execution recorded WITH a fault (the write landed — follow up, do not re-run); failure = refusal or failure, no execution recorded; no_op = recorded as a no-op, nothing was changed; pending = outcome not confirmed; read = read returned.';
 
     public function query(Ticket $ticket): \Illuminate\Database\Query\Builder
     {
@@ -64,6 +64,7 @@ final class TicketToolActivity
             // Never 'failure': a consumer keying on state must not re-run a
             // committed side effect.
             'executed_with_fault' => 'executed_with_fault',
+            'no_op' => 'no_op',
             'error', 'failed', 'blocked' => 'failure',
             default => 'pending',
         } : ($row->call_status === 'error' ? 'failure' : (in_array($row->activity_kind, ['read', 'failure'], true) ? $row->activity_kind : 'pending'));
@@ -72,6 +73,7 @@ final class TicketToolActivity
             'executed' => 'Action execution recorded.',
             'executed_with_fault' => 'Action executed with a fault; follow-up required. Diagnostic payload withheld.',
             'failure' => 'Failure or refusal recorded; diagnostic payload withheld.',
+            'no_op' => 'No-op recorded; nothing was changed.',
             'read' => 'Read returned successfully; content withheld.',
             default => 'Pending or held; execution not confirmed.',
         };

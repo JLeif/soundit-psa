@@ -49,6 +49,14 @@ class StaffCippWriteToolExecutor
     /** Remove answered "No license changes needed": no write was made. Claims nothing about history. */
     private const LICENSE_NO_CHANGE_MESSAGE = 'CIPP reported the user did not hold this licence, so nothing was removed.';
 
+    /**
+     * result_status of the audit row for that answer (#3744): the value the
+     * phone-call services already write for a no-change action. It is not
+     * 'executed', so alreadyExecuted() and executedRunId() do not match it and
+     * do not refuse an identical removal made after it.
+     */
+    private const RESULT_NO_OP = 'no_op';
+
     /** @var array<string, string> */
     private const STAGED_TO_DIRECT = [
         'cipp_stage_offboard_user' => 'cipp_offboard_user',
@@ -982,7 +990,7 @@ class StaffCippWriteToolExecutor
             }
 
             if ($this->isLicenseNoChange($directTool, $upstream)) {
-                $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
+                $this->auditAttempt($run->action_type, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
                 $run->advanceTo(TechnicianRunState::Done);
 
                 return new TechnicianApprovalResult('executed', message: self::LICENSE_NO_CHANGE_MESSAGE);
@@ -1056,7 +1064,7 @@ class StaffCippWriteToolExecutor
         }
 
         if ($this->isLicenseNoChange($tool, $upstream)) {
-            $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
+            $this->auditAttempt($tool, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
 
             return [
                 'success' => true,
@@ -6315,6 +6323,11 @@ class StaffCippWriteToolExecutor
         return $keys;
     }
 
+    /**
+     * Matches 'executed' rows only. A licence removal that CIPP answered with
+     * "No license changes needed" is audited RESULT_NO_OP, so this check
+     * does not refuse a later identical removal (#3744).
+     */
     private function alreadyExecuted(string $tool, int $clientId, string $contentHash): bool
     {
         return TechnicianActionLog::query()
@@ -6383,7 +6396,8 @@ class StaffCippWriteToolExecutor
      * Every other staged verb is protected by that rail: identical content that
      * already executed short-circuits before firstOrCreate is ever reached, so the
      * only non-live run its key can return is one that never executed (superseded,
-     * denied, withdrawn) and reviving THAT row in place is correct. With the rail
+     * denied, withdrawn, or a licence removal that ended as a no-op) and reviving
+     * THAT row in place is correct. With the rail
      * skipped the protection is gone, and firstOrCreate on the UNIQUE (ticket_id,
      * action_type, content_hash) key hands back the very run that removed a rule
      * under this name — a terminal Done row the revive branch would flip back to
@@ -6987,9 +7001,36 @@ class StaffCippWriteToolExecutor
         return $tool === 'cipp_remove_user_license' && is_array($upstream) && ($upstream['no_change'] ?? false) === true;
     }
 
+    /**
+     * The audit summary for a caught CippClientException (#3745).
+     *
+     * Both types below are thrown only after ->post(), so their summaries say
+     * nothing about when the failure happened:
+     *  - CippWriteUnconfirmedException: its own message, which names the
+     *    endpoint and the outcome, (unknown) or (not_applied).
+     *  - CippWriteHttpException: the HTTP status, read from the exception's
+     *    status field. Its message says "failed", which a 5xx does not show.
+     *
+     * Any other CippClientException keeps "failed before completion". On the
+     * licence methods that type is thrown only before ->post(). Some other
+     * methods still throw it after the send (setGroupMembership,
+     * reassignOneDriveOwnership, editUser, and guardReportedFailure()'s
+     * callers), where the phrase says more than is known. Those throws are not
+     * changed here; #3709 covers the first three.
+     */
     private function safeFailureSummary(string $tool, CippClientException $e): string
     {
-        return "{$tool} failed before completion: ".mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+        if ($e instanceof CippWriteHttpException) {
+            return "{$tool}: CIPP answered HTTP {$e->status}.";
+        }
+
+        $detail = mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+
+        if ($e instanceof CippWriteUnconfirmedException) {
+            return "{$tool}: {$detail}";
+        }
+
+        return "{$tool} failed before completion: {$detail}";
     }
 
     /**
