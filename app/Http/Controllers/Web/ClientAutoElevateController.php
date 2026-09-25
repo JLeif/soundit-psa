@@ -20,8 +20,8 @@ use Illuminate\Support\Facades\Cache;
  *   failed       — mapped; the read was degraded (configuration/transport/status/drift/paging)
  *   ok           — mapped; one or more computers
  *
- * The panel is fetched on demand when the Integrations tab opens (the vendor's bucket is
- * 100 requests per hour per route). Successful reads are cached for 60 seconds per company;
+ * The panel is fetched on demand when the Integrations tab opens (the vendor rate-limits each
+ * route; see RATE LIMITS in AutoElevateReadService). Successful reads are cached for 60 seconds per company;
  * a failure is never cached, so the next open retries.
  */
 class ClientAutoElevateController extends Controller

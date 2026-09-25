@@ -189,7 +189,7 @@ class AutoElevateReadServiceTest extends TestCase
 
     /**
      * #2124. An over-cap tenant is knowable from the FIRST page's `totalCount`, so it must
-     * cost one request, not fifty against a 100/hour bucket — and it must not wear the
+     * cost one request, not fifty rate-limited ones — and it must not wear the
      * `paging_bound` label, which means something else (see the next test).
      */
     public function test_a_tenant_larger_than_the_walk_is_named_from_the_first_page(): void
