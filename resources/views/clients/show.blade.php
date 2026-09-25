@@ -238,10 +238,16 @@
                     @else
                         <div class="table-responsive d-none d-md-block">
                             <table class="table table-hover mb-0">
+                                {{-- "Person email" rather than "Email": the Details card in the
+                                     sidebar is a sibling of this tab column, so its own "Email"
+                                     row (the Client's address) renders on the same screen as this
+                                     table. Two unqualified Email labels on one page is what made a
+                                     Person's email look like the Client's. See README, Core
+                                     entities. The Client's field label is deliberately unchanged. --}}
                                 <thead>
                                     <tr>
                                         <th>Name</th>
-                                        <th>Email</th>
+                                        <th>Person email</th>
                                         <th>Phone</th>
                                         <th>Mobile</th>
                                     </tr>
@@ -307,7 +313,7 @@
                                     </div>
                                     @if($person->email)
                                         <div class="d-flex justify-content-between gap-3 small py-1">
-                                            <span class="data-label">Email</span>
+                                            <span class="data-label">Person email</span>
                                             <a href="mailto:{{ $person->email }}" class="text-break text-end">{{ $person->email }}</a>
                                         </div>
                                     @endif
