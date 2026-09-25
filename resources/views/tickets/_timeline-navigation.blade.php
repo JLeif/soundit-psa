@@ -6,12 +6,10 @@
     @endforeach
 </nav>
 <div class="small text-muted mb-2" data-timeline-states>{{ $timelinePage['states'] }}</div>
-<nav class="d-flex gap-3 small mb-2" aria-label="Timeline pages">
-    @if($timelinePage['has_newer'])
-        <a href="{{ route('tickets.show', array_filter(['ticket' => $ticket, 'types' => request()->query('types'), 'after' => $timelinePage['after']])) }}#notes">Newer</a>
+<div class="small text-muted mb-2" data-timeline-count="{{ $timelinePage['shown'] }}">
+    @if($timelinePage['truncated'])
+        <i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>Showing the newest {{ $timelinePage['shown'] }} entries; older entries are not shown on this page.
+    @else
+        {{ $timelinePage['shown'] }} {{ Str::plural('entry', $timelinePage['shown']) }}, full history.
     @endif
-    @if($timelinePage['has_older'])
-        <a href="{{ route('tickets.show', array_filter(['ticket' => $ticket, 'types' => request()->query('types'), 'before' => $timelinePage['before']])) }}#notes">Older</a>
-    @endif
-    <span>{{ $timelinePage['has_more'] ? 'More entries available in this direction' : 'End of this direction' }}</span>
-</nav>
+</div>
