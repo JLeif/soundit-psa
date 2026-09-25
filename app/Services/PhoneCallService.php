@@ -368,6 +368,29 @@ class PhoneCallService
             return true;
         }
 
+        return $this->bLegConnectionIsObserved($data);
+    }
+
+    /**
+     * answerIsObserved() WITHOUT its DialBLegUUID arm: the test handleCallEnded()
+     * applies to a TERMINAL payload.
+     *
+     * The UUID arm is sound only where the vendor guarantees the field is empty
+     * when nobody answers, and the sole source for that guarantee is the
+     * action-URL / dial-status-reporting set quoted above. The terminal payloads
+     * the controller routes to handleCallEnded() include per-B-leg callbackUrl
+     * DialAction=hangup events, where DialBLegUUID is documented only as the
+     * B-leg UUID, with no emptiness guarantee. So a leg that RANG OUT may name
+     * its own UUID there. Reading that as an answer would save a missed call as
+     * Completed. Because it stamps answered_at before the recording callback
+     * lands, it would also disable the controller's voicemail auto-detect for
+     * that call permanently.
+     *
+     * handleCallAnswered() keeps the UUID arm through answerIsObserved(); that
+     * path is unchanged.
+     */
+    private function bLegConnectionIsObserved(array $data): bool
+    {
         // A B leg that ran for a positive number of seconds was connected.
         if (isset($data['DialBLegDuration']) && (int) $data['DialBLegDuration'] > 0) {
             return true;
@@ -482,7 +505,7 @@ class PhoneCallService
                 // Plivo's Duration includes voicemail recording time, which is
                 // the whole reason this method does not infer "answered" from
                 // duration.
-            } elseif ($call->answered_at === null && $this->answerIsObserved($data)) {
+            } elseif ($call->answered_at === null && $this->bLegConnectionIsObserved($data)) {
                 // THIS PAYLOAD says the dialled leg connected, and nothing has
                 // stamped answered_at. Card 57SuhqPY.
                 //
@@ -509,11 +532,19 @@ class PhoneCallService
                 // moment a real duration lands. A visibly wrong status was the
                 // defect; an approximate answer moment is the smaller wrong.
                 //
-                // FAILS CLOSED: answerIsObserved() requires a non-empty
-                // DialBLegUUID, a POSITIVE DialBLegDuration, an affirmative
-                // DialBLegStatus, or DialAction=connected. An unanswered dial
-                // carries an empty B-leg UUID and a zero B-leg duration and so
-                // still lands as Missed below.
+                // FAILS CLOSED, and deliberately NARROWER than
+                // answerIsObserved(): a non-empty DialBLegUUID is NOT accepted
+                // here (see bLegConnectionIsObserved()). The only vendor source
+                // for "empty if nobody answers" is the action-URL parameter set,
+                // and the payloads routed here include per-B-leg callbackUrl
+                // DialAction=hangup events, where the UUID carries no such
+                // guarantee. Accepting it would stamp answered_at on a leg that
+                // rang out, BEFORE the recording callback arrives, and the
+                // controller's voicemail auto-detect - which requires a null
+                // answered_at - would never fire. What IS accepted: a POSITIVE
+                // DialBLegDuration, an affirmative DialBLegStatus ('hangup' is
+                // not one), or DialAction=connected. Anything else lands as
+                // Missed below.
                 $call->answered_at = $call->ended_at;
                 $call->status = CallStatus::Completed;
             } elseif ($call->answered_at === null) {

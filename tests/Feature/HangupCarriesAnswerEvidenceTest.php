@@ -73,30 +73,85 @@ class HangupCarriesAnswerEvidenceTest extends TestCase
     // ── the reproduction: answer evidence on the hangup payload ─────────────
 
     /**
-     * THE CARD'S QUESTION. A hangup payload carrying a B-leg UUID — Plivo's own
-     * documented "empty if nobody answers" field, non-empty here — with no
-     * Duration.
-     *
-     * RED at 52ec8d94: status === Missed. handleCallEnded() never consults
-     * answerIsObserved(), so the evidence sitting in its own $data is ignored
-     * and answered_at-alone decides.
+     * The Dial callbackUrl hangup event for a B leg that RANG OUT. It names that
+     * leg's own UUID: the "empty if nobody answers" sentence covers the
+     * action-URL set, not this one.
      */
-    public function test_hangup_with_b_leg_uuid_is_not_reported_as_missed(): void
+    private function rungOutHangup(string $uuid): array
     {
-        $call = $this->ringingCall('hangup-bleg-uuid');
-
-        app(PhoneCallService::class)->handleCallEnded('hangup-bleg-uuid', [
-            'CallUUID' => 'hangup-bleg-uuid',
+        return [
+            'CallUUID' => $uuid,
             'CallStatus' => 'completed',
             'Event' => 'Hangup',
-            'DialBLegUUID' => 'b-leg-4c7e1a93',
-        ]);
+            'DialAction' => 'hangup',
+            'DialBLegUUID' => 'b-leg-rang-out-4c7e1a93',
+            'DialBLegStatus' => 'hangup',
+            'DialBLegDuration' => '0',
+            'DialBLegHangupCauseName' => 'NO_ANSWER',
+        ];
+    }
+
+    /**
+     * A non-empty B-leg UUID on a hangup event is NOT answer evidence. A leg
+     * that rang out reports its own UUID, with DialBLegStatus=hangup, a zero
+     * DialBLegDuration and NO_ANSWER.
+     *
+     * GREEN AT 52ec8d94 BY CONSTRUCTION, because that base never read the
+     * payload. RED against the first cut of this change, which accepted any
+     * non-empty DialBLegUUID on the hangup path and saved this call Completed.
+     */
+    public function test_rung_out_hangup_naming_its_own_b_leg_uuid_is_still_missed(): void
+    {
+        $call = $this->ringingCall('hangup-rung-out');
+
+        app(PhoneCallService::class)->handleCallEnded('hangup-rung-out', $this->rungOutHangup('hangup-rung-out'));
 
         $stored = $call->fresh();
 
-        $this->assertNotSame(CallStatus::Missed, $stored->status,
-            'a hangup payload carrying a non-empty DialBLegUUID is the vendor stating the dialled leg connected; '
-            .'reporting that call as Missed is the defect on card 57SuhqPY (PhoneCallService.php:481)');
+        $this->assertSame(CallStatus::Missed, $stored->status,
+            'a rung-out leg\'s hangup names its own B-leg UUID; reading that as an answer turns every missed call Completed');
+        $this->assertNull($stored->answered_at,
+            'nothing answered this call, so answered_at must stay null');
+    }
+
+    /**
+     * PRODUCTION ORDER. The rung-out leg's hangup lands BEFORE the recording
+     * callback. Status is therefore still Ringing when handleCallEnded() runs,
+     * and the Voicemail-precedence arm cannot protect the call. Voicemail stays
+     * reachable only because answered_at stays NULL: PlivoWebhookController's
+     * voicemail auto-detect calls markAsVoicemail() only when answered_at is
+     * null. This test drives the service seam. It restates that guard's
+     * conditions (recording >= 3s, answered_at null) instead of posting the
+     * recording through the route, so it pins the service's side of the
+     * contract and not the controller's.
+     *
+     * GREEN AT 52ec8d94 BY CONSTRUCTION. RED against the first cut of this
+     * change: the hangup stamped answered_at, the guard declined, and the row
+     * stayed Completed.
+     */
+    public function test_rung_out_hangup_before_the_recording_leaves_voicemail_detectable(): void
+    {
+        $call = $this->ringingCall('hangup-then-recording');
+        $service = app(PhoneCallService::class);
+
+        $service->handleCallEnded('hangup-then-recording', $this->rungOutHangup('hangup-then-recording'));
+
+        $this->assertNull($call->fresh()->answered_at,
+            'the controller\'s voicemail auto-detect requires a null answered_at; stamping it here suppresses voicemail for good');
+
+        $recordingSeconds = 42;
+        if ($recordingSeconds >= 3 && $call->fresh()->answered_at === null) {
+            $service->markAsVoicemail('hangup-then-recording');
+        }
+
+        // A redelivered hangup must not undo the detection.
+        $service->handleCallEnded('hangup-then-recording', $this->rungOutHangup('hangup-then-recording'));
+
+        $stored = $call->fresh();
+
+        $this->assertSame(CallStatus::Voicemail, $stored->status,
+            'a rung-out call that then records a voicemail must end Voicemail, not Completed');
+        $this->assertNull($stored->answered_at);
     }
 
     /**
@@ -165,8 +220,9 @@ class HangupCarriesAnswerEvidenceTest extends TestCase
      * commonest real case (nobody answered) into a false Completed.
      *
      * The keys here are the ones present on a call NOBODY answered: DialBLegTo
-     * names who was dialled, an EMPTY DialBLegUUID is the vendor's documented
-     * "nobody answered", and the top-level CallStatus describes the A leg Plivo
+     * names who was dialled, an EMPTY DialBLegUUID is what the action-URL set
+     * documents for "nobody answered" (the hangup arm does not read the UUID at
+     * all; see the rung-out tests above), and the top-level CallStatus describes the A leg Plivo
      * itself answered. A reader that accepts any Dial* key, or the A-leg status,
      * fails here.
      */
