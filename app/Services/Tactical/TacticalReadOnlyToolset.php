@@ -873,6 +873,16 @@ class TacticalReadOnlyToolset
             'status_state' => $insight->statusState->value,
             'last_seen_at' => $insight->lastSeen?->toIso8601String(),
             'uptime' => $insight->uptime,
+            // A snapshot status has no timestamp of its own on the insight
+            // (freshAsOf can read now() on a mixed read), so its recency cannot be
+            // bounded here. Only a live status can qualify uptime; a snapshot
+            // status stays unverified but is still shown.
+            ...TacticalFieldMap::uptimeProvenance(
+                $insight->statusState === SignalState::Live ? $insight->status : null,
+                $insight->lastSeen?->toIso8601String(),
+                $insight->uptime,
+            ),
+            'agent_status' => $insight->status,
             'cpu' => $insight->cpu,
             'ram_gb' => $insight->ramGb,
             'disk_summary' => $insight->diskSummary,
@@ -1043,6 +1053,12 @@ class TacticalReadOnlyToolset
             ),
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => TacticalFieldMap::uptimeFromBootTime($agent['boot_time'] ?? null),
+            'boot_time' => $agent['boot_time'] ?? null,
+            ...TacticalFieldMap::uptimeProvenance(
+                $agent['status'] ?? null,
+                $agent['last_seen'] ?? null,
+                TacticalFieldMap::uptimeFromBootTime($agent['boot_time'] ?? null),
+            ),
             'checks_total' => $checks['total'],
             'checks_failing' => $checks['failing'],
             'checks_passing' => $checks['passing'],
