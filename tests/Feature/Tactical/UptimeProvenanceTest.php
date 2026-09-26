@@ -157,7 +157,25 @@ class UptimeProvenanceTest extends TestCase
         $this->assertSame('42d', $result['uptime']);
         $this->assertSame('unverified', $result['uptime_state'], 'Boot time another RMM may have written must not be qualified by Tactical status');
         $this->assertStringNotContainsString('agent', $result['freshness_note'], 'Non-Tactical boot time must not carry a Tactical mechanism note');
+        $this->assertStringContainsString('last boot time PSA stored', $result['freshness_note']);
         $this->assertSame($tactical ? 'online' : null, $result['agent_status']);
+    }
+
+    public function test_stored_uptime_without_a_stored_boot_time_claims_none(): void
+    {
+        $asset = $this->asset();
+        $asset->forceFill(['last_boot_at' => null])->save();
+        $results = [
+            TacticalFieldMap::storedUptime($asset->fresh()),
+            (new AssistantToolExecutor(clientId: $asset->client_id))->execute('get_asset', ['asset_id' => $asset->id]),
+            app(AssetController::class)->quickLook($asset->fresh())->getData(true),
+        ];
+        foreach ($results as $result) {
+            $this->assertArrayNotHasKey('error', $result);
+            $this->assertNull($result['uptime']);
+            $this->assertSame('unverified', $result['uptime_state']);
+            $this->assertSame('PSA has no stored boot time for this device.', $result['freshness_note'], 'An asset with no stored boot time must not be described as having one');
+        }
     }
 
     public function test_insight_snapshot_online_does_not_qualify_uptime(): void

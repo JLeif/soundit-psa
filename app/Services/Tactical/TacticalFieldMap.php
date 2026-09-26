@@ -148,7 +148,9 @@ class TacticalFieldMap
             return [
                 'uptime' => self::uptimeFromBootTime($asset->last_boot_at?->toIso8601String()),
                 'uptime_state' => 'unverified',
-                'freshness_note' => 'This is the last boot time PSA stored; a reboot after it was recorded will not show in this uptime.',
+                'freshness_note' => $asset->last_boot_at !== null
+                    ? 'This is the last boot time PSA stored; a reboot after it was recorded will not show in this uptime.'
+                    : 'PSA has no stored boot time for this device.',
                 'agent_status' => $agent?->status,
                 'agent_last_seen' => $agent?->last_seen_at?->toIso8601String(),
             ];
