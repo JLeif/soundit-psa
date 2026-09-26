@@ -33,8 +33,7 @@ use Illuminate\Support\Facades\Log;
  *    one page and logs a warning if the response signals more, so an operator
  *    sees a truncated list rather than silently getting one.
  *
- * Deliberately NOT built here: device sync (needs a redacted real /v1/devices
- * response, which is Charlie's ask to make) and webhook alerts (their own PR).
+ * Deliberately NOT built here: device sync and webhook alerts (each its own PR).
  *
  * AUTH DIFFERS FROM LEVEL ON PURPOSE. LevelClient sends the key raw in the
  * Authorization header; this sends `Bearer <token>`, because the proposal says
@@ -294,9 +293,10 @@ class LitsrmmClient
         // for both. So an empty object and an empty list are indistinguishable
         // here and no predicate can separate them -- which is why {"clients":[]}
         // defeated an emptiness test. (Decoding without assoc would keep them
-        // apart, as {} becomes a stdClass, but this client decodes at :467 with
-        // assoc:true and every caller expects arrays.) Asking whether a value
-        // belongs under its key sidesteps the ambiguity instead of losing to it.
+        // apart, as {} becomes a stdClass, but request() decodes with
+        // json_decode($body, true) and every caller expects arrays.) Asking
+        // whether a value belongs under its key sidesteps the ambiguity instead
+        // of losing to it.
         //
         // Only the values that pass are mapped. So one null or scalar element
         // drops that element and keeps the rest of the collection. The envelope
