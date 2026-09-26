@@ -112,14 +112,22 @@ class TacticalFieldMap
      *
      * @ e56ebd3e48e99de59f34d4bd7600c127a6f02cf2: hello writes last_seen;
      * agent-agentinfo writes boot_time independently. No boot-report timestamp
-     * is exposed. Require both arguments: callers must choose live or stored
+     * is exposed. Require every argument: callers must choose live or stored
      * agent evidence explicitly. Stored callers must also bound status recency;
      * PSA's sync clock is never a boot-report observation timestamp.
      *
      * @return array{uptime_state: string, freshness_note: string, agent_status: mixed, agent_last_seen: ?string}
      */
-    public static function uptimeProvenance(mixed $status, ?string $lastSeen): array
+    public static function uptimeProvenance(mixed $status, ?string $lastSeen, ?string $uptime): array
     {
+        if ($uptime === null) {
+            return [
+                'uptime_state' => 'unverified',
+                'freshness_note' => 'No uptime is available from this read.',
+                'agent_status' => $status,
+                'agent_last_seen' => $lastSeen,
+            ];
+        }
         $state = $status === 'online' ? 'vendor_reported' : 'unverified';
         $note = $state === 'vendor_reported'
             ? 'Boot time comes from the agent’s periodic info report, which may be older than its last heartbeat, so a very recent reboot may not show yet.'
@@ -139,12 +147,12 @@ class TacticalFieldMap
      * Stored online status counts only within the shared status-recency window.
      * Asset.last_boot_at is shared: Ninja and Level syncs write it too. The
      * Tactical row therefore qualifies it, and the Tactical notes apply, only on
-     * a Tactical-only asset.
+     * a Tactical-only asset that has a stored boot time.
      */
     public static function storedUptime(\App\Models\Asset $asset): array
     {
         $agent = $asset->tacticalAsset;
-        if ($agent === null || $asset->ninja_id || $asset->level_id) {
+        if ($agent === null || $asset->ninja_id || $asset->level_id || $asset->last_boot_at === null) {
             return [
                 'uptime' => self::uptimeFromBootTime($asset->last_boot_at?->toIso8601String()),
                 'uptime_state' => 'unverified',
@@ -157,15 +165,17 @@ class TacticalFieldMap
         }
         $recent = $agent?->synced_at !== null
             && $agent->synced_at->gte(now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES));
+        $uptime = self::uptimeFromBootTime($asset->last_boot_at?->toIso8601String());
         $provenance = self::uptimeProvenance(
             $recent ? $agent?->status : null,
             $agent?->last_seen_at?->toIso8601String(),
+            $uptime,
         );
         // Keep the observed status visible even when too old to qualify uptime.
         $provenance['agent_status'] = $agent?->status;
 
         return [
-            'uptime' => self::uptimeFromBootTime($asset->last_boot_at?->toIso8601String()),
+            'uptime' => $uptime,
             ...$provenance,
         ];
     }
