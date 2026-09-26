@@ -135,10 +135,24 @@ class TacticalFieldMap
         ];
     }
 
-    /** Stored online status counts only within the shared status-recency window. */
+    /**
+     * Stored online status counts only within the shared status-recency window.
+     * Asset.last_boot_at is shared: Ninja and Level syncs write it too. The
+     * Tactical row therefore qualifies it, and the Tactical notes apply, only on
+     * a Tactical-only asset.
+     */
     public static function storedUptime(\App\Models\Asset $asset): array
     {
         $agent = $asset->tacticalAsset;
+        if ($agent === null || $asset->ninja_id || $asset->level_id) {
+            return [
+                'uptime' => self::uptimeFromBootTime($asset->last_boot_at?->toIso8601String()),
+                'uptime_state' => 'unverified',
+                'freshness_note' => 'This is the last boot time PSA stored; a reboot after it was recorded will not show in this uptime.',
+                'agent_status' => $agent?->status,
+                'agent_last_seen' => $agent?->last_seen_at?->toIso8601String(),
+            ];
+        }
         $recent = $agent?->synced_at !== null
             && $agent->synced_at->gte(now()->subMinutes(EndpointInsight::STALE_AFTER_MINUTES));
         $provenance = self::uptimeProvenance(
