@@ -11,6 +11,13 @@
     $showFilters = $showFilters ?? true;
     $showBulkActions = $showBulkActions ?? true;
     $columns = $columns ?? null; // null = show all columns
+    // On a Client's page the sidebar Details card renders its own "Email" row (the
+    // Client's address) beside this list, so an unqualified "Email" column here is
+    // what made a Person's email look like the Client's. Qualify the label in that
+    // context only. On people.index there is no Client Email on screen and the
+    // Client column already names the owner, so the plain label stays. Keyed on the
+    // same prefilter the Client column is keyed on below.
+    $emailLabel = isset($prefilter['client_id']) ? 'Person email' : 'Email';
 @endphp
 
 @if($showFilters)
@@ -76,7 +83,7 @@
                             <th>Name</th>
                             @endif
                             @if(!$columns || in_array('email', $columns))
-                            <th>Email</th>
+                            <th>{{ $emailLabel }}</th>
                             @endif
                             @if(!$columns || in_array('phone', $columns))
                             <th>Phone</th>
@@ -166,7 +173,7 @@
                             @endif
                         </div>
                         <div class="d-flex justify-content-between gap-3 small py-1">
-                            <span class="data-label">Email</span>
+                            <span class="data-label">{{ $emailLabel }}</span>
                             @if($person->email)
                                 <a href="mailto:{{ $person->email }}" class="text-break text-end">{{ $person->email }}</a>
                             @else
