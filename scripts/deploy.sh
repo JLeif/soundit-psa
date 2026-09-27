@@ -433,7 +433,19 @@ case "$DB_CONNECTION" in
   sqlite)
     DB_FILE="$(env_val DB_DATABASE)"
     BACKUP_FILE="$BACKUP_DIR/pre-deploy-$STAMP.sqlite"
-    ( set -C; cat "${DB_FILE:-database/database.sqlite}" > "$BACKUP_FILE" )
+    # cat, not cp: noclobber governs redirects only. A redirect creates the file
+    # 0666 & ~umask instead of copying the source's mode, so umask 077 keeps a
+    # restricted DB from getting a wider copy. The source is checked to be a
+    # regular file and opened (< before >) before the backup path is created, so
+    # a missing, unreadable or non-file DB_DATABASE aborts without leaving an
+    # empty backup behind to take a retention slot.
+    ( set -C; umask 077
+      DB_SRC="${DB_FILE:-database/database.sqlite}"
+      if [ ! -f "$DB_SRC" ]; then
+        echo "  ERROR: sqlite database $DB_SRC is missing or not a regular file — aborting before migrate." >&2
+        exit 1
+      fi
+      cat < "$DB_SRC" > "$BACKUP_FILE" )
     ;;
   *)
     echo "  ERROR: unsupported DB_CONNECTION '$DB_CONNECTION' — refusing to migrate without a backup." >&2
