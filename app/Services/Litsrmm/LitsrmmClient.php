@@ -19,21 +19,27 @@ use Illuminate\Support\Facades\Log;
  * and `name`. It does NOT document the response envelope, the pagination
  * mechanism, or any device field below `hostname / OS / online / last seen`.
  *
- * So this class reads `id` and `name` and NOTHING ELSE, and every shape below
- * that is handled defensively rather than guessed at:
+ * So from `/v1/clients` this class reads `id` and `name` and NOTHING ELSE, and
+ * every shape below that is handled defensively rather than guessed at:
  *
  *  - The envelope is read as `data` if present, else the top-level array. That
  *    covers both conventions without asserting which one the vendor uses.
  *    Anything else (another wrapper key, an error object) is not a list and
  *    is logged, as is a non-empty list in which no row is mappable: a wrong
  *    shape must not look like a vendor with no clients.
- *  - Pagination is NOT implemented. Level's cursor scheme (`has_more` +
- *    `starting_after`) is a LEVEL convention, and copying it would encode an
- *    assumption as though it were the contract. getClients() therefore fetches
- *    one page and logs a warning if the response signals more, so an operator
- *    sees a truncated list rather than silently getting one.
+ *  - Pagination is NOT implemented for `/v1/clients`. Level's cursor scheme
+ *    (`has_more` + `starting_after`) is a LEVEL convention, and copying it
+ *    would encode an assumption as though it were the contract. getClients()
+ *    therefore fetches one page and logs a warning if the response signals
+ *    more, so an operator sees a truncated list rather than silently getting
+ *    one.
  *
- * Deliberately NOT built here: device sync and webhook alerts (each its own PR).
+ * `/v1/devices` is different: its envelope, paging and fields come from the
+ * vendor's own production capture (card 6ab46339, 24 Sep 2026), not from the
+ * proposal. See getDevicePage(), getDevices() and LitsrmmDevice.
+ *
+ * Deliberately NOT built here: writing or retiring asset rows from device
+ * data, scheduling a sync, and webhook alerts (each its own PR).
  *
  * AUTH DIFFERS FROM LEVEL ON PURPOSE. LevelClient sends the key raw in the
  * Authorization header; this sends `Bearer <token>`, because the proposal says
@@ -135,8 +141,9 @@ class LitsrmmClient
      *         onto a remote host in cleartext
      *
      * The host equality check is what makes this hold for a future caller that
-     * follows a vendor-supplied `next` link, which is exactly how stage 2's
-     * paging will be written. Scheme safety is re-asserted on the RESOLVED URI
+     * builds an endpoint from vendor-supplied data. (Device paging does not:
+     * it sends the vendor's cursor as a query VALUE on a fixed path, so the
+     * cursor cannot change the URL's origin.) Scheme safety is re-asserted on the RESOLVED URI
      * rather than inferred, because the loopback exemption is a statement about
      * a host and must not survive a change of host.
      */
@@ -359,6 +366,196 @@ class LitsrmmClient
 
         return is_int($key)
             || (isset($row['id']) && is_scalar($row['id']) && (string) $row['id'] === $key);
+    }
+
+    /** The vendor's page-size bounds for /v1/devices; out of range is a 400, not clamped. */
+    public const DEVICE_PAGE_LIMIT_MIN = 1;
+
+    public const DEVICE_PAGE_LIMIT_MAX = 500;
+
+    public const DEVICE_PAGE_LIMIT_DEFAULT = 100;
+
+    /**
+     * One page of `GET /v1/devices`. READ ONLY.
+     *
+     * Contract (vendor capture relayed on card 6ab46339, 24 Sep 2026):
+     * `{"devices": [...], "nextCursor": <string|null>}`, `?limit=&cursor=`.
+     * The cursor is OPAQUE and is sent back verbatim as a query value. It is
+     * never decoded, built or edited here.
+     *
+     * Refused BEFORE any request: a limit outside 1..500 (the vendor answers
+     * 400 rather than clamping, so sending it would only trade a clear local
+     * refusal for a vendor one), and an empty-string cursor (the vendor never
+     * issues one; the first page is requested with NO cursor).
+     *
+     * Unlike getClients(), nothing here returns [] on a refusal or an
+     * unrecognised body: both throw (C-56). An empty device list is a
+     * statement that the client has no machines, and a later sync may act on
+     * it. A documented key absent from every row on a page is logged, not
+     * thrown; see warnOnMissingDeviceKeys().
+     *
+     * @return array{devices: list<LitsrmmDevice>, nextCursor: ?string}
+     *
+     * @throws LitsrmmClientException
+     */
+    public function getDevicePage(int $limit = self::DEVICE_PAGE_LIMIT_DEFAULT, ?string $cursor = null): array
+    {
+        if ($limit < self::DEVICE_PAGE_LIMIT_MIN || $limit > self::DEVICE_PAGE_LIMIT_MAX) {
+            throw new LitsrmmClientException('LITSRMM device page limit must be between 1 and 500');
+        }
+
+        if ($cursor === '') {
+            throw new LitsrmmClientException('LITSRMM device cursor is an empty string, which the vendor never issues');
+        }
+
+        $query = ['limit' => $limit];
+
+        if ($cursor !== null) {
+            $query['cursor'] = $cursor;
+        }
+
+        try {
+            $response = $this->get('v1/devices', $query);
+        } catch (LitsrmmClientException $e) {
+            throw self::deviceReadRefusal($e);
+        }
+
+        if (! array_key_exists('devices', $response) || ! is_array($response['devices'])
+            || ($response['devices'] !== [] && ! array_is_list($response['devices']))) {
+            Log::warning('[LitsrmmClient] /v1/devices did not return a devices list', [
+                'keys' => array_slice(array_keys($response), 0, 10),
+            ]);
+
+            throw new LitsrmmClientException('LITSRMM /v1/devices response has no devices list');
+        }
+
+        // Absent is not null. A body without nextCursor cannot say whether the
+        // walk is finished, and reading it as "last page" would truncate.
+        if (! array_key_exists('nextCursor', $response)) {
+            throw new LitsrmmClientException('LITSRMM /v1/devices response has no nextCursor field');
+        }
+
+        $next = $response['nextCursor'];
+
+        // The vendor ends the walk with null, never "". Accepting "" as either
+        // an end or a cursor would be guessing at a shape they said they do
+        // not send.
+        if ($next !== null && (! is_string($next) || $next === '')) {
+            throw new LitsrmmClientException('LITSRMM /v1/devices nextCursor is neither null nor a non-empty string');
+        }
+
+        $devices = array_map(
+            static fn ($row) => LitsrmmDevice::fromArray($row),
+            $response['devices'],
+        );
+
+        $this->warnOnMissingDeviceKeys($response['devices']);
+
+        return ['devices' => $devices, 'nextCursor' => $next];
+    }
+
+    /**
+     * Every device, by walking the cursor until the vendor returns a null
+     * nextCursor. READ ONLY.
+     *
+     * The walk is bounded twice, so a vendor bug cannot hold a worker forever:
+     * a cursor seen before is refused (it would loop), and more than $maxPages
+     * pages is refused. Both THROW; a partial list is never returned, because
+     * a device missing from it would read as a device that no longer exists.
+     * An id seen twice in one walk is refused too: the vendor's own check
+     * found every id distinct, so a repeat means the pages overlapped.
+     *
+     * @return list<LitsrmmDevice>
+     *
+     * @throws LitsrmmClientException
+     */
+    public function getDevices(int $limit = self::DEVICE_PAGE_LIMIT_DEFAULT, int $maxPages = 1000): array
+    {
+        $devices = [];
+        $seenCursors = [];
+        $cursor = null;
+
+        for ($page = 1; ; $page++) {
+            if ($page > $maxPages) {
+                throw new LitsrmmClientException("LITSRMM device walk exceeded {$maxPages} pages without a null nextCursor");
+            }
+
+            $result = $this->getDevicePage($limit, $cursor);
+
+            foreach ($result['devices'] as $device) {
+                if (isset($devices[$device->id])) {
+                    throw new LitsrmmClientException('LITSRMM device walk returned the same device id on two rows');
+                }
+
+                $devices[$device->id] = $device;
+            }
+
+            $cursor = $result['nextCursor'];
+
+            if ($cursor === null) {
+                return array_values($devices);
+            }
+
+            if (isset($seenCursors[$cursor])) {
+                throw new LitsrmmClientException('LITSRMM device walk was handed a cursor it had already followed');
+            }
+
+            $seenCursors[$cursor] = true;
+        }
+    }
+
+    /**
+     * 400, 401 and 403 mean three different things on /v1/devices and are
+     * reported as three different refusals, each carrying the HTTP status as
+     * its code. The vendor made 401 and 403 distinct on purpose: 401 is a
+     * missing or invalid key (fix the key), 403 is a valid key without the
+     * devices scope (fix the key's grant). Collapsing them would send an
+     * operator to fix the wrong thing. Any other failure is passed through
+     * unchanged.
+     */
+    private static function deviceReadRefusal(LitsrmmClientException $e): LitsrmmClientException
+    {
+        $message = match ($e->getCode()) {
+            400 => 'LITSRMM rejected the device page request (400); the vendor documents 400 for an out-of-range limit or a cursor it did not issue',
+            401 => 'LITSRMM rejected the API key (401); the vendor documents 401 as a missing or invalid key',
+            403 => 'LITSRMM refused the device read (403); the vendor documents 403 as a valid key without the devices scope',
+            default => null,
+        };
+
+        return $message === null ? $e : new LitsrmmClientException($message, $e->getCode(), $e);
+    }
+
+    /**
+     * In-band drift detection (C-56): a documented key absent from EVERY row
+     * on a page is a shape change, not a null. A key present and null is the
+     * vendor's normal answer for a device without their agent and is never
+     * logged.
+     */
+    private function warnOnMissingDeviceKeys(array $rows): void
+    {
+        if ($rows === []) {
+            return;
+        }
+
+        $missing = array_values(array_filter(
+            LitsrmmDevice::DOCUMENTED_KEYS,
+            static function (string $key) use ($rows): bool {
+                foreach ($rows as $row) {
+                    if (array_key_exists($key, $row)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            },
+        ));
+
+        if ($missing !== []) {
+            Log::warning('[LitsrmmClient] /v1/devices rows are missing documented keys on every row', [
+                'missing' => $missing,
+                'rows' => count($rows),
+            ]);
+        }
     }
 
     public function get(string $endpoint, array $params = []): array
