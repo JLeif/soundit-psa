@@ -102,6 +102,65 @@ class PhoneCall extends Model
         return null;
     }
 
+    /**
+     * The number at the OTHER end of the call: the caller on an inbound call,
+     * the number we dialled on an outbound call.
+     *
+     * On a row logOutboundCall() writes, and on a row logIncomingCall() writes
+     * for a call that really was inbound, that is from_number.
+     * PhoneCallService::logIncomingCall() stores the caller there, and
+     * logOutboundCall() stores the DIALLED number there and writes our own DID
+     * (PlivoConfig did_number) into to_number. So to_number
+     * on an outbound row is not a reading of anything, and a consumer that
+     * picks "the far end" by direction (inbound ? from : to) gets our main line
+     * back on every outbound call. CallController::getCallHistory() did exactly
+     * that until card mfmgS3XO.
+     *
+     * This is a METHOD over from_number, not a stored column. It adds no
+     * migration and no backfill, and there is no second copy to drift from the
+     * one every caller-resolution path already reads. The columns are
+     * deliberately NOT renamed or swapped. ResolveCallerFromPeople,
+     * CallerResolver and PhoneCallActionService all read from_number as the far
+     * end on both directions. Making the columns literally direction-accurate
+     * would silently break client attribution on outbound calls.
+     *
+     * The value alone does not say what kind of evidence it is. Read it
+     * together with farEndProvenance().
+     */
+    public function farEndNumber(): ?string
+    {
+        return $this->from_number !== null && $this->from_number !== ''
+            ? $this->from_number
+            : null;
+    }
+
+    /**
+     * What farEndNumber() is evidence OF, which differs by direction:
+     *   'caller_id' - inbound. The number the network presented for the party
+     *                 who called us. That is evidence about the caller, and a
+     *                 spoofable claim, not a verified contact number.
+     *   'dialled'   - outbound. The number one of our staff dialled. That is
+     *                 evidence about what WE did, not about what number the
+     *                 other party owns.
+     * null when there is no far-end number (e.g. an anonymous inbound call).
+     *
+     * It exists because one column carries both provenances with no marker. On
+     * card mfmgS3XO a consumer reading from_number on an outbound call was one
+     * step from proposing it as a client's own number.
+     */
+    public function farEndProvenance(): ?string
+    {
+        if ($this->farEndNumber() === null) {
+            return null;
+        }
+
+        return match ($this->direction) {
+            CallDirection::Inbound => 'caller_id',
+            CallDirection::Outbound => 'dialled',
+            default => null,
+        };
+    }
+
     // ── Relations ──
 
     public function client(): BelongsTo
