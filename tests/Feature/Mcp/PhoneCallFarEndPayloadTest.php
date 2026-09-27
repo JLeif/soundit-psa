@@ -89,15 +89,16 @@ class PhoneCallFarEndPayloadTest extends TestCase
     /**
      * The tool description is the contract an agent reads. Pin only the facts
      * that would have prevented the misreading on this card: that from/to are not
-     * literal, that outbound to_number is our own number, and the two provenance
-     * values.
+     * literal, and the two provenance values. The outbound to_number clause was
+     * deleted by ruling (card mfmgS3XO, 2026-09-26); the last assertion keeps
+     * it deleted.
      */
     public function test_list_phone_calls_description_states_the_convention(): void
     {
         $d = McpToolRegistry::listPhoneCallsTool()['description'];
 
         $this->assertStringContainsString('NOT literal from/to', $d);
-        $this->assertStringContainsString('on outbound to_number is our own main number', $d);
+        $this->assertStringNotContainsString('our own main number', $d);
         $this->assertStringContainsString('caller_id', $d);
         $this->assertStringContainsString('dialled', $d);
     }

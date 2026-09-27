@@ -106,10 +106,11 @@ class PhoneCall extends Model
      * The number at the OTHER end of the call: the caller on an inbound call,
      * the number we dialled on an outbound call.
      *
-     * On every row our writers produce, that is from_number, whatever the
-     * direction. PhoneCallService::logIncomingCall() stores the caller there, and
+     * On a row logOutboundCall() writes, and on a row logIncomingCall() writes
+     * for a call that really was inbound, that is from_number.
+     * PhoneCallService::logIncomingCall() stores the caller there, and
      * logOutboundCall() stores the DIALLED number there and writes our own DID
-     * (PlivoConfig did_number, a config constant) into to_number. So to_number
+     * (PlivoConfig did_number) into to_number. So to_number
      * on an outbound row is not a reading of anything, and a consumer that
      * picks "the far end" by direction (inbound ? from : to) gets our main line
      * back on every outbound call. CallController::getCallHistory() did exactly

@@ -83,7 +83,7 @@ class CallController extends Controller
         // active(), not operational(): caller-resolution intake can start at prospect stage.
         $clients = Client::active()->orderBy('name')->get(['id', 'name']);
 
-        // Previous calls from/to the same number (useful when caller is unresolved)
+        // Previous calls with the same from_number (useful when caller is unresolved)
         $callHistory = $this->getCallHistory($call);
 
         return view('calls.show', [
@@ -147,7 +147,7 @@ class CallController extends Controller
                 ->all();
         }
 
-        // Call history from/to same number (useful when unresolved)
+        // Call history with the same from_number (useful when unresolved)
         $callHistory = [];
         if (! $call->client_id) {
             $callHistory = $this->getCallHistory($call)
@@ -231,8 +231,8 @@ class CallController extends Controller
      *
      * The match is on from_number ONLY, the column our writers store the far
      * end in on both directions. There is deliberately no orWhere('to_number').
-     * Production never stores a far end there, so that arm could only match
-     * calls INTO one of our own lines, which is the same defect for any call
+     * logOutboundCall() never stores a far end there, so on its rows that arm
+     * could only match our own DID, which is the same defect for any call
      * whose far end is one of our numbers. CallerResolver keeps its own
      * to_number arm for seeded/legacy rows. That is a separate consumer and
      * is not changed here.
