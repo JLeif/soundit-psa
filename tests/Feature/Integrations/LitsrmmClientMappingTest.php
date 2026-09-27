@@ -28,9 +28,9 @@ use Tests\TestCase;
  * registered, that the toggle gates it, that the client sends Bearer auth to
  * the configured host and no other, and that it never invents a field. They do
  * NOT establish that the vendor's real response looks like the fixture. The
- * envelope, the pagination signal, and every device field below
- * hostname/OS/online/last-seen are UNDOCUMENTED, and a redacted real
- * `/v1/devices` response is a precondition of the NEXT stage, not this one.
+ * `/v1/clients` envelope and pagination signal are UNDOCUMENTED, and a
+ * redacted real `/v1/devices` response is a precondition of the NEXT stage,
+ * not this one.
  */
 class LitsrmmClientMappingTest extends TestCase
 {
@@ -265,31 +265,35 @@ class LitsrmmClientMappingTest extends TestCase
             'a different port on the configured host is a different service' => [
                 'https://litsrmm.test', '//litsrmm.test:8443/v1/x',
             ],
-            // AND THE SCHEME IS PART OF THE KEY, NOT ONLY THE PORT (#3500),
-            // AND THIS IS THE ONLY INPUT SHAPE THAT PROVES IT.
+            // TWO DIFFERENT SCHEMELESS MUTANTS, AND WHICH ROWS KILL EACH
+            // (#3553, #3559). Both drop the scheme from the origin key; they
+            // differ in the port.
             //
-            // Dropping the scheme from the origin key leaves it colliding on
-            // several pairs -- measured, https://h:80 == http://h and
-            // https://h:8443 == http://h:8443 -- but on a REMOTE host every
-            // one of those is caught anyway, one line later, by
-            // assertTransportIsSafe() refusing plain http. So a remote data
-            // set cannot tell the two rules apart, and a schemeless key looks
-            // perfectly safe through it.
-            //
-            // A LOOPBACK base is the seam: there plain http is legitimately
-            // exempt, so the origin key is the only thing left holding the
-            // scheme, and a downgrade on the SAME loopback host and port walks
-            // straight through without it. That is a narrow case, and it is
-            // exactly the vendor's documented same-host deployment.
+            // (1) host + EFFECTIVE port. It collides on any pair with the same
+            // host and effective port and a different scheme. On a REMOTE host
+            // every such pair is still refused, by assertTransportIsSafe() on
+            // the configured base_url or on the resolved URI, so no request
+            // leaves. On a LOOPBACK host plain http is
+            // exempt, the origin key is the only thing refusing the scheme
+            // change, and under (1) the request leaves. The rows where it
+            // leaves are a CLASS -- loopback host, same effective port,
+            // different scheme -- and the 8443 row below is one member of it.
+            // Measured by execution against (1): https://127.0.0.1:8080,
+            // https://localhost:443 and https://[::1]:8443, each downgraded to
+            // http on the same port, and the upgrade http://localhost:8443 ->
+            // https://localhost:8443, all send the request. Host and port are
+            // unchanged on each, so under (1) it reaches the same listener.
             'a scheme downgrade on a loopback base is still a different origin' => [
                 'https://localhost:8443', 'http://localhost:8443/v1/x',
             ],
-            // THE ORIGIN INCLUDES THE SCHEME (#3500 diff:1). getPort() is null
-            // for each scheme's OWN default, so a host:port key read these as
-            // one origin; on a loopback host the plain-http transport rule then
-            // admits the request and the Bearer lands on port 80 (or 443), a
-            // different service. Only a loopback host reaches that path, which
-            // is why the non-loopback downgrade row above could not catch it.
+            // (2) host + RAW getPort() (#3500 diff:1), which is null for each
+            // scheme's OWN default. It reads https://127.0.0.1 and
+            // http://127.0.0.1 as one origin; on a loopback host the plain-http
+            // exemption then lets the Bearer reach port 80 (or 443), a
+            // different service. These two rows kill (2) and not (1), which
+            // fills in 443 and 80 and keeps them apart. The 8443 row above
+            // kills both, and the remote 'absolute http downgrades the scheme'
+            // row kills (2) through the refusal reason alone.
             'https loopback base to plain http on the same host is port 80' => [
                 'https://127.0.0.1', 'http://127.0.0.1/v1/x',
             ],
@@ -317,18 +321,25 @@ class LitsrmmClientMappingTest extends TestCase
             'handler' => $stack,
         ]);
 
-        $threw = false;
+        $refusal = null;
         try {
             $client->get($endpoint);
-        } catch (LitsrmmClientException) {
-            $threw = true;
+        } catch (LitsrmmClientException $e) {
+            $refusal = $e->getMessage();
         }
 
         // The history is the load-bearing assertion. A thrown exception that
         // still let the request out would be a leak wearing a refusal's face.
         $this->assertCount(0, $this->history,
             "endpoint {$endpoint} escaped the guard and carried the API key off the configured host");
-        $this->assertTrue($threw, 'and the caller must be told, not silently handed an empty result');
+        $this->assertNotNull($refusal, 'and the caller must be told, not silently handed an empty result');
+
+        // WHICH guard refused (#3556). request() runs other guards before
+        // the origin check and every one throws this same exception class, so
+        // a bare "it threw" would stay green if any of them started refusing
+        // these rows first. The origin guard is the one this data set pins.
+        $this->assertStringContainsString('a different scheme, host or port', $refusal,
+            "endpoint {$endpoint} was refused, but not by the origin guard");
     }
 
     /**
@@ -353,6 +364,34 @@ class LitsrmmClientMappingTest extends TestCase
             $this->assertSame('litsrmm.test', $entry['request']->getUri()->getHost());
             $this->assertSame('https', $entry['request']->getUri()->getScheme());
         }
+    }
+
+    /**
+     * The same-origin LOOPBACK control (#3562). The ordinary-endpoint control
+     * above uses a remote https base, so before this PR a guard that refused
+     * every loopback base passed this whole file while refusing a same-host
+     * deployment outright. This is the loopback half of that pair.
+     */
+    public function test_a_same_origin_endpoint_on_a_loopback_base_still_goes_out(): void
+    {
+        $this->configure();
+
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $this->history = [];
+        $stack->push(Middleware::history($this->history));
+
+        $client = new LitsrmmClient([
+            'api_key' => 'test-token-value',
+            'base_url' => 'https://localhost:8443',
+            'handler' => $stack,
+        ]);
+
+        $client->get('v1/x');
+
+        $this->assertCount(1, $this->history,
+            'a same-origin endpoint on a loopback base must go out: the origin guard refuses a change of origin, not a loopback host');
+        $this->assertSame('https://localhost:8443/v1/x', (string) $this->history[0]['request']->getUri());
     }
 
     /**
@@ -850,15 +889,25 @@ class LitsrmmClientMappingTest extends TestCase
      * exposure is real -- and restores it. Relying on the ambient setting
      * would be a control that passes because of the environment rather than
      * because of the code.
+     *
+     * THE HTTP IS FAKED (#3525). Without a handler, http() builds a real Guzzle
+     * client. The queued 200 means a leaked request SUCCEEDS and is
+     * recorded, and the history count says so before anything else is read.
      */
     public function test_a_refused_transport_never_composed_the_credential(): void
     {
         $this->configure();
 
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $this->history = [];
+        $stack->push(Middleware::history($this->history));
+
         // Plaintext to a remote host: refused by assertTransportIsSafe().
         $client = new LitsrmmClient([
             'api_key' => 'test-token-value',
             'base_url' => 'http://litsrmm.test',
+            'handler' => $stack,
         ]);
 
         $previous = ini_set('zend.exception_ignore_args', '0');
@@ -869,8 +918,12 @@ class LitsrmmClientMappingTest extends TestCase
         try {
             $client->get('v1/clients');
 
+            $this->assertCount(0, $this->history,
+                'a plaintext request to a remote host left the process carrying the credential');
             $this->fail('a plaintext base URL must refuse before any request is composed');
         } catch (LitsrmmClientException $e) {
+            $this->assertCount(0, $this->history, 'a refused plaintext request must not leave the process');
+
             $serialised = json_encode($e->getTrace()).' '.$e->getTraceAsString().' '.$e->getMessage();
 
             $this->assertStringNotContainsString('test-token-value', $serialised,
@@ -892,15 +945,22 @@ class LitsrmmClientMappingTest extends TestCase
      *
      * assertEndpointStaysOnTheConfiguredHost() also runs before the header, so
      * an endpoint that would steer the request off-host refuses without ever
-     * composing the credential either.
+     * composing the credential either. Its HTTP is faked for the same reason
+     * as the test above.
      */
     public function test_a_refused_endpoint_never_composed_the_credential(): void
     {
         $this->configure();
 
+        $mock = new MockHandler([new Response(200, [], json_encode(['data' => []]))]);
+        $stack = HandlerStack::create($mock);
+        $this->history = [];
+        $stack->push(Middleware::history($this->history));
+
         $client = new LitsrmmClient([
             'api_key' => 'test-token-value',
             'base_url' => 'https://litsrmm.test',
+            'handler' => $stack,
         ]);
 
         $previous = ini_set('zend.exception_ignore_args', '0');
@@ -908,8 +968,12 @@ class LitsrmmClientMappingTest extends TestCase
         try {
             $client->get('https://evil.example/v1/clients');
 
+            $this->assertCount(0, $this->history,
+                'an off-host request left the process carrying the credential');
             $this->fail('an off-host endpoint must refuse before any request is composed');
         } catch (LitsrmmClientException $e) {
+            $this->assertCount(0, $this->history, 'a refused off-host request must not leave the process');
+
             $serialised = json_encode($e->getTrace()).' '.$e->getTraceAsString().' '.$e->getMessage();
 
             $this->assertStringNotContainsString('test-token-value', $serialised,
