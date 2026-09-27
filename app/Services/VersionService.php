@@ -179,9 +179,10 @@ class VersionService
             }
 
             $ref = trim(substr($head, 5));
-            $sha = $this->resolveRef($refDir, $ref);
+            $why = null;
+            $sha = $this->resolveRef($refDir, $ref, $why);
             if ($sha === null) {
-                return $this->unknown("HEAD names {$ref}, which resolves in neither the loose ref file nor packed-refs");
+                return $this->unknown("HEAD names {$ref}, which does not resolve to a commit id: {$why}");
             }
 
             return $this->describe($sha, $this->branchFromRef($ref), $gitDir);
@@ -266,18 +267,46 @@ class VersionService
      * loose ref, and that stale value is a real historical commit -- so reading
      * packed-refs first returns a plausible sha for a tree that is not served.
      */
-    private function resolveRef(string $gitDir, string $ref): ?string
+    private function resolveRef(string $gitDir, string $ref, ?string &$why = null, int $depth = 0): ?string
     {
-        $loose = $this->readFile($gitDir.'/'.$ref);
-        if ($loose !== null) {
+        // A loose ref file that EXISTS is authoritative even when it is unusable: a
+        // symref ("ref: <other>") is followed, and an empty, truncated or unreadable
+        // file is a failure. Only when no loose file is visible does the read fall
+        // through to packed-refs; falling through on a broken loose file would hand
+        // back the stale packed entry as a clean answer. Limit: a loose file inside a
+        // directory the PHP user cannot search is invisible to file_exists() and so
+        // is treated as absent here.
+        $loosePath = $gitDir.'/'.$ref;
+        if (file_exists($loosePath) && ! is_dir($loosePath)) {
+            $loose = $this->readFile($loosePath);
+            if ($loose === null) {
+                $why = "the loose ref file for {$ref} exists but could not be read";
+
+                return null;
+            }
             $loose = trim($loose);
             if ($this->looksLikeSha($loose)) {
                 return $loose;
             }
+            if (str_starts_with($loose, 'ref: ')) {
+                // Bounded so a symref cycle fails instead of recursing without end.
+                if ($depth >= 5) {
+                    $why = "the symref chain through {$ref} is deeper than 5";
+
+                    return null;
+                }
+
+                return $this->resolveRef($gitDir, trim(substr($loose, 5)), $why, $depth + 1);
+            }
+            $why = "the loose ref file for {$ref} holds neither a commit id nor a symref";
+
+            return null;
         }
 
         $packed = $this->readFile($gitDir.'/packed-refs');
         if ($packed === null) {
+            $why = "{$ref} has no loose ref file and no packed-refs entry";
+
             return null;
         }
 
@@ -298,6 +327,8 @@ class VersionService
                 return $parts[0];
             }
         }
+
+        $why = "{$ref} has no loose ref file and no packed-refs entry";
 
         return null;
     }

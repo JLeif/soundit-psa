@@ -124,6 +124,48 @@ class VersionReadTest extends TestCase
         $this->assertSame(self::SHA_A, $this->service()->current()['commit_hash']);
     }
 
+    public function test_a_broken_loose_ref_does_not_fall_back_to_a_stale_packed_entry(): void
+    {
+        // An existing loose ref is authoritative even when it is unusable. An empty
+        // (truncated) loose file beside a stale packed entry must fail, not return
+        // the stale packed commit as a clean answer.
+        file_put_contents($this->fixture.'/.git/HEAD', "ref: refs/heads/main\n");
+        file_put_contents($this->fixture.'/.git/refs/heads/main', '');
+        file_put_contents(
+            $this->fixture.'/.git/packed-refs',
+            "# pack-refs with: peeled fully-peeled sorted \n".self::SHA_B." refs/heads/main\n"
+        );
+
+        $v = $this->service()->current();
+
+        $this->assertSame(VersionService::UNKNOWN, $v['commit_hash']);
+        $this->assertStringContainsString('neither a commit id nor a symref', (string) $v['error']);
+    }
+
+    public function test_a_loose_symref_is_followed_rather_than_bypassed_to_packed_refs(): void
+    {
+        file_put_contents($this->fixture.'/.git/HEAD', "ref: refs/heads/main\n");
+        file_put_contents($this->fixture.'/.git/refs/heads/main', "ref: refs/heads/release\n");
+        file_put_contents($this->fixture.'/.git/refs/heads/release', self::SHA_A."\n");
+        file_put_contents(
+            $this->fixture.'/.git/packed-refs',
+            "# pack-refs with: peeled fully-peeled sorted \n".self::SHA_B." refs/heads/main\n"
+        );
+
+        $this->assertSame(self::SHA_A, $this->service()->current()['commit_hash']);
+    }
+
+    public function test_a_symref_cycle_is_a_failure_with_a_reason(): void
+    {
+        file_put_contents($this->fixture.'/.git/HEAD', "ref: refs/heads/main\n");
+        file_put_contents($this->fixture.'/.git/refs/heads/main', "ref: refs/heads/main\n");
+
+        $v = $this->service()->current();
+
+        $this->assertSame(VersionService::UNKNOWN, $v['commit_hash']);
+        $this->assertStringContainsString('deeper than 5', (string) $v['error']);
+    }
+
     // ------------------------------------------------------- linked worktree
 
     public function test_it_follows_a_gitdir_pointer_file_in_a_linked_worktree(): void
