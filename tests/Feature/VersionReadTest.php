@@ -23,9 +23,17 @@ class VersionReadTest extends TestCase
     {
         parent::setUp();
 
+        $realBase = base_path();
+
         $this->fixture = sys_get_temp_dir().'/psa-version-'.bin2hex(random_bytes(6));
         mkdir($this->fixture.'/.git/refs/heads', 0755, true);
         app()->setBasePath($this->fixture);
+
+        // setBasePath moves public_path() too, and the app layout stamps asset URLs
+        // with filemtime(public_path(...)) -- so a view test would die on a missing
+        // asset rather than on anything this service does. Point public/ back at the
+        // real one: the fixture exists to control .git, not to model the app tree.
+        @symlink($realBase.'/public', $this->fixture.'/public');
     }
 
     protected function tearDown(): void
@@ -309,5 +317,256 @@ class VersionReadTest extends TestCase
         $this->service()->current();
 
         $this->assertNull(\Illuminate\Support\Facades\Cache::get('psa_version_current'));
+    }
+
+    // ---------------------------------------------------- commit date (#4025)
+
+    /**
+     * Write $sha as a LOOSE object whose committer epoch is $epoch.
+     *
+     * Built the way git writes it -- zlib-deflated "commit <len>\0<body>" -- so the
+     * control exercises the real inflate-and-parse path. The object's own content is
+     * not hashed to $sha and does not need to be: nothing in the read verifies the
+     * hash, and a fixture that did would be testing git rather than this service.
+     */
+    private function writeLooseCommit(string $sha, int $epoch, string $tz = '+0000', ?string $committerLine = null): void
+    {
+        $dir = $this->fixture.'/.git/objects/'.substr($sha, 0, 2);
+        mkdir($dir, 0755, true);
+
+        $committer = $committerLine ?? "committer Someone <someone@example.com> {$epoch} {$tz}";
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            ."author Someone <someone@example.com> {$epoch} {$tz}\n"
+            .$committer."\n\nsubject line\n";
+        $raw = 'commit '.strlen($body)."\0".$body;
+
+        file_put_contents($dir.'/'.substr($sha, 2), gzcompress($raw));
+    }
+
+    private function headAt(string $sha): void
+    {
+        file_put_contents($this->fixture.'/.git/HEAD', "ref: refs/heads/main\n");
+        file_put_contents($this->fixture.'/.git/refs/heads/main', $sha."\n");
+    }
+
+    public function test_the_commit_date_is_read_from_a_loose_object_without_the_git_binary(): void
+    {
+        // #4025: the row was structurally always Unknown because both return paths
+        // hardcoded null, on the stated ground that the date "cannot be read without
+        // git". A loose object is a plain zlib stream (#4016), and PHP inflates it.
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(self::SHA_A, 1790485588);       // 2026-09-27T05:06:28Z
+
+        // Precondition, as the sibling success control does: with no `git` on PATH a
+        // pass cannot have come from shelling out.
+        $path = getenv('PATH');
+        putenv('PATH=/nonexistent');
+        try {
+            $v = $this->service()->current();
+        } finally {
+            putenv('PATH='.$path);
+        }
+
+        $this->assertSame('2026-09-27T05:06:28Z', $v['commit_date']);
+        // Positive control: the surrounding read still worked, so the assertion above
+        // is about the date and not about the whole call having failed into nulls.
+        $this->assertSame(self::SHA_A, $v['commit_hash']);
+    }
+
+    public function test_the_committer_zone_offset_does_not_shift_the_instant(): void
+    {
+        // The epoch is UTC by definition and the trailing offset on the committer line
+        // is discarded. A reader that applied it would move a real instant by hours --
+        // the wrong-value hazard this row is allowed to carry at all only because the
+        // value is read rather than manufactured.
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(self::SHA_A, 1790485588, '-0700');
+
+        $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
+    }
+
+    public function test_a_packed_commit_object_reports_no_date_rather_than_a_wrong_one(): void
+    {
+        // MEASURED on production 2026-09-27: 11 of the 12 most recently deployed shas
+        // were loose, and one was not. So the not-loose case is reachable rather than
+        // hypothetical, and it is why the About view keeps its Unknown fallback.
+        $this->headAt(self::SHA_A);   // ref resolves; NO object written
+
+        $v = $this->service()->current();
+
+        $this->assertSame(self::SHA_A, $v['commit_hash'], 'the sha must still be reported');
+        $this->assertNull($v['commit_date'], 'an unreadable object is a null, never a guess');
+        $this->assertNull($v['error'], 'a missing date is not a failed read of the commit');
+    }
+
+    public function test_a_corrupt_loose_object_reports_no_date_rather_than_failing_the_read(): void
+    {
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), 'this is not a zlib stream');
+
+        $v = $this->service()->current();
+
+        $this->assertSame(self::SHA_A, $v['commit_hash']);
+        $this->assertNull($v['commit_date']);
+    }
+
+    public function test_a_tag_object_at_the_commit_path_is_not_read_as_a_commit_date(): void
+    {
+        // The header decides. Without the "commit " test a tag or blob body carrying a
+        // tagger line would be read as though it were the commit's own date.
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "object 4b825dc642cb6eb9a060e54bf8d69288fbee4904\ntype commit\n"
+            ."committer Someone <someone@example.com> 1790485588 +0000\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('tag '.strlen($body)."\0".$body));
+
+        $this->assertNull($this->service()->current()['commit_date']);
+    }
+
+    public function test_digits_in_a_committer_name_are_not_read_as_the_timestamp(): void
+    {
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(
+            self::SHA_A,
+            1790485588,
+            '+0000',
+            'committer Agent 1234567890123 <bot123456789@example.com> 1790485588 +0000'
+        );
+
+        $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
+    }
+
+    public function test_a_committer_name_containing_byte_0x85_still_yields_the_date(): void
+    {
+        // Å is C3 85 and Cyrillic х is D1 85 in UTF-8. A split on PCRE's \R without
+        // /u treats the lone 0x85 as a line break, cuts the committer line mid-name,
+        // and the anchored match then answers null on a healthy loose commit.
+        $name = "\u{00C5}sa Berg \u{0445}";
+        $this->assertStringContainsString("\x85", $name, 'precondition: the name carries the NEL byte');
+
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(
+            self::SHA_A,
+            1790485588,
+            '+0200',
+            "committer {$name} <asa@example.com> 1790485588 +0200"
+        );
+
+        $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
+    }
+
+    public function test_a_commit_with_no_committer_line_reports_no_date(): void
+    {
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\nsubject only\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
+
+        $this->assertNull($this->service()->current()['commit_date']);
+    }
+
+    public function test_a_linked_worktree_reads_its_commit_object_through_commondir(): void
+    {
+        // Objects live in the shared directory for the same reason refs do. Without
+        // this the date would be null in every review worktree -- the exact class of
+        // miss that made refs/ read "unknown" on a healthy checkout.
+        $shared = $this->fixture.'/shared.git';
+        mkdir($shared.'/refs/heads', 0755, true);
+        file_put_contents($shared.'/refs/heads/topic', self::SHA_A."\n");
+        mkdir($shared.'/objects/'.substr(self::SHA_A, 0, 2), 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            ."committer Someone <someone@example.com> 1790485588 +0000\n\nsubject\n";
+        file_put_contents(
+            $shared.'/objects/'.substr(self::SHA_A, 0, 2).'/'.substr(self::SHA_A, 2),
+            gzcompress('commit '.strlen($body)."\0".$body)
+        );
+
+        $wt = $shared.'/worktrees/leg';
+        mkdir($wt, 0755, true);
+        file_put_contents($wt.'/HEAD', "ref: refs/heads/topic\n");
+        file_put_contents($wt.'/commondir', "../..\n");
+
+        exec('rm -rf '.escapeshellarg($this->fixture.'/.git'));
+        file_put_contents($this->fixture.'/.git', "gitdir: {$wt}\n");
+
+        $v = $this->service()->current();
+
+        $this->assertSame(self::SHA_A, $v['commit_hash']);
+        $this->assertSame('2026-09-27T05:06:28Z', $v['commit_date'], 'objects resolve through commondir');
+    }
+
+    public function test_a_failed_read_still_carries_a_null_date(): void
+    {
+        exec('rm -rf '.escapeshellarg($this->fixture.'/.git'));
+
+        $v = $this->service()->current();
+
+        $this->assertSame(VersionService::UNKNOWN, $v['commit_hash']);
+        $this->assertNull($v['commit_date']);
+    }
+
+    // -------------------------------------------------- the About view (#4025)
+
+    public function test_the_about_page_shows_the_commit_date_it_read(): void
+    {
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(self::SHA_A, 1790485588);
+
+        $html = $this->aboutHtml();
+
+        $this->assertStringContainsString('Commit Date', $html);
+        // Rendered in the app zone by the view, so assert the DATE rather than a
+        // zone-specific clock time the fixture does not control.
+        $this->assertMatchesRegularExpression('/Commit Date.*Sep\s+2[67],\s+2026/s', $html);
+    }
+
+    public function test_the_about_page_has_no_row_that_can_never_hold_a_value(): void
+    {
+        // #4025: the Deployed row read deploy_timestamp, which both return paths set
+        // to null, so it printed Unknown for every user on every deploy. Asserting the
+        // row's absence is the control; asserting "not Unknown" would pass while the
+        // row still shipped, because Commit Date legitimately falls back to Unknown.
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(self::SHA_A, 1790485588);
+
+        $html = $this->aboutHtml();
+
+        $this->assertStringNotContainsString('Deployed', $html);
+        $this->assertStringNotContainsString('deploy_timestamp', $html);
+        // Positive control: the page rendered and still carries its other rows, so the
+        // absence above is the row being gone and not the view failing to render.
+        $this->assertStringContainsString('Branch', $html);
+    }
+
+    public function test_the_about_page_still_says_unknown_when_the_date_cannot_be_read(): void
+    {
+        // The packed case. The fallback has to survive, or a gc'd object turns into a
+        // blank cell instead of an honest Unknown.
+        $this->headAt(self::SHA_A);   // no object written
+
+        $html = $this->aboutHtml();
+
+        $this->assertMatchesRegularExpression('/Commit Date.*Unknown/s', $html);
+    }
+
+    /**
+     * Render the About view directly with the same data the controller passes.
+     *
+     * A route call would need an authenticated staff user and the middleware stack;
+     * this control is about what the template does with a null date, so it drives
+     * the template. The view() call is the same one AboutController makes.
+     */
+    private function aboutHtml(): string
+    {
+        $service = $this->service();
+
+        return view('about.index', [
+            'current' => $service->current(),
+            'updates' => $service->updates(),
+        ])->render();
     }
 }
