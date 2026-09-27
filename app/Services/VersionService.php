@@ -366,7 +366,8 @@ class VersionService
      *    resolution, which is a different instrument, not a longer version of this one);
      *  - the inflate fails, or the header does not say "commit" (a tag or a blob at that
      *    path is not a commit date);
-     *  - no committer line before the blank line that ends the header, or its trailing
+     *  - no committer line before the blank line that ends the header (an empty line,
+     *    or a lone "\r" when the object is CRLF-separated), or its trailing
      *    "<epoch> <tz>" does not parse.
      *
      * MEASURED on the production checkout 2026-09-27 as the PHP-FPM user: HEAD's object
@@ -420,7 +421,11 @@ class VersionService
             // The header ends at the first blank line. Without this stop the commit
             // MESSAGE is scanned too, and a body line beginning "committer " is read as
             // the header.
-            if ($line === '') {
+            //
+            // rtrim the CR (#4124): in a CRLF-separated object the split above leaves
+            // "\r" as the blank line, and a bare `=== ''` does not treat that line as
+            // the end of the header.
+            if (rtrim($line, "\r") === '') {
                 return null;
             }
 

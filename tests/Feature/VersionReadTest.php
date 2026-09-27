@@ -506,6 +506,26 @@ class VersionReadTest extends TestCase
         $this->assertNull($date, 'the header ends at the blank line; the message is not the header');
     }
 
+    public function test_a_crlf_forged_object_does_not_have_its_message_read_as_the_header(): void
+    {
+        // #4124. The same committer-less object as above, but CRLF-separated: the blank
+        // line splits to "\r", not ''. With a bare `=== ''` stop the LF-only message
+        // line below was read as the header and returned 2023-11-14T22:13:20Z.
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\r\n"
+            ."author A <a@x> 1790485588 +0000\r\n"
+            ."\r\n"
+            ."committer bot <b@x> 1700000000 +0000\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
+
+        $this->assertNull(
+            $this->service()->current()['commit_date'],
+            'the header ends at the first empty line whether it is LF- or CRLF-separated'
+        );
+    }
+
     public function test_a_real_committer_header_is_still_read_when_the_message_also_has_one(): void
     {
         // Positive control for the stop above: stopping at the blank line must not make
