@@ -253,7 +253,8 @@ class SendReplyTool
      */
     private function hasUnaddressedClientReply(Ticket $ticket): bool
     {
-        $latestClientReply = $ticket->notes()->automationVisible()
+        // Contained web-form replies count: only noted_at is read, never the body (r2 diff:1).
+        $latestClientReply = $ticket->notes()
             ->where('note_type', NoteType::Reply->value)
             ->where('ai_authored', false)
             ->where('who_type', WhoType::EndUser->value)
