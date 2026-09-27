@@ -6,7 +6,10 @@ use App\Models\SignalDelivery;
 use App\Models\SignalDestination;
 use App\Models\SignalEvent;
 use App\Models\SignalInboxEntry;
+use App\Models\SignalRoute;
+use App\Models\SignalRouteStep;
 use App\Services\Chet\OperatorBridgeToolExecutor;
+use App\Services\Signals\SignalRouter;
 use App\Support\McpConfig;
 use App\Support\McpToolRegistry;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -87,6 +90,69 @@ class PollSignalsToolTest extends TestCase
         $this->assertNull($other->fresh()->acked_at);
     }
 
+    /**
+     * Card qptZ5IKH, measured on prod 2026-09-27: two enabled routes each reached an MCP
+     * destination carrying the SAME token label, so one intake.call_transcribed event
+     * produced two inbox rows for that token. The rows here come from the real producer
+     * (SignalRouter -> DeliverSignal -> McpSink on the sync queue), not a hand-written
+     * fixture, so the test sees exactly the shape a consumer sees.
+     */
+    public function test_one_event_fanned_to_two_destinations_sharing_a_label_returns_two_deliveries_with_one_event_id(): void
+    {
+        $token = McpConfig::rotateStaffToken(allowedTools: ['poll_signals'], label: 'chet');
+        $this->mcpRoute('Chet alerts', 'Chet MCP', 'chet', ['intake.call_transcribed']);
+        $this->mcpRoute('Relay to chet', 'Relay to chet', 'chet', ['intake.call_transcribed']);
+
+        $event = $this->routedEvent('intake.call_transcribed', entityId: 908);
+
+        $out = $this->poll($token, ['limit' => 50]);
+
+        $this->assertCount(2, $out['signals'], 'fan-out precondition: one event, two deliveries for this label');
+        $this->assertArrayHasKey('event_id', $out['signals'][0]);
+        $this->assertArrayHasKey('event_id', $out['signals'][1]);
+        $this->assertNotSame($out['signals'][0]['inbox_id'], $out['signals'][1]['inbox_id']);
+        $this->assertSame($event->id, $out['signals'][0]['event_id']);
+        $this->assertSame($event->id, $out['signals'][1]['event_id']);
+        $this->assertSame(
+            [$event->id],
+            array_values(array_unique(array_column($out['signals'], 'event_id'))),
+            'deduping on event_id must collapse the two deliveries to one occurrence',
+        );
+    }
+
+    public function test_two_distinct_events_on_the_same_entity_return_different_event_ids(): void
+    {
+        $token = McpConfig::rotateStaffToken(allowedTools: ['poll_signals'], label: 'chet');
+        // cooldown 0 so the second event on the same entity is delivered, not suppressed.
+        $this->mcpRoute('Chet alerts', 'Chet MCP', 'chet', ['intake.call_transcribed'], cooldownSeconds: 0);
+        // An unrouted event first, so signal_events ids run one ahead of inbox/delivery ids.
+        // Without it both sequences start at 1 and an event_id mapped from inbox_id passes.
+        $this->routedEvent('ticket.created', entityId: 1);
+
+        $first = $this->routedEvent('intake.call_transcribed', entityId: 909);
+        $second = $this->routedEvent('intake.call_transcribed', entityId: 909);
+
+        $out = $this->poll($token, ['limit' => 50]);
+
+        $this->assertCount(2, $out['signals'], 'precondition: both occurrences delivered');
+        $this->assertArrayHasKey('event_id', $out['signals'][0]);
+        $this->assertSame($out['signals'][0]['entity'], $out['signals'][1]['entity'], 'same entity on both rows');
+        $this->assertSame($first->id, $out['signals'][0]['event_id']);
+        $this->assertSame($second->id, $out['signals'][1]['event_id']);
+        $this->assertNotSame($out['signals'][0]['event_id'], $out['signals'][1]['event_id']);
+        $this->assertNotSame($out['signals'][0]['inbox_id'], $out['signals'][0]['event_id'], 'id sequences must differ or this test cannot tell the columns apart');
+    }
+
+    public function test_poll_signals_description_states_the_delivery_and_occurrence_contract(): void
+    {
+        $tool = collect(\App\Services\Chet\OperatorBridgeTools::definitions())->firstWhere('name', 'poll_signals');
+        $description = (string) ($tool['description'] ?? '');
+
+        $this->assertStringContainsString('DELIVERY', $description);
+        $this->assertStringContainsString('event_id identifies the occurrence', $description);
+        $this->assertStringContainsString('dedupe on event_id, never on entity id', $description);
+    }
+
     public function test_poll_signals_requires_scoped_token_label(): void
     {
         $out = app(OperatorBridgeToolExecutor::class)->execute('poll_signals', [], null);
@@ -130,6 +196,46 @@ class PollSignalsToolTest extends TestCase
         $this->assertFalse((bool) $response->json('result.isError'));
 
         return json_decode((string) $response->json('result.content.0.text'), true) ?? [];
+    }
+
+    /** @param  array<int, string>  $types */
+    private function mcpRoute(string $routeLabel, string $destinationLabel, string $tokenLabel, array $types, int $cooldownSeconds = 300): SignalRoute
+    {
+        $destination = SignalDestination::create([
+            'label' => $destinationLabel,
+            'type' => 'mcp',
+            'mcp_token_label' => $tokenLabel,
+            'enabled' => true,
+        ]);
+        $route = SignalRoute::create([
+            'label' => $routeLabel,
+            'event_filter' => ['types' => $types],
+            'enabled' => true,
+            'cooldown_seconds' => $cooldownSeconds,
+        ]);
+        SignalRouteStep::create([
+            'route_id' => $route->id,
+            'step_order' => 1,
+            'destination_id' => $destination->id,
+        ]);
+
+        return $route;
+    }
+
+    private function routedEvent(string $typeKey, int $entityId): SignalEvent
+    {
+        $event = SignalEvent::create([
+            'type_key' => $typeKey,
+            'entity_type' => 'App\\Models\\PhoneCall',
+            'entity_id' => $entityId,
+            'summary' => 'call transcribed',
+            'context' => [],
+            'occurred_at' => now()->startOfSecond(),
+        ]);
+
+        app(SignalRouter::class)->route($event);
+
+        return $event;
     }
 
     private function seedSignal(string $tokenLabel, int $entityId): SignalInboxEntry
