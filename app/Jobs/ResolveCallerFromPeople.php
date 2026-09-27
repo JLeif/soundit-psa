@@ -42,6 +42,19 @@ class ResolveCallerFromPeople implements ShouldQueue
                 'client' => $person->client?->name,
             ]);
 
+            // Both call directions are attributed here, so the auto-link is tried
+            // here. It decides for itself whether to act: with the setting off, or
+            // with 0 or 2+ open tickets, the call stays unlinked. A failure there
+            // is logged and swallowed so it cannot undo the resolution saved above.
+            try {
+                $phoneCallService->autoLinkToSoleOpenTicket($call);
+            } catch (\Throwable $e) {
+                Log::warning('[CallerResolve] Auto-link failed; call left unlinked', [
+                    'call_id' => $call->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
             return;
         }
 

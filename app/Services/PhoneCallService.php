@@ -7,6 +7,7 @@ use App\Enums\CallStatus;
 use App\Enums\NoteType;
 use App\Enums\TicketPriority;
 use App\Enums\TicketSource;
+use App\Enums\TicketStatus;
 use App\Enums\TicketType;
 use App\Jobs\ResolveCallerFromPeople;
 use App\Models\Person;
@@ -14,6 +15,7 @@ use App\Models\PhoneCall;
 use App\Models\SipEndpoint;
 use App\Models\Ticket;
 use App\Services\Triage\AssetMatcher;
+use App\Support\CallAutoLinkConfig;
 use App\Support\PhoneNumber;
 use App\Support\PlivoConfig;
 use App\Support\TriageConfig;
@@ -1203,6 +1205,72 @@ class PhoneCallService
     }
 
     /**
+     * Deterministic auto-link (card 0JJon0z4). Links the call to its contact's
+     * single open ticket, or does nothing. Returns the linked ticket id, or null
+     * when the call was left as it was.
+     *
+     * It links only when ALL of these hold:
+     *  - CallAutoLinkConfig::enabled() (absent setting row = off);
+     *  - client_id and person_id are both set, ticket_id is null and
+     *    followed_up_at is null, re-read under a row lock;
+     *  - exactly one ticket has this client_id, this person as contact_id and a
+     *    status whose isOpen() is true.
+     * Zero or several open tickets leave the call unlinked for a human. "Open" is
+     * TicketStatus::isOpen(), never closed_at IS NULL: a resolved ticket can carry
+     * a null closed_at. No AI takes part in the decision.
+     *
+     * The link goes through linkCallToTicketWithNote(), so it keeps that path's
+     * billability and prepay behaviour and adds a private note saying the call was
+     * auto-linked and why.
+     */
+    public function autoLinkToSoleOpenTicket(PhoneCall $call): ?int
+    {
+        if (! CallAutoLinkConfig::enabled()) {
+            return null;
+        }
+
+        return DB::transaction(function () use ($call): ?int {
+            $locked = PhoneCall::whereKey($call->id)->lockForUpdate()->first();
+
+            if (! $locked
+                || $locked->client_id === null
+                || $locked->person_id === null
+                || $locked->ticket_id !== null
+                || $locked->followed_up_at !== null) {
+                return null;
+            }
+
+            $openStatuses = array_values(array_filter(
+                TicketStatus::cases(),
+                fn (TicketStatus $status) => $status->isOpen(),
+            ));
+
+            $openTicketIds = Ticket::query()
+                ->where('client_id', $locked->client_id)
+                ->where('contact_id', $locked->person_id)
+                ->whereIn('status', $openStatuses)
+                ->limit(2)
+                ->pluck('id');
+
+            if ($openTicketIds->count() !== 1) {
+                return null;
+            }
+
+            $ticketId = (int) $openTicketIds->first();
+
+            $this->linkCallToTicketWithNote(
+                $locked,
+                $ticketId,
+                "Phone call #{$locked->id} was auto-linked to this ticket: it is the only open ticket for this call's contact at this client.",
+            );
+
+            $call->setRawAttributes($locked->getAttributes(), true);
+
+            return $ticketId;
+        });
+    }
+
+    /**
      * Create a new ticket from a resolved call and link the call to it.
      *
      * PRECONDITION: the call is already resolved ($call->client_id !== null) — the
@@ -1298,6 +1366,8 @@ class PhoneCallService
                 $query->unfollowedUp();
             } elseif ($filters['status'] === 'unknown-caller') {
                 $query->unknownCaller();
+            } elseif ($filters['status'] === 'resolved-no-ticket') {
+                $query->resolvedWithoutTicket();
             } else {
                 $query->where('status', $filters['status']);
             }
