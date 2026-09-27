@@ -41,16 +41,18 @@
                                 @endif
                             </td>
                         </tr>
-                        <tr>
-                            <th class="text-muted">Deployed</th>
-                            <td>
-                                @if($current['deploy_timestamp'])
-                                    {{ \Carbon\Carbon::parse($current['deploy_timestamp'])->toAppTz()->format('M j, Y g:i A T') }}
-                                @else
-                                    <span class="text-muted">Unknown</span>
-                                @endif
-                            </td>
-                        </tr>
+                        {{-- No Deployed row. Nothing in the deploy path records a deploy
+                             TIME: scripts/deploy.sh writes a backup slot and fast-forwards the
+                             checkout, and writes no marker a request can read (measured at the
+                             deployed sha 2026-09-27). The row this replaces read deploy_timestamp,
+                             which both VersionService return paths set to null, so it displayed
+                             "Unknown" for every user on every deploy -- a row that can never hold
+                             a value reads as a broken page rather than an absent feature. Do not
+                             restore it from now() or from a file mtime: the first claims a deploy
+                             time it never measured (the reason the old key was renamed read_at),
+                             and a ref mtime moves for a fetch as well as a deploy. It needs the
+                             deploy to write the fact first. Commit Date above is a different
+                             question and is answered from the commit object. --}}
                         <tr>
                             <th class="text-muted">PHP</th>
                             <td>{{ PHP_VERSION }}</td>

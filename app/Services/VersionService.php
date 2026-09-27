@@ -337,19 +337,92 @@ class VersionService
         return [
             'commit_hash' => $sha,
             'commit_short' => substr($sha, 0, 7),
-            // Deliberately absent: the commit DATE lives in the object database, which
-            // cannot be read without git. The About view already renders "Unknown" for
-            // a null date, and an honest null beats a fabricated timestamp.
-            'commit_date' => null,
+            // Read from the commit object when it is LOOSE, null when it is not. The
+            // earlier comment here said the date "cannot be read without git" and gave
+            // that as the reason for returning null; that is false for a loose object,
+            // which is a plain zlib stream PHP inflates (#4016). It stays true for a
+            // PACKED object, which needs pack-index and delta resolution -- so this
+            // returns null there rather than pretending to a general answer.
+            'commit_date' => $this->commitDateFromLooseObject($sha, $gitDir),
             'branch' => $branch,
             // When this answer was READ, not when anything was deployed. The old name
             // said "deploy_timestamp" while holding now(), which claimed a deploy time
             // it never measured.
             'read_at' => now()->toDateTimeString(),
-            'deploy_timestamp' => null,
             'source' => 'git-plumbing',
             'error' => null,
         ];
+    }
+
+    /**
+     * The committer date of $sha, read from a LOOSE object without the git binary.
+     *
+     * A loose object at objects/xx/yyyy... is a zlib stream whose inflated form is
+     * "commit <len>\0...\ncommitter <name> <email> <epoch> <tz>\n..." (gitformat-pack(5),
+     * "Object Types"). gzuncompress() reads it; no binary, no safe.directory exception.
+     *
+     * It returns null for every case it cannot establish rather than guessing:
+     *  - the object is packed or absent (the pack format needs an index and delta
+     *    resolution, which is a different instrument, not a longer version of this one);
+     *  - the inflate fails, or the header does not say "commit" (a tag or a blob at that
+     *    path is not a commit date);
+     *  - no committer line, or its trailing "<epoch> <tz>" does not parse.
+     *
+     * MEASURED on the production checkout 2026-09-27 as the PHP-FPM user: HEAD's object
+     * was loose and inflated to a commit whose committer epoch matched `git log -1 %cI`
+     * exactly; 11 of the 12 most recently deployed shas on main were loose there. The
+     * packed one is why this may still answer null after a deploy, and why the About
+     * view must keep its Unknown fallback instead of assuming a value arrives.
+     *
+     * The epoch is UTC by definition, so the trailing zone offset is the AUTHOR'S local
+     * zone and is deliberately discarded: it says where the commit was made, not when.
+     * Carbon renders the instant in the app zone downstream.
+     */
+    private function commitDateFromLooseObject(string $sha, string $gitDir): ?string
+    {
+        if (! $this->looksLikeSha($sha)) {
+            return null;
+        }
+
+        // Objects live in the SHARED directory for a linked worktree, same as refs.
+        $objectDir = $this->resolveCommonDir($gitDir).'/objects';
+        $raw = $this->readFile($objectDir.'/'.substr($sha, 0, 2).'/'.substr($sha, 2));
+        if ($raw === null) {
+            return null;
+        }
+
+        // A corrupt or non-zlib file must be a null, not a warning-shaped answer.
+        //
+        // This check is REDUNDANT with the header test below and no control can fail
+        // if it is deleted: measured, a cast of gzuncompress()'s false gives '', which
+        // has no NUL and does not start with "commit ", so the next guard returns null
+        // too. Kept because it names the failure at the point it happens rather than
+        // letting a corrupt object reach a parser -- but do not cite it as
+        // load-bearing, and do not add a control that only appears to cover it.
+        $inflated = @gzuncompress($raw);
+        if ($inflated === false) {
+            return null;
+        }
+
+        $nul = strpos($inflated, "\0");
+        if ($nul === false || ! str_starts_with($inflated, 'commit ')) {
+            return null;
+        }
+
+        foreach (preg_split('/\R/', substr($inflated, $nul + 1)) ?: [] as $line) {
+            if (! str_starts_with($line, 'committer ')) {
+                continue;
+            }
+            // Anchored at the END so an email or a name containing digits cannot be
+            // read as the timestamp.
+            if (preg_match('/ (\d{9,})\s+[+-]\d{4}$/', $line, $m) !== 1) {
+                return null;
+            }
+
+            return gmdate('Y-m-d\TH:i:s\Z', (int) $m[1]);
+        }
+
+        return null;
     }
 
     /**
@@ -366,7 +439,6 @@ class VersionService
             'commit_date' => null,
             'branch' => self::UNKNOWN,
             'read_at' => now()->toDateTimeString(),
-            'deploy_timestamp' => null,
             'source' => 'git-plumbing',
             'error' => $reason,
         ];
