@@ -286,7 +286,7 @@ set -eo pipefail
 cd "$1"
 TARGET="$2"
 
-# ONE deploy at a time on this host (card 8qSgt6MA). Two seats each ran this
+# ONE deploy at a time into this checkout (card 8qSgt6MA). Two seats each ran this
 # script for the same sha 61 s apart on 2026-09-27; both gate passes were
 # legitimate, so nothing upstream of here refused the second one. The claim log
 # is supposed to stop a second worker on one leg, and it depends on each seat
@@ -304,13 +304,26 @@ TARGET="$2"
 # the one its gate measured. Refusing is the honest answer — the operator can
 # re-read prod and decide.
 #
-# /run/lock is tmpfs, so a host reboot cannot strand a stale lock file. fd 9 is
-# closed by the shell on exit, so the lock is released on any exit path,
-# including the refusals below and a SIGKILL.
-DEPLOY_LOCK="/run/lock/soundit-psa-deploy.lock"
+# The lock file sits in this checkout's own git dir and is created 0600, so
+# creating, opening or holding it needs an account that can already write that
+# git dir. A fixed name in world-writable /run/lock would let any local account,
+# www-data included, hold or pre-create it and refuse every deploy. The file is
+# left on disk after a run. That is harmless: the flock lives on the open file
+# description, not on the file, and ends when the last descriptor on it closes.
+#
+# Only THIS shell holds fd 9. Everything after the lock runs in the
+# `( ... ) 9>&-` subshell below, so no child inherits the descriptor: not git's
+# detached auto-gc/maintenance, not mysqldump, composer or artisan. Nothing can
+# keep the lock held after this shell has gone, on any exit path including a
+# SIGKILL. The flip side: if this shell is SIGKILLed mid-run, the lock is
+# released even while an orphaned child is still working.
+DEPLOY_LOCK="$(git rev-parse --absolute-git-dir)/soundit-psa-deploy.lock"
+_DEPLOY_UMASK="$(umask)"
+umask 077
 exec 9>"$DEPLOY_LOCK"
+umask "$_DEPLOY_UMASK"
 if ! flock -n 9; then
-  echo "  ERROR: another deploy is already running on this host ($DEPLOY_LOCK is held)." >&2
+  echo "  ERROR: another deploy of this checkout is already running ($DEPLOY_LOCK is held)." >&2
   echo "  Refusing rather than queueing: by the time a queued run acquired the lock," >&2
   echo "  the checkout would no longer be the one its review gate measured." >&2
   echo "  Wait for the running deploy to finish, then re-read prod HEAD and decide whether" >&2
@@ -318,6 +331,9 @@ if ! flock -n 9; then
   exit 3
 fi
 
+# Not re-indented, to keep the diff reviewable. Closes at `) 9>&-` just before REMOTE.
+# Under set -e, a nonzero exit in here ends the parent with the same code.
+(
 echo "  Fetching origin..."
 git fetch --prune origin
 
@@ -441,6 +457,7 @@ echo "  Fixing storage permissions..."
 chown -R www-data:www-data storage bootstrap/cache
 
 echo "  Done!"
+) 9>&-
 REMOTE
 
 echo ""
