@@ -340,8 +340,8 @@ class VersionService
             // Read from the commit object when it is LOOSE, null when it is not. The
             // earlier comment here said the date "cannot be read without git" and gave
             // that as the reason for returning null; that is false for a loose object,
-            // which is a plain zlib stream PHP inflates (#4016). It stays true for a
-            // PACKED object, which needs pack-index and delta resolution -- so this
+            // which is a plain zlib stream PHP inflates (#4016). A packed object needs
+            // pack-index and delta resolution, which this reader does not do, so it
             // returns null there rather than pretending to a general answer.
             'commit_date' => $this->commitDateFromLooseObject($sha, $gitDir),
             'branch' => $branch,
@@ -358,8 +358,8 @@ class VersionService
      * The committer date of $sha, read from a LOOSE object without the git binary.
      *
      * A loose object at objects/xx/yyyy... is a zlib stream whose inflated form is
-     * "commit <len>\0...\ncommitter <name> <email> <epoch> <tz>\n..." (gitformat-pack(5),
-     * "Object Types"). gzuncompress() reads it; no binary, no safe.directory exception.
+     * "commit <len>\0...\ncommitter <name> <email> <epoch> <tz>\n...". gzuncompress()
+     * reads it; no binary, no safe.directory exception.
      *
      * It returns null for every case it cannot establish rather than guessing:
      *  - the object is packed or absent (the pack format needs an index and delta
@@ -374,9 +374,9 @@ class VersionService
      * packed one is why this may still answer null after a deploy, and why the About
      * view must keep its Unknown fallback instead of assuming a value arrives.
      *
-     * The epoch is UTC by definition, so the trailing zone offset is the AUTHOR'S local
-     * zone and is deliberately discarded: it says where the commit was made, not when.
-     * Carbon renders the instant in the app zone downstream.
+     * The epoch is UTC by definition, so the trailing zone offset on the committer line
+     * is deliberately discarded: it says where the commit was made, not when. Carbon
+     * renders the instant in the app zone downstream.
      */
     private function commitDateFromLooseObject(string $sha, string $gitDir): ?string
     {

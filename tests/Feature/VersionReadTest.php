@@ -375,9 +375,9 @@ class VersionReadTest extends TestCase
 
     public function test_the_committer_zone_offset_does_not_shift_the_instant(): void
     {
-        // The epoch is UTC by definition and the trailing offset is the author's local
-        // zone. A reader that applied it would move a real instant by hours -- the
-        // wrong-value hazard this row is allowed to take on at all only because the
+        // The epoch is UTC by definition and the trailing offset on the committer line
+        // is discarded. A reader that applied it would move a real instant by hours --
+        // the wrong-value hazard this row is allowed to carry at all only because the
         // value is read rather than manufactured.
         $this->headAt(self::SHA_A);
         $this->writeLooseCommit(self::SHA_A, 1790485588, '-0700');
@@ -388,7 +388,7 @@ class VersionReadTest extends TestCase
     public function test_a_packed_commit_object_reports_no_date_rather_than_a_wrong_one(): void
     {
         // MEASURED on production 2026-09-27: 11 of the 12 most recently deployed shas
-        // were loose, and one was not. So this is the reachable case after a gc, not a
+        // were loose, and one was not. So the not-loose case is reachable rather than
         // hypothetical, and it is why the About view keeps its Unknown fallback.
         $this->headAt(self::SHA_A);   // ref resolves; NO object written
 
