@@ -130,6 +130,13 @@ class SendReplyTool
             return "Left ticket #{$ticket->id} (nothing unaddressed to reply to).";
         }
 
+        // A contained client reply is counted above but cannot be answered: the drafter's
+        // context excludes it, and a run recorded now would mark it addressed for good once
+        // staff verify it (c1:v2:1). Wait for verification instead of drafting blind.
+        if ($this->hasContainedClientReplySinceLastDraft($ticket)) {
+            return "Left ticket #{$ticket->id} (a client message awaits staff verification; no reply drafted).";
+        }
+
         $body = null;
         $to = null;
         $tokensUsed = 0;
@@ -273,5 +280,23 @@ class SendReplyTool
         return $latestReplyRun === null
             || $latestReplyRun->created_at === null
             || $latestReplyRun->created_at->lt($latestClientReply->noted_at);
+    }
+
+    /** True when an unverified web-form client reply is newer than our latest reply draft. */
+    private function hasContainedClientReplySinceLastDraft(Ticket $ticket): bool
+    {
+        $since = TechnicianRun::where('ticket_id', $ticket->id)
+            ->where('action_type', 'send_reply')
+            ->latest('created_at')
+            ->value('created_at');
+
+        return $ticket->notes()->withoutTrashed()
+            ->where('note_type', NoteType::Reply->value)
+            ->where('ai_authored', false)
+            ->where('who_type', WhoType::EndUser->value)
+            ->where('contact_intake_origin', true)
+            ->whereNull('contact_intake_verified_at')
+            ->when($since !== null, fn ($q) => $q->where('noted_at', '>', $since))
+            ->exists();
     }
 }
