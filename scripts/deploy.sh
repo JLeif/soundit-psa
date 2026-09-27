@@ -286,6 +286,62 @@ set -eo pipefail
 cd "$1"
 TARGET="$2"
 
+# ONE deploy at a time into this checkout (card 8qSgt6MA). Two seats each ran this
+# script for the same sha 61 s apart on 2026-09-27; both gate passes were
+# legitimate, so nothing upstream of here refused the second one. The claim log
+# is supposed to stop a second worker on one leg, and it depends on each seat
+# remembering to read it before acting — which is exactly what failed. So the
+# exclusion is enforced here, where every seat and every caller has to pass
+# through it, rather than in a habit.
+#
+# Taken BEFORE the fetch, not merely before the merge: the ff-only decision and
+# the tracked/untracked blocker checks below all read a repo state a concurrent
+# run is moving, so a lock held only over the mutating half would still let two
+# runs interleave their reads and act on each other's half-applied state.
+#
+# -n (fail immediately), never -w: a queued second deploy would wake up and redo
+# work the first one has already finished, against a checkout that is no longer
+# the one its gate measured. Refusing is the honest answer — the operator can
+# re-read prod and decide.
+#
+# The lock file sits in this checkout's own git dir and is created 0600, so
+# creating, opening or holding it needs an account that can already write that
+# git dir. A fixed name in world-writable /run/lock would let any local account,
+# www-data included, hold or pre-create it and refuse every deploy. The file is
+# left on disk after a run. That is harmless: the flock lives on the open file
+# description, not on the file, and ends when the last descriptor on it closes.
+#
+# fd 9 is held by THIS shell, and this shell is also the only thing that issues
+# the deploy steps. They run in the `{ ... } 9>&-` group below, which is in this
+# same process and not a subshell, so no separate process can be killed and
+# leave the rest of the deploy running unlocked. For the length of the group,
+# bash moves fd 9 onto a saved descriptor that it marks close-on-exec. This
+# shell keeps the lock, and no program it runs inherits it: not git (so not
+# git's detached auto-gc/maintenance either), not mysqldump, composer or
+# artisan. A command substitution or pipeline stage that bash forks without
+# exec does carry the saved copy, and it holds the lock only until that step
+# ends. Nothing can keep the lock held once the deploy is over. If this shell
+# dies mid-run, even by SIGKILL, it issues no further step. The lock is gone by
+# the time the step then in flight finishes, and that one step may finish
+# unlocked.
+DEPLOY_LOCK="$(git rev-parse --absolute-git-dir)/soundit-psa-deploy.lock"
+_DEPLOY_UMASK="$(umask)"
+umask 077
+exec 9>"$DEPLOY_LOCK"
+umask "$_DEPLOY_UMASK"
+if ! flock -n 9; then
+  echo "  ERROR: another deploy of this checkout is already running ($DEPLOY_LOCK is held)." >&2
+  echo "  Refusing rather than queueing: by the time a queued run acquired the lock," >&2
+  echo "  the checkout would no longer be the one its review gate measured." >&2
+  echo "  Wait for the running deploy to finish, then re-read prod HEAD and decide whether" >&2
+  echo "  this deploy is still needed. Nothing was fetched, backed up, pruned, or changed." >&2
+  exit 3
+fi
+
+# Not re-indented, to keep the diff reviewable. Closes at `} 9>&-` just before REMOTE.
+# A brace group and not a subshell: every step runs in the shell that holds the
+# lock. `exit` and set -e in here end that shell directly, with the same code.
+{
 echo "  Fetching origin..."
 git fetch --prune origin
 
@@ -409,6 +465,7 @@ echo "  Fixing storage permissions..."
 chown -R www-data:www-data storage bootstrap/cache
 
 echo "  Done!"
+} 9>&-
 REMOTE
 
 echo ""
