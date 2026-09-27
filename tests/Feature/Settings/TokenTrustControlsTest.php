@@ -117,7 +117,8 @@ class TokenTrustControlsTest extends TestCase
         $this->page($row)->assertSee('Tool grants and execution modes')->assertSee('Configure in Tools')
             ->assertSee('A staged-only grant cannot execute immediately; immediate grants do not bypass confirmation or tool-specific restrictions.');
         $ticket = Ticket::factory()->create(['status' => TicketStatus::New]);
-        $args = ['ticket_id' => $ticket->id, 'reason' => 'Synthetic mode guard.', 'resolution_summary' => 'Synthetic resolution.', 'confirm' => true, 'staged' => false];
+        // No `confirm`: close_ticket never declared it, and it now refuses undeclared keys (card crRnwaQJ).
+        $args = ['ticket_id' => $ticket->id, 'reason' => 'Synthetic mode guard.', 'resolution_summary' => 'Synthetic resolution.', 'staged' => false];
         $denied = $this->callTool($plain, 'add_ticket_note', $args + ['client_id' => $ticket->client_id, 'body' => 'Not granted.'])->assertOk();
         $this->assertTrue((bool) $denied->json('result.isError'));
         $this->assertStringContainsString('Tool not allowed', $denied->json('result.content.0.text'));
