@@ -439,6 +439,25 @@ class VersionReadTest extends TestCase
         $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
     }
 
+    public function test_a_committer_name_containing_byte_0x85_still_yields_the_date(): void
+    {
+        // Å is C3 85 and Cyrillic х is D1 85 in UTF-8. A split on PCRE's \R without
+        // /u treats the lone 0x85 as a line break, cuts the committer line mid-name,
+        // and the anchored match then answers null on a healthy loose commit.
+        $name = "\u{00C5}sa Berg \u{0445}";
+        $this->assertStringContainsString("\x85", $name, 'precondition: the name carries the NEL byte');
+
+        $this->headAt(self::SHA_A);
+        $this->writeLooseCommit(
+            self::SHA_A,
+            1790485588,
+            '+0200',
+            "committer {$name} <asa@example.com> 1790485588 +0200"
+        );
+
+        $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
+    }
+
     public function test_a_commit_with_no_committer_line_reports_no_date(): void
     {
         $this->headAt(self::SHA_A);

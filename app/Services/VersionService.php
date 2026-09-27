@@ -409,7 +409,13 @@ class VersionService
             return null;
         }
 
-        foreach (preg_split('/\R/', substr($inflated, $nul + 1)) ?: [] as $line) {
+        // Split on "\n" only: git separates header lines with LF alone, and names are
+        // raw bytes. Without /u, PCRE's \R also matches the lone byte 0x85 (NEL), which
+        // is the UTF-8 continuation byte of Å, ą, х and others -- it would cut the
+        // committer line mid-name and turn a healthy commit into a null date. /u is not
+        // the fix either: a name in a legacy encoding is not valid UTF-8 and would fail
+        // the split outright.
+        foreach (explode("\n", substr($inflated, $nul + 1)) as $line) {
             if (! str_starts_with($line, 'committer ')) {
                 continue;
             }
