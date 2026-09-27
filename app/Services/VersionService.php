@@ -366,7 +366,8 @@ class VersionService
      *    resolution, which is a different instrument, not a longer version of this one);
      *  - the inflate fails, or the header does not say "commit" (a tag or a blob at that
      *    path is not a commit date);
-     *  - no committer line, or its trailing "<epoch> <tz>" does not parse.
+     *  - no committer line before the blank line that ends the header, or its trailing
+     *    "<epoch> <tz>" does not parse.
      *
      * MEASURED on the production checkout 2026-09-27 as the PHP-FPM user: HEAD's object
      * was loose and inflated to a commit whose committer epoch matched `git log -1 %cI`
@@ -416,6 +417,13 @@ class VersionService
         // the fix either: a name in a legacy encoding is not valid UTF-8 and would fail
         // the split outright.
         foreach (explode("\n", substr($inflated, $nul + 1)) as $line) {
+            // The header ends at the first blank line. Without this stop the commit
+            // MESSAGE is scanned too, and a body line beginning "committer " is read as
+            // the header.
+            if ($line === '') {
+                return null;
+            }
+
             if (! str_starts_with($line, 'committer ')) {
                 continue;
             }

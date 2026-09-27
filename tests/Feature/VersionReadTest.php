@@ -38,6 +38,21 @@ class VersionReadTest extends TestCase
 
     protected function tearDown(): void
     {
+        // #4096: $fixture is uninitialised if setUp failed before assigning it, and
+        // PHPUnit calls tearDown anyway. isset() is false for an uninitialised typed
+        // property.
+        if (! isset($this->fixture) || $this->fixture === '') {
+            parent::tearDown();
+
+            return;
+        }
+
+        // Remove the symlink before the recursive delete: the fixture holds a link to
+        // the repository's real public/.
+        if (is_link($this->fixture.'/public')) {
+            unlink($this->fixture.'/public');
+        }
+
         exec('rm -rf '.escapeshellarg($this->fixture));
         parent::tearDown();
     }
@@ -467,6 +482,79 @@ class VersionReadTest extends TestCase
         file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
 
         $this->assertNull($this->service()->current()['commit_date']);
+    }
+
+    public function test_a_committer_line_in_the_message_is_not_read_as_the_header(): void
+    {
+        // #4095. The scan used to walk the whole object, so a MESSAGE line beginning
+        // "committer ..." was taken as the header and produced a WRONG VALUE rather than
+        // an Unknown.
+        //
+        // This object has no committer header at all, so null is its only correct
+        // answer. No local commit path produces one; an unverified fetch can.
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            ."author Someone <someone@example.com> 1790485588 +0000\n"
+            ."\n"
+            ."committer bot <b@x> 1700000000 +0000\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
+
+        $date = $this->service()->current()['commit_date'];
+
+        $this->assertNull($date, 'the header ends at the blank line; the message is not the header');
+    }
+
+    public function test_a_real_committer_header_is_still_read_when_the_message_also_has_one(): void
+    {
+        // Positive control for the stop above: stopping at the blank line must not make
+        // the reader miss the genuine header that precedes it. Without this, deleting the
+        // whole loop body would also pass the test above.
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            ."author Someone <someone@example.com> 1790485588 +0000\n"
+            ."committer Someone <someone@example.com> 1790485588 +0000\n"
+            ."\n"
+            ."committer bot <b@x> 1700000000 +0000\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
+
+        $this->assertSame('2026-09-27T05:06:28Z', $this->service()->current()['commit_date']);
+    }
+
+    public function test_teardown_does_not_read_the_fixture_path_before_setup_assigned_it(): void
+    {
+        // #4096. $fixture is uninitialised if setUp failed before assigning it, and
+        // PHPUnit calls tearDown anyway. Asserted on the property of the guard rather
+        // than by making setUp throw.
+        $fresh = new \ReflectionClass(self::class);
+        $uninitialised = $fresh->newInstanceWithoutConstructor();
+        $prop = new \ReflectionProperty(self::class, 'fixture');
+
+        $this->assertSame('string', (string) $prop->getType(), 'a typed property is what makes this fail');
+        $this->assertFalse(
+            $prop->isInitialized($uninitialised),
+            'precondition: the property really is uninitialised before setUp assigns it'
+        );
+
+        // The guarded tearDown must not throw on that object. Unguarded, this line is
+        // the Error the issue describes.
+        $tearDown = new \ReflectionMethod(self::class, 'tearDown');
+        $tearDown->setAccessible(true);
+
+        try {
+            $tearDown->invoke($uninitialised);
+        } catch (\Error $e) {
+            $this->fail('tearDown read the fixture path before setUp assigned it: '.$e->getMessage());
+        } catch (\Throwable $e) {
+            // Anything from parent::tearDown() on a half-built object is not this defect;
+            // only the typed-property Error is.
+            $this->assertStringNotContainsString('must not be accessed before initialization', $e->getMessage());
+        }
+
+        $this->assertTrue(true, 'the guard returned without reading the unset path');
     }
 
     public function test_a_linked_worktree_reads_its_commit_object_through_commondir(): void
