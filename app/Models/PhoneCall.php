@@ -216,6 +216,17 @@ class PhoneCall extends Model
         return $query->whereNull('client_id')->whereNull('followed_up_at');
     }
 
+    /**
+     * Calls whose caller is resolved to a client and a contact but which are
+     * attached to no ticket (card 0JJon0z4). Read-only listing filter.
+     */
+    public function scopeResolvedWithoutTicket(Builder $query): Builder
+    {
+        return $query->whereNotNull('client_id')
+            ->whereNotNull('person_id')
+            ->whereNull('ticket_id');
+    }
+
     public function scopeForClient(Builder $query, int $clientId): Builder
     {
         return $query->where('client_id', $clientId);
