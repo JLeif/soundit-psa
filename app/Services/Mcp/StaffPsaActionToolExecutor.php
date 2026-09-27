@@ -389,6 +389,11 @@ class StaffPsaActionToolExecutor
             return $error;
         }
 
+        // Before ticketForClient() and before every write (Jeeves, crRnwaQJ 9/26 18:07 PT).
+        if ($error = $this->refuseUndeclaredCloseArguments('close_ticket', $arguments)) {
+            return $error;
+        }
+
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
             return $ticket;
@@ -485,6 +490,11 @@ class StaffPsaActionToolExecutor
      */
     private function stageClose(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
     {
+        // Before ticketForClient() and before every write (Jeeves, crRnwaQJ 9/26 18:07 PT).
+        if ($error = $this->refuseUndeclaredCloseArguments('stage_close_ticket', $arguments)) {
+            return $error;
+        }
+
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
             return $ticket;
@@ -3081,6 +3091,65 @@ class StaffPsaActionToolExecutor
             'run_id' => $run->id,
             'message' => 'Asset merge proposed for cockpit approval.',
         ];
+    }
+
+    /**
+     * Allow-list for close_ticket / stage_close_ticket (card crRnwaQJ). Returns a refusal naming
+     * every key the tool's schema does not declare, or null. Both callers run it before their
+     * ticketForClient() lookup and before any write, so a refused call writes nothing. Because
+     * ticketForClient() is what links the call to its ticket, the mcp_audit_logs row of a
+     * refused call has a null ticket_id column; its arguments still carry ticket_id. Without
+     * this check, a misnamed key such as `resolution` was only caught because
+     * resolution_summary was then missing, and the refusal named the missing key, never the
+     * misnamed one.
+     *
+     * The accepted set is the McpToolRegistry schema's properties for the same tool name,
+     * not a second list here. `staged` is not among them: McpToolModes adds it to the
+     * published schema, and McpStaffController::callTool() unsets it before dispatch on both
+     * routes here (the stage_close_ticket alias and the stageable close_ticket), as it does
+     * client_id and execute_at. The message lists `staged` because the MCP caller may send
+     * it. A `staged` key that does reach this method came from a caller that bypassed that
+     * boundary, so it is refused like any other key and is then left out of the accepted list.
+     *
+     * Only key NAMES are echoed, capped in count and length. Values are never read.
+     *
+     * @param  array<array-key, mixed>  $arguments
+     * @return array{error: string}|null
+     */
+    private function refuseUndeclaredCloseArguments(string $tool, array $arguments): ?array
+    {
+        $definition = $tool === 'stage_close_ticket'
+            ? \App\Support\McpToolRegistry::stageCloseTicketTool()
+            : \App\Support\McpToolRegistry::closeTicketTool();
+        $declared = array_values(array_filter(
+            array_keys((array) ($definition['input_schema']['properties'] ?? [])),
+            'is_string',
+        ));
+
+        $unknown = [];
+        foreach (array_keys($arguments) as $key) {
+            if (! in_array((string) $key, $declared, true)) {
+                $unknown[] = (string) $key;
+            }
+        }
+        if ($unknown === []) {
+            return null;
+        }
+        sort($unknown);
+
+        $maxNames = 10;
+        $maxNameLength = 64;
+        $named = array_map(
+            static fn (string $key): string => mb_substr($key, 0, $maxNameLength),
+            array_slice($unknown, 0, $maxNames),
+        );
+        $more = count($unknown) - count($named);
+
+        $accepted = in_array('staged', $unknown, true) ? $declared : [...$declared, 'staged'];
+
+        return ['error' => 'Unsupported argument(s): '.implode(', ', $named)
+            .($more > 0 ? " (+{$more} more)" : '')
+            .". {$tool} accepts only: ".implode(', ', $accepted).'.'];
     }
 
     /** @return array<string, string>|null */
