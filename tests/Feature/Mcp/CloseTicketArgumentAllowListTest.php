@@ -355,6 +355,34 @@ class CloseTicketArgumentAllowListTest extends TestCase
         $this->assertNothingWritten($ticket);
     }
 
+    public function test_boundary_keys_on_a_row_refused_before_dispatch_are_not_named_as_unknown(): void
+    {
+        // The 'Tool not allowed' row is audited before callTool() unsets client_id and
+        // execute_at. Those are boundary keys, not misnamed ones, so only `resolution` is named.
+        $token = $this->token(['find_staff']);
+        $ticket = $this->quietTicket();
+
+        $response = $this->callTool($token, 'close_ticket', [
+            'ticket_id' => $ticket->id,
+            'client_id' => $ticket->client_id,
+            'execute_at' => '2026-10-01T09:00:00Z',
+            'staged' => false,
+            'resolution_summary' => 'Fixed.',
+            'reason' => 'Client confirmed.',
+            'resolution' => self::CLIENT_TEXT,
+        ]);
+
+        $response->assertOk();
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('Tool not allowed', $this->text($response));
+        $audit = $this->lastAudit('close_ticket');
+        $this->assertSame('error', $audit->status);
+        $this->assertSame(['resolution'], $audit->arguments['unknown_keys'] ?? null);
+        $this->assertSame(1, $audit->arguments['unknown_key_count'] ?? null);
+        $this->assertStringNotContainsString('CLIENT-TEXT-8f3a', json_encode($audit->arguments));
+        $this->assertNothingWritten($ticket);
+    }
+
     /** Nothing written: no status change, no note, no action log, no held run. */
     private function assertNothingWritten(Ticket $ticket): void
     {

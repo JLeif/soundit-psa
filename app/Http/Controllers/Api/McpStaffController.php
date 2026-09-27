@@ -1921,7 +1921,10 @@ class McpStaffController extends Controller
      * key (`resolution` for resolution_summary) showed no sign of the key. Only names are
      * kept, never values, since a value can carry client text. At most 10 names are kept,
      * each cut to 64 characters, and unknown_key_count holds the full count. The match is
-     * exact, the same as the executor's allow-list, so the audit names the same keys the
+     * exact, the same as the executor's allow-list. staged, client_id and execute_at are not
+     * counted: callTool() consumes them itself and unsets them before dispatch, but a row it
+     * refuses before those unsets (Tool not allowed, an execute_at refusal) can still carry
+     * client_id or execute_at. So on a dispatched call the audit names the same keys the
      * refusal names.
      *
      * @return array<string, mixed>
@@ -1933,7 +1936,10 @@ class McpStaffController extends Controller
         $definition = $tool === 'stage_close_ticket'
             ? McpToolRegistry::stageCloseTicketTool()
             : McpToolRegistry::closeTicketTool();
-        $declared = array_keys((array) ($definition['input_schema']['properties'] ?? []));
+        $declared = [
+            ...array_keys((array) ($definition['input_schema']['properties'] ?? [])),
+            'staged', 'client_id', 'execute_at',
+        ];
         $unknown = [];
         foreach (array_keys($arguments) as $key) {
             if (! in_array((string) $key, $declared, true)) {
