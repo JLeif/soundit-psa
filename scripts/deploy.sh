@@ -311,12 +311,19 @@ TARGET="$2"
 # left on disk after a run. That is harmless: the flock lives on the open file
 # description, not on the file, and ends when the last descriptor on it closes.
 #
-# Only THIS shell holds fd 9. Everything after the lock runs in the
-# `( ... ) 9>&-` subshell below, so no child inherits the descriptor: not git's
-# detached auto-gc/maintenance, not mysqldump, composer or artisan. Nothing can
-# keep the lock held after this shell has gone, on any exit path including a
-# SIGKILL. The flip side: if this shell is SIGKILLed mid-run, the lock is
-# released even while an orphaned child is still working.
+# fd 9 is held by THIS shell, and this shell is also the only thing that issues
+# the deploy steps. They run in the `{ ... } 9>&-` group below, which is in this
+# same process and not a subshell, so no separate process can be killed and
+# leave the rest of the deploy running unlocked. For the length of the group,
+# bash moves fd 9 onto a saved descriptor that it marks close-on-exec. This
+# shell keeps the lock, and no program it runs inherits it: not git (so not
+# git's detached auto-gc/maintenance either), not mysqldump, composer or
+# artisan. A command substitution or pipeline stage that bash forks without
+# exec does carry the saved copy, and it holds the lock only until that step
+# ends. Nothing can keep the lock held once the deploy is over. If this shell
+# dies mid-run, even by SIGKILL, it issues no further step. The lock is gone by
+# the time the step then in flight finishes, and that one step may finish
+# unlocked.
 DEPLOY_LOCK="$(git rev-parse --absolute-git-dir)/soundit-psa-deploy.lock"
 _DEPLOY_UMASK="$(umask)"
 umask 077
@@ -331,9 +338,10 @@ if ! flock -n 9; then
   exit 3
 fi
 
-# Not re-indented, to keep the diff reviewable. Closes at `) 9>&-` just before REMOTE.
-# Under set -e, a nonzero exit in here ends the parent with the same code.
-(
+# Not re-indented, to keep the diff reviewable. Closes at `} 9>&-` just before REMOTE.
+# A brace group and not a subshell: every step runs in the shell that holds the
+# lock. `exit` and set -e in here end that shell directly, with the same code.
+{
 echo "  Fetching origin..."
 git fetch --prune origin
 
@@ -457,7 +465,7 @@ echo "  Fixing storage permissions..."
 chown -R www-data:www-data storage bootstrap/cache
 
 echo "  Done!"
-) 9>&-
+} 9>&-
 REMOTE
 
 echo ""
