@@ -508,16 +508,9 @@ class VersionReadTest extends TestCase
 
     public function test_a_crlf_forged_object_does_not_have_its_message_read_as_the_header(): void
     {
-        // #4124. A committer-less object whose HEADER is CRLF-separated: the blank line
-        // splits to "\r", not ''. With a bare `=== ''` stop the LF-only message line
-        // below was read as the header and returned 2023-11-14T22:13:20Z.
-        //
-        // #4135: this fixture is MIXED, not CRLF-separated throughout. The header lines
-        // end "\r\n" and the message line ends in a bare "\n" — which is the shape that
-        // exercises the defect, because an all-CRLF object would leave "\r" on the
-        // message line too. Its author ident also differs from the #4095 control above,
-        // so it is not "the same object". The stop line here is "\r", which is NOT
-        // empty; the assertion message says so rather than calling it empty.
+        // #4124. Header lines end "\r\n" and the message line ends "\n", so the blank
+        // line splits to "\r" and a bare `=== ''` stop read the message as the header.
+        // #4135: mixed endings, and a different author ident from the #4095 control.
         $this->headAt(self::SHA_A);
         $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
         mkdir($dir, 0755, true);
@@ -535,14 +528,7 @@ class VersionReadTest extends TestCase
 
     public function test_a_run_of_crs_ends_the_header_in_an_lf_only_object(): void
     {
-        // #4131 + #4133. The stop is `rtrim($line, "\r") === ''`, which strips EVERY
-        // trailing CR and asks nothing about the object's line endings. So "\r\r" ends
-        // the header in an otherwise LF-only object. Nothing pinned that: the narrower
-        // `$line === '' || $line === "\r"` passed every control, and the docblock claimed
-        // a "lone" CR in a "CRLF-separated" object, both narrower than the code.
-        //
-        // Wider is the safe direction here — a line of only CRs is never a valid git
-        // header line — but it must be asserted, not assumed.
+        // #4131 + #4133. "\r\r" ends the header in an otherwise LF-only object.
         $this->headAt(self::SHA_A);
         $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
         mkdir($dir, 0755, true);
@@ -560,14 +546,8 @@ class VersionReadTest extends TestCase
 
     public function test_a_space_only_line_does_not_end_the_header(): void
     {
-        // #4133. The charlist "\r" is a deliberate choice over trim() or a bare rtrim():
-        // git CONTINUATION lines begin with a space, so a whitespace-only line is part of
-        // the header, not its end. No control pinned that, so `trim($line) === ''` and
-        // `rtrim($line) === ''` both passed all 34 tests while silently losing a
-        // committer line that follows a space-only line.
-        //
-        // This is a POSITIVE control: it asserts the date IS read, so a stop that grew
-        // too wide fails here rather than passing quietly.
+        // #4133. A space-only line does not end the header; `trim($line) === ''` and
+        // `rtrim($line) === ''` do end it there. Asserts the date IS read.
         $this->headAt(self::SHA_A);
         $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
         mkdir($dir, 0755, true);
@@ -588,10 +568,7 @@ class VersionReadTest extends TestCase
 
     public function test_a_tab_only_line_does_not_end_the_header(): void
     {
-        // #4133, the other half of the whitespace charlist: a tab-only line must not end
-        // the header either. Separate from the space case because trim() and rtrim()
-        // strip both, while the shipped "\r" charlist strips neither, and a mutant
-        // narrowed to only one of them would otherwise survive.
+        // #4133. A tab-only line does not end the header either.
         $this->headAt(self::SHA_A);
         $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
         mkdir($dir, 0755, true);
@@ -607,6 +584,29 @@ class VersionReadTest extends TestCase
             '2026-09-27T05:06:28Z',
             $this->service()->current()['commit_date'],
             'a tab-only line is not the end of the header either'
+        );
+    }
+
+    public function test_a_nul_or_vertical_tab_line_does_not_end_the_header(): void
+    {
+        // #4133. PHP's default rtrim charlist also strips "\0" and "\x0B"; neither ends
+        // the header here.
+        $this->headAt(self::SHA_A);
+        $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
+        mkdir($dir, 0755, true);
+        $body = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+            ."author A <a@x> 1790485588 +0000\n"
+            ."\0\n"
+            ."\x0B\n"
+            ."committer Someone <someone@example.com> 1790485588 +0000\n"
+            ."\n"
+            ."message body\n";
+        file_put_contents($dir.'/'.substr(self::SHA_A, 2), gzcompress('commit '.strlen($body)."\0".$body));
+
+        $this->assertSame(
+            '2026-09-27T05:06:28Z',
+            $this->service()->current()['commit_date'],
+            'a "\0"-only or "\x0B"-only line does not end the header'
         );
     }
 

@@ -366,9 +366,8 @@ class VersionService
      *    resolution, which is a different instrument, not a longer version of this one);
      *  - the inflate fails, or the header does not say "commit" (a tag or a blob at that
      *    path is not a commit date);
-     *  - no committer line before the blank line that ends the header (an empty line,
-     *    or a line of ONLY CRs — one or more, in an object of any kind), or its
-     *    trailing "<epoch> <tz>" does not parse.
+     *  - no committer line before the blank line that ends the header (a blank line:
+     *    empty, or CRs only), or its trailing "<epoch> <tz>" does not parse.
      *
      * MEASURED on the production checkout 2026-09-27 as the PHP-FPM user: HEAD's object
      * was loose and inflated to a commit whose committer epoch matched `git log -1 %cI`
@@ -426,18 +425,6 @@ class VersionService
             // "\r" as the blank line, and a bare `=== ''` does not treat that line as
             // the end of the header.
             //
-            // What this actually stops on, stated as the code behaves rather than as the
-            // motivating case (#4131): a line of only CRs, one or more, in an object of
-            // ANY kind — rtrim strips every trailing CR, and nothing here asks whether
-            // the object is CRLF-separated. So "\r\r" stops the scan in an LF-only
-            // object too. Deliberately WIDER than `$line === '' || $line === "\r"`: a
-            // CR run is never a valid git header line, so treating it as the end of the
-            // header cannot swallow a real one.
-            //
-            // The charlist is "\r" and not the default: git continuation lines begin
-            // with a SPACE, so trim() or a bare rtrim() would read " " or "\t" as the
-            // end of the header and lose a committer line that follows one. Both of
-            // those forms are pinned red by controls (#4133).
             if (rtrim($line, "\r") === '') {
                 return null;
             }
