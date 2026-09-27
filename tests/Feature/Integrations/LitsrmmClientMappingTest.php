@@ -273,8 +273,7 @@ class LitsrmmClientMappingTest extends TestCase
             // host and effective port and a different scheme. On a REMOTE host
             // every such pair is still refused, by assertTransportIsSafe() on
             // the configured base_url or on the resolved URI, so no request
-            // leaves; a remote row sees (1) only through the refusal-reason
-            // assertion in the test below. On a LOOPBACK host plain http is
+            // leaves. On a LOOPBACK host plain http is
             // exempt, the origin key is the only thing refusing the scheme
             // change, and under (1) the request leaves. The rows where it
             // leaves are a CLASS -- loopback host, same effective port,
@@ -283,9 +282,7 @@ class LitsrmmClientMappingTest extends TestCase
             // https://localhost:443 and https://[::1]:8443, each downgraded to
             // http on the same port, and the upgrade http://localhost:8443 ->
             // https://localhost:8443, all send the request. Host and port are
-            // unchanged on these rows, so under (1) it reaches the same
-            // listener in plain http: they pin parity with Guzzle's
-            // UriComparator::isCrossOrigin.
+            // unchanged on each, so under (1) it reaches the same listener.
             'a scheme downgrade on a loopback base is still a different origin' => [
                 'https://localhost:8443', 'http://localhost:8443/v1/x',
             ],
@@ -337,7 +334,7 @@ class LitsrmmClientMappingTest extends TestCase
             "endpoint {$endpoint} escaped the guard and carried the API key off the configured host");
         $this->assertNotNull($refusal, 'and the caller must be told, not silently handed an empty result');
 
-        // WHICH guard refused (#3556). request() runs five other guards before
+        // WHICH guard refused (#3556). request() runs other guards before
         // the origin check and every one throws this same exception class, so
         // a bare "it threw" would stay green if any of them started refusing
         // these rows first. The origin guard is the one this data set pins.
@@ -371,9 +368,9 @@ class LitsrmmClientMappingTest extends TestCase
 
     /**
      * The same-origin LOOPBACK control (#3562). The ordinary-endpoint control
-     * above uses a remote https base, so a guard that refused every loopback
-     * base would pass the whole suite while refusing a same-host deployment
-     * outright. This is the loopback half of that pair.
+     * above uses a remote https base, so before this PR a guard that refused
+     * every loopback base passed this whole file while refusing a same-host
+     * deployment outright. This is the loopback half of that pair.
      */
     public function test_a_same_origin_endpoint_on_a_loopback_base_still_goes_out(): void
     {
@@ -894,9 +891,7 @@ class LitsrmmClientMappingTest extends TestCase
      * because of the code.
      *
      * THE HTTP IS FAKED (#3525). Without a handler, http() builds a real Guzzle
-     * client, so a guard regression here sends a credentialed request to a
-     * real resolver and the test fails on a network error instead of an
-     * assertion. The queued 200 means a leaked request SUCCEEDS and is
+     * client. The queued 200 means a leaked request SUCCEEDS and is
      * recorded, and the history count says so before anything else is read.
      */
     public function test_a_refused_transport_never_composed_the_credential(): void
