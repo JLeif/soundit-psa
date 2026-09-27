@@ -181,7 +181,11 @@ final class LitsrmmDevice
     /**
      * ISO 8601 UTC, always ending in `Z`, fractional seconds OPTIONAL. Both
      * forms occur in the same field in the vendor's capture
-     * (`2026-09-22T03:47:40Z` and `2026-09-22T18:20:53.331Z`). Anything else,
+     * (`2026-09-22T03:47:40Z` and `2026-09-22T18:20:53.331Z`). The relayed
+     * notes set no limit on how many fraction digits appear, so any number is
+     * accepted. Digits past the sixth are dropped (truncated, not rounded),
+     * because microseconds are the finest precision DateTimeImmutable holds.
+     * Anything else,
      * including an offset form or a calendar-invalid date that PHP would
      * silently roll over, is refused.
      */
@@ -194,11 +198,11 @@ final class LitsrmmDevice
         }
 
         if (! is_string($value)
-            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/', $value, $m) !== 1) {
+            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/', $value, $m) !== 1) {
             throw new LitsrmmClientException("LITSRMM device row has an unparseable {$key}");
         }
 
-        $fraction = str_pad($m[2] ?? '', 6, '0');
+        $fraction = str_pad(substr($m[2] ?? '', 0, 6), 6, '0');
         $parsed = DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s.u', $m[1].'.'.$fraction, new DateTimeZone('UTC'));
         $errors = DateTimeImmutable::getLastErrors();
 

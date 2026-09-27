@@ -31,7 +31,8 @@ class LitsrmmDeviceSyncTest extends TestCase
 
     private array $history = [];
 
-    private const TOKEN = 'test-token-value';
+    /** A placeholder, not a credential: the fake transport never forwards it anywhere. */
+    private const FAKE_BEARER = 'fake-litsrmm-bearer-not-a-credential';
 
     protected function setUp(): void
     {
@@ -39,7 +40,7 @@ class LitsrmmDeviceSyncTest extends TestCase
 
         // request() re-reads live Settings before every call, so the fake
         // integration has to be configured and switched on.
-        Setting::setEncrypted('litsrmm_api_key', self::TOKEN);
+        Setting::setEncrypted('litsrmm_api_key', self::FAKE_BEARER);
         Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
     }
 
@@ -59,7 +60,7 @@ class LitsrmmDeviceSyncTest extends TestCase
         $stack->push(Middleware::history($this->history));
 
         return new LitsrmmClient([
-            'api_key' => self::TOKEN,
+            'api_key' => self::FAKE_BEARER,
             'base_url' => 'https://litsrmm.test',
             'handler' => $stack,
             'request_timeout' => 5,
@@ -108,7 +109,7 @@ class LitsrmmDeviceSyncTest extends TestCase
         $this->assertSame('GET', $request->getMethod());
         $this->assertSame('/v1/devices', $request->getUri()->getPath());
         $this->assertSame(['limit' => '100'], $this->query(0), 'first page: default limit, and NO cursor');
-        $this->assertSame('Bearer '.self::TOKEN, $request->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer '.self::FAKE_BEARER, $request->getHeaderLine('Authorization'));
     }
 
     public function test_the_normal_nulls_in_the_capture_are_not_logged(): void
@@ -335,7 +336,7 @@ class LitsrmmDeviceSyncTest extends TestCase
                 $this->assertSame($status, $e->getCode(), "the refusal carries the HTTP status {$status}");
                 $this->assertStringContainsString("({$status})", $e->getMessage());
                 $this->assertStringContainsString($meaning, $e->getMessage());
-                $this->assertStringNotContainsString(self::TOKEN, $e->getMessage());
+                $this->assertStringNotContainsString(self::FAKE_BEARER, $e->getMessage());
                 $seen[$status] = $e->getMessage();
             }
         }

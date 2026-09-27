@@ -140,6 +140,26 @@ class LitsrmmDeviceParserTest extends TestCase
         ];
     }
 
+    #[DataProvider('longFractions')]
+    public function test_a_fraction_longer_than_microseconds_is_truncated_not_refused(string $value, string $expected): void
+    {
+        // The relayed notes set no limit on fraction digits. Six is PHP's
+        // limit, not the vendor's, so extra digits are dropped rather than
+        // failing the row and, with it, the whole walk.
+        $device = LitsrmmDevice::fromArray(self::row(0, ['lastSeen' => $value]));
+
+        $this->assertSame($expected, $device->lastSeen?->format('Y-m-d\TH:i:s.u\Z'));
+    }
+
+    public static function longFractions(): array
+    {
+        return [
+            'six digits' => ['2026-09-24T01:00:50.123456Z', '2026-09-24T01:00:50.123456Z'],
+            'seven digits (.NET round-trip form)' => ['2026-09-22T18:20:53.3310000Z', '2026-09-22T18:20:53.331000Z'],
+            'nine digits, truncated not rounded' => ['2026-09-24T01:00:50.123456789Z', '2026-09-24T01:00:50.123456Z'],
+        ];
+    }
+
     // ---- point 4: retired devices are listed, retiredAt shape is PROPOSED ----
 
     public function test_a_retired_device_parses_and_exposes_its_state(): void
