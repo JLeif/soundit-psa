@@ -706,6 +706,15 @@ PROMPT;
      */
     private function matchToExistingTicket(Email $email): ?Ticket
     {
+        // A held form ticket is contained as a whole: no inbound email threads onto it, by
+        // conversation, header or a guessed [T-id], until staff verify it (contract-replacement:4).
+        $ticket = $this->matchToExistingTicketUnfiltered($email);
+
+        return $ticket?->isUnverifiedContactIntake() ? null : $ticket;
+    }
+
+    private function matchToExistingTicketUnfiltered(Email $email): ?Ticket
+    {
         // 1. conversation_id — same Graph conversation thread
         if ($email->conversation_id) {
             $match = Email::where('conversation_id', $email->conversation_id)
@@ -838,7 +847,7 @@ PROMPT;
             // own substance/idempotency logic (Task 10) decides whether to actually draft.
             // afterCommit: creation now runs inside the email-row transaction, and a
             // worker must never pick this job up for a ticket a rollback removed.
-            if (\App\Support\TechnicianConfig::enabled()) {
+            if (\App\Support\TechnicianConfig::enabled() && ! $ticket->isUnverifiedContactIntake()) {
                 \App\Jobs\RunTechnicianLoop::dispatch($ticket->id)->afterCommit();
             }
         }
