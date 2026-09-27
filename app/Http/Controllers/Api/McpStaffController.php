@@ -1639,7 +1639,7 @@ class McpStaffController extends Controller
         }
 
         if ($tool === 'close_ticket' || $tool === 'stage_close_ticket') {
-            return $this->auditCloseTicketArguments($args);
+            return $this->auditCloseTicketArguments($tool, $args);
         }
 
         if ($tool === 'assign_ticket') {
@@ -1916,11 +1916,44 @@ class McpStaffController extends Controller
      * (ticket_id, status, confidence) and reduce the free-text resolution_summary / reason
      * to lengths only — they can carry client detail and never belong in the audit body.
      *
+     * Keys the tool's registry schema does not declare are recorded by NAME under
+     * unknown_keys (card crRnwaQJ). Without that, the row for a call refused over a misnamed
+     * key (`resolution` for resolution_summary) showed no sign of the key. Only names are
+     * kept, never values, since a value can carry client text. At most 10 names are kept,
+     * each cut to 64 characters, and unknown_key_count holds the full count. The match is
+     * exact, the same as the executor's allow-list. staged, client_id and execute_at are not
+     * counted: callTool() consumes them itself and unsets them before dispatch, but a row it
+     * refuses before those unsets (Tool not allowed, an execute_at refusal) can still carry
+     * client_id or execute_at. So on a dispatched call the audit names the same keys the
+     * refusal names.
+     *
      * @return array<string, mixed>
      */
-    private function auditCloseTicketArguments(array $arguments): array
+    private function auditCloseTicketArguments(string $tool, array $arguments): array
     {
         $safe = [];
+
+        $definition = $tool === 'stage_close_ticket'
+            ? McpToolRegistry::stageCloseTicketTool()
+            : McpToolRegistry::closeTicketTool();
+        $declared = [
+            ...array_keys((array) ($definition['input_schema']['properties'] ?? [])),
+            'staged', 'client_id', 'execute_at',
+        ];
+        $unknown = [];
+        foreach (array_keys($arguments) as $key) {
+            if (! in_array((string) $key, $declared, true)) {
+                $unknown[] = (string) $key;
+            }
+        }
+        if ($unknown !== []) {
+            sort($unknown);
+            $safe['unknown_keys'] = array_map(
+                static fn (string $key): string => mb_substr($key, 0, 64),
+                array_slice($unknown, 0, 10),
+            );
+            $safe['unknown_key_count'] = count($unknown);
+        }
 
         foreach ($arguments as $key => $value) {
             $normalized = mb_strtolower((string) $key);
