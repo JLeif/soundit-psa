@@ -419,7 +419,7 @@ These commands execute automatically based on their schedule:
 | Command | Purpose |
 |---------|---------|
 | `prepay:reconcile` | Recalculate prepay balances from the transaction ledger. Use `--contract=ID` for a specific contract. |
-| `version:refresh` | Refresh cached version info (commit, branch, update count). Runs automatically during deploy. |
+| `version:refresh` | Re-check update availability (how many commits behind `origin/main`) and print the served commit. **The served commit needs no refresh** — it is read from the git plumbing files on every request and is never cached, so a deploy is reflected immediately. This command is NOT run by `scripts/deploy.sh` and is NOT scheduled; run it by hand when you want the update count re-checked (it fetches from the remote). |
 | `tickets:recalculate-sla` | Recompute ticket SLA deadlines (`response_due_at`, `due_at`) from contract SLA terms. Open tickets only unless `--all`. See "SLA deadline recalculation" below. |
 
 > **Note:** Commands only execute if their respective integration is configured. It's safe to have the cron entry active even before you set up any integrations.
@@ -1650,7 +1650,6 @@ php artisan migrate --force
 php artisan config:cache
 php artisan route:cache
 php artisan view:cache
-php artisan version:refresh
 php artisan queue:restart
 
 # Bring the site back up
