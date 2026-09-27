@@ -366,9 +366,8 @@ class VersionService
      *    resolution, which is a different instrument, not a longer version of this one);
      *  - the inflate fails, or the header does not say "commit" (a tag or a blob at that
      *    path is not a commit date);
-     *  - no committer line before the blank line that ends the header (an empty line,
-     *    or a lone "\r" when the object is CRLF-separated), or its trailing
-     *    "<epoch> <tz>" does not parse.
+     *  - no committer line before the blank line that ends the header (a blank line:
+     *    empty, or CRs only), or its trailing "<epoch> <tz>" does not parse.
      *
      * MEASURED on the production checkout 2026-09-27 as the PHP-FPM user: HEAD's object
      * was loose and inflated to a commit whose committer epoch matched `git log -1 %cI`
@@ -422,9 +421,10 @@ class VersionService
             // MESSAGE is scanned too, and a body line beginning "committer " is read as
             // the header.
             //
-            // rtrim the CR (#4124): in a CRLF-separated object the split above leaves
+            // rtrim the CRs (#4124): in a CRLF-separated object the split above leaves
             // "\r" as the blank line, and a bare `=== ''` does not treat that line as
             // the end of the header.
+            //
             if (rtrim($line, "\r") === '') {
                 return null;
             }
