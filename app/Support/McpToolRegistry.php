@@ -1397,7 +1397,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'list_phone_calls',
-            'description' => 'List phone calls (metadata only; never the transcript). Staff-class, cross-client. Filter by direction, unlinked (no ticket), client_id, transcription_status, since.',
+            'description' => 'List phone calls (metadata only; never the transcript). Staff-class, cross-client. Filter by direction, unlinked (no ticket), client_id, transcription_status, since. from_number/to_number are NOT literal from/to: from_number is the other party on both directions (the caller on inbound, the number we dialled on outbound), and on outbound to_number is our own main number. far_end_number is the other party\'s number and far_end_provenance says what it is evidence of: caller_id (inbound, the number presented by the caller) or dialled (outbound, the number our staff dialled, not proof of what number the other party owns).',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -1418,7 +1418,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'get_phone_call',
-            'description' => 'Get one phone call\'s full detail, including the transcription and its ticket/client linkage. Staff-class, cross-client — not scoped to a client_id.',
+            'description' => 'Get one phone call\'s full detail, including the transcription and its ticket/client linkage. Staff-class, cross-client — not scoped to a client_id. from_number, to_number, far_end_number and far_end_provenance mean what list_phone_calls says they mean.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [

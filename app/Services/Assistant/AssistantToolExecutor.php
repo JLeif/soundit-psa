@@ -1995,6 +1995,13 @@ class AssistantToolExecutor
                 'direction' => $c->direction?->value,
                 'from_number' => $c->from_number,
                 'to_number' => $c->to_number,
+                // The raw pair above is kept byte-for-byte for existing
+                // readers. It is NOT literal from/to: on an outbound row
+                // from_number is the number we dialled and to_number is our
+                // own DID. These two say which number is the other party and
+                // what kind of evidence it is. See PhoneCall::farEndNumber().
+                'far_end_number' => $c->farEndNumber(),
+                'far_end_provenance' => $c->farEndProvenance(),
                 'status' => $c->status?->value,
                 'started_at' => $c->started_at?->toIso8601String(),
                 'duration' => $c->duration,
@@ -2030,6 +2037,10 @@ class AssistantToolExecutor
             'direction' => $call->direction?->value,
             'from_number' => $call->from_number,
             'to_number' => $call->to_number,
+            // Same pair as list_phone_calls, so a list-then-get read does not
+            // lose the field it just relied on. See listPhoneCalls().
+            'far_end_number' => $call->farEndNumber(),
+            'far_end_provenance' => $call->farEndProvenance(),
             'status' => $call->status?->value,
             'started_at' => $call->started_at?->toIso8601String(),
             'duration' => $call->duration,
