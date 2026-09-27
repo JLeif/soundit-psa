@@ -21,6 +21,9 @@ use Illuminate\Support\Facades\Log;
  */
 class ContextBuilder
 {
+    /** Returned in place of any context for an unverified web-form ticket (containment). */
+    public const UNVERIFIED_WITHHELD = '[Unverified web-form ticket: its content is withheld from this context until staff verify it.]';
+
     private const MAX_TICKET_BODY = 5_000;
 
     private const MAX_NOTES = 10;
@@ -52,6 +55,12 @@ class ContextBuilder
      */
     public static function buildForTicket(Ticket $ticket, bool $skipNotes = false, bool $includeClientSituation = false): string
     {
+        // Degrade, never throw (r1 diff:14): staff-facing callers such as AssistantService do
+        // not catch, and a form ticket must not crash them. Nothing of the ticket is returned.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return self::UNVERIFIED_WITHHELD;
+        }
+
         $eagerLoads = [
             'client',
             'contact',
@@ -61,7 +70,7 @@ class ContextBuilder
         ];
 
         if (! $skipNotes) {
-            $eagerLoads['notes'] = fn ($q) => $q->orderByDesc('noted_at')->limit(self::MAX_NOTES);
+            $eagerLoads['notes'] = fn ($q) => $q->automationVisible()->orderByDesc('noted_at')->limit(self::MAX_NOTES);
             $eagerLoads[] = 'notes.author';
             $eagerLoads[] = 'notes.email';
         }
@@ -145,7 +154,12 @@ class ContextBuilder
      */
     public static function buildConversationContext(Ticket $ticket, int $limit = 20, bool $publicOnly = true): string
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return self::UNVERIFIED_WITHHELD;
+        }
+
         $query = $ticket->notes()
+            ->automationVisible()
             ->with(['author', 'email'])
             ->orderBy('noted_at', 'asc')
             ->limit($limit);
@@ -242,9 +256,13 @@ class ContextBuilder
      */
     public static function buildMultimodalContent(Ticket $ticket): array
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return [['type' => 'text', 'text' => self::UNVERIFIED_WITHHELD]];
+        }
+
         $ticket->loadMissing([
             'attachments',
-            'notes' => fn ($q) => $q->orderBy('noted_at', 'asc')->limit(self::MAX_NOTES),
+            'notes' => fn ($q) => $q->automationVisible()->orderBy('noted_at', 'asc')->limit(self::MAX_NOTES),
             'notes.author',
             'notes.email',
             'notes.attachments',
@@ -282,6 +300,9 @@ class ContextBuilder
 
         // Notes with interleaved images (chronological order)
         foreach ($ticket->notes as $note) {
+            if ($note->isUnverifiedContactIntake()) {
+                continue;
+            }
             $author = $note->author?->name ?? $note->author_name ?? 'System';
             $date = $note->noted_at?->toDateTimeString() ?? $note->created_at->toDateTimeString();
             $type = $note->note_type?->label() ?? 'Note';
@@ -772,6 +793,9 @@ class ContextBuilder
         $lines = ['## Recent Notes (newest first)'];
 
         foreach ($ticket->notes as $note) {
+            if ($note->isUnverifiedContactIntake()) {
+                continue;
+            }
             $author = $note->author?->name ?? $note->author_name ?? 'System';
             $date = $note->noted_at?->toDateTimeString() ?? $note->created_at->toDateTimeString();
             $type = $note->note_type?->label() ?? 'Note';
