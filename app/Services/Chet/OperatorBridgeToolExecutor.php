@@ -355,8 +355,12 @@ class OperatorBridgeToolExecutor
         $signals = $rows->map(function (SignalInboxEntry $row): array {
             $payload = is_array($row->payload) ? $row->payload : [];
 
+            // inbox_id is the DELIVERY (one per matching route/step/destination for this
+            // token label); event_id is the OCCURRENCE (signal_events.id), the only
+            // correct dedupe key for a consumer. Card qptZ5IKH.
             return [
                 'inbox_id' => $row->id,
+                'event_id' => (int) $row->event_id,
                 'event' => $payload['event'] ?? null,
                 'entity' => $payload['entity'] ?? null,
                 'category' => $payload['category'] ?? null,
