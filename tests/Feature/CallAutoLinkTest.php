@@ -22,9 +22,9 @@ use Tests\TestCase;
  * Card 0JJon0z4: deterministic call auto-link and the "resolved client, no
  * ticket" calls-list view.
  *
- * Every case runs through ResolveCallerFromPeople, the job that first gives a
- * call both client_id and person_id, and turns the switch on by its literal
- * setting key. Neither depends on a class this change adds.
+ * Every auto-link case runs through ResolveCallerFromPeople, the job that
+ * first gives a call both client_id and person_id, and turns the switch on by
+ * its literal setting key. Neither depends on a class this change adds.
  */
 class CallAutoLinkTest extends TestCase
 {
@@ -40,8 +40,9 @@ class CallAutoLinkTest extends TestCase
     {
         parent::setUp();
 
-        // linkCallToTicketWithNote() authors its note as the system user, which
-        // falls back to the first user; without one no note is written.
+        // linkCallToTicketWithNote() authors its note as TriageConfig::systemUserId().
+        // With triage_system_user_id unset that is the lowest-id user; with no
+        // user at all it is null and the note is skipped.
         User::factory()->create();
 
         $this->client = Client::factory()->create();
