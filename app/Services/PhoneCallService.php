@@ -585,6 +585,23 @@ class PhoneCallService
             app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
         }
 
+        // Auto-link (card 0JJon0z4) is tried here, after the final status is
+        // COMMITTED, because only now is it known whether the call was answered:
+        // autoLinkToSoleOpenTicket() declines anything but a Completed call. It
+        // sits outside the closure above for the same reason as the release: a
+        // failure in it must not roll back ended_at, the status or the debit. A
+        // redelivered hangup re-enters it and finds ticket_id already set.
+        if ($call !== null) {
+            try {
+                $this->autoLinkToSoleOpenTicket($call);
+            } catch (\Throwable $e) {
+                Log::warning('[PhoneCall] Auto-link at call end failed', [
+                    'call_id' => $call->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         return $call;
     }
 
@@ -1211,8 +1228,11 @@ class PhoneCallService
      *
      * It links only when ALL of these hold:
      *  - CallAutoLinkConfig::enabled() (absent setting row = off);
-     *  - client_id and person_id are both set, ticket_id is null and
-     *    followed_up_at is null, re-read under a row lock;
+     *  - client_id and person_id are both set, ticket_id is null,
+     *    followed_up_at is null and status is Completed (answered and ended),
+     *    re-read under a row lock. A ringing, in-progress, missed or voicemail
+     *    call is never linked, so the auto-link never puts an unanswered call on
+     *    the prepay path;
      *  - exactly one ticket has this client_id, this person as contact_id and a
      *    status whose isOpen() is true.
      * Zero or several open tickets leave the call unlinked for a human. "Open" is
@@ -1222,6 +1242,13 @@ class PhoneCallService
      * The link goes through linkCallToTicketWithNote(), so it keeps that path's
      * billability and prepay behaviour and adds a private note saying the call was
      * auto-linked and why.
+     *
+     * Called from ResolveCallerFromPeople (once the caller is resolved) and from
+     * handleCallEnded() (once the final status is committed), so the attempt made
+     * by whichever of the two runs later sees both. A call that becomes Completed
+     * later still, by a late answer webhook or a recording-derived correction,
+     * has no trigger of its own and stays unlinked unless the resolver job runs
+     * after that.
      */
     public function autoLinkToSoleOpenTicket(PhoneCall $call): ?int
     {
@@ -1236,7 +1263,8 @@ class PhoneCallService
                 || $locked->client_id === null
                 || $locked->person_id === null
                 || $locked->ticket_id !== null
-                || $locked->followed_up_at !== null) {
+                || $locked->followed_up_at !== null
+                || $locked->status !== CallStatus::Completed) {
                 return null;
             }
 

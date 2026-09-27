@@ -23,8 +23,10 @@ use Tests\TestCase;
  * ticket" calls-list view.
  *
  * Every auto-link case runs through ResolveCallerFromPeople, the job that
- * first gives a call both client_id and person_id, and turns the switch on by
- * its literal setting key. Neither depends on a class this change adds.
+ * first gives a call both client_id and person_id; the answered/unanswered
+ * cases also run through PhoneCallService's answer and hangup handlers. The
+ * switch is turned on by its literal setting key. Neither depends on a class
+ * this change adds.
  */
 class CallAutoLinkTest extends TestCase
 {
@@ -251,6 +253,65 @@ class CallAutoLinkTest extends TestCase
         $this->ticket(TicketStatus::InProgress);
 
         $this->assertNull($this->resolve($this->newCall())->ticket_id);
+    }
+
+    // ── Auto-link: only an answered call is linked ──
+
+    public function test_a_ringing_call_is_linked_only_once_it_ends_answered(): void
+    {
+        $this->enable();
+        $open = $this->ticket(TicketStatus::InProgress);
+        $call = $this->newCall(attrs: ['status' => CallStatus::Ringing]);
+
+        $this->assertNull($this->resolve($call)->ticket_id);
+        $this->assertCount(0, $this->autoLinkNotes($open));
+
+        $service = app(PhoneCallService::class);
+        $service->handleCallAnswered($call->call_uuid, []);
+        $service->handleCallEnded($call->call_uuid, ['Duration' => '30']);
+        // A redelivered hangup must not link or note a second time.
+        $service->handleCallEnded($call->call_uuid, ['Duration' => '30']);
+
+        $call = $call->fresh();
+        $this->assertSame(CallStatus::Completed, $call->status);
+        $this->assertSame($open->id, $call->ticket_id);
+        $this->assertCount(1, $this->autoLinkNotes($open));
+    }
+
+    public function test_an_unanswered_call_is_linked_neither_at_ring_nor_at_end(): void
+    {
+        $this->enable();
+        $open = $this->ticket(TicketStatus::InProgress);
+
+        foreach ([CallDirection::Inbound, CallDirection::Outbound] as $direction) {
+            $call = $this->newCall($direction, ['status' => CallStatus::Ringing]);
+
+            $this->assertNull($this->resolve($call)->ticket_id);
+
+            app(PhoneCallService::class)->handleCallEnded($call->call_uuid, ['Duration' => '40']);
+
+            $call = $call->fresh();
+            $this->assertSame(CallStatus::Missed, $call->status);
+            $this->assertNull($call->ticket_id);
+        }
+
+        $this->assertCount(0, $this->autoLinkNotes($open));
+    }
+
+    public function test_a_voicemail_call_stays_unlinked_at_resolve_and_at_end(): void
+    {
+        $this->enable();
+        $open = $this->ticket(TicketStatus::InProgress);
+        $call = $this->newCall(attrs: ['status' => CallStatus::Voicemail]);
+
+        $this->assertNull($this->resolve($call)->ticket_id);
+
+        app(PhoneCallService::class)->handleCallEnded($call->call_uuid, ['Duration' => '40']);
+
+        $call = $call->fresh();
+        $this->assertSame(CallStatus::Voicemail, $call->status);
+        $this->assertNull($call->ticket_id);
+        $this->assertCount(0, $this->autoLinkNotes($open));
     }
 
     // ── The calls-list view ──
