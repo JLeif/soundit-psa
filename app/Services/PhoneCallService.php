@@ -492,7 +492,12 @@ class PhoneCallService
      */
     public function handleCallEnded(string $callUuid, array $data): ?PhoneCall
     {
-        $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($data) {
+        // Set under the row lock when THIS delivery moves the call into
+        // Completed; read by the auto-link below.
+        $becameCompleted = false;
+
+        $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($data, &$becameCompleted) {
+            $statusBefore = $call->status;
             $call->ended_at = now();
             $call->duration = isset($data['Duration']) ? (int) $data['Duration'] : null;
 
@@ -557,6 +562,9 @@ class PhoneCallService
 
             $call->save();
 
+            $becameCompleted = $statusBefore !== CallStatus::Completed
+                && $call->status === CallStatus::Completed;
+
             // Re-run the debit with whatever duration is available. The
             // service uses effectiveDurationSeconds() which falls back to
             // recording_duration when Plivo omits Duration from the hangup
@@ -589,9 +597,16 @@ class PhoneCallService
         // COMMITTED, because only now is it known whether the call was answered:
         // autoLinkToSoleOpenTicket() declines anything but a Completed call. It
         // sits outside the closure above for the same reason as the release: a
-        // failure in it must not roll back ended_at, the status or the debit. A
-        // redelivered hangup re-enters it and finds ticket_id already set.
-        if ($call !== null) {
+        // failure in it must not roll back ended_at, the status or the debit.
+        //
+        // Unlike the release, it runs only on the delivery that moved the call
+        // into Completed, not on every terminal delivery. One call can receive
+        // several terminal payloads (the hangup/completed pair, Plivo retries),
+        // and unlinkCallFromTicket() sets ticket_id to null and leaves
+        // followed_up_at untouched, so a later delivery would pass every check in
+        // autoLinkToSoleOpenTicket() again and re-link, re-note and re-debit a
+        // call a technician has unlinked.
+        if ($call !== null && $becameCompleted) {
             try {
                 $this->autoLinkToSoleOpenTicket($call);
             } catch (\Throwable $e) {
@@ -1244,8 +1259,12 @@ class PhoneCallService
      * auto-linked and why.
      *
      * Called from ResolveCallerFromPeople (once the caller is resolved) and from
-     * handleCallEnded() (once the final status is committed), so the attempt made
-     * by whichever of the two runs later sees both. A call that becomes Completed
+     * handleCallEnded() (once the final status is committed, and only on the
+     * delivery that moved the call into Completed), so the attempt made by
+     * whichever of the two runs later sees both. A redelivered hangup does not
+     * retry, because the call is already Completed, and the resolver job returns
+     * early once client_id is set, so a call a technician unlinks after the
+     * auto-link is not re-linked by either. A call that becomes Completed
      * later still, by a late answer webhook or a recording-derived correction,
      * has no trigger of its own and stays unlinked unless the resolver job runs
      * after that.

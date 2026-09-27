@@ -278,6 +278,28 @@ class CallAutoLinkTest extends TestCase
         $this->assertCount(1, $this->autoLinkNotes($open));
     }
 
+    public function test_a_redelivered_hangup_does_not_relink_a_call_a_technician_unlinked(): void
+    {
+        $this->enable();
+        $open = $this->ticket(TicketStatus::InProgress);
+        $call = $this->newCall(attrs: ['status' => CallStatus::Ringing]);
+        $this->resolve($call);
+
+        $service = app(PhoneCallService::class);
+        $service->handleCallAnswered($call->call_uuid, []);
+        $service->handleCallEnded($call->call_uuid, ['Duration' => '30']);
+        $this->assertSame($open->id, $call->fresh()->ticket_id);
+
+        $service->unlinkCallFromTicket($call->fresh());
+        // The second of the hangup/completed pair, or a Plivo retry.
+        $service->handleCallEnded($call->call_uuid, ['Duration' => '30']);
+
+        $call = $call->fresh();
+        $this->assertSame(CallStatus::Completed, $call->status);
+        $this->assertNull($call->ticket_id);
+        $this->assertCount(1, $this->autoLinkNotes($open));
+    }
+
     public function test_an_unanswered_call_is_linked_neither_at_ring_nor_at_end(): void
     {
         $this->enable();
