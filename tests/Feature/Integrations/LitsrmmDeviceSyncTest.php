@@ -31,8 +31,12 @@ class LitsrmmDeviceSyncTest extends TestCase
 
     private array $history = [];
 
-    /** A placeholder, not a credential: the fake transport never forwards it anywhere. */
-    private const FAKE_BEARER = 'fake-litsrmm-bearer-not-a-credential';
+    /**
+     * Minted per test in setUp(), never a literal in source, so no value that
+     * reads as a credential is committed. The fake transport never forwards it
+     * anywhere.
+     */
+    private string $fakeBearer;
 
     protected function setUp(): void
     {
@@ -40,7 +44,8 @@ class LitsrmmDeviceSyncTest extends TestCase
 
         // request() re-reads live Settings before every call, so the fake
         // integration has to be configured and switched on.
-        Setting::setEncrypted('litsrmm_api_key', self::FAKE_BEARER);
+        $this->fakeBearer = 'fake-'.bin2hex(random_bytes(8));
+        Setting::setEncrypted('litsrmm_api_key', $this->fakeBearer);
         Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
     }
 
@@ -60,7 +65,7 @@ class LitsrmmDeviceSyncTest extends TestCase
         $stack->push(Middleware::history($this->history));
 
         return new LitsrmmClient([
-            'api_key' => self::FAKE_BEARER,
+            'api_key' => $this->fakeBearer,
             'base_url' => 'https://litsrmm.test',
             'handler' => $stack,
             'request_timeout' => 5,
@@ -109,7 +114,7 @@ class LitsrmmDeviceSyncTest extends TestCase
         $this->assertSame('GET', $request->getMethod());
         $this->assertSame('/v1/devices', $request->getUri()->getPath());
         $this->assertSame(['limit' => '100'], $this->query(0), 'first page: default limit, and NO cursor');
-        $this->assertSame('Bearer '.self::FAKE_BEARER, $request->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer '.$this->fakeBearer, $request->getHeaderLine('Authorization'));
     }
 
     public function test_the_normal_nulls_in_the_capture_are_not_logged(): void
@@ -336,7 +341,7 @@ class LitsrmmDeviceSyncTest extends TestCase
                 $this->assertSame($status, $e->getCode(), "the refusal carries the HTTP status {$status}");
                 $this->assertStringContainsString("({$status})", $e->getMessage());
                 $this->assertStringContainsString($meaning, $e->getMessage());
-                $this->assertStringNotContainsString(self::FAKE_BEARER, $e->getMessage());
+                $this->assertStringNotContainsString($this->fakeBearer, $e->getMessage());
                 $seen[$status] = $e->getMessage();
             }
         }
