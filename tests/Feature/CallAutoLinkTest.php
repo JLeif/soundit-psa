@@ -16,6 +16,7 @@ use App\Models\TicketNote;
 use App\Models\User;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 /**
@@ -24,7 +25,8 @@ use Tests\TestCase;
  *
  * Every auto-link case runs through ResolveCallerFromPeople, the job that
  * first gives a call both client_id and person_id; the answered/unanswered
- * cases also run through PhoneCallService's answer and hangup handlers. The
+ * cases also run through PhoneCallService's answer and hangup handlers, and one
+ * through the Plivo webhook controller's coalesced recording+terminal POST. The
  * switch is turned on by its literal setting key. Neither depends on a class
  * this change adds.
  */
@@ -297,6 +299,43 @@ class CallAutoLinkTest extends TestCase
         $call = $call->fresh();
         $this->assertSame(CallStatus::Completed, $call->status);
         $this->assertNull($call->ticket_id);
+        $this->assertCount(1, $this->autoLinkNotes($open));
+    }
+
+    public function test_a_coalesced_recording_and_terminal_post_links_an_answered_call(): void
+    {
+        Queue::fake();
+        $this->enable();
+        $open = $this->ticket(TicketStatus::InProgress);
+        // recording_disk_path keeps downloadRecording() off the network.
+        $call = $this->newCall(attrs: [
+            'status' => CallStatus::Ringing,
+            'started_at' => now()->subMinutes(3),
+            'recording_disk_path' => 'call-recordings/seeded.mp3',
+        ]);
+
+        $this->assertNull($this->resolve($call)->ticket_id);
+
+        app(PhoneCallService::class)->handleCallAnswered($call->call_uuid, []);
+        $this->assertSame(CallStatus::InProgress, $call->fresh()->status);
+
+        // One POST carrying both the recording and the terminal event. The
+        // controller handles the recording first, which completes the call
+        // before handleCallEnded() runs.
+        $payload = [
+            'CallUUID' => $call->call_uuid,
+            'CallStatus' => 'completed',
+            'RecordUrl' => 'https://media.plivo.com/v1/rec/autolink.mp3',
+            'RecordingDuration' => 120,
+            'Duration' => 125,
+        ];
+        $this->post('/api/plivo/test-secret/webhook', $payload)->assertOk();
+        // A redelivery of the same POST must not link or note a second time.
+        $this->post('/api/plivo/test-secret/webhook', $payload)->assertOk();
+
+        $call = $call->fresh();
+        $this->assertSame(CallStatus::Completed, $call->status);
+        $this->assertSame($open->id, $call->ticket_id);
         $this->assertCount(1, $this->autoLinkNotes($open));
     }
 

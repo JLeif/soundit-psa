@@ -638,7 +638,13 @@ class PhoneCallService
      */
     public function handleRecordingReady(string $callUuid, string $url, ?int $duration): ?PhoneCall
     {
-        $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($url, $duration) {
+        // Set inside the update below when THIS delivery moves the call into
+        // Completed; read by the auto-link below.
+        $becameCompleted = false;
+
+        $call = $this->updateCallSafely($callUuid, function (PhoneCall $call) use ($url, $duration, &$becameCompleted) {
+            $statusBefore = $call->status;
+
             // Read the STORED recording length before the write below can
             // replace it. The ceiling guard further down tests the operands the
             // finalisation will use; reading the column after this method has
@@ -706,6 +712,9 @@ class PhoneCallService
 
             $call->save();
 
+            $becameCompleted = $statusBefore !== CallStatus::Completed
+                && $call->status === CallStatus::Completed;
+
             return $call;
         });
 
@@ -728,6 +737,25 @@ class PhoneCallService
             // commit, never inside the transaction. A no-op when the row carries
             // no withheld email.
             app(NotificationService::class)->releaseDeferredVoicemailNotification($call);
+        }
+
+        // Auto-link (card 0JJon0z4), on the same terms as in handleCallEnded():
+        // after the commit, only on the delivery that moved the call into
+        // Completed, and a failure is logged rather than rethrown. This method
+        // makes that transition too: on the coalesced recording+terminal POST
+        // the controller calls it BEFORE handleCallEnded(), and
+        // finaliseCallTheHangupNeverClosed() or reconcileAnsweredStateWithDuration()
+        // above can complete an answered call, so handleCallEnded() then finds it
+        // already Completed and does not try.
+        if ($call !== null && $becameCompleted) {
+            try {
+                $this->autoLinkToSoleOpenTicket($call);
+            } catch (\Throwable $e) {
+                Log::warning('[PhoneCall] Auto-link after recording failed', [
+                    'call_id' => $call->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         return $call;
@@ -1259,15 +1287,20 @@ class PhoneCallService
      * auto-linked and why.
      *
      * Called from ResolveCallerFromPeople (once the caller is resolved) and from
-     * handleCallEnded() (once the final status is committed, and only on the
-     * delivery that moved the call into Completed), so the attempt made by
-     * whichever of the two runs later sees both. A redelivered hangup does not
-     * retry, because the call is already Completed, and the resolver job returns
-     * early once client_id is set, so a call a technician unlinks after the
-     * auto-link is not re-linked by either. A call that becomes Completed
-     * later still, by a late answer webhook or a recording-derived correction,
-     * has no trigger of its own and stays unlinked unless the resolver job runs
-     * after that.
+     * handleCallEnded() and handleRecordingReady() (once their write is
+     * committed, and only on the delivery that moved the call into Completed),
+     * so the attempt made by whichever runs later sees both the resolution and
+     * the final status. handleRecordingReady() is needed because a recording
+     * that lands before the terminal event (the coalesced recording+terminal
+     * POST, which the controller handles recording-first, or a separate earlier
+     * recording callback) can complete an answered call itself, and
+     * handleCallEnded() then finds it already Completed. A redelivered hangup or
+     * recording does not retry, because the call is already Completed, and the
+     * resolver job returns early once client_id is set, so a call a technician
+     * unlinks after the auto-link is not re-linked by any of them. A call made
+     * Completed by any other path (a late answer webhook, the
+     * calls:finalise-stuck sweep) has no trigger of its own and stays unlinked
+     * unless the resolver job runs after that.
      */
     public function autoLinkToSoleOpenTicket(PhoneCall $call): ?int
     {

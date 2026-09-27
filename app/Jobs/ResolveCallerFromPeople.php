@@ -46,9 +46,10 @@ class ResolveCallerFromPeople implements ShouldQueue
             // here. It decides for itself whether to act: with the setting off,
             // with 0 or 2+ open tickets, or with the call not Completed, the call
             // stays unlinked. This job is dispatched while the call is ringing, so
-            // it can run before the call has ended; PhoneCallService::
-            // handleCallEnded() then makes the attempt, and this one covers the job
-            // running after the hangup. A failure there is logged and swallowed so
+            // it can run before the call has ended; PhoneCallService then makes
+            // the attempt from handleCallEnded() or handleRecordingReady(),
+            // whichever moves the call into Completed, and this one covers the job
+            // running after that. A failure there is logged and swallowed so
             // it cannot undo the resolution saved above.
             try {
                 $phoneCallService->autoLinkToSoleOpenTicket($call);
