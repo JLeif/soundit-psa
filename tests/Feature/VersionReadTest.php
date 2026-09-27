@@ -69,8 +69,6 @@ class VersionReadTest extends TestCase
 
     public function test_a_detached_head_reports_the_commit_it_holds(): void
     {
-        // The deploy checkout is detached by construction, so this is the shape
-        // production actually serves from, not an edge case.
         file_put_contents($this->fixture.'/.git/HEAD', self::SHA_A."\n");
 
         $v = $this->service()->current();

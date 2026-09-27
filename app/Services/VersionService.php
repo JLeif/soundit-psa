@@ -9,9 +9,9 @@ use Illuminate\Support\Facades\Process;
 /**
  * Reads the served commit, and separately caches update availability.
  *
- * current() is NOT cached. It reads the git plumbing files directly, which costs
- * two small file reads, so a cache would add only staleness: the served commit
- * changes on every deploy, and a cached answer survives it. The previous version
+ * current() is NOT cached. It reads the git plumbing files directly; a cache
+ * would add staleness: the served commit changes on every deploy, and a cached
+ * answer survives it. The previous version
  * cached this for 24h with nothing clearing the key on deploy, so a WORKING read
  * reported the PREVIOUS commit for up to a day -- a plausible 40-hex sha that is
  * simply wrong, which is worse than an obvious blank.
@@ -186,8 +186,6 @@ class VersionService
             }
 
             return $this->describe($sha, $this->branchFromRef($ref), $gitDir);
-            // note: $gitDir (not $refDir) identifies THIS checkout, which is what a
-            // reader wants to know about the tree being served.
         } catch (\Throwable $e) {
             return $this->unknown('unexpected failure: '.$e->getMessage());
         }
@@ -260,8 +258,7 @@ class VersionService
      * Resolve a ref name to a commit id, LOOSE REF FIRST.
      *
      * The order is the whole correctness argument, not a preference. git itself
-     * prefers $GIT_DIR/<ref> over the packed-refs entry, and `git pack-refs`
-     * WITHOUT --prune leaves a stale packed entry behind while later commits
+     * prefers $GIT_DIR/<ref> over the packed-refs entry, and later commits
      * update only the loose file. Measured on this project's production checkout
      * on 2026-09-27: packed-refs still named a commit 628 commits behind the
      * loose ref, and that stale value is a real historical commit -- so reading
@@ -345,7 +342,7 @@ class VersionService
             'branch' => $branch,
             // When this answer was READ, not when anything was deployed. The old name
             // said "deploy_timestamp" while holding now(), which claimed a deploy time
-            // it never measured; both keys are returned so the About view keeps working.
+            // it never measured.
             'read_at' => now()->toDateTimeString(),
             'deploy_timestamp' => null,
             'source' => 'git-plumbing',
