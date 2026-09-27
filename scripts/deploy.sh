@@ -286,6 +286,38 @@ set -eo pipefail
 cd "$1"
 TARGET="$2"
 
+# ONE deploy at a time on this host (card 8qSgt6MA). Two seats each ran this
+# script for the same sha 61 s apart on 2026-09-27; both gate passes were
+# legitimate, so nothing upstream of here refused the second one. The claim log
+# is supposed to stop a second worker on one leg, and it depends on each seat
+# remembering to read it before acting — which is exactly what failed. So the
+# exclusion is enforced here, where every seat and every caller has to pass
+# through it, rather than in a habit.
+#
+# Taken BEFORE the fetch, not merely before the merge: the ff-only decision and
+# the tracked/untracked blocker checks below all read a repo state a concurrent
+# run is moving, so a lock held only over the mutating half would still let two
+# runs interleave their reads and act on each other's half-applied state.
+#
+# -n (fail immediately), never -w: a queued second deploy would wake up and redo
+# work the first one has already finished, against a checkout that is no longer
+# the one its gate measured. Refusing is the honest answer — the operator can
+# re-read prod and decide.
+#
+# /run/lock is tmpfs, so a host reboot cannot strand a stale lock file. fd 9 is
+# closed by the shell on exit, so the lock is released on any exit path,
+# including the refusals below and a SIGKILL.
+DEPLOY_LOCK="/run/lock/soundit-psa-deploy.lock"
+exec 9>"$DEPLOY_LOCK"
+if ! flock -n 9; then
+  echo "  ERROR: another deploy is already running on this host ($DEPLOY_LOCK is held)." >&2
+  echo "  Refusing rather than queueing: by the time a queued run acquired the lock," >&2
+  echo "  the checkout would no longer be the one its review gate measured." >&2
+  echo "  Wait for the running deploy to finish, then re-read prod HEAD and decide whether" >&2
+  echo "  this deploy is still needed. Nothing was fetched, backed up, pruned, or changed." >&2
+  exit 3
+fi
+
 echo "  Fetching origin..."
 git fetch --prune origin
 
