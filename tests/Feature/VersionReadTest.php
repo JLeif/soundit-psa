@@ -254,8 +254,9 @@ class VersionReadTest extends TestCase
     public function test_a_moved_head_is_reported_with_no_refresh_step(): void
     {
         // This is the control for the ruling's second acceptance check. The old code
-        // cached the sha for 24h and nothing cleared the key on deploy, so a WORKING
-        // read reported the previous commit until the TTL expired. Two calls with no
+        // cached the sha for 24h and scripts/deploy.sh never cleared the key, so after
+        // such a deploy a WORKING read reported the previous commit until the TTL
+        // expired. Two calls with no
         // intervening refresh must disagree.
         file_put_contents($this->fixture.'/.git/HEAD', "ref: refs/heads/main\n");
         file_put_contents($this->fixture.'/.git/refs/heads/main', self::SHA_A."\n");

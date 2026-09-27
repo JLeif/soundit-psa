@@ -12,9 +12,11 @@ use Illuminate\Support\Facades\Process;
  * current() is NOT cached. It reads the git plumbing files directly; a cache
  * would add staleness: the served commit changes on every deploy, and a cached
  * answer survives it. The previous version
- * cached this for 24h with nothing clearing the key on deploy, so a WORKING read
- * reported the PREVIOUS commit for up to a day -- a plausible 40-hex sha that is
- * simply wrong, which is worse than an obvious blank.
+ * cached this for 24h and scripts/deploy.sh never cleared the key (the manual
+ * update in INSTALL section 10 did, by running version:refresh), so after a
+ * deploy.sh deploy a WORKING read reported the PREVIOUS commit for up to a day
+ * -- a plausible 40-hex sha that is simply wrong, which is worse than an
+ * obvious blank.
  *
  * current() deliberately does NOT shell out to `git`:
  * - it needs no `git` binary on PATH for the PHP process user
