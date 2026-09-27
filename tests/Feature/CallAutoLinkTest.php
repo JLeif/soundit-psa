@@ -151,6 +151,13 @@ class CallAutoLinkTest extends TestCase
     public function test_no_open_ticket_leaves_the_call_unlinked(): void
     {
         $this->enable();
+        // Open tickets exist, but none is this contact's at this client: one is a
+        // colleague's, one names this contact under another client.
+        $colleague = Person::create([
+            'client_id' => $this->client->id, 'first_name' => 'Bo', 'last_name' => 'Other', 'is_active' => true,
+        ]);
+        $this->ticket(TicketStatus::New, ['contact_id' => $colleague->id]);
+        $this->ticket(TicketStatus::New, ['client_id' => Client::factory()->create()->id]);
 
         $call = $this->resolve($this->newCall());
 
