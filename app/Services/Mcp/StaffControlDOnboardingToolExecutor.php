@@ -229,6 +229,14 @@ class StaffControlDOnboardingToolExecutor
 
         $ticketId = $this->positiveInt($arguments['ticket_id'] ?? null);
         $ticket = $ticketId !== null ? Ticket::automationVisible()->find($ticketId) : null;
+        // G-14: a held intake ticket in THIS client exists; the refusal and its audit row say so.
+        $held = $ticket === null && $ticketId !== null ? Ticket::find($ticketId) : null;
+        if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+            $message = 'ticket_id is an unverified web-form intake held for staff verification; staff must verify it before Control D onboarding can trace to it.';
+            $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, $message, $actorLabel);
+
+            return ['error' => $message];
+        }
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
             $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, 'ticket_id is required and must belong to this client.', $actorLabel);
 

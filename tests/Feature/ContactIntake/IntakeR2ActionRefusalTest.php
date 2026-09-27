@@ -4,6 +4,7 @@ namespace Tests\Feature\ContactIntake;
 
 use App\Enums\TicketStatus;
 use App\Models\Asset;
+use App\Models\Client;
 use App\Models\Setting;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
@@ -11,6 +12,7 @@ use App\Models\User;
 use App\Services\Assistant\AssistantToolExecutor;
 use App\Services\Cipp\Offboarding\OffboardingScope;
 use App\Services\Mcp\StaffCalendarToolExecutor;
+use App\Services\Mcp\StaffPsaActionToolExecutor;
 use App\Services\Triage\TriageToolExecutor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -105,5 +107,50 @@ class IntakeR2ActionRefusalTest extends TestCase
         $this->assertStringContainsString('NORMAL_LINKED_SUBJECT', $out);
         $this->assertStringNotContainsString('HELD_LINKED_SUBJECT', $out);
         $this->assertStringContainsString('"tickets_count":1', $out);
+    }
+
+    /** contract:3 — staff PSA merge and asset-merge arms name the hold in scope; across clients they stay not-found. */
+    public function test_staff_psa_merge_arms_refuse_in_scope_held_ticket_as_held(): void
+    {
+        Setting::setValue('triage_system_user_id', (string) User::factory()->create()->id);
+        $normal = Ticket::factory()->create(['status' => TicketStatus::New]);
+        $held = $this->held(['client_id' => $normal->client_id]);
+        $other = Client::factory()->create();
+        $exec = app(StaffPsaActionToolExecutor::class);
+        $calls = [
+            'propose_merge' => ['primary_ticket_id' => $normal->id, 'secondary_ticket_id' => $held->id, 'reason' => 'Synthetic.'],
+            'propose_asset_merge' => ['ticket_id' => $held->id, 'survivor_asset_id' => 1, 'duplicate_asset_id' => 2, 'reason' => 'Synthetic.'],
+        ];
+        foreach ($calls as $tool => $in) {
+            $out = json_encode($exec->execute($tool, $in, (int) $normal->client_id, 'Synthetic staff'));
+            $this->assertStringContainsString('unverified web-form intake held for staff verification', $out, $tool);
+            $this->assertStringNotContainsString('not found', $out, $tool);
+            $cross = json_encode($exec->execute($tool, $in, (int) $other->id, 'Synthetic staff'));
+            $this->assertStringContainsString('not found', $cross, $tool);
+            $this->assertStringNotContainsString('unverified', $cross, $tool);
+        }
+    }
+
+    /** contract:3 — Assistant detail/close/note/calls name the hold in scope; another client's executor still reads not-found. */
+    public function test_assistant_ticket_arms_refuse_in_scope_held_ticket_as_held(): void
+    {
+        $held = $this->held();
+        $other = Client::factory()->create();
+        $calls = [
+            'get_ticket_detail' => ['ticket_id' => $held->id],
+            'propose_close' => ['ticket_id' => $held->id, 'reason' => 'Synthetic.', 'confidence' => 0.5],
+            'add_ticket_note' => ['ticket_id' => $held->id, 'body' => 'Synthetic.'],
+            'get_ticket_calls' => ['ticket_id' => $held->id],
+        ];
+        foreach ($calls as $tool => $in) {
+            $out = json_encode((new AssistantToolExecutor(null, $held->client_id))->execute($tool, $in));
+            $this->assertStringContainsString('Unverified contact intake', $out, $tool);
+            $this->assertStringNotContainsString('not found', $out, $tool);
+        }
+        foreach (['get_ticket_detail', 'add_ticket_note', 'get_ticket_calls'] as $tool) {
+            $out = json_encode((new AssistantToolExecutor(null, $other->id))->execute($tool, $calls[$tool]));
+            $this->assertStringContainsString('not found', $out, $tool);
+            $this->assertStringNotContainsString('Unverified', $out, $tool);
+        }
     }
 }

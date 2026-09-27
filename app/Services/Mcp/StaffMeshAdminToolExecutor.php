@@ -1438,6 +1438,12 @@ class StaffMeshAdminToolExecutor
 
         $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+            }
+
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 

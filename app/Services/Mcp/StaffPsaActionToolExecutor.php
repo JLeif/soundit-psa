@@ -2110,7 +2110,7 @@ class StaffPsaActionToolExecutor
 
         $ticket = Ticket::automationVisible()->find((int) ($arguments['ticket_id'] ?? 0));
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) ($arguments['ticket_id'] ?? 0), null) ?? ['error' => 'Ticket not found'];
         }
 
         // Mutation + audit atomic (the ticket's client_id is nullable — pass it through
@@ -2269,7 +2269,7 @@ class StaffPsaActionToolExecutor
 
         $ticket = Ticket::automationVisible()->find((int) ($arguments['ticket_id'] ?? 0));
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) ($arguments['ticket_id'] ?? 0), null) ?? ['error' => 'Ticket not found'];
         }
 
         // A call a technician already followed up on (in particular, marked spam)
@@ -2807,7 +2807,7 @@ class StaffPsaActionToolExecutor
         }
         $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId, $clientId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         $survivor = Asset::find($survivorId);
@@ -3000,7 +3000,7 @@ class StaffPsaActionToolExecutor
         }
         $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId, $clientId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         $survivor = Asset::find($survivorId);
@@ -3217,6 +3217,25 @@ class StaffPsaActionToolExecutor
         return $ticket;
     }
 
+    /**
+     * G-14: an existing held intake ticket (in $clientId when one is given) is refused as
+     * held, never as "not found". Callers reach this only after the automation-visible
+     * lookup or its client scope failed, so an ordinary ticket never takes this path and
+     * a held ticket under another client still reads not-found.
+     *
+     * @return array{error: string}|null
+     */
+    private function heldTicketRefusal(int $ticketId, ?int $clientId): ?array
+    {
+        $ticket = $ticketId > 0 ? Ticket::find($ticketId) : null;
+        if (! $ticket?->isUnverifiedContactIntake()
+            || ($clientId !== null && ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
+            return null;
+        }
+
+        return ['error' => "Ticket #{$ticket->id} is an unverified web-form intake held for staff verification; staff must verify it before any action on it."];
+    }
+
     /** @return array{primary: Ticket, secondary: Ticket}|array{error: string} */
     private function mergePairForClient(int $primaryId, int $secondaryId, int $clientId): array
     {
@@ -3227,7 +3246,7 @@ class StaffPsaActionToolExecutor
         $primary = Ticket::automationVisible()->find($primaryId);
         $secondary = Ticket::automationVisible()->find($secondaryId);
         if (! $primary || ! $secondary) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($primaryId, $clientId) ?? $this->heldTicketRefusal($secondaryId, $clientId) ?? ['error' => 'Ticket not found'];
         }
 
         if ((int) $primary->client_id !== $clientId || (int) $secondary->client_id !== $clientId) {

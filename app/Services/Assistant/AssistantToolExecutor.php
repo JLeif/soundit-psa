@@ -334,6 +334,26 @@ class AssistantToolExecutor
         return Ticket::automationVisible();
     }
 
+    /**
+     * G-14: an existing held intake ticket is refused as held, never as "not found". Reached
+     * only after the automation-visible lookup missed, so an ordinary ticket never takes
+     * this path. When $scoped and this executor has a client context, a held ticket under
+     * another client still reads exactly like an unknown id.
+     *
+     * @return array{error: string}|null
+     */
+    private function heldTicketRefusal(mixed $ticketId, bool $scoped = true): ?array
+    {
+        $id = is_int($ticketId) || (is_string($ticketId) && ctype_digit($ticketId)) ? (int) $ticketId : 0;
+        $ticket = $id > 0 ? Ticket::find($id) : null;
+        if (! $ticket?->isUnverifiedContactIntake()
+            || ($scoped && $this->clientId && (int) $ticket->client_id !== (int) $this->clientId)) {
+            return null;
+        }
+
+        return ['error' => 'Unverified contact intake.'];
+    }
+
     private function priorityOrderSql(): string
     {
         return "CASE priority WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 WHEN 'p3' THEN 3 WHEN 'p4' THEN 4 ELSE 5 END";
@@ -513,7 +533,7 @@ class AssistantToolExecutor
         $ticket = $ticketQuery->find($ticketId);
         if (! $ticket) {
             // Existence is never confirmed: out-of-scope reads exactly like unknown.
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
@@ -711,7 +731,8 @@ class AssistantToolExecutor
 
         $ticket = Ticket::automationVisible()->with('client')->find((int) $ticketId);
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            // This lookup is unscoped, so the held refusal is too.
+            return $this->heldTicketRefusal((int) $ticketId, scoped: false) ?? ['error' => 'Ticket not found'];
         }
 
         if (! $ticket->client_id || ! $ticket->client) {
@@ -757,7 +778,7 @@ class AssistantToolExecutor
 
         $ticket = $ticketQuery->find($ticketId);
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
@@ -1141,7 +1162,7 @@ class AssistantToolExecutor
             ->first();
 
         if (! $ticket) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         if (! $this->userId) {
