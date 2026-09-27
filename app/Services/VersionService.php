@@ -417,20 +417,9 @@ class VersionService
         // the fix either: a name in a legacy encoding is not valid UTF-8 and would fail
         // the split outright.
         foreach (explode("\n", substr($inflated, $nul + 1)) as $line) {
-            // Stop at the blank line that ends the header. Without this the commit
-            // MESSAGE is scanned too, and a body line beginning "committer <name>
-            // <email> <epoch> <tz>" is read as the header -- a WRONG VALUE, not a null,
-            // which is the one outcome this row must never produce.
-            //
-            // REACHABILITY, stated honestly: no object git writes can trigger this.
-            // `git commit` and `git commit-tree` always emit a committer header, and
-            // `git fsck` REFUSES a commit without one ("missingCommitter"), so for any
-            // real commit the loop returned at the genuine header before ever reaching
-            // the message. The reproduction needed an object forged with
-            // `git hash-object --literally`. So this is hardening against a forged or
-            // corrupt object, not a defect reachable through ordinary git use. It is two
-            // lines and it makes the parser's bound match what the docblock claims, so
-            // it is worth having -- but do not cite it as a live wrong-value fix.
+            // The header ends at the first blank line. Without this stop the commit
+            // MESSAGE is scanned too, and a body line beginning "committer " is read as
+            // the header.
             if ($line === '') {
                 return null;
             }

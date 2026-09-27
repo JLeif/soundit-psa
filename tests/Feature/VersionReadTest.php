@@ -38,25 +38,17 @@ class VersionReadTest extends TestCase
 
     protected function tearDown(): void
     {
-        // #4096: guard the read, do not assume setUp got this far. $fixture is a typed
-        // property with no default, and PHPUnit calls tearDown even when setUp threw --
-        // so on any failure before the assignment above, reading it raises "Typed
-        // property ... must not be accessed before initialization" and that Error
-        // REPLACES the real failure in the report. REPRODUCED: the unguarded read throws,
-        // the guarded one does not. isset() is false for an uninitialised typed property,
-        // which is why it is the honest test here rather than a null comparison.
+        // #4096: $fixture is uninitialised if setUp failed before assigning it, and
+        // PHPUnit calls tearDown anyway. isset() is false for an uninitialised typed
+        // property.
         if (! isset($this->fixture) || $this->fixture === '') {
             parent::tearDown();
 
             return;
         }
 
-        // Remove the symlink BEFORE the recursive delete. `rm -rf` does NOT follow a
-        // symlinked directory (verified: the real public/ survived), so this is not a
-        // live bug. It is removed because the fixture holds a link to the repository's
-        // real public/, and any future tearDown rewritten with a recursive PHP delete
-        // that tests is_dir() without is_link() WOULD follow it and empty that
-        // directory. Deleting the link first means that shape cannot appear later.
+        // Remove the symlink before the recursive delete: the fixture holds a link to
+        // the repository's real public/.
         if (is_link($this->fixture.'/public')) {
             unlink($this->fixture.'/public');
         }
@@ -496,14 +488,10 @@ class VersionReadTest extends TestCase
     {
         // #4095. The scan used to walk the whole object, so a MESSAGE line beginning
         // "committer ..." was taken as the header and produced a WRONG VALUE rather than
-        // an Unknown. REPRODUCED before the fix: this exact object yielded
-        // 2023-11-14 for a commit whose real date is 2026.
+        // an Unknown.
         //
-        // SCOPE, stated exactly: this object has NO committer header at all, which is
-        // why the message line is reachable. `git fsck` rejects such a commit
-        // ("missingCommitter") and neither `git commit` nor `git commit-tree` can emit
-        // one, so this models a FORGED or CORRUPT object -- not a squashed or quoted
-        // commit, which always carries its own header and was never affected.
+        // This object has no committer header at all, so null is its only correct
+        // answer. No local commit path produces one; an unverified fetch can.
         $this->headAt(self::SHA_A);
         $dir = $this->fixture.'/.git/objects/'.substr(self::SHA_A, 0, 2);
         mkdir($dir, 0755, true);
@@ -516,8 +504,6 @@ class VersionReadTest extends TestCase
         $date = $this->service()->current()['commit_date'];
 
         $this->assertNull($date, 'the header ends at the blank line; the message is not the header');
-        // Named explicitly so the pre-fix answer cannot return by another route.
-        $this->assertNotSame('2023-11-14T22:13:20Z', $date);
     }
 
     public function test_a_real_committer_header_is_still_read_when_the_message_also_has_one(): void
@@ -540,13 +526,9 @@ class VersionReadTest extends TestCase
 
     public function test_teardown_does_not_read_the_fixture_path_before_setup_assigned_it(): void
     {
-        // #4096. PHPUnit calls tearDown even when setUp throws, and $fixture is a typed
-        // property with no default -- so an unguarded read raises "must not be accessed
-        // before initialization" and that Error REPLACES the real failure in the report.
-        //
-        // Asserted on the PROPERTY OF THE GUARD rather than by making setUp throw: a
-        // test that breaks its own setUp cannot then report anything. isset() is false
-        // for an uninitialised typed property, which is the behaviour the guard rests on.
+        // #4096. $fixture is uninitialised if setUp failed before assigning it, and
+        // PHPUnit calls tearDown anyway. Asserted on the property of the guard rather
+        // than by making setUp throw.
         $fresh = new \ReflectionClass(self::class);
         $uninitialised = $fresh->newInstanceWithoutConstructor();
         $prop = new \ReflectionProperty(self::class, 'fixture');
