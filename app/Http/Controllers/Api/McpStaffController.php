@@ -298,6 +298,9 @@ class McpStaffController extends Controller
         // like the pairs above, client_id an optional filter; explicit-grant only so
         // the legacy full-surface token never inherits a fleet-wide cross-client read.
         'list_mislinked_assets',
+        // #3982: the commit this instance serves. Takes no arguments and reads no
+        // client data; explicit-grant only like every entry in this list.
+        'psa_version',
     ];
 
     /**
@@ -1235,6 +1238,8 @@ class McpStaffController extends Controller
             if (in_array($name, ['get_ticket_tool_history', 'get_ticket_timeline'], true)) {
                 $tool = $name === 'get_ticket_timeline' ? \App\Services\Mcp\TicketTimelineTool::class : \App\Services\Mcp\TicketToolHistoryTool::class;
                 $result = app($tool)->execute($arguments, $clientId);
+            } elseif ($name === \App\Services\Mcp\PsaVersionTool::NAME) {
+                $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {

@@ -1252,6 +1252,7 @@ class McpToolRegistry
             self::previewRecurringInvoiceTool(),
             self::getStagedActionStatusTool(),
             self::listMislinkedAssetsTool(),
+            \App\Services\Mcp\PsaVersionTool::definition(),
         ];
     }
 
