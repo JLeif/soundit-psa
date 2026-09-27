@@ -405,7 +405,13 @@ fi
 echo "  Backing up database (pre-checkout/pre-migration safety net)..."
 BACKUP_DIR="storage/app/backups"
 mkdir -p "$BACKUP_DIR"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+# The name must be unique per run on its own terms, not only because the deploy
+# lock serialises this script (#4136): the second-granular stamp alone let two
+# runs in one second resolve to one path, and the survivor of the overwrite was a
+# complete dump, so the empty-file check below could not see the loss. The shell
+# pid separates concurrent runs; the noclobber redirect below refuses, rather
+# than replaces, any path that is somehow still occupied.
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 # Read DB settings straight from the app's .env (strip surrounding double quotes).
 env_val() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'; }
 DB_CONNECTION="$(env_val DB_CONNECTION)"
@@ -418,15 +424,16 @@ case "$DB_CONNECTION" in
     # --no-tablespaces: avoids needing the PROCESS privilege. Password via MYSQL_PWD
     # so it never appears in the process list. pipefail aborts the deploy if the
     # dump fails (a failed/empty gzip must NOT look like success).
-    MYSQL_PWD="$(env_val DB_PASSWORD)" mysqldump \
-      --single-transaction --quick --no-tablespaces \
-      -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" \
-      -u "$DB_USERNAME" "$DB_DATABASE" | gzip > "$BACKUP_FILE"
+    ( set -C
+      MYSQL_PWD="$(env_val DB_PASSWORD)" mysqldump \
+        --single-transaction --quick --no-tablespaces \
+        -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" \
+        -u "$DB_USERNAME" "$DB_DATABASE" | gzip > "$BACKUP_FILE" )
     ;;
   sqlite)
     DB_FILE="$(env_val DB_DATABASE)"
     BACKUP_FILE="$BACKUP_DIR/pre-deploy-$STAMP.sqlite"
-    cp "${DB_FILE:-database/database.sqlite}" "$BACKUP_FILE"
+    ( set -C; cat "${DB_FILE:-database/database.sqlite}" > "$BACKUP_FILE" )
     ;;
   *)
     echo "  ERROR: unsupported DB_CONNECTION '$DB_CONNECTION' — refusing to migrate without a backup." >&2
