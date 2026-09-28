@@ -134,4 +134,33 @@ class ByIdReadClientScopeTest extends TestCase
         $this->assertStringContainsString('BYID-', json_encode($own));
         $this->assertStringContainsString('BYID-', json_encode($mcp([$key => $record->id])));
     }
+
+    /** @dataProvider tools */
+    public function test_mcp_staff_malformed_client_id_is_refused_not_dropped(string $tool, string $key, string $make, string $field): void
+    {
+        $owner = Client::factory()->create();
+        $record = $this->{$make}($owner->id);
+        $token = McpConfig::rotateStaffToken(allowedTools: [$tool], label: 'chet');
+
+        $mcp = fn (array $arguments) => $this->withHeaders(['Authorization' => 'Bearer '.$token])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0',
+                'id' => 1,
+                'method' => 'tools/call',
+                'params' => ['name' => $tool, 'arguments' => $arguments],
+            ])->json('result');
+
+        // Positive control: the record is reachable on this surface, so a refusal
+        // below is the malformed scope being refused, not the row being absent.
+        $this->assertStringContainsString('BYID-', json_encode($mcp([$key => $record->id])));
+
+        foreach (['07', 7.0, 0, -3, ''] as $malformed) {
+            $result = $mcp([$key => $record->id, 'client_id' => $malformed]);
+            $text = (string) ($result['content'][0]['text'] ?? '');
+
+            $this->assertTrue((bool) ($result['isError'] ?? false), $tool.' '.var_export($malformed, true).': '.$text);
+            $this->assertStringContainsString('is not a positive integer', $text);
+            $this->assertStringNotContainsString('BYID-', json_encode($result));
+        }
+    }
 }

@@ -340,6 +340,15 @@ class McpStaffController extends Controller
         'list_recurring_profiles',
         'get_recurring_profile',
         'preview_recurring_invoice',
+
+        // #4254: the by-id intake reads. Like get_recurring_profile, neither
+        // publishes client_id in its schema, but the controller lifts it out of the
+        // arguments regardless and the executor now honours it as a real fence
+        // (AssistantToolExecutor::getEmailItem/getPhoneCall). A malformed one would
+        // collapse to null and hand back another client's body_text/transcription.
+        // The entry only ADDS a refusal; an omitted client_id keeps the unscoped read.
+        'get_email_item',
+        'get_phone_call',
     ];
 
     /**
