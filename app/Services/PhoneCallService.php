@@ -1326,6 +1326,7 @@ class PhoneCallService
             ));
 
             $openTicketIds = Ticket::query()
+                ->automationVisible()
                 ->where('client_id', $locked->client_id)
                 ->where('contact_id', $locked->person_id)
                 ->whereIn('status', $openStatuses)

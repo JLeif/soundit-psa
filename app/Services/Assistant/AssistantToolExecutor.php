@@ -1382,11 +1382,11 @@ class AssistantToolExecutor
                     ->get(['people.id', 'people.first_name', 'people.last_name'])
                     ->map(fn (Person $p) => ['id' => $p->id, 'name' => trim("{$p->first_name} {$p->last_name}")])
                     ->values()->toArray(),
-                'tickets_count' => $asset->tickets()->count(),
+                'tickets_count' => $asset->tickets()->automationVisible()->count(),
                 // halo_id rides along because display_id is an ACCESSOR over it
                 // ("#{halo_id}", else "T-{id}"): a column-restricted select that
                 // omits it silently renders every migrated ticket as T-{id}.
-                'recent_tickets' => $asset->tickets()
+                'recent_tickets' => $asset->tickets()->automationVisible()
                     ->orderByDesc('tickets.created_at')
                     ->limit(5)
                     ->get(['tickets.id', 'tickets.halo_id', 'tickets.subject', 'tickets.status'])
@@ -1400,7 +1400,7 @@ class AssistantToolExecutor
         ];
 
         if (in_array('tickets', $expand, true)) {
-            $out['expanded']['tickets'] = $asset->tickets()
+            $out['expanded']['tickets'] = $asset->tickets()->automationVisible()
                 ->orderByDesc('tickets.created_at')
                 ->limit(20)
                 // halo_id: display_id is an accessor over it, same as above.

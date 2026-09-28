@@ -171,7 +171,7 @@ class TriageToolExecutor
         $query = $input['query'] ?? '';
 
         // CLIENT-SCOPED: only search tickets for this client
-        $builder = Ticket::where('client_id', $this->clientId)
+        $builder = Ticket::automationVisible()->where('client_id', $this->clientId)
             ->search($query)
             ->where('id', '!=', $this->ticket->id) // Exclude current ticket
             ->orderByDesc('created_at');
@@ -211,7 +211,7 @@ class TriageToolExecutor
         try {
             $status = $input['status'] ?? 'open';
 
-            $query = Ticket::where('client_id', $this->clientId)
+            $query = Ticket::automationVisible()->where('client_id', $this->clientId)
                 ->where('id', '!=', $this->ticket->id);
 
             // Status map (there is intentionally NO scopePending): open() already includes
@@ -370,11 +370,11 @@ class TriageToolExecutor
         // externally-synced tickets (psa-gq0f).
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
 
-        if (! $ticket) {
+        if (! $ticket || $ticket->isUnverifiedContactIntake()) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
-        $notes = TicketNote::where('ticket_id', $ticket->id)
+        $notes = TicketNote::automationVisible()->where('ticket_id', $ticket->id)
             ->orderBy('noted_at')
             ->limit(20)
             ->get();

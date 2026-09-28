@@ -1033,7 +1033,7 @@ PROMPT;
         // Dedup: vendor notification emails often arrive in bursts for the same issue.
         // If an open ticket with the same subject exists for this client within 2 hours, link instead of creating a duplicate.
         if ($isVendorRequest) {
-            $existing = Ticket::where('client_id', $email->client_id)
+            $existing = Ticket::automationVisible()->where('client_id', $email->client_id)
                 ->where('subject', $email->subject)
                 ->whereNotIn('status', [TicketStatus::Closed, TicketStatus::Resolved])
                 ->where('created_at', '>=', now()->subHours(2))
