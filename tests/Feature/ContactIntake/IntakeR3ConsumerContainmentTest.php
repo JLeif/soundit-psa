@@ -2,15 +2,21 @@
 
 namespace Tests\Feature\ContactIntake;
 
+use App\Enums\CallStatus;
 use App\Enums\NoteType;
+use App\Enums\TechnicianRunState;
 use App\Enums\TicketStatus;
 use App\Enums\WhoType;
 use App\Jobs\RunTriagePipeline;
 use App\Models\Email;
+use App\Models\PhoneCall;
 use App\Models\Setting;
+use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\TicketNote;
+use App\Models\User;
 use App\Services\Agent\Intake\IntakeRouter;
+use App\Services\Agent\ProposeCloseTool;
 use App\Services\Ai\AiClient;
 use App\Services\Assistant\AssistantToolExecutor;
 use App\Services\Triage\TriagePipeline;
@@ -153,5 +159,63 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $decision = app(IntakeRouter::class)->route($email);
         $this->assertTrue($decision->isAttach());
         $this->assertSame($ticket->id, $decision->ticketId);
+    }
+
+    /** c1:v2:1 — the assistant's propose_close does not find a held ticket and records nothing. */
+    public function test_assistant_propose_close_does_not_act_on_a_held_ticket(): void
+    {
+        User::factory()->create();
+        $ticket = $this->formTicket();
+        $propose = fn () => (new AssistantToolExecutor)->execute('propose_close',
+            ['ticket_id' => $ticket->id, 'reason' => 'Synthetic close reason', 'confidence' => 0.9]);
+
+        $this->assertSame(['error' => 'Ticket not found'], $propose());
+        $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)->count());
+
+        // Positive control: once verified, the close is proposed and held for approval.
+        $this->verify($ticket);
+        $this->assertTrue($propose()['success'] ?? false);
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $ticket->id)->where('action_type', 'propose_close')
+            ->where('state', TechnicianRunState::AwaitingApproval->value)->count());
+    }
+
+    /** c1:v2:1 — ProposeCloseTool itself records nothing on a held ticket, on either entry point. */
+    public function test_propose_close_tool_records_nothing_on_a_held_ticket(): void
+    {
+        User::factory()->create();
+        $ticket = $this->formTicket();
+        $held = "Left ticket #{$ticket->id} (an unverified web-form intake awaits staff verification; no close proposed).";
+        $input = ['reason' => 'Synthetic close reason', 'confidence' => 0.9];
+
+        $this->assertSame($held, app(ProposeCloseTool::class)->executeHeld($ticket, $input));
+        $this->assertSame($held, app(ProposeCloseTool::class)->execute($ticket, $input));
+        $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)->count());
+
+        // Positive control: the verified ticket gets a held proposal.
+        $ticket = $this->verify($ticket);
+        $this->assertStringContainsString('held for approval', app(ProposeCloseTool::class)->executeHeld($ticket, $input));
+        $this->assertSame(1, TechnicianRun::where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->count());
+    }
+
+    /** c1:v2:2 — get_ticket_calls refuses a held ticket like get_ticket_detail, serving none of its calls. */
+    public function test_assistant_ticket_calls_do_not_serve_a_held_ticket(): void
+    {
+        $ticket = $this->formTicket();
+        PhoneCall::create(['call_uuid' => 'intake-held-call', 'ticket_id' => $ticket->id, 'from_number' => '+15095550101',
+            'to_number' => '+15095550202', 'status' => CallStatus::Completed, 'started_at' => now()->subHour(),
+            'call_summary' => 'HELD-CALL-SUMMARY', 'cleaned_transcript' => 'HELD-CALL-TRANSCRIPT']);
+        $staff = fn () => (new AssistantToolExecutor)->execute('get_ticket_calls', ['ticket_id' => $ticket->id]);
+        $scoped = fn () => (new AssistantToolExecutor(null, $ticket->client_id))->execute('get_ticket_calls', ['ticket_id' => $ticket->id]);
+
+        foreach ([$staff(), $scoped()] as $result) {
+            $this->assertSame(['error' => 'Ticket not found'], $result);
+        }
+
+        // Positive control: once verified, both readers serve its calls.
+        $this->verify($ticket);
+        foreach ([$staff(), $scoped()] as $result) {
+            $this->assertSame($ticket->display_id, $result['display_id'] ?? null);
+            $this->assertStringContainsString('HELD-CALL-TRANSCRIPT', json_encode($result));
+        }
     }
 }

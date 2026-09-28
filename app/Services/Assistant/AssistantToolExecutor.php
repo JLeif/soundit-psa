@@ -706,7 +706,9 @@ class AssistantToolExecutor
             return ['error' => 'confidence must be a number between 0 and 1'];
         }
 
-        $ticket = Ticket::with('client')->find((int) $ticketId);
+        // Held form ticket (c1:v2:1): not found here, as in get_ticket_detail; no close is
+        // proposed against it until staff verify it.
+        $ticket = Ticket::automationVisible()->with('client')->find((int) $ticketId);
         if (! $ticket) {
             return ['error' => 'Ticket not found'];
         }
@@ -746,7 +748,8 @@ class AssistantToolExecutor
         //   unscoped — the staff board keeps its cross-client read, including
         //              the client_id IS NULL unresolved-intake tickets that
         //              are reachable nowhere else (psa-6usr).
-        $ticketQuery = Ticket::with('client:id,stage');
+        // A held form ticket is not found here either, as in get_ticket_detail (c1:v2:2).
+        $ticketQuery = Ticket::automationVisible()->with('client:id,stage');
 
         if ($this->clientId) {
             $ticketQuery->where('client_id', $this->clientId);
