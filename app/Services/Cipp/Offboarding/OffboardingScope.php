@@ -36,7 +36,7 @@ class OffboardingScope
     public function approver(int $id, TechnicianRun $run): void
     {
         $this->reader($id, $run);
-        $ticket = Ticket::find($run->ticket_id);
+        $ticket = Ticket::automationVisible()->findOrFail($run->ticket_id);
         // Bearer-token proposals and human approval are separate principal types. Also
         // refuse the ticket's recorded human requester; never compare token IDs to user IDs.
         if ($ticket->created_by === $id) {
@@ -48,8 +48,11 @@ class OffboardingScope
     /** Local staff ACL: admins, or the technician assigned to this same-client ticket. */
     public function reader(int $id, TechnicianRun $run): void
     {
+        if (Ticket::find($run->ticket_id)?->isUnverifiedContactIntake()) {
+            throw new RuntimeException('The ticket is an unverified contact intake held for staff verification; offboarding is refused until it is verified.');
+        }
         $user = User::find($id);
-        $ticket = Ticket::find($run->ticket_id);
+        $ticket = Ticket::automationVisible()->find($run->ticket_id);
         if (! $user || ! $user->is_active || ! $ticket || ! $run->client_id
             || $ticket->client_id !== $run->client_id
             || (! $user->isAdmin() && (! $user->isTech() || $ticket->assignee_id !== $id))) {

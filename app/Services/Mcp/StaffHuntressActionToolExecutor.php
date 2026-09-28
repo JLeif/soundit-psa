@@ -563,7 +563,7 @@ class StaffHuntressActionToolExecutor
                 return new TechnicianApprovalResult('gate_declined');
             }
 
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $ticket = Ticket::automationVisible()->find((int) ($payload['ticket_id'] ?? 0));
             if (! $ticket || (int) $ticket->client_id !== (int) $client->id) {
                 $run->releaseClaim();
 
@@ -1030,8 +1030,14 @@ class StaffHuntressActionToolExecutor
             throw new HuntressWriteScopeException('ticket_id is required for staged Huntress actions');
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                throw new HuntressWriteScopeException('This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.');
+            }
+
             throw new HuntressWriteScopeException('Ticket not found or belongs to a different client');
         }
 

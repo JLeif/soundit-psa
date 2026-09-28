@@ -3747,7 +3747,7 @@ class StaffTacticalAdminToolExecutor
             }
 
             $client = Client::find((int) ($payload['client_id'] ?? 0));
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $ticket = Ticket::automationVisible()->find((int) ($payload['ticket_id'] ?? 0));
             if (! $client || ! $ticket || (int) $ticket->client_id !== (int) $run->client_id) {
                 $run->releaseClaim();
 
@@ -5504,8 +5504,14 @@ class StaffTacticalAdminToolExecutor
             return ['error' => $missingMessage];
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+            }
+
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 

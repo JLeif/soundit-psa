@@ -61,6 +61,10 @@ class TriageToolExecutor
      */
     public function execute(string $toolName, array $input): mixed
     {
+        if ($this->ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
+        }
+
         if (str_starts_with($toolName, 'tactical_') && ! TriageToolDefinitions::isTacticalAvailable()) {
             return ['error' => 'Tactical RMM is disabled or not configured'];
         }
@@ -370,8 +374,14 @@ class TriageToolExecutor
         // externally-synced tickets (psa-gq0f).
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
 
-        if (! $ticket || $ticket->isUnverifiedContactIntake()) {
+        if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
+        }
+
+        // G-14: an in-scope held intake ticket is refused as held, never as missing. The lookup
+        // above is client-scoped, so a held ticket under another client never reaches this.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
         }
 
         $notes = TicketNote::automationVisible()->where('ticket_id', $ticket->id)

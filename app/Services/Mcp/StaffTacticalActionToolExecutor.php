@@ -288,7 +288,7 @@ class StaffTacticalActionToolExecutor
             }
 
             $asset = Asset::with('tacticalAsset')->find((int) ($payload['asset_id'] ?? 0));
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $ticket = Ticket::automationVisible()->find((int) ($payload['ticket_id'] ?? 0));
             if (! $asset || ! $ticket || (int) $ticket->client_id !== (int) $run->client_id) {
                 $run->releaseClaimTo($releaseState);
 
@@ -1022,8 +1022,14 @@ class StaffTacticalActionToolExecutor
             return $required ? ['error' => 'ticket_id is required for staged Tactical actions'] : null;
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+            }
+
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
