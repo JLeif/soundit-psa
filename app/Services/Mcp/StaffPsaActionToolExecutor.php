@@ -2453,6 +2453,12 @@ class StaffPsaActionToolExecutor
             return $ticket;
         }
 
+        // Refuse before the note, responded_at and audit writes (c1:v3:1): EmailService would
+        // refuse the send anyway, and a swallowed refusal after those writes reads as success.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'send_email refused: this ticket is an unverified web-form intake; staff must verify it before any email is sent.'];
+        }
+
         try {
             $resolved = $this->recipients->resolve(
                 $ticket,
@@ -3199,6 +3205,11 @@ class StaffPsaActionToolExecutor
             ? $ticket->client_id !== null
             : ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
             return ['error' => 'Ticket not found or belongs to a different client'];
+        }
+
+        // Held form ticket (diff:6): no MCP tool reads or acts on it until staff verify it.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Refused: this ticket is an unverified web-form intake; staff must verify it before any MCP tool can read or act on it.'];
         }
 
         TicketToolActivityContext::current()?->validated($ticket);

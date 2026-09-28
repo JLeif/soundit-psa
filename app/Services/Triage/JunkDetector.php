@@ -206,7 +206,7 @@ class JunkDetector
             return true;
         }
 
-        // Real conversation happening (3+ notes)
+        // Real conversation happening (3+ notes); contained web-form notes count (r2 diff:1)
         if ($ticket->notes()->count() >= 3) {
             return true;
         }
@@ -481,7 +481,7 @@ class JunkDetector
         }
 
         // Try first note's linked email
-        $firstNote = $ticket->notes()->whereNotNull('email_id')->first();
+        $firstNote = $ticket->notes()->automationVisible()->whereNotNull('email_id')->first();
         if ($firstNote?->email) {
             return $firstNote->email->from_address;
         }

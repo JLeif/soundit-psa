@@ -40,6 +40,12 @@ class SignificanceGate
      */
     public function assess(Ticket $ticket): bool
     {
+        // A held form ticket is contained as a whole: nothing of it reaches the model, and the
+        // agent is not woken on it until staff verify it (contract-replacement:2).
+        if ($ticket->fresh()?->isUnverifiedContactIntake()) {
+            return false;
+        }
+
         $context = $this->buildContext($ticket);
 
         try {
@@ -92,7 +98,7 @@ class SignificanceGate
             "Last updated: {$ageDays} day(s) ago",
         ];
 
-        $lastNote = $ticket->notes()
+        $lastNote = $ticket->notes()->automationVisible()
             ->orderByDesc('noted_at')
             ->first();
 

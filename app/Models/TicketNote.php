@@ -39,6 +39,12 @@ class TicketNote extends Model
         'edited_by',
     ];
 
+    /** Provenance is not mass assignable: only the intake writer may stamp it. */
+    public function isUnverifiedContactIntake(): bool
+    {
+        return (bool) $this->contact_intake_origin && $this->contact_intake_verified_at === null;
+    }
+
     protected function casts(): array
     {
         return [
@@ -52,6 +58,8 @@ class TicketNote extends Model
             'time_minutes' => 'integer',
             'noted_at' => 'datetime',
             'edited_at' => 'datetime',
+            'contact_intake_origin' => 'boolean',
+            'contact_intake_verified_at' => 'datetime',
         ];
     }
 
@@ -91,15 +99,24 @@ class TicketNote extends Model
 
     /**
      * Filter to notes visible in the client portal.
-     * Excludes private notes and system-generated note types.
+     * Excludes private notes, system-generated note types and unverified contact-intake
+     * notes; a verified intake note is portal-eligible like any other (r2 diff:7).
      */
     public function scopePortalVisible(Builder $query): Builder
     {
-        return $query->where('is_private', false)
+        return $query->automationVisible()->where('is_private', false)
             ->whereNotIn('note_type', array_map(
                 fn (NoteType $t) => $t->value,
                 NoteType::systemGenerated(),
             ));
+    }
+
+    /** Automatic and action-capable readers must apply this independently of privacy. */
+    public function scopeAutomationVisible(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $q) => $q
+            ->where('contact_intake_origin', false)
+            ->orWhereNotNull('contact_intake_verified_at'));
     }
 
     // ── Accessors ──

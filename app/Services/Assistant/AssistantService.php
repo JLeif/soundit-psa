@@ -251,7 +251,7 @@ PROMPT;
                 $prompt .= "\n\n".ContextBuilder::buildForTicket($ticket);
 
                 // Include most recent AI triage note if available
-                $triageNote = $ticket->notes()
+                $triageNote = $ticket->notes()->automationVisible()
                     ->where('note_type', NoteType::AiTriage)
                     ->orderByDesc('noted_at')
                     ->first();
@@ -298,10 +298,16 @@ PROMPT;
      */
     private function buildTicketImageBlocks(Ticket $ticket): array
     {
+        // Contained content never reaches AI context (r2 contract:1): a held ticket contributes
+        // no images, and a contained note on any ticket contributes none of its own.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return [];
+        }
+
         $ticket->loadMissing(['attachments', 'notes.attachments']);
 
         $attachments = $ticket->attachments
-            ->concat($ticket->notes->flatMap->attachments)
+            ->concat($ticket->notes->reject(fn ($n) => $n->isUnverifiedContactIntake())->flatMap->attachments)
             ->filter(fn ($a) => $a->isImage())
             ->unique('id')
             ->take(8); // cap — keeps context manageable

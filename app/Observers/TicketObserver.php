@@ -61,6 +61,13 @@ class TicketObserver
             }
         }
 
+        // Contact-intake containment starts AFTER the audit-only log above (C-51): an
+        // unverified web-form ticket is still audited, but emits no signal, notification
+        // or automatic dispatch until staff verify it.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         try {
             app(SignalHub::class)->emit('ticket.created', $ticket, "Ticket #{$ticket->id} created", [
                 'client_id' => $ticket->client_id,
@@ -105,6 +112,10 @@ class TicketObserver
      */
     public function updating(Ticket $ticket): void
     {
+        if ($ticket->getRawOriginal('contact_intake_origin')) {
+            $ticket->contact_intake_origin = true;
+        }
+
         if ($ticket->isDirty('category_id')) {
             $ticket->category_source = TicketCategoryChangeLog::attributionSource();
         }
@@ -220,6 +231,13 @@ class TicketObserver
                     'error' => $e->getMessage(),
                 ]);
             }
+        }
+
+        // Contact-intake containment starts AFTER the two audit-only logs above (C-51,
+        // r1 diff:11): the change log is recorded for every ticket, but an unverified
+        // web-form ticket triggers no callback, mining or automatic drafting.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
         }
 
         // T2T callback — only for HelpdeskButton tickets, on a status change.

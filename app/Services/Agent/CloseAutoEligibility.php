@@ -81,6 +81,8 @@ class CloseAutoEligibility
     {
         $cutoff = now()->subDays(AgentConfig::autoQuietDays());
 
+        // Contained web-form notes count too: their content is withheld, not the fact that
+        // the client wrote (r2 diff:1).
         return TicketNote::withTrashed()
             ->where('ticket_id', $ticket->id)
             ->where('who_type', WhoType::EndUser->value)

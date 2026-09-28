@@ -53,6 +53,18 @@ class TriagePipeline
             'errors' => [],
         ]);
 
+        // Held form ticket (diff:5): no stage — contact resolution, junk filter, review — may
+        // send its content to the model or act on it until staff verify it.
+        if ($ticket->fresh()?->isUnverifiedContactIntake()) {
+            $run->update([
+                'status' => 'failed',
+                'completed_at' => now(),
+                'errors' => [['stage' => 'pre_check', 'message' => 'Unverified contact intake — contained until staff verify it']],
+            ]);
+
+            return $run;
+        }
+
         // Check daily token ceiling before proceeding
         if (! $this->withinDailyTokenLimit()) {
             Log::warning('[Triage] Daily token limit exceeded, skipping pipeline', [
@@ -474,7 +486,7 @@ class TriagePipeline
         }
 
         // Update ticket notes that defaulted to billable=true before classification
-        $notes = TicketNote::where('ticket_id', $ticket->id)
+        $notes = TicketNote::automationVisible()->where('ticket_id', $ticket->id)
             ->where('is_billable', '!=', $shouldBeBillable)
             ->whereNotNull('time_minutes')
             ->where('time_minutes', '>', 0)

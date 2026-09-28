@@ -52,6 +52,14 @@ class ConversationReviewer
             }
         }
 
+        // Even on a manual run: a web-form client reply awaiting verification is
+        // withheld from the context, so the model would assess the ticket blind to it.
+        if (self::hasUnverifiedContainedClientReply($ticket)) {
+            Log::debug('[Triage] Review skipped — contained client reply awaits verification', ['ticket_id' => $ticket->id]);
+
+            return ['skipped' => true, 'reason' => 'contained_reply_pending'];
+        }
+
         $ticket->loadMissing(['client', 'contact', 'assignee', 'notes.author']);
 
         // Build conversation history for AI review
@@ -192,6 +200,7 @@ class ConversationReviewer
 
         // Check for human notes in the last 4 hours
         // Includes: staff notes (author_id set, not system user) and portal/email replies (who_type = EndUser)
+        // Contained web-form notes count too: only their content is withheld (r2 diff:1).
         $humanNote = $ticket->notes()
             ->where('noted_at', '>=', $fourHoursAgo)
             ->whereNotIn('note_type', [
@@ -216,6 +225,18 @@ class ConversationReviewer
         }
 
         return false;
+    }
+
+    /** True while a web-form client reply on this ticket awaits staff verification. */
+    private static function hasUnverifiedContainedClientReply(Ticket $ticket): bool
+    {
+        return $ticket->notes()->withoutTrashed()
+            ->where('note_type', NoteType::Reply->value)
+            ->where('ai_authored', false)
+            ->where('who_type', \App\Enums\WhoType::EndUser->value)
+            ->where('contact_intake_origin', true)
+            ->whereNull('contact_intake_verified_at')
+            ->exists();
     }
 
     /**

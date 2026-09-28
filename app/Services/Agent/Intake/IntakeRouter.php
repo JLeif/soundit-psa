@@ -110,8 +110,9 @@ PROMPT;
     public function routeContent(int $clientId, string $subject, string $body, string $contentKey, string $channelNoun = 'email'): IntakeDecision
     {
         // 1. Fetch candidate tickets SERVER-SIDE from the resolved client_id (injection floor).
-        //    The content never influences which tickets are considered.
-        $candidates = Ticket::where('client_id', $clientId)
+        //    The content never influences which tickets are considered. A held form ticket is
+        //    never a candidate (context:1): its unverified text must not reach the prompt.
+        $candidates = Ticket::automationVisible()->where('client_id', $clientId)
             ->open()
             ->latest()
             ->limit(self::CANDIDATE_LIMIT)

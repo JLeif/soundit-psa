@@ -26,6 +26,10 @@ class NotificationService
      */
     public function notifyTicketCreated(Ticket $ticket): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         $ticket->loadMissing('client');
         $context = ($ticket->client?->name ?? 'Unknown client').' — '.($ticket->source?->label() ?? 'Manual');
 
@@ -54,6 +58,13 @@ class NotificationService
      */
     public function notifyNoteAdded(Ticket $ticket, TicketNote $note, int $authorUserId): void
     {
+        // A held ticket is contained as a whole. A contained note on an ordinary ticket is not
+        // hidden: the assignee is told a client wrote, but its body never leaves the PSA (r2 diff:1).
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+        $contained = $note->isUnverifiedContactIntake();
+
         if (! $ticket->assignee_id || $ticket->assignee_id === $authorUserId) {
             return;
         }
@@ -71,11 +82,11 @@ class NotificationService
             $event->value,
             $ticket->id,
             $authorUserId,
-            Str::limit($note->body, 200),
+            $contained ? 'Unverified web-form message; content withheld until staff verify it.' : Str::limit($note->body, 200),
         );
 
         // Notify portal contact when a staff member adds a public reply
-        if (! $note->is_private && $note->note_type === NoteType::Reply && $ticket->contact_id) {
+        if (! $contained && ! $note->is_private && $note->note_type === NoteType::Reply && $ticket->contact_id) {
             $this->notifyPortalContact($ticket, 'staff_reply', Str::limit($note->body, 500));
         }
     }
@@ -86,6 +97,12 @@ class NotificationService
      */
     public function notifyEmailAdded(Ticket $ticket, Email $email): void
     {
+        // A held ticket is contained as a whole: no notification carries its subject
+        // (contract-replacement:3).
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         if (! $ticket->assignee_id) {
             return;
         }
@@ -108,6 +125,10 @@ class NotificationService
      */
     public function notifyTicketAssigned(Ticket $ticket, int $newAssigneeId, int $changedByUserId): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         if ($newAssigneeId === $changedByUserId) {
             return;
         }
@@ -148,6 +169,10 @@ class NotificationService
      */
     public function notifyPriorityChanged(Ticket $ticket, TicketPriority $oldPriority, TicketPriority $newPriority, int $changedByUserId): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         if (! $ticket->assignee_id || $ticket->assignee_id === $changedByUserId) {
             return;
         }
@@ -174,6 +199,10 @@ class NotificationService
      */
     public function notifyStatusChanged(Ticket $ticket, TicketStatus $oldStatus, TicketStatus $newStatus, ?int $changedByUserId): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         // Staff notification
         if ($ticket->assignee_id && $ticket->assignee_id !== $changedByUserId && ! $this->isTriageUser($changedByUserId)) {
             SendTicketNotification::dispatch(
@@ -200,6 +229,10 @@ class NotificationService
      */
     public function notifyPortalReply(Ticket $ticket, TicketNote $note, \App\Models\Person $person): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         if (! $ticket->assignee_id) {
             return;
         }
@@ -614,6 +647,10 @@ class NotificationService
      */
     private function notifyPortalContact(Ticket $ticket, string $eventType, ?string $context = null): void
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return;
+        }
+
         if (! $ticket->contact_id) {
             return;
         }
