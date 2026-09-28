@@ -31,9 +31,13 @@ final class IntakeReconciliation
      */
     public function measure(): array
     {
-        $accepted = DB::table('contact_intake_counters')->where('name', 'accepted')->value('total');
-        $byState = DB::table('contact_submissions')->selectRaw('state, COUNT(*) AS total')
-            ->groupBy('state')->pluck('total', 'state')->map(fn ($n) => (int) $n)->all();
+        // One transaction, so under InnoDB's default REPEATABLE READ both reads share one snapshot;
+        // separate autocommit reads could straddle an accept's commit and show a false mismatch.
+        [$accepted, $byState] = DB::transaction(fn () => [
+            DB::table('contact_intake_counters')->where('name', 'accepted')->value('total'),
+            DB::table('contact_submissions')->selectRaw('state, COUNT(*) AS total')
+                ->groupBy('state')->pluck('total', 'state')->map(fn ($n) => (int) $n)->all(),
+        ]);
         $states = [];
         foreach (self::STATES as $state) {
             $states[$state] = $byState[$state] ?? 0;
