@@ -35,6 +35,9 @@ class RunCommandAction implements TacticalAction
     /** #3971: timeout + TacticalClient's 15s margin must fit its 45s cmd() budget. */
     private const TIMEOUT_MAX = 30;
 
+    /** #3971: the maximum before it was lowered; proposals and schedules stored earlier may carry up to this. */
+    private const PREVIOUS_TIMEOUT_MAX = 600;
+
     /** Tactical's exact accepted shell set (parity, no PSA-side OS narrowing). */
     private const ALLOWED_SHELLS = ['cmd', 'powershell', 'shell'];
 
@@ -85,9 +88,14 @@ class RunCommandAction implements TacticalAction
         }
         $timeout = (int) $timeout;
         if ($timeout < self::TIMEOUT_MIN || $timeout > self::TIMEOUT_MAX) {
-            throw new InvalidActionParams(
-                'timeout must be between '.self::TIMEOUT_MIN.' and '.self::TIMEOUT_MAX.' seconds.'
-            );
+            $message = 'timeout must be between '.self::TIMEOUT_MIN.' and '.self::TIMEOUT_MAX.' seconds.';
+            // #3971: a staged proposal or scheduled run stored under the old maximum
+            // is refused here at approval or fire time; the refusal says why.
+            if ($timeout > self::TIMEOUT_MAX && $timeout <= self::PREVIOUS_TIMEOUT_MAX) {
+                $message .= ' The maximum was lowered from '.self::PREVIOUS_TIMEOUT_MAX.' to '.self::TIMEOUT_MAX.' seconds.';
+            }
+
+            throw new InvalidActionParams($message);
         }
 
         // Exactly the canonical triplet — the dangerous body keys (custom_shell /

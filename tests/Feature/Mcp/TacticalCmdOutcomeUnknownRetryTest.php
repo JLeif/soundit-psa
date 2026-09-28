@@ -19,6 +19,7 @@ use App\Services\Tactical\TacticalClientException;
 use App\Services\Technician\TechnicianApprovalService;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Testing\TestResponse;
 use Mockery;
 use Tests\TestCase;
@@ -208,6 +209,43 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
 
         $this->assertSame('gate_declined', $approval->status);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'offline: nothing ran, so it stays approvable');
+    }
+
+    public function test_a_command_staged_under_the_old_600s_maximum_is_refused_at_approval_with_a_named_reason(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_stage_command'], label: 'opsbot');
+
+        $staged = $this->callTool($token, 'tactical_stage_command', $this->stageArgs($f));
+        $this->assertFalse((bool) $staged->json('result.isError'), $this->text($staged));
+        $run = TechnicianRun::findOrFail(json_decode($this->text($staged), true)['run_id']);
+
+        // A proposal stored before the maximum was lowered: the old 10..600 schema accepted 120.
+        $meta = $run->proposed_meta;
+        $meta['encrypted_payload'] = Crypt::encryptString(json_encode([
+            'direct_tool' => 'tactical_run_command',
+            'asset_id' => $f['asset']->id,
+            'ticket_id' => $f['ticket']->id,
+            'client_id' => $f['client']->id,
+            'params' => ['cmd' => 'Long-Job', 'shell' => 'powershell', 'timeout' => 120],
+        ], JSON_THROW_ON_ERROR));
+        $run->forceFill(['proposed_meta' => $meta])->save();
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldNotReceive('cmd');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $approval = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run->fresh(), $f['actor']->id);
+
+        $this->assertSame('gate_declined', $approval->status);
+        $this->assertStringContainsString('lowered from 600 to 30 seconds', (string) $approval->message);
+        $this->assertStringContainsString('deny this proposal and stage it again', (string) $approval->message);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'nothing was sent; the approver can deny it');
+        $this->assertStringContainsString(
+            'lowered from 600 to 30 seconds',
+            (string) TacticalActionLog::where('result_status', 'rejected')->sole()->message,
+            'the bus audit row, the same one the scheduled lane writes at fire time, names the change',
+        );
     }
 
     public function test_the_same_command_is_held_across_lanes_tickets_and_timeouts_after_an_outcome_unknown(): void

@@ -383,6 +383,13 @@ class StaffTacticalActionToolExecutor
             if (! $result->isOk()) {
                 $run->releaseClaimTo($releaseState);
 
+                // #3971: the bus rejects only at parameter validation, and the stored
+                // parameters cannot change at approval, so every later approval is
+                // rejected the same way (e.g. a command staged under the old 600s max).
+                if ($result->status === 'rejected' && $releaseState === TechnicianRunState::AwaitingApproval) {
+                    return new TechnicianApprovalResult('gate_declined', message: 'The approved parameters are no longer accepted, so nothing was sent: '.$result->message.' Approving again will be refused the same way; deny this proposal and stage it again with accepted parameters.');
+                }
+
                 return new TechnicianApprovalResult('gate_declined');
             }
 

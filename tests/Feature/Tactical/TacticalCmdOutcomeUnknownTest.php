@@ -224,4 +224,22 @@ class TacticalCmdOutcomeUnknownTest extends TestCase
 
         $this->assertCount(1, $history, 'neither page retry reached the transport');
     }
+
+    public function test_only_a_timeout_the_old_maximum_accepted_is_told_the_maximum_was_lowered(): void
+    {
+        $messageFor = function (int $timeout): string {
+            try {
+                (new RunCommandAction)->validateParams(['shell' => 'powershell', 'cmd' => 'Long-Job', 'timeout' => $timeout]);
+            } catch (\App\Services\Tactical\Actions\InvalidActionParams $e) {
+                return $e->getMessage();
+            }
+
+            $this->fail("timeout {$timeout} should be rejected.");
+        };
+
+        $this->assertStringContainsString('lowered from 600 to 30 seconds', $messageFor(31));
+        $this->assertStringContainsString('lowered from 600 to 30 seconds', $messageFor(600));
+        $this->assertStringNotContainsString('lowered', $messageFor(601), 'the old maximum never accepted it either');
+        $this->assertStringNotContainsString('lowered', $messageFor(5));
+    }
 }
