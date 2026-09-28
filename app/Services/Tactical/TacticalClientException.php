@@ -2,6 +2,7 @@
 
 namespace App\Services\Tactical;
 
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\RequestException;
 use RuntimeException;
 use Throwable;
@@ -26,6 +27,7 @@ class TacticalClientException extends RuntimeException
         private readonly ?int $statusCode = null,
         private readonly ?string $responseBody = null,
         private readonly bool $transportFailure = false,
+        private readonly bool $timedOutAfterSend = false,
     ) {
         parent::__construct($message, $code, $previous);
     }
@@ -66,7 +68,28 @@ class TacticalClientException extends RuntimeException
             ? "Tactical API error (HTTP {$status})"
             : 'Tactical API error (transport failure)';
 
-        return new self($safeMessage, $e->getCode(), $e, $status, $body, $transport);
+        return new self($safeMessage, $e->getCode(), $e, $status, $body, $transport, $transport && self::timedOutAfterRequestSent($e));
+    }
+
+    /**
+     * #3971: cURL 28 arrives as a ConnectException both when the connection never
+     * opened and when the request went out and no answer came back in time. The
+     * handler context separates them: cURL's request_size (CURLINFO_REQUEST_SIZE)
+     * is the size of the request it issued, and is 0 when the timeout fired
+     * before the connection and any TLS handshake completed. A context without
+     * those keys proves nothing, so it answers false.
+     */
+    private static function timedOutAfterRequestSent(Throwable $e): bool
+    {
+        if (! $e instanceof ConnectException && ! $e instanceof RequestException) {
+            return false;
+        }
+
+        $context = $e->getHandlerContext();
+
+        return ($context['errno'] ?? null) === CURLE_OPERATION_TIMEDOUT
+            && is_int($context['request_size'] ?? null)
+            && $context['request_size'] > 0;
     }
 
     /**
@@ -76,6 +99,16 @@ class TacticalClientException extends RuntimeException
     public function isTransportFailure(): bool
     {
         return $this->transportFailure;
+    }
+
+    /**
+     * #3971: true only for a transport failure whose handler context shows the
+     * request was written before the timeout fired, so the far end may have
+     * acted on it. Never true for a failure that carried an HTTP response.
+     */
+    public function timedOutAfterSend(): bool
+    {
+        return $this->timedOutAfterSend;
     }
 
     /**

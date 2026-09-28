@@ -23,7 +23,9 @@ use Illuminate\Support\Str;
  *   4. confirm   — destructive actions require a valid confirm token (else `blocked`)
  *   5. execute   — action->execute, catching TacticalClientException and
  *                  classifying it on the STRUCTURED signal (M2): transport
- *                  failure ⇒ `offline`; HTTP error (401/403/404/5xx) ⇒ `error`
+ *                  failure ⇒ `offline`, except a timeout after the request
+ *                  was sent ⇒ `outcome_unknown` (#3971); HTTP error
+ *                  (401/403/404/5xx) ⇒ `error`
  *   6. audit     — write exactly ONE immutable, redacted TacticalActionLog row
  *                  on EVERY path, with a correlation id
  *   7. return    — the normalized result (never an unhandled exception)
@@ -114,7 +116,13 @@ class TacticalActionService
         try {
             $result = $action->execute($this->client, $agentId, $params);
         } catch (TacticalClientException $e) {
-            if ($this->isAgentOffline($e)) {
+            // #3971: checked before isAgentOffline(), which is true for every
+            // transport failure, this one included.
+            if ($e->timedOutAfterSend()) {
+                $result = TacticalActionResult::outcomeUnknown(
+                    'Tactical did not answer before the timeout after the request was sent; the action may have run. Check the device before retrying.'
+                );
+            } elseif ($this->isAgentOffline($e)) {
                 $result = TacticalActionResult::offline('Tactical agent is unreachable (offline)');
             } else {
                 // M2: a genuine HTTP error (auth/4xx/5xx) is NEVER collapsed to offline.

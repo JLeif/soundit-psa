@@ -1,0 +1,208 @@
+<?php
+
+namespace Tests\Feature\Mcp;
+
+use App\Enums\PersonType;
+use App\Enums\TechnicianRunState;
+use App\Models\Asset;
+use App\Models\Client;
+use App\Models\Person;
+use App\Models\Setting;
+use App\Models\TacticalAsset;
+use App\Models\TechnicianActionLog;
+use App\Models\TechnicianRun;
+use App\Models\Ticket;
+use App\Models\User;
+use App\Services\Tactical\TacticalClient;
+use App\Services\Tactical\TacticalClientException;
+use App\Services\Technician\TechnicianApprovalService;
+use App\Support\McpConfig;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Testing\TestResponse;
+use Mockery;
+use Tests\TestCase;
+
+/**
+ * #3971: an outcome_unknown command may have run, so neither the identical-
+ * content dedup nor the (zeroed) cooldown may let an immediate identical retry
+ * through as if nothing happened. Each guard is paired with a control proving
+ * the same retry DOES go through after a genuine offline — so a guard that
+ * blocked every retry would fail here too.
+ */
+class TacticalCmdOutcomeUnknownRetryTest extends TestCase
+{
+    use RefreshDatabase;
+
+    /** @return array{client: Client, asset: Asset, ticket: Ticket, actor: User} */
+    private function fixture(): array
+    {
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'secret');
+        $actor = User::factory()->create(['name' => 'AI Actor']);
+        Setting::setValue('triage_system_user_id', (string) $actor->id);
+
+        $client = Client::factory()->create(['name' => 'Acme']);
+        $contact = Person::create([
+            'client_id' => $client->id,
+            'person_type' => PersonType::User,
+            'first_name' => 'Client',
+            'last_name' => 'Contact',
+            'email' => 'client@example.test',
+            'is_active' => true,
+        ]);
+        $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'PC-01', 'name' => 'PC-01']);
+        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'agent-1', 'hostname' => 'PC-01', 'status' => 'online', 'synced_at' => now()]);
+        $ticket = Ticket::factory()->for($client)->create(['contact_id' => $contact->id, 'subject' => 'Workstation issue']);
+        $ticket->assets()->attach($asset->id, ['is_primary' => true]);
+
+        return compact('client', 'asset', 'ticket', 'actor');
+    }
+
+    private function callTool(string $token, string $name, array $arguments): TestResponse
+    {
+        return $this->withHeaders(['Authorization' => 'Bearer '.$token])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0',
+                'id' => 1,
+                'method' => 'tools/call',
+                'params' => ['name' => $name, 'arguments' => $arguments],
+            ]);
+    }
+
+    private function text(TestResponse $response): string
+    {
+        return (string) $response->json('result.content.0.text');
+    }
+
+    /** @return array<string, mixed> */
+    private function runArgs(Client $client, string $cmd = 'Long-Job'): array
+    {
+        return [
+            'client_id' => $client->id,
+            'hostname' => 'PC-01',
+            'confirm_hostname' => 'PC-01',
+            'shell' => 'powershell',
+            'cmd' => $cmd,
+            'timeout' => 120,
+            'reason' => 'Run the long job.',
+        ];
+    }
+
+    private function sentThenTimedOut(): TacticalClientException
+    {
+        return new TacticalClientException('Tactical API error (transport failure)', transportFailure: true, timedOutAfterSend: true);
+    }
+
+    private function neverConnected(): TacticalClientException
+    {
+        return new TacticalClientException('Tactical API error (transport failure)', transportFailure: true);
+    }
+
+    // ── direct dispatch ─────────────────────────────────────────────────
+
+    public function test_an_identical_command_is_not_resent_after_an_outcome_unknown(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_run_command'], label: 'opsbot');
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'Long-Job', 'powershell', 120)->andThrow($this->sentThenTimedOut());
+        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'hostname', 'powershell', 120)->andReturn('PC-01');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $first = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
+        $this->assertTrue((bool) $first->json('result.isError'));
+        $this->assertStringContainsString('may have run', $this->text($first));
+        $this->assertStringNotContainsString('offline', $this->text($first));
+        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_run_command')->where('result_status', 'outcome_unknown')->count());
+
+        // The immediate identical retry: no second cmd() call (Mockery ->once()).
+        $retry = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
+        $this->assertTrue((bool) $retry->json('result.isError'));
+        $this->assertStringContainsString('outcome is unknown; it may have run', $this->text($retry));
+        $this->assertStringContainsString('No tactical_run_command was sent', $this->text($retry));
+
+        // Only IDENTICAL content is held: a different command still goes out.
+        $other = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client'], 'hostname'));
+        $this->assertFalse((bool) $other->json('result.isError'), $this->text($other));
+    }
+
+    public function test_control_an_identical_command_is_resent_after_a_genuine_offline(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_run_command'], label: 'opsbot');
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('cmd')->once()->ordered()->andThrow($this->neverConnected());
+        $tactical->shouldReceive('cmd')->once()->ordered()->andReturn('done');
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $first = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
+        $this->assertStringContainsString('offline', $this->text($first));
+
+        // Nothing was sent, so the retry is let through (both cmd() calls happen).
+        $retry = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
+        $this->assertFalse((bool) $retry->json('result.isError'), $this->text($retry));
+    }
+
+    // ── staged approval ───────────────────────────────────────────────────────────────
+
+    /** @return array<string, mixed> */
+    private function stageArgs(array $f): array
+    {
+        return [
+            'client_id' => $f['client']->id,
+            'ticket_id' => $f['ticket']->id,
+            'hostname' => 'PC-01',
+            'shell' => 'powershell',
+            'cmd' => 'Long-Job',
+            'timeout' => 120,
+            'reason' => 'Run the long job.',
+        ];
+    }
+
+    private function stageAndApprove(array $f, string $token, TacticalClientException $failure): array
+    {
+        $staged = $this->callTool($token, 'tactical_stage_command', $this->stageArgs($f));
+        $this->assertFalse((bool) $staged->json('result.isError'), $this->text($staged));
+        $run = TechnicianRun::findOrFail(json_decode($this->text($staged), true)['run_id']);
+
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('cmd')->once()->andThrow($failure);
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $approval = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $f['actor']->id);
+
+        return [$run, $approval];
+    }
+
+    public function test_an_approved_command_that_times_out_after_send_is_held_not_reopened(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_stage_command'], label: 'opsbot');
+
+        [$run, $approval] = $this->stageAndApprove($f, $token, $this->sentThenTimedOut());
+
+        $this->assertSame('gate_declined', $approval->status);
+        $this->assertStringContainsString('may have run', (string) $approval->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not released to AwaitingApproval for one-tap re-approval');
+        $this->assertSame('outcome_unknown', TechnicianActionLog::where('run_id', $run->id)->latest('id')->value('result_status'));
+
+        // Staging the identical command again is refused; nothing new is staged.
+        $again = $this->callTool($token, 'tactical_stage_command', $this->stageArgs($f));
+        $this->assertTrue((bool) $again->json('result.isError'));
+        $this->assertStringContainsString('outcome is unknown; it may have run', $this->text($again));
+        $this->assertSame(1, TechnicianRun::where('action_type', 'tactical_stage_command')->count());
+    }
+
+    public function test_control_an_approved_command_that_never_connected_is_reopened(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_stage_command'], label: 'opsbot');
+
+        [$run, $approval] = $this->stageAndApprove($f, $token, $this->neverConnected());
+
+        $this->assertSame('gate_declined', $approval->status);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'offline: nothing ran, so it stays approvable');
+    }
+}

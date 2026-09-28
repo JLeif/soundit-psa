@@ -785,6 +785,7 @@
                 return match ($status) {
                     'ok' => ['bg-success', 'succeeded'],
                     'offline' => ['bg-warning text-dark', 'no-op (agent unreachable)'],
+                    'outcome_unknown' => ['bg-warning text-dark', 'outcome unknown (may have run)'],
                     'error' => ['bg-danger', 'error'],
                     'rejected', 'denied', 'blocked' => ['bg-secondary', $status],
                     default => ['bg-secondary', $status],
