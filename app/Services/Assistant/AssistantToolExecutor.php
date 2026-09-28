@@ -733,10 +733,15 @@ class AssistantToolExecutor
 
         // Held form ticket (c1:v2:1): the automation-visible lookup misses it, so no close is
         // proposed against it until staff verify it; it is refused as held (G-14), not as missing.
-        $ticket = Ticket::automationVisible()->with('client')->find((int) $ticketId);
+        // With a client context the lookup is scoped to that client, as get_ticket_calls is: another
+        // client's ticket, held or ordinary, reads exactly like an unknown id (card 0WPZ4VA5).
+        $ticketQuery = Ticket::automationVisible()->with('client');
+        if ($this->clientId) {
+            $ticketQuery->where('client_id', $this->clientId);
+        }
+        $ticket = $ticketQuery->find((int) $ticketId);
         if (! $ticket) {
-            // This lookup is unscoped, so the held refusal is too.
-            return $this->heldTicketRefusal((int) $ticketId, scoped: false) ?? ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) $ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         if (! $ticket->client_id || ! $ticket->client) {

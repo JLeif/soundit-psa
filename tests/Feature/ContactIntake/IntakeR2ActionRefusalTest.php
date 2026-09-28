@@ -147,10 +147,28 @@ class IntakeR2ActionRefusalTest extends TestCase
             $this->assertStringContainsString('Unverified contact intake', $out, $tool);
             $this->assertStringNotContainsString('not found', $out, $tool);
         }
-        foreach (['get_ticket_detail', 'add_ticket_note', 'get_ticket_calls'] as $tool) {
+        foreach (['get_ticket_detail', 'add_ticket_note', 'get_ticket_calls', 'propose_close'] as $tool) {
             $out = json_encode((new AssistantToolExecutor(null, $other->id))->execute($tool, $calls[$tool]));
             $this->assertStringContainsString('not found', $out, $tool);
             $this->assertStringNotContainsString('Unverified', $out, $tool);
         }
+    }
+
+    /** card 0WPZ4VA5 — a client-scoped propose_close cannot reach another client's ordinary ticket either. */
+    public function test_scoped_propose_close_reads_other_clients_ordinary_ticket_as_unknown(): void
+    {
+        $ordinary = Ticket::factory()->create(['status' => TicketStatus::New]);
+        $other = Client::factory()->create();
+        $in = ['ticket_id' => $ordinary->id, 'reason' => 'Synthetic.', 'confidence' => 0.5];
+
+        $cross = (new AssistantToolExecutor(null, $other->id))->execute('propose_close', $in);
+        $unknown = (new AssistantToolExecutor(null, $other->id))
+            ->execute('propose_close', ['ticket_id' => $ordinary->id + 100000] + $in);
+        $this->assertSame($unknown, $cross);
+        $this->assertSame(['error' => 'Ticket not found'], $cross);
+
+        // Positive control: in its own client's scope the same ticket is reached.
+        $own = json_encode((new AssistantToolExecutor(null, $ordinary->client_id))->execute('propose_close', $in));
+        $this->assertStringNotContainsString('not found', $own);
     }
 }
