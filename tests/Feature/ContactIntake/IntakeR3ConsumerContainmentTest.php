@@ -96,7 +96,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
             ->assertSuccessful();
     }
 
-    /** diff:6 — the assistant / staff-MCP ticket readers neither list nor read a held ticket. */
+    /** diff:6 — the assistant / staff-MCP ticket readers neither list nor read a held ticket; a by-id read names the hold (G-14). */
     public function test_assistant_ticket_readers_do_not_serve_a_held_ticket(): void
     {
         $subject = 'Synthetic held reader ticket';
@@ -104,7 +104,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $staff = new AssistantToolExecutor;
         $scoped = new AssistantToolExecutor(null, $ticket->client_id);
 
-        $this->assertSame(['error' => 'Ticket not found'], $staff->execute('get_ticket_detail', ['ticket_id' => $ticket->id]));
+        $this->assertSame(['error' => 'Unverified contact intake.'], $staff->execute('get_ticket_detail', ['ticket_id' => $ticket->id]));
         $this->assertStringNotContainsString($subject, json_encode($staff->execute('search_all_tickets', [])));
         $this->assertStringNotContainsString($subject, json_encode($staff->execute('list_open_tickets', [])));
         $this->assertStringNotContainsString($subject, json_encode($scoped->execute('search_tickets', [])));
@@ -161,7 +161,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $this->assertSame($ticket->id, $decision->ticketId);
     }
 
-    /** c1:v2:1 — the assistant's propose_close does not find a held ticket and records nothing. */
+    /** c1:v2:1 — the assistant's propose_close refuses a held ticket as held (G-14) and records nothing. */
     public function test_assistant_propose_close_does_not_act_on_a_held_ticket(): void
     {
         User::factory()->create();
@@ -169,7 +169,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $propose = fn () => (new AssistantToolExecutor)->execute('propose_close',
             ['ticket_id' => $ticket->id, 'reason' => 'Synthetic close reason', 'confidence' => 0.9]);
 
-        $this->assertSame(['error' => 'Ticket not found'], $propose());
+        $this->assertSame(['error' => 'Unverified contact intake.'], $propose());
         $this->assertSame(0, TechnicianRun::where('ticket_id', $ticket->id)->count());
 
         // Positive control: once verified, the close is proposed and held for approval.
@@ -197,7 +197,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $this->assertSame(1, TechnicianRun::where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->count());
     }
 
-    /** c1:v2:2 — get_ticket_calls refuses a held ticket like get_ticket_detail, serving none of its calls. */
+    /** c1:v2:2 — get_ticket_calls refuses a held ticket as held (G-14) like get_ticket_detail, serving none of its calls. */
     public function test_assistant_ticket_calls_do_not_serve_a_held_ticket(): void
     {
         $ticket = $this->formTicket();
@@ -208,7 +208,7 @@ class IntakeR3ConsumerContainmentTest extends TestCase
         $scoped = fn () => (new AssistantToolExecutor(null, $ticket->client_id))->execute('get_ticket_calls', ['ticket_id' => $ticket->id]);
 
         foreach ([$staff(), $scoped()] as $result) {
-            $this->assertSame(['error' => 'Ticket not found'], $result);
+            $this->assertSame(['error' => 'Unverified contact intake.'], $result);
         }
 
         // Positive control: once verified, both readers serve its calls.

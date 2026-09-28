@@ -908,11 +908,13 @@ class AssistantToolExecutor
         // externally-synced tickets (psa-gq0f).
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
 
-        // A held form ticket (diff:6) reads exactly like one that is not there.
-        if (! $ticket || $ticket->isUnverifiedContactIntake()) {
+        if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        // G-14: a held form ticket (diff:6) that resolved in this scope is refused as held, never
+        // as missing; its notes stay unread. Out of scope it never resolves, so it reads exactly
+        // like an unknown id.
         if ($ticket->isUnverifiedContactIntake()) {
             return ['error' => 'Unverified contact intake.'];
         }
@@ -1023,9 +1025,9 @@ class AssistantToolExecutor
         }
 
         // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused. A held form
-        // ticket (diff:6) is refused the same way.
+        // ticket (diff:6) in scope is refused as held (G-14), and no attachment is read.
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
-        if (! $ticket || $ticket->isUnverifiedContactIntake()) {
+        if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
         if ($ticket->isUnverifiedContactIntake()) {

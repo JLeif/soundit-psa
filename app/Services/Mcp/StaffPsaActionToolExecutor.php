@@ -3207,14 +3207,10 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
         // G-14: a held intake ticket in THIS scope exists; say so rather than "not found".
-        // Checked only after the client scope, so it reveals nothing across clients.
+        // Checked only after the client scope, so it reveals nothing across clients. This is
+        // also L1's containment (diff:6): no MCP tool reads or acts on it until staff verify it.
         if ($ticket->isUnverifiedContactIntake()) {
             return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
-        }
-
-        // Held form ticket (diff:6): no MCP tool reads or acts on it until staff verify it.
-        if ($ticket->isUnverifiedContactIntake()) {
-            return ['error' => 'Refused: this ticket is an unverified web-form intake; staff must verify it before any MCP tool can read or act on it.'];
         }
 
         TicketToolActivityContext::current()?->validated($ticket);
