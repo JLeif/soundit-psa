@@ -3278,7 +3278,7 @@ function renderPatches(data) {
             hostname: hostInput.value,
             shell: confirmed.shell,
             cmd: confirmed.cmd,
-            timeout: 60,
+            timeout: 30,
         };
         if (ticketSel && ticketSel.value) body.ticket_id = ticketSel.value;
 

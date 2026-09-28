@@ -84,7 +84,7 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
             'confirm_hostname' => 'PC-01',
             'shell' => 'powershell',
             'cmd' => $cmd,
-            'timeout' => 120,
+            'timeout' => 25,
             'reason' => 'Run the long job.',
         ];
     }
@@ -107,8 +107,8 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
         $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_run_command'], label: 'opsbot');
 
         $tactical = Mockery::mock(TacticalClient::class);
-        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'Long-Job', 'powershell', 120)->andThrow($this->sentThenTimedOut());
-        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'hostname', 'powershell', 120)->andReturn('PC-01');
+        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'Long-Job', 'powershell', 25)->andThrow($this->sentThenTimedOut());
+        $tactical->shouldReceive('cmd')->once()->with('agent-1', 'hostname', 'powershell', 25)->andReturn('PC-01');
         $this->app->instance(TacticalClient::class, $tactical);
 
         $first = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
@@ -159,7 +159,7 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
             'hostname' => 'PC-01',
             'shell' => 'powershell',
             'cmd' => 'Long-Job',
-            'timeout' => 120,
+            'timeout' => 25,
             'reason' => 'Run the long job.',
         ];
     }
@@ -225,7 +225,7 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
 
         // Direct again, now on a ticket and with another timeout: a different content hash, so the
         // executor's identical-content hold does not match it; the bus hold does.
-        $retry = $this->callTool($token, 'tactical_run_command', ['ticket_id' => $f['ticket']->id, 'timeout' => 121] + $this->runArgs($f['client']));
+        $retry = $this->callTool($token, 'tactical_run_command', ['ticket_id' => $f['ticket']->id, 'timeout' => 26] + $this->runArgs($f['client']));
         $this->assertTrue((bool) $retry->json('result.isError'));
         $this->assertStringContainsString('It was not sent again', $this->text($retry));
 

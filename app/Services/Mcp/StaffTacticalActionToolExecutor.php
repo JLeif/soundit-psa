@@ -1884,7 +1884,7 @@ class StaffTacticalActionToolExecutor
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed target hostname. Defense-in-depth friction only; grant, held/default posture, and kill-switch are the real gates.'],
                 'shell' => ['type' => 'string', 'enum' => ['cmd', 'powershell', 'shell'], 'description' => 'Command shell.'],
                 'cmd' => ['type' => 'string', 'description' => 'Command body to execute. Avoid inline secrets; audits redact known credential shapes.'],
-                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 600.'],
+                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 30.'],
             ]),
             ['reason', 'confirm_hostname', 'shell', 'cmd', 'timeout'],
         );
@@ -1899,7 +1899,7 @@ class StaffTacticalActionToolExecutor
             array_merge(self::targetProperties(ticket: true), [
                 'shell' => ['type' => 'string', 'enum' => ['cmd', 'powershell', 'shell'], 'description' => 'Command shell.'],
                 'cmd' => ['type' => 'string', 'description' => 'Command body to hold for approval. Avoid inline secrets.'],
-                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 600.'],
+                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 30.'],
             ]),
             ['ticket_id', 'reason', 'shell', 'cmd', 'timeout'],
         );

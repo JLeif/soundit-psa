@@ -36,7 +36,8 @@ class TacticalClient
      * fastcgi_read_timeout, so nginx's 60s default ends a web request that waits
      * longer: the caller gets a 504 before the outcome is classified and
      * audited. Capping below it lets this client's own timeout fire first, with
-     * room left for the rest of the request.
+     * room left for the rest of the request. RunCommandAction accepts at most
+     * 30s, so an accepted timeout plus the margin never exceeds this cap.
      */
     private const CMD_TIMEOUT_CAP_S = 45.0;
 

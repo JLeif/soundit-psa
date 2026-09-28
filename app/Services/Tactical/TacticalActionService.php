@@ -7,7 +7,6 @@ use App\Models\TacticalActionLog;
 use App\Models\User;
 use App\Services\Tactical\Actions\ActionRedactor;
 use App\Services\Tactical\Actions\InvalidActionParams;
-use App\Services\Tactical\Actions\RunCommandAction;
 use App\Services\Tactical\Actions\TacticalAction;
 use App\Services\Tactical\Actions\TacticalActionResult;
 use App\Support\TacticalConfig;
@@ -45,6 +44,9 @@ class TacticalActionService
      * matching command to the same agent (see commandOutcomeUnknownRecently()).
      */
     public const OUTCOME_UNKNOWN_HOLD_HOURS = 24;
+
+    /** #3971: the action key every run_command lane dispatches under. */
+    private const RUN_COMMAND_KEY = 'tactical.run_command';
 
     public function __construct(
         private readonly TacticalClient $client,
@@ -125,8 +127,9 @@ class TacticalActionService
         // #3971: a run_command whose last matching send to this agent timed out
         // after it went out may have run, so it is not sent again on the
         // assumption that it did not. Held here, at the chokepoint every lane
-        // dispatches through, so a retry from another surface is held too.
-        if ($action instanceof RunCommandAction && $this->commandOutcomeUnknownRecently($action, $agentId, $params)) {
+        // dispatches through, so a retry from another surface is held too. The
+        // action is matched by key (isRunCommand()), so the scheduled lane is too.
+        if ($this->isRunCommand($action) && $this->commandOutcomeUnknownRecently($action, $agentId, $params)) {
             return $this->audit(
                 $action, $target, $actor, $label, $agentId, $params, $ticketId, $correlationId,
                 TacticalActionResult::blocked('A matching command was sent to this device within the last '.self::OUTCOME_UNKNOWN_HOLD_HOURS.' hours and Tactical did not answer before the timeout, so it may have run. It was not sent again. Check the device to find out whether it ran.'),
@@ -140,7 +143,7 @@ class TacticalActionService
             // #3971: scoped to run_command, the verb this defect covers; other
             // actions are classified as before. Checked before isAgentOffline(),
             // which is true for every transport failure, this one included.
-            if ($e->timedOutAfterSend() && $action instanceof RunCommandAction) {
+            if ($e->timedOutAfterSend() && $this->isRunCommand($action)) {
                 $result = TacticalActionResult::outcomeUnknown(
                     'Tactical did not answer before the timeout after the request was sent; the action may have run. Check the device before retrying.'
                 );
@@ -204,6 +207,15 @@ class TacticalActionService
         }
 
         return false;
+    }
+
+    /**
+     * #3971: matched on the key, not the class: the scheduled lane sends the
+     * same command as a TacticalScheduledAction keyed tactical.run_command.
+     */
+    private function isRunCommand(TacticalAction $action): bool
+    {
+        return $action->key() === self::RUN_COMMAND_KEY;
     }
 
     /**

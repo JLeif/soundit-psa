@@ -6,12 +6,14 @@ use App\Models\Asset;
 use App\Models\Setting;
 use App\Models\TacticalActionLog;
 use App\Models\TacticalAsset;
+use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Tactical\Actions\RebootAction;
 use App\Services\Tactical\Actions\RunCommandAction;
 use App\Services\Tactical\TacticalActionConfirmToken;
 use App\Services\Tactical\TacticalActionService;
 use App\Services\Tactical\TacticalClient;
+use App\Services\Technician\Scheduled\TacticalScheduledAction;
 use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Handler\MockHandler;
@@ -70,7 +72,7 @@ class TacticalCmdOutcomeUnknownTest extends TestCase
         $action = new RunCommandAction;
         $actor = User::factory()->create();
         $asset = $this->asset();
-        $params = ['shell' => 'powershell', 'cmd' => 'Long-Job', 'timeout' => 120];
+        $params = ['shell' => 'powershell', 'cmd' => 'Long-Job', 'timeout' => 25];
         $token = TacticalActionConfirmToken::issue($action->key(), 'AGENT-1', $actor->id, $action->payloadHash($action->validateParams($params)));
 
         return $bus->dispatch($action, $asset, $actor, $params, $token);
@@ -153,10 +155,10 @@ class TacticalCmdOutcomeUnknownTest extends TestCase
             return $bus->dispatch($action, $asset, $actor, $params, $token);
         };
 
-        $this->assertSame('outcome_unknown', $dispatch('Long-Job', 120)->status);
+        $this->assertSame('outcome_unknown', $dispatch('Long-Job', 25)->status);
 
         // Another timeout and another actor: still the same command on the same device.
-        $held = $dispatch('Long-Job', 300);
+        $held = $dispatch('Long-Job', 30);
         $this->assertSame('blocked', $held->status);
         $this->assertStringContainsString('may have run', (string) $held->message);
         $this->assertStringContainsString('It was not sent again', (string) $held->message);
@@ -164,7 +166,62 @@ class TacticalCmdOutcomeUnknownTest extends TestCase
         $this->assertSame(1, TacticalActionLog::where('result_status', 'blocked')->count());
 
         // Only the matching command is held: a different one still goes out.
-        $this->assertSame('ok', $dispatch('Other-Job', 120)->status);
+        $this->assertSame('ok', $dispatch('Other-Job', 25)->status);
         $this->assertCount(2, $history);
+    }
+
+    public function test_the_scheduled_lane_is_held_after_an_outcome_unknown_from_another_lane(): void
+    {
+        // The scheduled lane sends run_command as a TacticalScheduledAction, not a
+        // RunCommandAction; the hold matches the action key, so it is held too.
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            $this->curlTimeout(['errno' => 28, 'request_size' => 149]),
+            new Response(200, [], (string) json_encode('done')),
+        ]));
+        $stack->push(Middleware::history($history));
+        $bus = new TacticalActionService(new TacticalClient(new GuzzleClient(['base_uri' => 'https://t.example.com/', 'handler' => $stack])));
+        $asset = $this->asset();
+        $params = ['cmd' => 'Long-Job', 'shell' => 'powershell', 'timeout' => 25];
+
+        $direct = new RunCommandAction;
+        $actor = User::factory()->create();
+        $first = $bus->dispatch($direct, $asset, $actor, $params, TacticalActionConfirmToken::issue($direct->key(), 'AGENT-1', $actor->id, $direct->payloadHash($direct->validateParams($params))));
+        $this->assertSame('outcome_unknown', $first->status);
+
+        $scheduled = new TacticalScheduledAction('tactical_stage_command');
+        $token = TacticalActionConfirmToken::issue($scheduled->key(), 'AGENT-1', null, $scheduled->payloadHash($scheduled->validateParams($params)));
+        $held = $bus->dispatch($scheduled, $asset, null, $params, $token, 'scheduled:1');
+
+        $this->assertSame('blocked', $held->status);
+        $this->assertStringContainsString('It was not sent again', (string) $held->message);
+        $this->assertCount(1, $history, 'the scheduled send never reached the transport');
+    }
+
+    public function test_the_asset_and_ticket_page_lanes_are_held_after_an_outcome_unknown(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            $this->curlTimeout(['errno' => 28, 'request_size' => 149]),
+            new Response(200, [], (string) json_encode('done')),
+        ]));
+        $stack->push(Middleware::history($history));
+        $this->app->instance(TacticalClient::class, new TacticalClient(new GuzzleClient(['base_uri' => 'https://t.example.com/', 'handler' => $stack])));
+        $user = User::factory()->create();
+        $asset = $this->asset();
+        $ticket = Ticket::factory()->create();
+        $ticket->assets()->attach($asset->id);
+        $body = ['hostname' => 'WORKSTATION-01', 'shell' => 'powershell', 'cmd' => 'Long-Job', 'timeout' => 25];
+
+        $first = $this->actingAs($user)->postJson(route('assets.run-tactical-command', $asset), $body);
+        $this->assertStringContainsString('may have run', (string) $first->json('error'));
+
+        $fromAsset = $this->actingAs($user)->postJson(route('assets.run-tactical-command', $asset), $body);
+        $this->assertStringContainsString('It was not sent again', (string) $fromAsset->json('error'));
+
+        $fromTicket = $this->actingAs($user)->postJson(route('tickets.run-tactical-command', $ticket), ['asset_id' => $asset->id] + $body);
+        $this->assertStringContainsString('It was not sent again', (string) $fromTicket->json('error'));
+
+        $this->assertCount(1, $history, 'neither page retry reached the transport');
     }
 }

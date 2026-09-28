@@ -1946,7 +1946,7 @@ window.runTicketScript = function() {
                 hostname: hostInput.value,
                 shell: confirmed.shell,
                 cmd: confirmed.cmd,
-                timeout: 60,
+                timeout: 30,
             }),
         })
         .then(function(r) { return r.json().then(function(d) { d._status = r.status; return d; }); })
