@@ -576,7 +576,8 @@ class PrepayService
         $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
         $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
 
-        $txn = DB::transaction(function () use ($contract, $call, $hours, $description) {
+        $alertContract = $contract;
+        $txn = DB::transaction(function () use ($contract, $call, $hours, $description, &$alertContract) {
             // Lock the parent call row first so concurrent debits for one call queue
             // here. Without it, under InnoDB's default REPEATABLE READ a locking read
             // that finds no prepay row takes only a gap lock, both racers can hold
@@ -609,6 +610,7 @@ class PrepayService
                 // Preserve the ledger's target even when this delivery resolves elsewhere.
                 // Lock order remains call -> prepay transaction -> contract.
                 $originalContract = $existing->contract()->lockForUpdate()->first();
+                $alertContract = $originalContract;
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
@@ -646,8 +648,10 @@ class PrepayService
             return $txn;
         });
 
-        $contract->refresh();
-        app(PrepayAlertService::class)->checkThreshold($contract);
+        if ($alertContract) {
+            $alertContract->refresh();
+            app(PrepayAlertService::class)->checkThreshold($alertContract);
+        }
 
         return $txn;
     }

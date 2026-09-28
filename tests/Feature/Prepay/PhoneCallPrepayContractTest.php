@@ -11,6 +11,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -86,6 +87,29 @@ class PhoneCallPrepayContractTest extends TestCase
             'contract_id' => $a->id,
             'hours_difference' => 0.5,
         ]], $records);
+    }
+
+    public function test_redelivery_alerts_original_contract_below_threshold(): void
+    {
+        Queue::fake();
+        [$call, $a, $b, $txn] = $this->fixture();
+        $a->update(['prepay_alert_threshold' => 8]);
+        $call->duration = 9000;
+        app(PrepayService::class)->debitFromPhoneCall($call);
+        $this->assertEquals(7.5, $a->fresh()->prepay_balance);
+        $this->assertNotNull($a->fresh()->prepay_alert_notified_at);
+        $this->assertNull($b->fresh()->prepay_alert_notified_at);
+    }
+
+    public function test_redelivery_clears_original_contract_alert_above_threshold(): void
+    {
+        Queue::fake();
+        [$call, $a, $b, $txn] = $this->fixture();
+        $a->update(['prepay_alert_threshold' => 9.25, 'prepay_alert_notified_at' => now()]);
+        $call->duration = 1800;
+        app(PrepayService::class)->debitFromPhoneCall($call);
+        $this->assertEquals(9.5, $a->fresh()->prepay_balance);
+        $this->assertNull($a->fresh()->prepay_alert_notified_at);
     }
 
     public function test_reversal_opens_transaction(): void
