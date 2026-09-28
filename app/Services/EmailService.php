@@ -930,8 +930,9 @@ PROMPT;
             // GRADUATED auto-attach — only when confident AND the threshold is set.
             if ($decision->isAttach() && $threshold !== null && $decision->confidence >= $threshold) {
                 $ticket = Ticket::find($decision->ticketId);
-                // Re-validate server-side: still the same client + still open (may have changed since route).
-                if ($ticket && $ticket->client_id === $email->client_id && $ticket->status->isOpen()) {
+                // Re-validate server-side: still the same client + still open + not a held form
+                // ticket (context:1) (may have changed since route).
+                if ($ticket && $ticket->client_id === $email->client_id && $ticket->status->isOpen() && ! $ticket->isUnverifiedContactIntake()) {
                     $this->linkEmailToTicket($email, $ticket);
                     $this->recordIntakeRoute($email, $decision, attachedTicketId: $ticket->id, createdTicketId: null);
 

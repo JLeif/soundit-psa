@@ -117,8 +117,9 @@ class CallIntakePipeline
             if ($decision->isAttach() && $threshold !== null && $decision->confidence >= $threshold) {
                 $ticket = Ticket::find($decision->ticketId);
 
-                // Re-validate server-side: same client + still open (may have changed since route).
-                if ($ticket && $ticket->client_id === $clientId && $ticket->status->isOpen()) {
+                // Re-validate server-side: same client + still open + not a held form ticket
+                // (context:1) (may have changed since route).
+                if ($ticket && $ticket->client_id === $clientId && $ticket->status->isOpen() && ! $ticket->isUnverifiedContactIntake()) {
                     app(PhoneCallService::class)->linkCallToTicketWithNote(
                         $call,
                         $ticket->id,

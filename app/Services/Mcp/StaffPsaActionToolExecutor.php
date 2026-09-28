@@ -3207,6 +3207,11 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        // Held form ticket (diff:6): no MCP tool reads or acts on it until staff verify it.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Refused: this ticket is an unverified web-form intake; staff must verify it before any MCP tool can read or act on it.'];
+        }
+
         TicketToolActivityContext::current()?->validated($ticket);
 
         return $ticket;

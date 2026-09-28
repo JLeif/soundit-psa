@@ -36,6 +36,13 @@ class RunTriagePipeline implements ShouldQueue
                 return null;
             }
 
+            // Held form ticket (diff:5): auto, cron and manual re-triage all wait for staff verification.
+            if ($ticket->isUnverifiedContactIntake()) {
+                Log::debug('[Triage] Skipping — unverified contact intake', ['ticket_id' => $this->ticketId]);
+
+                return null;
+            }
+
             // Check if a triage run is already in progress for this ticket.
             // Ignore runs older than 15 minutes — they are stale (crashed worker).
             $existingRun = TriageRun::where('ticket_id', $this->ticketId)
