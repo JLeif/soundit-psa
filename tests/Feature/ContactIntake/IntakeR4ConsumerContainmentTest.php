@@ -159,6 +159,32 @@ class IntakeR4ConsumerContainmentTest extends TestCase
         $this->assertSame($held->id, $call->fresh()->ticket_id);
     }
 
+    /** c1:v3:1 — a held ticket still makes the contact's open tickets ambiguous; the call is not linked to the other one. */
+    public function test_call_auto_link_treats_a_held_ticket_as_a_competing_open_ticket(): void
+    {
+        User::factory()->create();
+        Setting::setValue('call_autolink_enabled', '1');
+        $client = Client::factory()->create();
+        $person = Person::create(['client_id' => $client->id, 'first_name' => 'Ada', 'last_name' => 'Caller',
+            'phone' => '+15555550143', 'is_active' => true]);
+        $ordinary = Ticket::factory()->create(['client_id' => $client->id, 'contact_id' => $person->id,
+            'status' => TicketStatus::InProgress]);
+        $held = $this->formTicket(['client_id' => $client->id, 'contact_id' => $person->id]);
+        $call = PhoneCall::create(['call_uuid' => uniqid('autolink_', true), 'direction' => CallDirection::Inbound,
+            'from_number' => '+15555550143', 'status' => CallStatus::Completed, 'started_at' => now()]);
+
+        (new ResolveCallerFromPeople($call->id))->handle(app(PhoneCallService::class));
+        $call = $call->fresh();
+        $this->assertSame($person->id, $call->person_id);
+        $this->assertNull($call->ticket_id);
+        $this->assertSame(0, TicketNote::where('ticket_id', $ordinary->id)->count());
+
+        // Positive control: once the held ticket is no longer open, the ordinary ticket is the sole one.
+        $held->forceFill(['status' => TicketStatus::Closed])->save();
+        $this->assertSame($ordinary->id, app(PhoneCallService::class)->autoLinkToSoleOpenTicket($call));
+        $this->assertSame($ordinary->id, $call->fresh()->ticket_id);
+    }
+
     /** context:4 — the keyword backfill never sends a held ticket to the model; once verified it does. */
     public function test_keyword_backfill_skips_a_held_ticket(): void
     {
