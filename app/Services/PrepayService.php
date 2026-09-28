@@ -11,6 +11,7 @@ use App\Models\PrepayTransaction;
 use App\Models\TicketNote;
 use App\Models\User;
 use Carbon\CarbonInterface;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -576,7 +577,33 @@ class PrepayService
         $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
 
         $txn = DB::transaction(function () use ($contract, $call, $hours, $description) {
-            $existing = PrepayTransaction::where('phone_call_id', $call->id)->first();
+            // Lock the parent call row first so concurrent debits for one call queue
+            // here. Without it, under InnoDB's default REPEATABLE READ a locking read
+            // that finds no prepay row takes only a gap lock, both racers can hold
+            // that gap lock, and their INSERTs then deadlock. The unique index is the
+            // backstop for any writer that skips this lock.
+            PhoneCall::whereKey($call->id)->lockForUpdate()->first();
+
+            $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+
+            if (! $existing) {
+                try {
+                    $txn = PrepayTransaction::create([
+                        'contract_id' => $contract->id,
+                        'source' => PrepayTransactionSource::PhoneCallTime,
+                        'phone_call_id' => $call->id,
+                        'user_id' => $call->answered_by,
+                        'date' => $call->started_at ?? $call->created_at,
+                        'hours' => -$hours,
+                        'description' => $description,
+                    ]);
+                } catch (UniqueConstraintViolationException $e) {
+                    $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+                    if (! $existing) {
+                        throw $e;
+                    }
+                }
+            }
 
             if ($existing) {
                 $oldHours = abs((float) $existing->hours);
@@ -594,16 +621,6 @@ class PrepayService
 
                 return $existing;
             }
-
-            $txn = PrepayTransaction::create([
-                'contract_id' => $contract->id,
-                'source' => PrepayTransactionSource::PhoneCallTime,
-                'phone_call_id' => $call->id,
-                'user_id' => $call->answered_by,
-                'date' => $call->started_at ?? $call->created_at,
-                'hours' => -$hours,
-                'description' => $description,
-            ]);
 
             $contract->increment('prepay_used', $hours);
             $contract->decrement('prepay_balance', $hours);
@@ -628,26 +645,28 @@ class PrepayService
      */
     public function reverseDebitForPhoneCall(PhoneCall $call): void
     {
-        $txn = PrepayTransaction::where('phone_call_id', $call->id)->first();
+        DB::transaction(function () use ($call) {
+            $txn = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
 
-        if (! $txn) {
-            return;
-        }
+            if (! $txn) {
+                return;
+            }
 
-        $hours = abs((float) $txn->hours);
-        $contract = $txn->contract;
+            $hours = abs((float) $txn->hours);
+            $contract = $txn->contract;
 
-        $txn->delete();
+            $txn->delete();
 
-        if ($contract) {
-            $contract->decrement('prepay_used', $hours);
-            $contract->increment('prepay_balance', $hours);
-        }
+            if ($contract) {
+                $contract->decrement('prepay_used', $hours);
+                $contract->increment('prepay_balance', $hours);
+            }
 
-        Log::info('[Prepay] Phone call time debit reversed', [
-            'phone_call_id' => $call->id,
-            'hours' => $hours,
-        ]);
+            Log::info('[Prepay] Phone call time debit reversed', [
+                'phone_call_id' => $call->id,
+                'hours' => $hours,
+            ]);
+        });
     }
 
     /**
