@@ -123,6 +123,12 @@ class SendReplyTool
     ): string {
         $reason = trim((string) ($input['reason'] ?? ''));
 
+        // A held form ticket is contained as a whole: nothing is drafted or recorded on it, or
+        // the run would take its one intake draft before staff verify it (contract-replacement:1).
+        if ($ticket->fresh()?->isUnverifiedContactIntake()) {
+            return "Left ticket #{$ticket->id} (an unverified web-form intake awaits staff verification; no reply drafted).";
+        }
+
         // "Should I reply at all?" — carried from DraftPipeline. Only draft when there is
         // an unaddressed (non-AI) client message; the bot's own ack is ai_authored and is
         // ignored, so intake-only tickets don't trigger a needless reply.

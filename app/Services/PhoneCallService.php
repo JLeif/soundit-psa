@@ -1325,18 +1325,20 @@ class PhoneCallService
                 fn (TicketStatus $status) => $status->isOpen(),
             ));
 
-            $openTicketIds = Ticket::query()
+            // A held form ticket counts toward ambiguity but is never the link target
+            // (c1:v3:1): scoping it out would make the contact's other ticket look sole.
+            $openTickets = Ticket::query()
                 ->where('client_id', $locked->client_id)
                 ->where('contact_id', $locked->person_id)
                 ->whereIn('status', $openStatuses)
                 ->limit(2)
-                ->pluck('id');
+                ->get(['id', 'contact_intake_origin', 'contact_intake_verified_at']);
 
-            if ($openTicketIds->count() !== 1) {
+            if ($openTickets->count() !== 1 || $openTickets->first()->isUnverifiedContactIntake()) {
                 return null;
             }
 
-            $ticketId = (int) $openTicketIds->first();
+            $ticketId = (int) $openTickets->first()->id;
 
             $this->linkCallToTicketWithNote(
                 $locked,

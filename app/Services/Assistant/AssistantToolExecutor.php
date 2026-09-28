@@ -331,7 +331,9 @@ class AssistantToolExecutor
         // with a confident under-count (psa-6usr). Staff already see every
         // ticket on the web dashboard, so removing it widens no access boundary;
         // the real client-lock lives on the portal executor, which is untouched.
-        return Ticket::automationVisible();
+        // A held form ticket (diff:6) is AI context, so no queue tool lists it until verified.
+        // By-id reads that miss go through heldTicketRefusal() below (G-14).
+        return Ticket::query()->automationVisible();
     }
 
     /**
@@ -729,6 +731,8 @@ class AssistantToolExecutor
             return ['error' => 'confidence must be a number between 0 and 1'];
         }
 
+        // Held form ticket (c1:v2:1): the automation-visible lookup misses it, so no close is
+        // proposed against it until staff verify it; it is refused as held (G-14), not as missing.
         $ticket = Ticket::automationVisible()->with('client')->find((int) $ticketId);
         if (! $ticket) {
             // This lookup is unscoped, so the held refusal is too.
@@ -770,6 +774,8 @@ class AssistantToolExecutor
         //   unscoped — the staff board keeps its cross-client read, including
         //              the client_id IS NULL unresolved-intake tickets that
         //              are reachable nowhere else (psa-6usr).
+        // A held form ticket (c1:v2:2) misses the automation-visible lookup and is refused as
+        // held (G-14) when in scope; out of scope it reads exactly like an unknown id.
         $ticketQuery = Ticket::automationVisible()->with('client:id,stage');
 
         if ($this->clientId) {
@@ -906,6 +912,9 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        // G-14: a held form ticket (diff:6) that resolved in this scope is refused as held, never
+        // as missing; its notes stay unread. Out of scope it never resolves, so it reads exactly
+        // like an unknown id.
         if ($ticket->isUnverifiedContactIntake()) {
             return ['error' => 'Unverified contact intake.'];
         }
@@ -1015,7 +1024,8 @@ class AssistantToolExecutor
             return ['error' => 'attachment_id is required (positive integer)'];
         }
 
-        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused.
+        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused. A held form
+        // ticket (diff:6) in scope is refused as held (G-14), and no attachment is read.
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
         if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
@@ -1156,7 +1166,8 @@ class AssistantToolExecutor
             return ['error' => 'ticket_id and body are required'];
         }
 
-        // CLIENT-SCOPED: verify the ticket belongs to this client
+        // CLIENT-SCOPED: verify the ticket belongs to this client (a held form ticket, diff:6,
+        // misses this lookup and is refused as held, G-14)
         $ticket = Ticket::automationVisible()->where('id', $ticketId)
             ->where('client_id', $this->clientId)
             ->first();
