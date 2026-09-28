@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Web;
 use App\Http\Controllers\Controller;
 use App\Models\ContactSubmission;
 use App\Services\Ai\AiClient;
+use App\Services\ContactIntake\IntakeReconciliation;
 use App\Services\ContactIntake\StaffWorkflow;
 use App\Services\Technician\TechnicianBudget;
 use App\Support\AiConfig;
@@ -13,11 +14,12 @@ use Illuminate\Support\Facades\DB;
 
 final class ContactIntakeController extends Controller
 {
-    public function index(Request $request, StaffWorkflow $staff)
+    public function index(Request $request, StaffWorkflow $staff, IntakeReconciliation $reconciliation)
     {
         $staff->authorize($request->user());
 
         return view('contact-intake.index', ['rows' => ContactSubmission::latest('id')->paginate(50),
+            'reconciliation' => $reconciliation->measure(),
             'counts' => ContactSubmission::selectRaw('state, COUNT(*) AS total')->groupBy('state')->pluck('total', 'state'),
             'oldest' => ContactSubmission::whereIn('state', ['pending', 'quarantined'])->min('created_at')]);
     }

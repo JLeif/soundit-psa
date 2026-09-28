@@ -72,6 +72,10 @@ final class SubmissionLedger
                     throw $e;
                 }
             }
+            if (! $duplicate) {
+                // Same transaction as the insert. A redelivery, conflicting or not, is not a new acceptance.
+                IntakeReconciliation::countAcceptance();
+            }
             $row = ContactSubmission::where('integration_id', $integrationId)
                 ->where('submission_id', strtolower($data['submission_id']))->lockForUpdate()->firstOrFail();
             $conflict = ! hash_equals($row->payload_hash, $payloadHash);
