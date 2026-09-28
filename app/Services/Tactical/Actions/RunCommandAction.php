@@ -15,8 +15,10 @@ use App\Services\Tactical\TacticalClient;
  *
  * Defenses (all server-side, fail-closed):
  *   - shell is allow-listed to exactly Tactical's set (C2); absent/empty rejects.
- *   - timeout is bounded 10..600 (C2); 0/huge rejects (a huge timeout ties up a
- *     web worker on the NATS round-trip).
+ *   - timeout is bounded 10..30 (C2, #3971); 0/huge rejects. TacticalClient::cmd()
+ *     waits timeout + 15s for Tactical's answer, capped at 45s under nginx's 60s
+ *     default, so a longer timeout would end the request before Tactical answers
+ *     and leave the command's outcome unknown.
  *   - the command is a DISCRETE opaque field — NO PSA-side tokenization or shell
  *     concatenation (A2); only an outer trim() for the empty-check. The trimmed
  *     string is what is hashed, displayed, AND executed (displayed==hashed==run).
@@ -30,7 +32,11 @@ class RunCommandAction implements TacticalAction
 {
     private const TIMEOUT_MIN = 10;
 
-    private const TIMEOUT_MAX = 600;
+    /** #3971: timeout + TacticalClient's 15s margin must fit its 45s cmd() budget. */
+    private const TIMEOUT_MAX = 30;
+
+    /** #3971: the maximum before it was lowered; proposals and schedules stored earlier may carry up to this. */
+    private const PREVIOUS_TIMEOUT_MAX = 600;
 
     /** Tactical's exact accepted shell set (parity, no PSA-side OS narrowing). */
     private const ALLOWED_SHELLS = ['cmd', 'powershell', 'shell'];
@@ -82,9 +88,14 @@ class RunCommandAction implements TacticalAction
         }
         $timeout = (int) $timeout;
         if ($timeout < self::TIMEOUT_MIN || $timeout > self::TIMEOUT_MAX) {
-            throw new InvalidActionParams(
-                'timeout must be between '.self::TIMEOUT_MIN.' and '.self::TIMEOUT_MAX.' seconds.'
-            );
+            $message = 'timeout must be between '.self::TIMEOUT_MIN.' and '.self::TIMEOUT_MAX.' seconds.';
+            // #3971: a staged proposal or scheduled run stored under the old maximum
+            // is refused here at approval; the refusal says why.
+            if ($timeout > self::TIMEOUT_MAX && $timeout <= self::PREVIOUS_TIMEOUT_MAX) {
+                $message .= ' The maximum was lowered from '.self::PREVIOUS_TIMEOUT_MAX.' to '.self::TIMEOUT_MAX.' seconds.';
+            }
+
+            throw new InvalidActionParams($message);
         }
 
         // Exactly the canonical triplet — the dangerous body keys (custom_shell /

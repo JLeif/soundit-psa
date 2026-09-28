@@ -24,6 +24,26 @@ class TacticalClient
      */
     private const MAX_REASON_BYTES = 300;
 
+    /**
+     * #3971: seconds added to a cmd() command timeout to form its HTTP budget,
+     * covering Tactical's own `timeout + 2` NATS wait plus the round trip.
+     */
+    private const CMD_TIMEOUT_MARGIN_S = 15.0;
+
+    /**
+     * #3971: upper bound on a cmd() HTTP budget. The documented nginx configs
+     * (docs/INSTALL.md §5, docker/nginx/default.conf) set no
+     * fastcgi_read_timeout, so nginx's 60s default ends a web request that waits
+     * longer: the caller gets a 504 before the outcome is classified and
+     * audited. Capping below it lets this client's own timeout fire first, with
+     * room left for the rest of the request. RunCommandAction accepts at most
+     * 30s, so an accepted timeout plus the margin never exceeds this cap.
+     */
+    private const CMD_TIMEOUT_CAP_S = 45.0;
+
+    /** #3971: connect budget applied beside a per-request POST timeout. */
+    private const CONNECT_TIMEOUT_S = 10.0;
+
     private Client $http;
 
     /**
@@ -198,16 +218,29 @@ class TacticalClient
      * caller convention. The guard call sits OUTSIDE the try block: a refusal
      * is a refusal, never re-wrapped as an HTTP failure.
      */
-    public function post(string $endpoint, array $body = []): mixed
+    public function post(string $endpoint, array $body = [], ?float $timeout = null): mixed
     {
         if ($this->targetsCheckCreation($endpoint)) {
             TacticalCheckPlatformGuard::assertSafe($body, $this);
         }
 
+        // #3971: the patch() per-request seam, same finite-and-positive guard.
+        if ($timeout !== null && (! is_finite($timeout) || $timeout <= 0)) {
+            throw new \InvalidArgumentException(
+                "Tactical POST {$endpoint}: per-request timeout must be a finite number greater than zero seconds."
+            );
+        }
+
+        $options = ['json' => $body];
+
+        if ($timeout !== null) {
+            $options['timeout'] = $timeout;
+            // A long read budget must not also become a long connect budget.
+            $options['connect_timeout'] = min(self::CONNECT_TIMEOUT_S, $timeout);
+        }
+
         try {
-            $response = $this->http->request('POST', $endpoint, [
-                'json' => $body,
-            ]);
+            $response = $this->http->request('POST', $endpoint, $options);
         } catch (GuzzleException $e) {
             Log::error("[TacticalClient] POST {$endpoint} failed", [
                 'status' => ($e instanceof \GuzzleHttp\Exception\RequestException && $e->hasResponse())
@@ -1046,7 +1079,27 @@ class TacticalClient
             'custom_shell' => null,
             'run_as_user' => false,
             'env_vars' => [],
-        ]);
+        ], self::cmdRequestTimeout($timeout));
+    }
+
+    /**
+     * #3971: the HTTP budget for one cmd() call. Tactical answers only after the
+     * agent replies: send_raw_cmd (amidaware/tacticalrmm,
+     * api/tacticalrmm/agents/views.py) waits `timeout + 2` seconds on NATS. The
+     * config-built client's 30s timeout therefore ended the wait for any
+     * command still running at 30s.
+     *
+     * @throws \InvalidArgumentException when $commandTimeout is not a finite number greater than zero
+     */
+    private static function cmdRequestTimeout(float $commandTimeout): float
+    {
+        if (! is_finite($commandTimeout) || $commandTimeout <= 0) {
+            throw new \InvalidArgumentException(
+                'Tactical cmd: command timeout must be a finite number greater than zero seconds.'
+            );
+        }
+
+        return min($commandTimeout + self::CMD_TIMEOUT_MARGIN_S, self::CMD_TIMEOUT_CAP_S);
     }
 
     /**

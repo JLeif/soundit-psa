@@ -369,8 +369,33 @@ class StaffTacticalActionToolExecutor
                 return $this->enqueueOfflineRun($run, $agentId, $directTool, $params, $approverId);
             }
 
+            // #3971: the action may have run, so the run is NOT released for
+            // re-approval or re-queue. It is landed Done rather than left in
+            // Executing, where no cockpit lane shows it and the stale-claim
+            // reaper only logs it; the outcome_unknown audit row above records
+            // what happened.
+            if ($result->isOutcomeUnknown()) {
+                $run->advanceTo(TechnicianRunState::Done);
+
+                return new TechnicianApprovalResult('gate_declined', message: 'Tactical did not answer before the timeout after the approved action was sent; it may have run. The run is closed, not reopened for re-approval. Check the device to find out whether it ran.');
+            }
+
             if (! $result->isOk()) {
                 $run->releaseClaimTo($releaseState);
+
+                // #3971: the bus rejects only at parameter validation, and the stored
+                // parameters cannot change at approval, so every later approval is
+                // rejected the same way (e.g. a command staged under the old 600s max).
+                if ($result->status === 'rejected' && $releaseState === TechnicianRunState::AwaitingApproval) {
+                    return new TechnicianApprovalResult('gate_declined', message: 'The approved parameters are no longer accepted, so nothing was sent: '.$result->message.' Approving again will be refused the same way; deny this proposal and stage it again with accepted parameters.');
+                }
+
+                // #3971: the bus blocks only before execute(), so nothing was sent. Its
+                // message is the reason; for the outcome_unknown hold, that reason is
+                // that the command may already have run, which the approver must see.
+                if ($result->status === 'blocked') {
+                    return new TechnicianApprovalResult('gate_declined', message: 'Nothing was sent: '.$result->message);
+                }
 
                 return new TechnicianApprovalResult('gate_declined');
             }
@@ -519,6 +544,15 @@ class StaffTacticalActionToolExecutor
             ];
         }
 
+        // #3971: an identical action whose last send timed out after it went out
+        // may have run, so it is not re-sent on the assumption that it did not.
+        if ($this->outcomeUnknownRecently($tool, $clientId, $contentHash)) {
+            $message = "An identical {$tool} was sent within the last ".self::DIRECT_DEDUP_HOURS." hours and its outcome is unknown; it may have run. No {$tool} was sent: identical re-sends are refused for ".self::DIRECT_DEDUP_HOURS.' hours after an unknown outcome. Check the device to find out whether it ran.';
+            $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, $message, $actorLabel);
+
+            return ['error' => $message, 'tactical_status' => 'blocked'];
+        }
+
         if ($this->cooldownActive($tool, $asset, $ticket, self::COOLDOWNS[$tool] ?? 0)) {
             $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, "{$tool} cooldown active; no {$tool} was sent.", $actorLabel);
 
@@ -649,6 +683,15 @@ class StaffTacticalActionToolExecutor
                 'run_id' => $this->executedRunId($tool, $clientId, $contentHash),
                 'message' => 'Already executed identical action recently; no new proposal was staged.',
             ];
+        }
+
+        // #3971: an approved identical proposal whose send timed out after it went
+        // out may have run; staging it again would invite a second run.
+        if ($this->outcomeUnknownRecently($tool, $clientId, $contentHash)) {
+            $message = 'An identical approved action was sent within the last '.self::DIRECT_DEDUP_HOURS.' hours and its outcome is unknown; it may have run. No new proposal was staged: identical proposals are refused for '.self::DIRECT_DEDUP_HOURS.' hours after an unknown outcome. Check the device to find out whether it ran.';
+            $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, $message, $actorLabel);
+
+            return ['error' => $message, 'tactical_status' => 'blocked'];
         }
 
         // "Still awaiting approval" is decided by the LIVE runs table ONLY, never the
@@ -1493,6 +1536,18 @@ class StaffTacticalActionToolExecutor
             ->exists();
     }
 
+    /** #3971: a matching direct dispatch audited outcome_unknown inside the dedup window. */
+    private function outcomeUnknownRecently(string $tool, int $clientId, string $contentHash): bool
+    {
+        return TechnicianActionLog::query()
+            ->where('action_type', $tool)
+            ->where('client_id', $clientId)
+            ->where('content_hash', $contentHash)
+            ->where('result_status', 'outcome_unknown')
+            ->where('created_at', '>=', now()->subHours(self::DIRECT_DEDUP_HOURS))
+            ->exists();
+    }
+
     /** The run_id of the most recent matching EXECUTED audit row, if any (bd psa-k4s0: never surface idempotent:true with a null run_id). */
     private function executedRunId(string $tool, int $clientId, string $contentHash): ?int
     {
@@ -1843,7 +1898,7 @@ class StaffTacticalActionToolExecutor
                 'confirm_hostname' => ['type' => 'string', 'description' => 'Typed target hostname. Defense-in-depth friction only; grant, held/default posture, and kill-switch are the real gates.'],
                 'shell' => ['type' => 'string', 'enum' => ['cmd', 'powershell', 'shell'], 'description' => 'Command shell.'],
                 'cmd' => ['type' => 'string', 'description' => 'Command body to execute. Avoid inline secrets; audits redact known credential shapes.'],
-                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 600.'],
+                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 30.'],
             ]),
             ['reason', 'confirm_hostname', 'shell', 'cmd', 'timeout'],
         );
@@ -1858,7 +1913,7 @@ class StaffTacticalActionToolExecutor
             array_merge(self::targetProperties(ticket: true), [
                 'shell' => ['type' => 'string', 'enum' => ['cmd', 'powershell', 'shell'], 'description' => 'Command shell.'],
                 'cmd' => ['type' => 'string', 'description' => 'Command body to hold for approval. Avoid inline secrets.'],
-                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 600.'],
+                'timeout' => ['type' => 'integer', 'description' => 'Timeout seconds, 10 to 30.'],
             ]),
             ['ticket_id', 'reason', 'shell', 'cmd', 'timeout'],
         );

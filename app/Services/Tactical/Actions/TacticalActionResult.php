@@ -16,7 +16,10 @@ namespace App\Services\Tactical\Actions;
  *              auth failures / key compromise are never masked
  *   denied   — the actor failed the capability gate
  *   rejected — params failed validation (action NOT executed)
- *   blocked  — a destructive action lacked a valid confirm token (NOT executed)
+ *   blocked  — refused before execution, e.g. a destructive action lacked a
+ *              valid confirm token, or a #3971 hold (NOT executed)
+ *   outcome_unknown — (#3971) the request was sent and no answer came back
+ *              before the timeout; the action may have run
  *
  * It is immutable and side-effect-free.
  */
@@ -54,6 +57,12 @@ final class TacticalActionResult
         return new self('offline', null, null, $message);
     }
 
+    /** #3971: sent, then timed out waiting for the answer — the action may have run. */
+    public static function outcomeUnknown(string $message): self
+    {
+        return new self('outcome_unknown', null, null, $message);
+    }
+
     public static function error(string $message): self
     {
         return new self('error', null, null, $message);
@@ -70,7 +79,7 @@ final class TacticalActionResult
         return new self('rejected', null, null, $message);
     }
 
-    /** A destructive action lacked a valid confirm token — not executed. */
+    /** Refused before execution (e.g. a missing/expired confirm token, a #3971 hold) — not executed. */
     public static function blocked(string $message): self
     {
         return new self('blocked', null, null, $message);
@@ -84,6 +93,11 @@ final class TacticalActionResult
     public function isOffline(): bool
     {
         return $this->status === 'offline';
+    }
+
+    public function isOutcomeUnknown(): bool
+    {
+        return $this->status === 'outcome_unknown';
     }
 
     /**

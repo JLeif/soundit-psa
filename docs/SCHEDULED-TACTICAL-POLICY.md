@@ -77,7 +77,7 @@ and repeat-confirmation refusal, separately from the new fire-time equality chec
 ## Eight-adapter execution contract
 
 `TacticalPlan` accepts only exact parameter sets. Commands use `cmd|powershell|shell`
-and integer timeout 10–600; custom shells, environment and run-as overrides are absent.
+and integer timeout 10–30 (the #3971 command budget); custom shells, environment and run-as overrides are absent.
 Maintenance requires an actual boolean; recovery is mesh-only. Services bind exact SCM
 names, not display aliases. Staging records MCP-token provenance and flags legacy argument
 coercion as scheduling-ineligible rather than changing immediate behavior. Existing
