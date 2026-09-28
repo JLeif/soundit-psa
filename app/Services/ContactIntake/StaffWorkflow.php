@@ -51,14 +51,16 @@ final class StaffWorkflow
                     break;
                 case 'verify':
                     abort_unless($row->state === 'processed', 409);
-                    $note = TicketNote::whereKey($row->ticket_note_id)->lockForUpdate()->firstOrFail();
+                    // withTrashed(): if a row's own form note is soft-deleted, it must still be
+                    // verifiable. Otherwise its ticket stays contained with no staff path out (diff:3).
+                    $note = TicketNote::withTrashed()->whereKey($row->ticket_note_id)->lockForUpdate()->firstOrFail();
                     abort_unless($note->isUnverifiedContactIntake(), 409);
                     $note->forceFill(['contact_intake_verified_at' => now()])->save();
                     $ticket = Ticket::whereKey($row->ticket_id)->lockForUpdate()->firstOrFail();
                     // Whole-ticket clearance requires EVERY form note to be cleared. A later
                     // unverified follow-up cannot be implicitly verified by an earlier row.
-                    // withoutTrashed(): Ticket::notes() is withTrashed(), but the per-row path
-                    // above cannot load a trashed note, so counting one here held forever (r1 cr:3).
+                    // withoutTrashed(): Ticket::notes() is withTrashed(). Another row's trashed form
+                    // note must not hold this ticket forever (r1 cr:3).
                     if ($ticket->isUnverifiedContactIntake() && ! $ticket->notes()->withoutTrashed()->where('contact_intake_origin', true)
                         ->whereNull('contact_intake_verified_at')->exists()) {
                         $ticket->forceFill(['contact_intake_verified_at' => now()])->saveQuietly();

@@ -120,6 +120,19 @@ class IntakeR2CoreTest extends TestCase
         $this->assertFalse(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
     }
 
+    /** diff:3 — a soft-deleted SOLE form note must not make verification impossible. */
+    public function test_verify_clears_ticket_whose_only_form_note_is_trashed(): void
+    {
+        Bus::fake();
+        $row = app(SubmissionProcessor::class)->process($this->accept()->id);
+        TicketNote::findOrFail($row->ticket_note_id)->delete();
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($row->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse(Ticket::findOrFail($row->ticket_id)->isUnverifiedContactIntake());
+        $this->assertNotNull(TicketNote::withTrashed()->findOrFail($row->ticket_note_id)->contact_intake_verified_at);
+        $this->assertDatabaseHas('contact_intake_audits', ['contact_submission_id' => $row->id, 'action' => 'verify']);
+    }
+
     /** diff:4 — a poison row leaves the pending queue after bounded failures. */
     public function test_poison_row_is_quarantined_after_bounded_failures_and_does_not_starve_new_rows(): void
     {
@@ -158,7 +171,43 @@ class IntakeR2CoreTest extends TestCase
         $other->update(['ticket_id' => $ticket->id]);
         DB::table('contact_intake_notifications')->insert(['contact_submission_id' => $other->id,
             'event' => 'processed', 'created_at' => $now, 'updated_at' => $now]);
+        $this->mock(\App\Services\EmailService::class, fn ($m) => $m->shouldReceive('sendNew')->once()->andReturn(new \App\Models\Email));
         $this->assertSame(1, app(\App\Services\ContactIntake\IntakeNotifications::class)->drain());
         $this->assertNotNull(DB::table('contact_intake_notifications')->where('contact_submission_id', $other->id)->value('sent_at'));
+    }
+
+    /** context:5 — a ticketless alert names its event and review link, and is stamped only once delivered. */
+    public function test_ticketless_alert_carries_event_and_review_link_and_is_stamped_only_after_delivery(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        $this->assertNull($row->ticket_id);
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $calls = [];
+        $this->mock(\App\Services\EmailService::class, function ($m) use (&$calls) {
+            $m->shouldReceive('sendNew')->twice()->andReturnUsing(function (...$args) use (&$calls) {
+                $calls[] = $args;
+                if (count($calls) === 1) {
+                    throw new \RuntimeException('synthetic transport failure');
+                }
+
+                return new \App\Models\Email;
+            });
+        });
+        $drain = fn () => app(\App\Services\ContactIntake\IntakeNotifications::class)->drain();
+        $sentAt = fn () => DB::table('contact_intake_notifications')->where('contact_submission_id', $row->id)->value('sent_at');
+        $this->assertSame(0, $drain());
+        $this->assertNull($sentAt());
+        $this->assertSame(1, $drain());
+        $this->assertNotNull($sentAt());
+        [$to, $subject, $body] = $calls[1];
+        $this->assertSame($owner->email, $to);
+        $this->assertStringContainsString('quarantined', $subject);
+        $this->assertStringContainsString('quarantined', $body);
+        $this->assertStringContainsString(route('contact-intake.show', $row->id), $body);
+        $this->assertStringNotContainsString('SYNTHETIC_UNTRUSTED_TEXT', $subject.$body);
+        $this->assertSame(0, $drain());
     }
 }

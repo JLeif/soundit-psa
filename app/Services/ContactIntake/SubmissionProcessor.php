@@ -94,7 +94,10 @@ final class SubmissionProcessor
             $row->update(['state' => 'processed', 'ticket_id' => $ticket->id, 'ticket_note_id' => $note->id,
                 'related_ticket_ids' => json_encode($related, JSON_THROW_ON_ERROR),
                 // Every submission already in the ledger was received before this ticket existed.
-                'ticket_watermark' => $createsTicket ? (int) ContactSubmission::max('id') : null]);
+                // A LOCKING read (diff:1). The snapshot was fixed at findOrFail, before the identity
+                // lock, so under REPEATABLE READ a plain max() missed any same-requester row the
+                // ledger committed while this transaction waited on that lock.
+                'ticket_watermark' => $createsTicket ? (int) ContactSubmission::lockForUpdate()->max('id') : null]);
             IntakeNotifications::record($row, 'processed');
 
             return $row->fresh();
@@ -103,8 +106,10 @@ final class SubmissionProcessor
 
     /**
      * Ledger ids are assigned in receipt order, so for a ticket intake created, "received
-     * before it existed" is exactly id <= the watermark stored at creation — exact even
-     * within one second. Any other ticket falls back to the received/created timestamps.
+     * before it existed" is exactly id <= the watermark stored at creation. The watermark is
+     * a locking read taken while holding the identity lock that the ledger's insert also
+     * holds, so it counts every same-requester row committed before the ticket, even within
+     * one second. Any other ticket falls back to the received/created timestamps.
      */
     private function receivedBeforeTicketExisted(ContactSubmission $row, Ticket $ticket): bool
     {

@@ -2,17 +2,18 @@
 
 namespace App\Services\ContactIntake;
 
-use App\Enums\NotificationEventType;
-use App\Jobs\SendTicketNotification;
 use App\Models\ContactSubmission;
 use App\Models\Ticket;
 use App\Models\User;
+use App\Services\EmailService;
 use App\Support\ContactIntakeConfig;
 use Illuminate\Support\Facades\DB;
 
 /** Durable internal-only outbox; no submitted text is passed to the notifier. */
 final class IntakeNotifications
 {
+    public function __construct(private readonly EmailService $email) {}
+
     public static function record(ContactSubmission $submission, string $event): void
     {
         DB::table('contact_intake_notifications')->updateOrInsert(
@@ -33,13 +34,21 @@ final class IntakeNotifications
             $row = ContactSubmission::findOrFail($item->contact_submission_id);
             $ticket = $row->ticket_id ? Ticket::find($row->ticket_id) : null;
             $recipient = $ticket?->assignee_id ?? ContactIntakeConfig::ownerId();
-            if (! $recipient || ! User::whereKey($recipient)->where('is_active', true)->exists()) {
+            $user = $recipient ? User::whereKey($recipient)->where('is_active', true)->first() : null;
+            if (! $user || ! $user->email) {
                 continue; // Retain the row; owner configuration must never discard an alert.
             }
-            // Called by the post-commit drain, never in the CRM transaction. A crash after
-            // enqueue but before stamping may repeat an INTERNAL alert, not a CRM write.
-            SendTicketNotification::dispatch($recipient, NotificationEventType::TicketNoteAdded->value,
-                $ticket?->id, null, 'Contact intake '.$item->event.'. Staff review: '.route('contact-intake.show', $row->id));
+            // Sent here and stamped only after delivery (context:5). The generic ticket notifier
+            // drops extra context when there is no ticket and skips users who have opted out,
+            // yet the outbox row was stamped at enqueue. Called by the post-commit drain, never
+            // in the CRM transaction. A crash after sending but before stamping may repeat an
+            // INTERNAL alert, not a CRM write.
+            try {
+                $this->email->sendNew($user->email, 'Contact intake alert: '.$item->event,
+                    "Contact intake event: {$item->event}\n\nStaff review:\n".route('contact-intake.show', $row->id), $user->name);
+            } catch (\Throwable) {
+                continue; // Never log exception text here; the row is retained for the next drain.
+            }
             DB::table('contact_intake_notifications')->where('id', $item->id)->update(['sent_at' => now()]);
             $count++;
         }

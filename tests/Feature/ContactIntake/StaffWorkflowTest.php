@@ -2,7 +2,6 @@
 
 namespace Tests\Feature\ContactIntake;
 
-use App\Jobs\SendTicketNotification;
 use App\Models\Client;
 use App\Models\ContactSubmission;
 use App\Models\Setting;
@@ -76,8 +75,8 @@ class StaffWorkflowTest extends TestCase
         $this->assertSame(0, app(IntakeNotifications::class)->drain());
         $this->assertDatabaseHas('contact_intake_notifications', ['sent_at' => null]);
         Setting::setValue('contact_intake_enabled', '1');
+        $this->mock(\App\Services\EmailService::class, fn ($m) => $m->shouldReceive('sendNew')->once()->andReturn(new \App\Models\Email));
         $this->assertSame(1, app(IntakeNotifications::class)->drain());
-        Bus::assertDispatched(SendTicketNotification::class, 1);
         $this->assertSame(0, app(IntakeNotifications::class)->drain());
     }
 
