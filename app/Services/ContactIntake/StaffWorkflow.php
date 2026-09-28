@@ -59,9 +59,11 @@ final class StaffWorkflow
                     $ticket = Ticket::whereKey($row->ticket_id)->lockForUpdate()->firstOrFail();
                     // Whole-ticket clearance requires EVERY form note to be cleared. A later
                     // unverified follow-up cannot be implicitly verified by an earlier row.
-                    // withoutTrashed(): Ticket::notes() is withTrashed(). Another row's trashed form
-                    // note must not hold this ticket forever (r1 cr:3).
-                    if ($ticket->isUnverifiedContactIntake() && ! $ticket->notes()->withoutTrashed()->where('contact_intake_origin', true)
+                    // Trashed form notes count too (Ticket::notes() is withTrashed()). The ticket's
+                    // description is its creating row's text even when that row's note is trashed
+                    // (r2 diff:1). A row whose own note is trashed is still verifiable above, so a
+                    // trashed note is cleared by verifying its row and does not hold the ticket forever.
+                    if ($ticket->isUnverifiedContactIntake() && ! $ticket->notes()->where('contact_intake_origin', true)
                         ->whereNull('contact_intake_verified_at')->exists()) {
                         $ticket->forceFill(['contact_intake_verified_at' => now()])->saveQuietly();
                     }

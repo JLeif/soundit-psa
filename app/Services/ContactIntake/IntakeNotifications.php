@@ -16,9 +16,11 @@ final class IntakeNotifications
 
     public static function record(ContactSubmission $submission, string $event): void
     {
+        // Clearing sent_at re-arms an already-delivered event, so a repeat (re-quarantine, the
+        // processing_failed that quarantines, a second conflict) is alerted again (r2 diff:3).
         DB::table('contact_intake_notifications')->updateOrInsert(
             ['contact_submission_id' => $submission->id, 'event' => $event],
-            ['updated_at' => now(), 'created_at' => now()],
+            ['sent_at' => null, 'updated_at' => now(), 'created_at' => now()],
         );
     }
 
@@ -49,7 +51,11 @@ final class IntakeNotifications
             } catch (\Throwable) {
                 continue; // Never log exception text here; the row is retained for the next drain.
             }
-            DB::table('contact_intake_notifications')->where('id', $item->id)->update(['sent_at' => now()]);
+            // Stamp only the recording that was read: a repeat recorded after the read, with a later
+            // updated_at, stays unsent. updated_at is second-precision, so a repeat recorded in the
+            // same second as the read is still stamped with this send.
+            DB::table('contact_intake_notifications')->where('id', $item->id)
+                ->where('updated_at', $item->updated_at)->update(['sent_at' => now()]);
             $count++;
         }
 

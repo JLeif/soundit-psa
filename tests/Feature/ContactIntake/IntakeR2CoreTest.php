@@ -107,8 +107,8 @@ class IntakeR2CoreTest extends TestCase
         $this->assertTrue((bool) $note->contact_intake_origin);
     }
 
-    /** contract-replacement:3 — a soft-deleted form note must not hold the ticket forever. */
-    public function test_trashed_unverified_form_note_does_not_block_ticket_verification(): void
+    /** contract-replacement:3 + r2 diff:1 — a trashed follow-up note is verifiable, and still required. */
+    public function test_trashed_unverified_follow_up_note_is_verifiable_and_still_required_for_ticket_clearance(): void
     {
         Bus::fake();
         $one = app(SubmissionProcessor::class)->process($this->accept('ONE')->id);
@@ -116,6 +116,24 @@ class IntakeR2CoreTest extends TestCase
         $this->assertSame($one->ticket_id, $two->ticket_id);
         TicketNote::findOrFail($two->ticket_note_id)->delete();
         $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($one->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertTrue(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+        app(StaffWorkflow::class)->act($two->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+    }
+
+    /** r2 diff:1 — verifying a follow-up must not release a ticket whose trashed creator note is unverified. */
+    public function test_verifying_follow_up_does_not_release_ticket_whose_trashed_creator_note_is_unverified(): void
+    {
+        Bus::fake();
+        $one = app(SubmissionProcessor::class)->process($this->accept('ONE')->id);
+        $two = app(SubmissionProcessor::class)->process($this->accept('TWO')->id);
+        $this->assertSame($one->ticket_id, $two->ticket_id);
+        $this->assertStringContainsString('ONE', Ticket::findOrFail($one->ticket_id)->description);
+        TicketNote::findOrFail($one->ticket_note_id)->delete();
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($two->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertTrue(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
         app(StaffWorkflow::class)->act($one->id, $staff, 'verify', 'Synthetic verification');
         $this->assertFalse(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
     }
@@ -209,5 +227,42 @@ class IntakeR2CoreTest extends TestCase
         $this->assertStringContainsString(route('contact-intake.show', $row->id), $body);
         $this->assertStringNotContainsString('SYNTHETIC_UNTRUSTED_TEXT', $subject.$body);
         $this->assertSame(0, $drain());
+    }
+
+    /** r2 diff:3 — a repeat of an already-delivered event is alerted again, not absorbed. */
+    public function test_repeat_event_after_delivery_is_alerted_again(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        $this->mock(\App\Services\EmailService::class, fn ($m) => $m->shouldReceive('sendNew')->twice()->andReturn(new \App\Models\Email));
+        $drain = fn () => app(\App\Services\ContactIntake\IntakeNotifications::class)->drain();
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $this->assertSame(1, $drain());
+        $this->assertSame(0, $drain());
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $this->assertSame(1, $drain());
+        $this->assertDatabaseCount('contact_intake_notifications', 1);
+    }
+
+    /** r2 diff:3 — a repeat recorded while its earlier recording is being sent stays unsent. */
+    public function test_repeat_recorded_during_send_is_not_stamped_by_that_send(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'conflict');
+        $this->mock(\App\Services\EmailService::class, function ($m) use ($row) {
+            $m->shouldReceive('sendNew')->once()->andReturnUsing(function () use ($row) {
+                $this->travel(1)->seconds();
+                \App\Services\ContactIntake\IntakeNotifications::record($row, 'conflict');
+
+                return new \App\Models\Email;
+            });
+        });
+        $this->assertSame(1, app(\App\Services\ContactIntake\IntakeNotifications::class)->drain());
+        $this->assertNull(DB::table('contact_intake_notifications')->where('contact_submission_id', $row->id)->value('sent_at'));
     }
 }
