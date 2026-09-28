@@ -90,7 +90,7 @@ class RunCommandAction implements TacticalAction
         if ($timeout < self::TIMEOUT_MIN || $timeout > self::TIMEOUT_MAX) {
             $message = 'timeout must be between '.self::TIMEOUT_MIN.' and '.self::TIMEOUT_MAX.' seconds.';
             // #3971: a staged proposal or scheduled run stored under the old maximum
-            // is refused here at approval or fire time; the refusal says why.
+            // is refused here at approval; the refusal says why.
             if ($timeout > self::TIMEOUT_MAX && $timeout <= self::PREVIOUS_TIMEOUT_MAX) {
                 $message .= ' The maximum was lowered from '.self::PREVIOUS_TIMEOUT_MAX.' to '.self::TIMEOUT_MAX.' seconds.';
             }

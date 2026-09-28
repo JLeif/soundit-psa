@@ -244,7 +244,7 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
         $this->assertStringContainsString(
             'lowered from 600 to 30 seconds',
             (string) TacticalActionLog::where('result_status', 'rejected')->sole()->message,
-            'the bus audit row, the same one the scheduled lane writes at fire time, names the change',
+            'the bus audit row names the change',
         );
     }
 
