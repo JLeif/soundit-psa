@@ -370,10 +370,14 @@ class StaffTacticalActionToolExecutor
             }
 
             // #3971: the action may have run, so the run is NOT released for
-            // re-approval or re-queue. It stays Executing; tactical_stage_* is
-            // outside TechnicianRun::RECOVERY_SAFE_ACTION_TYPES.
+            // re-approval or re-queue. It is landed Done rather than left in
+            // Executing, where no cockpit lane shows it and the stale-claim
+            // reaper only logs it; the outcome_unknown audit row above records
+            // what happened.
             if ($result->isOutcomeUnknown()) {
-                return new TechnicianApprovalResult('gate_declined', message: 'Tactical did not answer before the timeout after the approved action was sent; it may have run. The run is held for manual review, not reopened for re-approval. Check the device to find out whether it ran.');
+                $run->advanceTo(TechnicianRunState::Done);
+
+                return new TechnicianApprovalResult('gate_declined', message: 'Tactical did not answer before the timeout after the approved action was sent; it may have run. The run is closed, not reopened for re-approval. Check the device to find out whether it ran.');
             }
 
             if (! $result->isOk()) {

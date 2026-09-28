@@ -7,6 +7,7 @@ use App\Models\Setting;
 use App\Models\TacticalActionLog;
 use App\Models\TacticalAsset;
 use App\Models\User;
+use App\Services\Tactical\Actions\RebootAction;
 use App\Services\Tactical\Actions\RunCommandAction;
 use App\Services\Tactical\TacticalActionConfirmToken;
 use App\Services\Tactical\TacticalActionService;
@@ -15,7 +16,9 @@ use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
+use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -116,5 +119,52 @@ class TacticalCmdOutcomeUnknownTest extends TestCase
         ));
 
         $this->assertSame('offline', $result->status);
+    }
+
+    public function test_a_non_command_action_that_times_out_after_send_keeps_its_offline_classification(): void
+    {
+        // #3971 is scoped to run_command; other verbs are classified as before.
+        $http = new GuzzleClient(['base_uri' => 'https://t.example.com/', 'handler' => HandlerStack::create(new MockHandler([$this->curlTimeout(['errno' => 28, 'request_size' => 149])]))]);
+        $bus = new TacticalActionService(new TacticalClient($http));
+        $action = new RebootAction;
+        $actor = User::factory()->create();
+
+        $result = $bus->dispatch($action, $this->asset(), $actor, [], TacticalActionConfirmToken::issue($action->key(), 'AGENT-1', $actor->id));
+
+        $this->assertSame('offline', $result->status);
+    }
+
+    public function test_after_an_outcome_unknown_the_same_command_is_held_whatever_its_timeout_or_actor(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            $this->curlTimeout(['errno' => 28, 'request_size' => 149]),
+            new Response(200, [], (string) json_encode('done')),
+        ]));
+        $stack->push(Middleware::history($history));
+        $bus = new TacticalActionService(new TacticalClient(new GuzzleClient(['base_uri' => 'https://t.example.com/', 'handler' => $stack])));
+        $asset = $this->asset();
+        $dispatch = function (string $cmd, int $timeout) use ($bus, $asset): \App\Services\Tactical\Actions\TacticalActionResult {
+            $action = new RunCommandAction;
+            $actor = User::factory()->create();
+            $params = ['shell' => 'powershell', 'cmd' => $cmd, 'timeout' => $timeout];
+            $token = TacticalActionConfirmToken::issue($action->key(), 'AGENT-1', $actor->id, $action->payloadHash($action->validateParams($params)));
+
+            return $bus->dispatch($action, $asset, $actor, $params, $token);
+        };
+
+        $this->assertSame('outcome_unknown', $dispatch('Long-Job', 120)->status);
+
+        // Another timeout and another actor: still the same command on the same device.
+        $held = $dispatch('Long-Job', 300);
+        $this->assertSame('blocked', $held->status);
+        $this->assertStringContainsString('may have run', (string) $held->message);
+        $this->assertStringContainsString('It was not sent again', (string) $held->message);
+        $this->assertCount(1, $history, 'the held command never reached the transport');
+        $this->assertSame(1, TacticalActionLog::where('result_status', 'blocked')->count());
+
+        // Only the matching command is held: a different one still goes out.
+        $this->assertSame('ok', $dispatch('Other-Job', 120)->status);
+        $this->assertCount(2, $history);
     }
 }

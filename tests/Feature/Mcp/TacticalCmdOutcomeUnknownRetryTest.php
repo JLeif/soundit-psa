@@ -8,6 +8,7 @@ use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Person;
 use App\Models\Setting;
+use App\Models\TacticalActionLog;
 use App\Models\TacticalAsset;
 use App\Models\TechnicianActionLog;
 use App\Models\TechnicianRun;
@@ -187,7 +188,8 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
 
         $this->assertSame('gate_declined', $approval->status);
         $this->assertStringContainsString('may have run', (string) $approval->message);
-        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not released to AwaitingApproval for one-tap re-approval');
+        $this->assertStringContainsString('closed, not reopened', (string) $approval->message);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'landed terminal: neither released for one-tap re-approval nor stranded in Executing');
         $this->assertSame('outcome_unknown', TechnicianActionLog::where('run_id', $run->id)->latest('id')->value('result_status'));
 
         // Staging the identical command again is refused; nothing new is staged.
@@ -206,5 +208,37 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
 
         $this->assertSame('gate_declined', $approval->status);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'offline: nothing ran, so it stays approvable');
+    }
+
+    public function test_the_same_command_is_held_across_lanes_tickets_and_timeouts_after_an_outcome_unknown(): void
+    {
+        $f = $this->fixture();
+        $token = McpConfig::rotateStaffToken(allowedTools: ['tactical_run_command', 'tactical_stage_command'], label: 'opsbot');
+
+        // One cmd() only (Mockery ->once()): every retry below must be held before the transport.
+        $tactical = Mockery::mock(TacticalClient::class);
+        $tactical->shouldReceive('cmd')->once()->andThrow($this->sentThenTimedOut());
+        $this->app->instance(TacticalClient::class, $tactical);
+
+        $first = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client']));
+        $this->assertStringContainsString('may have run', $this->text($first));
+
+        // Direct again, now on a ticket and with another timeout: a different content hash, so the
+        // executor's identical-content hold does not match it; the bus hold does.
+        $retry = $this->callTool($token, 'tactical_run_command', ['ticket_id' => $f['ticket']->id, 'timeout' => 121] + $this->runArgs($f['client']));
+        $this->assertTrue((bool) $retry->json('result.isError'));
+        $this->assertStringContainsString('It was not sent again', $this->text($retry));
+
+        // The other lane: staged, approved, declined at the bus with nothing sent, and left approvable.
+        $staged = $this->callTool($token, 'tactical_stage_command', $this->stageArgs($f));
+        $this->assertFalse((bool) $staged->json('result.isError'), $this->text($staged));
+        $run = TechnicianRun::findOrFail(json_decode($this->text($staged), true)['run_id']);
+
+        $approval = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $f['actor']->id);
+
+        $this->assertSame('gate_declined', $approval->status);
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'nothing was sent, so it stays approvable');
+        $this->assertSame(1, TacticalActionLog::where('result_status', 'outcome_unknown')->count());
+        $this->assertSame(2, TacticalActionLog::where('result_status', 'blocked')->count());
     }
 }

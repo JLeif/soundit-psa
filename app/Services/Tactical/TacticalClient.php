@@ -30,8 +30,15 @@ class TacticalClient
      */
     private const CMD_TIMEOUT_MARGIN_S = 15.0;
 
-    /** #3971: upper bound on a cmd() HTTP budget (RunCommandAction's 600s maximum + margin). */
-    private const CMD_TIMEOUT_CAP_S = 615.0;
+    /**
+     * #3971: upper bound on a cmd() HTTP budget. The documented nginx configs
+     * (docs/INSTALL.md §5, docker/nginx/default.conf) set no
+     * fastcgi_read_timeout, so nginx's 60s default ends a web request that waits
+     * longer: the caller gets a 504 before the outcome is classified and
+     * audited. Capping below it lets this client's own timeout fire first, with
+     * room left for the rest of the request.
+     */
+    private const CMD_TIMEOUT_CAP_S = 45.0;
 
     /** #3971: connect budget applied beside a per-request POST timeout. */
     private const CONNECT_TIMEOUT_S = 10.0;

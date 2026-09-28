@@ -75,9 +75,9 @@ class TacticalClientCmdTimeoutTest extends TestCase
     {
         $client = $this->clientReturning([new Response(200, [], json_encode('done'))]);
 
-        $client->cmd('AGENT-1', 'long-job', 'powershell', 120);
+        $client->cmd('AGENT-1', 'long-job', 'powershell', 25);
 
-        $this->assertSame(135.0, $this->lastOptions()['timeout'], 'budget = command timeout + 15s margin');
+        $this->assertSame(40.0, $this->lastOptions()['timeout'], 'budget = command timeout + 15s margin');
         $this->assertSame(10.0, $this->lastOptions()['connect_timeout'], 'connect budget stays short');
     }
 
@@ -95,15 +95,22 @@ class TacticalClientCmdTimeoutTest extends TestCase
         $client = $this->clientReturning([
             new Response(200, [], json_encode('done')),
             new Response(200, [], json_encode('done')),
+            new Response(200, [], json_encode('done')),
         ]);
 
+        $client->cmd('AGENT-1', 'long-job', 'shell', 30);
+        $this->assertSame(45.0, $this->lastOptions()['timeout'], 'timeout + margin reaches the cap exactly');
+
+        // Under nginx's 60s fastcgi_read_timeout default, which the documented
+        // install does not raise: a longer command is cut by this client, where
+        // the cut is classified and audited, not by nginx with a 504.
         $client->cmd('AGENT-1', 'long-job', 'shell', 600);
-        $this->assertSame(615.0, $this->lastOptions()['timeout'], 'the validated maximum reaches the cap exactly');
+        $this->assertSame(45.0, $this->lastOptions()['timeout'], 'the validated maximum is held to the cap');
 
         // cmd() is public; a caller past RunCommandAction's 10..600 validation
         // still cannot hold a worker longer than the cap.
         $client->cmd('AGENT-1', 'long-job', 'shell', 5000);
-        $this->assertSame(615.0, $this->lastOptions()['timeout']);
+        $this->assertSame(45.0, $this->lastOptions()['timeout']);
     }
 
     /** @return array<string, array{int}> */
