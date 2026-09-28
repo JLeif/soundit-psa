@@ -7,8 +7,10 @@ use App\Models\PhoneCall;
 use App\Models\PrepayTransaction;
 use App\Models\Ticket;
 use App\Services\PrepayService;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -68,6 +70,25 @@ class PhoneCallPrepayRaceTest extends TestCase
         } finally {
             PrepayTransaction::flushEventListeners();
         }
+    }
+
+    public function test_debit_locks_parent_call_row_first_in_its_transaction(): void
+    {
+        [$call, $contract] = $this->fixture();
+        $events = [];
+        DB::listen(function ($query) use (&$events) {
+            $events[] = $query->sql;
+        });
+        Event::listen(TransactionBeginning::class, function () use (&$events) {
+            $events[] = 'BEGIN';
+        });
+        app(PrepayService::class)->debitFromPhoneCall($call);
+        $begin = array_search('BEGIN', $events, true);
+        $this->assertNotFalse($begin);
+        $first = $events[$begin + 1] ?? '';
+        $this->assertStringStartsWith('select * from "phone_calls"', $first);
+        $this->assertStringContainsString('"phone_calls"."id" = ?', $first);
+        $this->assertDebit($call, $contract, 1.0);
     }
 
     public function test_single_delivery_redelivery_and_reversal(): void

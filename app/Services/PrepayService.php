@@ -577,9 +577,15 @@ class PrepayService
         $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
 
         $txn = DB::transaction(function () use ($contract, $call, $hours, $description) {
+            // Lock the parent call row first so concurrent debits for one call queue
+            // here. Without it, under InnoDB's default REPEATABLE READ a locking read
+            // that finds no prepay row takes only a gap lock, both racers can hold
+            // that gap lock, and their INSERTs then deadlock. The unique index is the
+            // backstop for any writer that skips this lock.
+            PhoneCall::whereKey($call->id)->lockForUpdate()->first();
+
             $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
 
-            // The unique index closes the absent-row race; a row lock alone cannot.
             if (! $existing) {
                 try {
                     $txn = PrepayTransaction::create([
