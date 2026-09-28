@@ -1382,7 +1382,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'get_email_item',
-            'description' => 'Get one email item\'s full detail, including the full body text and its ticket/client linkage. Staff-class, cross-client — not scoped to a client_id.',
+            'description' => 'Get one email item\'s full detail, including the full body text and its ticket/client linkage. Staff-class, cross-client.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -1419,7 +1419,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'get_phone_call',
-            'description' => 'Get one phone call\'s full detail, including the transcription and its ticket/client linkage. Staff-class, cross-client — not scoped to a client_id. from_number, to_number, far_end_number and far_end_provenance mean what list_phone_calls says they mean.',
+            'description' => 'Get one phone call\'s full detail, including the transcription and its ticket/client linkage. Staff-class, cross-client. from_number, to_number, far_end_number and far_end_provenance mean what list_phone_calls says they mean.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
