@@ -40,10 +40,7 @@ use Soundasleep\Html2Text;
 
 class EmailService
 {
-    private const FREE_EMAIL_DOMAINS = [
-        'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'live.com',
-        'icloud.com', 'aol.com', 'protonmail.com', 'me.com', 'msn.com',
-    ];
+    private const FREE_EMAIL_DOMAINS = \App\Support\FreeEmailDomains::ALL;
 
     private const GRAPH_SELECT_FIELDS = 'id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,importance,receivedDateTime,internetMessageHeaders';
 
@@ -706,11 +703,10 @@ PROMPT;
      */
     private function matchToExistingTicket(Email $email): ?Ticket
     {
-        // A held form ticket is contained as a whole: no inbound email threads onto it, by
-        // conversation, header or a guessed [T-id], until staff verify it (contract-replacement:4).
-        $ticket = $this->matchToExistingTicketUnfiltered($email);
-
-        return $ticket?->isUnverifiedContactIntake() ? null : $ticket;
+        // A held form ticket keeps its thread: a reply lands on it, where the ticket-level guards
+        // keep it contained until staff verify it, rather than falling through to a separate
+        // automation-visible ticket that is never re-threaded (diff:3, context:3).
+        return $this->matchToExistingTicketUnfiltered($email);
     }
 
     private function matchToExistingTicketUnfiltered(Email $email): ?Ticket

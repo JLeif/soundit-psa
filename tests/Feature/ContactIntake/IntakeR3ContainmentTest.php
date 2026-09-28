@@ -9,9 +9,11 @@ use App\Enums\TechnicianRunState;
 use App\Enums\TicketPriority;
 use App\Enums\TicketStatus;
 use App\Enums\WhoType;
+use App\Jobs\RunTechnicianLoop;
 use App\Jobs\SendTicketNotification;
 use App\Models\Email;
 use App\Models\Person;
+use App\Models\Setting;
 use App\Models\SignalEvent;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
@@ -141,18 +143,39 @@ class IntakeR3ContainmentTest extends TestCase
         }
     }
 
-    /** contract-replacement:4 — an inbound email does not thread onto a held ticket by its [T-id]. */
-    public function test_inbound_email_does_not_thread_onto_a_held_ticket(): void
+    /** diff:3 — a reply to a held ticket threads onto it, contained, instead of spawning a visible duplicate ticket. */
+    public function test_inbound_email_threads_onto_a_held_ticket_and_stays_contained(): void
     {
+        Setting::setValue('email_auto_ticket', '1');
         $ticket = $this->formTicket();
-        $match = new \ReflectionMethod(EmailService::class, 'matchToExistingTicket');
-        $email = (new Email)->forceFill(['subject' => "Re: [T-{$ticket->id}] Synthetic"]);
+        // Enabled only after the ticket exists: TicketObserver::created would otherwise dispatch
+        // RunTechnicianLoop at creation, so no assertion below could tell the held link from the verified one.
+        Setting::setValue('technician_enabled', '1');
+        Bus::assertNotDispatched(RunTechnicianLoop::class);
+        $loopFor = fn (Ticket $t) => fn (RunTechnicianLoop $job) => (fn () => $this->ticketId)->call($job) === $t->id;
+        $inbound = function (string $graphId) use ($ticket): Email {
+            $email = Email::create(['graph_id' => $graphId, 'direction' => EmailDirection::Inbound,
+                'from_address' => 'client@example.test', 'subject' => "Re: [T-{$ticket->id}] Synthetic",
+                'body_preview' => 'Any update?', 'body_text' => 'Any update?', 'received_at' => now()]);
+            $email->forceFill(['client_id' => $ticket->client_id])->save();
+            app(EmailService::class)->processInbound($email->fresh());
 
-        $this->assertNull($match->invoke(app(EmailService::class), $email));
+            return $email->fresh();
+        };
+        $tickets = Ticket::count();
 
-        // Positive control: the verified ticket is matched by its [T-id] as usual.
+        $this->assertSame($ticket->id, $inbound('graph-held-thread')->ticket_id);
+        $this->assertSame($tickets, Ticket::count());
+        $this->assertSame(0, SignalEvent::where('type_key', 'ticket.client_replied')->count());
+        Bus::assertNotDispatched(RunTechnicianLoop::class);
+
+        // Positive control: once verified, a reply on the same thread wakes automation as usual.
         $this->verify($ticket);
-        $this->assertSame($ticket->id, $match->invoke(app(EmailService::class), $email)?->id);
+        Bus::assertNotDispatched(RunTechnicianLoop::class);
+        $this->assertSame($ticket->id, $inbound('graph-verified-thread')->ticket_id);
+        $this->assertSame($tickets, Ticket::count());
+        $this->assertSame(1, SignalEvent::where('type_key', 'ticket.client_replied')->count());
+        Bus::assertDispatched(RunTechnicianLoop::class, $loopFor($ticket));
     }
 
     private function pipelineHasUnaddressedClientReply(Ticket $ticket): bool

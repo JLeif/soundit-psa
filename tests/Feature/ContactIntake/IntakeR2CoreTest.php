@@ -1,0 +1,268 @@
+<?php
+
+namespace Tests\Feature\ContactIntake;
+
+use App\Enums\NoteType;
+use App\Enums\WhoType;
+use App\Models\ContactSubmission;
+use App\Models\Setting;
+use App\Models\Ticket;
+use App\Models\TicketNote;
+use App\Models\User;
+use App\Services\ContactIntake\StaffWorkflow;
+use App\Services\ContactIntake\SubmissionLedger;
+use App\Services\ContactIntake\SubmissionProcessor;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Tests\TestCase;
+
+/** r2 must-fix controls for the intake core (card sPMnZ1l4, r1 review 01a0d620). */
+class IntakeR2CoreTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function accept(string $message = 'SYNTHETIC_UNTRUSTED_TEXT'): ContactSubmission
+    {
+        Setting::setValue('contact_intake_enabled', '1');
+        app(SubmissionLedger::class)->accept('website', [
+            'submission_id' => (string) Str::uuid(), 'name' => 'Synthetic Visitor',
+            'email' => 'visitor@example.test', 'message' => $message,
+            'submitted_at' => '2026-09-24T12:00:00Z',
+        ]);
+
+        return ContactSubmission::latest('id')->firstOrFail();
+    }
+
+    /** diff:1 — two inquiries accepted before one drain run: one prospect, TWO tickets. */
+    public function test_two_submissions_accepted_before_one_drain_get_separate_tickets_on_one_prospect(): void
+    {
+        Bus::fake();
+        $first = $this->accept('FIRST');
+        $second = $this->accept('SECOND');
+        $this->artisan('contact-intake:drain')->assertSuccessful();
+        $first->refresh();
+        $second->refresh();
+        $this->assertSame('processed', $first->state);
+        $this->assertSame('processed', $second->state);
+        $this->assertNotSame($first->ticket_id, $second->ticket_id);
+        $this->assertDatabaseCount('tickets', 2);
+        $this->assertDatabaseCount('clients', 1);
+        $this->assertDatabaseCount('people', 1);
+        $this->assertSame(Ticket::findOrFail($first->ticket_id)->client_id, Ticket::findOrFail($second->ticket_id)->client_id);
+        // A later inquiry, received after both exist, follows the 15:59 PT ruling: several
+        // open tickets -> a new ticket with the others linked (the sequential single-ticket
+        // follow-up is SubmissionProcessorTest::test_later_submission_reuses_the_sole_open_form_ticket).
+        $third = app(SubmissionProcessor::class)->process($this->accept('THIRD')->id);
+        $this->assertSame('processed', $third->state);
+        $this->assertDatabaseCount('tickets', 3);
+        $related = json_decode($third->related_ticket_ids, true);
+        sort($related);
+        $this->assertSame([$first->ticket_id, $second->ticket_id], $related);
+    }
+
+    /** diff:9 — visitor text is the client's voice, never an Agent (staff) note. */
+    public function test_form_note_is_recorded_as_end_user_not_agent(): void
+    {
+        Bus::fake();
+        $row = app(SubmissionProcessor::class)->process($this->accept()->id);
+        $note = TicketNote::findOrFail($row->ticket_note_id);
+        $this->assertSame(WhoType::EndUser, $note->who_type);
+        $this->assertSame(NoteType::Reply, $note->note_type);
+    }
+
+    /** diff:2 / diff:7 / diff:8 — only the intake writer stamps provenance. */
+    public function test_staff_note_on_unverified_ticket_keeps_time_billing_email_and_does_not_block_verification(): void
+    {
+        Bus::fake();
+        $row = app(SubmissionProcessor::class)->process($this->accept()->id);
+        $ticket = Ticket::findOrFail($row->ticket_id);
+        $this->assertTrue($ticket->isUnverifiedContactIntake());
+        $staffNote = TicketNote::create(['ticket_id' => $ticket->id, 'body' => 'Tech investigation',
+            'note_type' => NoteType::Reply, 'who_type' => WhoType::Agent, 'is_private' => false,
+            'time_minutes' => 30, 'is_billable' => true, 'noted_at' => now()]);
+        $staffNote->refresh();
+        $this->assertFalse((bool) $staffNote->contact_intake_origin);
+        $this->assertSame(30, $staffNote->time_minutes);
+        $this->assertTrue((bool) $staffNote->is_billable);
+        $this->assertFalse((bool) $staffNote->is_private);
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($row->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
+    }
+
+    /** diff:7 — after verification a form note may carry staff time like any internal note. */
+    public function test_verified_form_note_is_no_longer_forced_to_zero_time(): void
+    {
+        Bus::fake();
+        $row = app(SubmissionProcessor::class)->process($this->accept()->id);
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($row->id, $staff, 'verify', 'Synthetic verification');
+        $note = TicketNote::findOrFail($row->ticket_note_id);
+        $note->update(['time_minutes' => 15, 'is_billable' => true]);
+        $note->refresh();
+        $this->assertSame(15, $note->time_minutes);
+        $this->assertTrue((bool) $note->is_billable);
+        $this->assertTrue((bool) $note->contact_intake_origin);
+    }
+
+    /** contract-replacement:3 + r2 diff:1 — a trashed follow-up note is verifiable, and still required. */
+    public function test_trashed_unverified_follow_up_note_is_verifiable_and_still_required_for_ticket_clearance(): void
+    {
+        Bus::fake();
+        $one = app(SubmissionProcessor::class)->process($this->accept('ONE')->id);
+        $two = app(SubmissionProcessor::class)->process($this->accept('TWO')->id);
+        $this->assertSame($one->ticket_id, $two->ticket_id);
+        TicketNote::findOrFail($two->ticket_note_id)->delete();
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($one->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertTrue(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+        app(StaffWorkflow::class)->act($two->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+    }
+
+    /** r2 diff:1 — verifying a follow-up must not release a ticket whose trashed creator note is unverified. */
+    public function test_verifying_follow_up_does_not_release_ticket_whose_trashed_creator_note_is_unverified(): void
+    {
+        Bus::fake();
+        $one = app(SubmissionProcessor::class)->process($this->accept('ONE')->id);
+        $two = app(SubmissionProcessor::class)->process($this->accept('TWO')->id);
+        $this->assertSame($one->ticket_id, $two->ticket_id);
+        $this->assertStringContainsString('ONE', Ticket::findOrFail($one->ticket_id)->description);
+        TicketNote::findOrFail($one->ticket_note_id)->delete();
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($two->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertTrue(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+        app(StaffWorkflow::class)->act($one->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse(Ticket::findOrFail($one->ticket_id)->isUnverifiedContactIntake());
+    }
+
+    /** diff:3 — a soft-deleted SOLE form note must not make verification impossible. */
+    public function test_verify_clears_ticket_whose_only_form_note_is_trashed(): void
+    {
+        Bus::fake();
+        $row = app(SubmissionProcessor::class)->process($this->accept()->id);
+        TicketNote::findOrFail($row->ticket_note_id)->delete();
+        $staff = User::factory()->admin()->create(['is_active' => true]);
+        app(StaffWorkflow::class)->act($row->id, $staff, 'verify', 'Synthetic verification');
+        $this->assertFalse(Ticket::findOrFail($row->ticket_id)->isUnverifiedContactIntake());
+        $this->assertNotNull(TicketNote::withTrashed()->findOrFail($row->ticket_note_id)->contact_intake_verified_at);
+        $this->assertDatabaseHas('contact_intake_audits', ['contact_submission_id' => $row->id, 'action' => 'verify']);
+    }
+
+    /** diff:4 — a poison row leaves the pending queue after bounded failures. */
+    public function test_poison_row_is_quarantined_after_bounded_failures_and_does_not_starve_new_rows(): void
+    {
+        Bus::fake();
+        $poison = $this->accept('POISON');
+        $poison->update(['resolved_client_id' => null]);
+        DB::table('contact_submissions')->where('id', $poison->id)->update(['payload' => 'not-decryptable']);
+        // Literal 5, not the constant: the control must fail on BEHAVIOUR at the unfixed byte.
+        for ($i = 0; $i < 5; $i++) {
+            $this->artisan('contact-intake:drain');
+        }
+        $poison->refresh();
+        $this->assertSame('quarantined', $poison->state);
+        $this->assertSame('processing_failed', $poison->exception_reason);
+        $this->assertSame(5, $poison->attempts);
+        $good = $this->accept('GOOD');
+        $this->artisan('contact-intake:drain')->assertSuccessful();
+        $this->assertSame('processed', $good->fresh()->state);
+    }
+
+    /** diff:6 — 100+ undeliverable alerts must not hide a deliverable one behind them. */
+    public function test_undeliverable_alerts_do_not_block_later_deliverable_alerts(): void
+    {
+        Bus::fake();
+        Setting::setValue('contact_intake_enabled', '1');
+        $row = $this->accept();
+        $now = now();
+        $rows = [];
+        for ($i = 0; $i < 105; $i++) {
+            $rows[] = ['contact_submission_id' => $row->id, 'event' => 'undeliverable_'.$i, 'created_at' => $now, 'updated_at' => $now];
+        }
+        DB::table('contact_intake_notifications')->insert($rows);
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        $ticket = Ticket::factory()->create(['assignee_id' => $owner->id]);
+        $other = $this->accept('OTHER');
+        $other->update(['ticket_id' => $ticket->id]);
+        DB::table('contact_intake_notifications')->insert(['contact_submission_id' => $other->id,
+            'event' => 'processed', 'created_at' => $now, 'updated_at' => $now]);
+        $this->mock(\App\Services\EmailService::class, fn ($m) => $m->shouldReceive('sendNew')->once()->andReturn(new \App\Models\Email));
+        $this->assertSame(1, app(\App\Services\ContactIntake\IntakeNotifications::class)->drain());
+        $this->assertNotNull(DB::table('contact_intake_notifications')->where('contact_submission_id', $other->id)->value('sent_at'));
+    }
+
+    /** context:5 — a ticketless alert names its event and review link, and is stamped only once delivered. */
+    public function test_ticketless_alert_carries_event_and_review_link_and_is_stamped_only_after_delivery(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        $this->assertNull($row->ticket_id);
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $calls = [];
+        $this->mock(\App\Services\EmailService::class, function ($m) use (&$calls) {
+            $m->shouldReceive('sendNew')->twice()->andReturnUsing(function (...$args) use (&$calls) {
+                $calls[] = $args;
+                if (count($calls) === 1) {
+                    throw new \RuntimeException('synthetic transport failure');
+                }
+
+                return new \App\Models\Email;
+            });
+        });
+        $drain = fn () => app(\App\Services\ContactIntake\IntakeNotifications::class)->drain();
+        $sentAt = fn () => DB::table('contact_intake_notifications')->where('contact_submission_id', $row->id)->value('sent_at');
+        $this->assertSame(0, $drain());
+        $this->assertNull($sentAt());
+        $this->assertSame(1, $drain());
+        $this->assertNotNull($sentAt());
+        [$to, $subject, $body] = $calls[1];
+        $this->assertSame($owner->email, $to);
+        $this->assertStringContainsString('quarantined', $subject);
+        $this->assertStringContainsString('quarantined', $body);
+        $this->assertStringContainsString(route('contact-intake.show', $row->id), $body);
+        $this->assertStringNotContainsString('SYNTHETIC_UNTRUSTED_TEXT', $subject.$body);
+        $this->assertSame(0, $drain());
+    }
+
+    /** r2 diff:3 — a repeat of an already-delivered event is alerted again, not absorbed. */
+    public function test_repeat_event_after_delivery_is_alerted_again(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        $this->mock(\App\Services\EmailService::class, fn ($m) => $m->shouldReceive('sendNew')->twice()->andReturn(new \App\Models\Email));
+        $drain = fn () => app(\App\Services\ContactIntake\IntakeNotifications::class)->drain();
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $this->assertSame(1, $drain());
+        $this->assertSame(0, $drain());
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'quarantined');
+        $this->assertSame(1, $drain());
+        $this->assertDatabaseCount('contact_intake_notifications', 1);
+    }
+
+    /** r2 diff:3 — a repeat recorded while its earlier recording is being sent stays unsent. */
+    public function test_repeat_recorded_during_send_is_not_stamped_by_that_send(): void
+    {
+        Bus::fake();
+        $owner = User::factory()->admin()->create(['is_active' => true]);
+        Setting::setValue('contact_intake_owner_id', (string) $owner->id);
+        $row = $this->accept();
+        \App\Services\ContactIntake\IntakeNotifications::record($row, 'conflict');
+        $this->mock(\App\Services\EmailService::class, function ($m) use ($row) {
+            $m->shouldReceive('sendNew')->once()->andReturnUsing(function () use ($row) {
+                $this->travel(1)->seconds();
+                \App\Services\ContactIntake\IntakeNotifications::record($row, 'conflict');
+
+                return new \App\Models\Email;
+            });
+        });
+        $this->assertSame(1, app(\App\Services\ContactIntake\IntakeNotifications::class)->drain());
+        $this->assertNull(DB::table('contact_intake_notifications')->where('contact_submission_id', $row->id)->value('sent_at'));
+    }
+}

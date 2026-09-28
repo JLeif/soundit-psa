@@ -230,10 +230,17 @@ class IntakeR2ContainmentTest extends TestCase
     /** c1:v3:1 — the web reply path reports a containment refusal, not a delivery failure. */
     public function test_staff_reply_on_unverified_form_ticket_reports_containment_not_delivery_failure(): void
     {
+        // Jeeves 2026-09-27 22:35Z: must fail if the EmailService conflict is resolved toward
+        // layer 3's bare DomainException (that path tells staff to "send manually").
+        \App\Models\Setting::setValue('graph_mailbox', 'support@example.test');
+        $this->mock(\App\Services\Graph\GraphClient::class, fn ($m) => $m->shouldNotReceive('post'));
         $user = User::factory()->create();
         $ticket = $this->formTicket();
-        $this->actingAs($user)->post(route('tickets.notes.store', $ticket), [
+        $response = $this->actingAs($user)->post(route('tickets.notes.store', $ticket), [
             'body' => 'Synthetic staff reply', 'note_type' => 'reply', 'is_private' => '0', 'to_email' => 'visitor@example.test',
-        ])->assertSessionHas('warning', 'Reply added, but not emailed: outbound mail is withheld from unverified web-form intake until staff verify it.');
+        ]);
+        $response->assertSessionHas('warning', 'Reply added, but not emailed: outbound mail is withheld from unverified web-form intake until staff verify it.');
+        $this->assertStringNotContainsString('delivery failed', (string) session('warning'));
+        $this->assertDatabaseCount('emails', 0);
     }
 }
