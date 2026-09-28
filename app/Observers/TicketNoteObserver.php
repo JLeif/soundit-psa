@@ -80,7 +80,9 @@ class TicketNoteObserver
         }
 
         $ticket = $note->ticket;
-        if ($ticket === null) {
+        // A held form ticket is contained as a whole: a note on it, such as an inbound email
+        // threaded by [T-id], wakes nothing until staff verify the ticket (diff:1).
+        if ($ticket === null || $ticket->isUnverifiedContactIntake()) {
             return;
         }
 

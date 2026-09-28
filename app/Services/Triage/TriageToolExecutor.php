@@ -378,6 +378,8 @@ class TriageToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        // G-14: an in-scope held intake ticket is refused as held, never as missing. The lookup
+        // above is client-scoped, so a held ticket under another client never reaches this.
         if ($ticket->isUnverifiedContactIntake()) {
             return ['error' => 'Unverified contact intake.'];
         }

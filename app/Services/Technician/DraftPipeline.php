@@ -112,6 +112,13 @@ class DraftPipeline
      */
     private function hasUnaddressedClientReply(Ticket $ticket): bool
     {
+        // A contained client reply cannot be proposed against: the classifier and drafter
+        // exclude it, and its noted_at is the backdated submission time. Wait for verification
+        // instead of proposing blind (diff:3).
+        if ($this->hasUnverifiedContainedClientReply($ticket)) {
+            return false;
+        }
+
         $latestClientReply = $ticket->notes()->automationVisible()
             ->where('note_type', NoteType::Reply->value)
             ->where('ai_authored', false)
@@ -128,9 +135,36 @@ class DraftPipeline
             return $latestResolutionRun === null; // intake: act once
         }
 
+        // A web-form reply first becomes answerable when staff verify it; its noted_at is the
+        // backdated submission time, so it is unaddressed if verified after our latest proposal.
         return $latestResolutionRun === null
             || $latestResolutionRun->created_at === null
-            || $latestResolutionRun->created_at->lt($latestClientReply->noted_at);
+            || $latestResolutionRun->created_at->lt($latestClientReply->noted_at)
+            || $this->hasIntakeReplyVerifiedAfter($ticket, $latestResolutionRun->created_at);
+    }
+
+    /** True while any untrashed unverified web-form client reply exists on the ticket. */
+    private function hasUnverifiedContainedClientReply(Ticket $ticket): bool
+    {
+        return $ticket->notes()->withoutTrashed()
+            ->where('note_type', NoteType::Reply->value)
+            ->where('ai_authored', false)
+            ->where('who_type', WhoType::EndUser->value)
+            ->where('contact_intake_origin', true)
+            ->whereNull('contact_intake_verified_at')
+            ->exists();
+    }
+
+    /** True when a web-form client reply was verified after the given proposal time. */
+    private function hasIntakeReplyVerifiedAfter(Ticket $ticket, \DateTimeInterface $since): bool
+    {
+        return $ticket->notes()->withoutTrashed()
+            ->where('note_type', NoteType::Reply->value)
+            ->where('ai_authored', false)
+            ->where('who_type', WhoType::EndUser->value)
+            ->where('contact_intake_origin', true)
+            ->where('contact_intake_verified_at', '>', $since)
+            ->exists();
     }
 
     /** True when a real (non-AI) client/human Reply note exists — distinct from the bot's ack. */
