@@ -147,8 +147,12 @@ class IntakeR3ContainmentTest extends TestCase
     public function test_inbound_email_threads_onto_a_held_ticket_and_stays_contained(): void
     {
         Setting::setValue('email_auto_ticket', '1');
-        Setting::setValue('technician_enabled', '1');
         $ticket = $this->formTicket();
+        // Enabled only after the ticket exists: TicketObserver::created would otherwise dispatch
+        // RunTechnicianLoop at creation, so no assertion below could tell the held link from the verified one.
+        Setting::setValue('technician_enabled', '1');
+        Bus::assertNotDispatched(RunTechnicianLoop::class);
+        $loopFor = fn (Ticket $t) => fn (RunTechnicianLoop $job) => (fn () => $this->ticketId)->call($job) === $t->id;
         $inbound = function (string $graphId) use ($ticket): Email {
             $email = Email::create(['graph_id' => $graphId, 'direction' => EmailDirection::Inbound,
                 'from_address' => 'client@example.test', 'subject' => "Re: [T-{$ticket->id}] Synthetic",
@@ -167,10 +171,11 @@ class IntakeR3ContainmentTest extends TestCase
 
         // Positive control: once verified, a reply on the same thread wakes automation as usual.
         $this->verify($ticket);
+        Bus::assertNotDispatched(RunTechnicianLoop::class);
         $this->assertSame($ticket->id, $inbound('graph-verified-thread')->ticket_id);
         $this->assertSame($tickets, Ticket::count());
         $this->assertSame(1, SignalEvent::where('type_key', 'ticket.client_replied')->count());
-        Bus::assertDispatched(RunTechnicianLoop::class);
+        Bus::assertDispatched(RunTechnicianLoop::class, $loopFor($ticket));
     }
 
     private function pipelineHasUnaddressedClientReply(Ticket $ticket): bool
