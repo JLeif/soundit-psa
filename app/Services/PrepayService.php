@@ -25,79 +25,84 @@ class PrepayService
      */
     public function depositFromInvoice(Invoice $invoice, Contract $contract): ?PrepayTransaction
     {
-        // Guard: skip dollar-based contracts (auto-deposit is hours-based)
-        if ($contract->has_prepay && $contract->prepay_as_amount) {
-            Log::warning('[Prepay] Skipping deposit — contract uses dollar-based prepay', [
+        return DB::transaction(function () use ($invoice, $contract) {
+            // Lock order: invoice -> contract (initialization / balance writes).
+            Invoice::whereKey($invoice->id)->lockForUpdate()->first();
+
+            // Guard: skip dollar-based contracts (auto-deposit is hours-based)
+            if ($contract->has_prepay && $contract->prepay_as_amount) {
+                Log::warning('[Prepay] Skipping deposit — contract uses dollar-based prepay', [
+                    'contract_id' => $contract->id,
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            // Idempotency: at most ONE unmatched deposit at a time. Counted
+            // against the reversals rather than tested for existence, because a
+            // reversal is a compensating -hours row, not a delete: an existence
+            // test would refuse for ever once an invoice had been reverted once,
+            // so a QBO payment unapplied and then re-applied would leave the
+            // invoice Paid, the client charged, and the hours they bought gone
+            // (#1173). Balanced counts mean nothing is deposited right now.
+            $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->count();
+
+            $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceReversal)
+                ->count();
+
+            if ($deposits > $reversals) {
+                Log::debug('[Prepay] Deposit already exists for invoice', [
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            $totalMinutes = (int) $invoice->lines->sum('prepaid_time_minutes');
+
+            if ($totalMinutes <= 0) {
+                return null;
+            }
+
+            $totalHours = round($totalMinutes / 60, 4);
+
+            // Initialize prepay on contract if this is the first deposit
+            $this->ensurePrepayInitialized($contract);
+
+            $txn = PrepayTransaction::create([
+                'contract_id' => $contract->id,
+                'source' => PrepayTransactionSource::InvoiceDeposit,
+                'invoice_id' => $invoice->id,
+                'date' => $invoice->invoice_date,
+                'hours' => $totalHours,
+                'description' => "Auto-deposit from {$invoice->invoice_number} ({$totalMinutes} min)",
+                'invoice_number' => $invoice->invoice_number,
+                'invoice_date' => $invoice->invoice_date,
+                // A RE-deposit is a new lot restored after a reversal, so its life
+                // cannot be measured from the original invoice date — see
+                // restoredExpiry(). The first deposit is unchanged.
+                'expiry_date' => $deposits > 0
+                    ? $this->restoredExpiry($contract, $invoice)
+                    : $this->expiryForCredit($contract, $invoice->invoice_date),
+            ]);
+
+            // Update denormalized balance on contract
+            $contract->increment('prepay_total', $totalHours);
+            $contract->increment('prepay_balance', $totalHours);
+
+            Log::info('[Prepay] Auto-deposit from invoice', [
                 'contract_id' => $contract->id,
                 'invoice_id' => $invoice->id,
+                'minutes' => $totalMinutes,
+                'hours' => $totalHours,
             ]);
 
-            return null;
-        }
-
-        // Idempotency: at most ONE unmatched deposit at a time. Counted
-        // against the reversals rather than tested for existence, because a
-        // reversal is a compensating -hours row, not a delete: an existence
-        // test would refuse for ever once an invoice had been reverted once,
-        // so a QBO payment unapplied and then re-applied would leave the
-        // invoice Paid, the client charged, and the hours they bought gone
-        // (#1173). Balanced counts mean nothing is deposited right now.
-        $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->count();
-
-        $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceReversal)
-            ->count();
-
-        if ($deposits > $reversals) {
-            Log::debug('[Prepay] Deposit already exists for invoice', [
-                'invoice_id' => $invoice->id,
-            ]);
-
-            return null;
-        }
-
-        $totalMinutes = (int) $invoice->lines->sum('prepaid_time_minutes');
-
-        if ($totalMinutes <= 0) {
-            return null;
-        }
-
-        $totalHours = round($totalMinutes / 60, 4);
-
-        // Initialize prepay on contract if this is the first deposit
-        $this->ensurePrepayInitialized($contract);
-
-        $txn = PrepayTransaction::create([
-            'contract_id' => $contract->id,
-            'source' => PrepayTransactionSource::InvoiceDeposit,
-            'invoice_id' => $invoice->id,
-            'date' => $invoice->invoice_date,
-            'hours' => $totalHours,
-            'description' => "Auto-deposit from {$invoice->invoice_number} ({$totalMinutes} min)",
-            'invoice_number' => $invoice->invoice_number,
-            'invoice_date' => $invoice->invoice_date,
-            // A RE-deposit is a new lot restored after a reversal, so its life
-            // cannot be measured from the original invoice date — see
-            // restoredExpiry(). The first deposit is unchanged.
-            'expiry_date' => $deposits > 0
-                ? $this->restoredExpiry($contract, $invoice)
-                : $this->expiryForCredit($contract, $invoice->invoice_date),
-        ]);
-
-        // Update denormalized balance on contract
-        $contract->increment('prepay_total', $totalHours);
-        $contract->increment('prepay_balance', $totalHours);
-
-        Log::info('[Prepay] Auto-deposit from invoice', [
-            'contract_id' => $contract->id,
-            'invoice_id' => $invoice->id,
-            'minutes' => $totalMinutes,
-            'hours' => $totalHours,
-        ]);
-
-        return $txn;
+            return $txn;
+        });
     }
 
     /**
@@ -122,58 +127,63 @@ class PrepayService
         Contract $contract,
         ?string $description = null,
     ): ?PrepayTransaction {
-        // The LATEST deposit, not the first: an invoice may have been
-        // deposited, reversed and deposited again across paid/open cycles, and
-        // the live one is the last.
-        $deposit = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->latest('id')
-            ->first();
+        return DB::transaction(function () use ($invoice, $contract, $description) {
+            // Share the deposit's invoice lock before reading the ledger.
+            Invoice::whereKey($invoice->id)->lockForUpdate()->first();
 
-        if (! $deposit) {
-            return null;
-        }
+            // The LATEST deposit, not the first: an invoice may have been
+            // deposited, reversed and deposited again across paid/open cycles, and
+            // the live one is the last.
+            $deposit = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->latest('id')
+                ->first();
 
-        // Idempotency: refuse only when every deposit already has a reversal.
-        $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->count();
+            if (! $deposit) {
+                return null;
+            }
 
-        $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceReversal)
-            ->count();
+            // Idempotency: refuse only when every deposit already has a reversal.
+            $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->count();
 
-        if ($reversals >= $deposits) {
-            Log::debug('[Prepay] Reversal already exists for invoice', [
+            $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceReversal)
+                ->count();
+
+            if ($reversals >= $deposits) {
+                Log::debug('[Prepay] Reversal already exists for invoice', [
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            $hours = abs((float) $deposit->hours);
+
+            $txn = PrepayTransaction::create([
+                'contract_id' => $contract->id,
+                'source' => PrepayTransactionSource::InvoiceReversal,
                 'invoice_id' => $invoice->id,
+                'date' => now(),
+                'hours' => -$hours,
+                'description' => $description ?? "Reversal — invoice {$invoice->invoice_number} voided",
+                'invoice_number' => $invoice->invoice_number,
+                'invoice_date' => $invoice->invoice_date,
             ]);
 
-            return null;
-        }
+            $contract->decrement('prepay_total', $hours);
+            $contract->decrement('prepay_balance', $hours);
 
-        $hours = abs((float) $deposit->hours);
+            Log::info('[Prepay] Deposit reversed for voided invoice', [
+                'contract_id' => $contract->id,
+                'invoice_id' => $invoice->id,
+                'hours' => $hours,
+            ]);
 
-        $txn = PrepayTransaction::create([
-            'contract_id' => $contract->id,
-            'source' => PrepayTransactionSource::InvoiceReversal,
-            'invoice_id' => $invoice->id,
-            'date' => now(),
-            'hours' => -$hours,
-            'description' => $description ?? "Reversal — invoice {$invoice->invoice_number} voided",
-            'invoice_number' => $invoice->invoice_number,
-            'invoice_date' => $invoice->invoice_date,
-        ]);
-
-        $contract->decrement('prepay_total', $hours);
-        $contract->decrement('prepay_balance', $hours);
-
-        Log::info('[Prepay] Deposit reversed for voided invoice', [
-            'contract_id' => $contract->id,
-            'invoice_id' => $invoice->id,
-            'hours' => $hours,
-        ]);
-
-        return $txn;
+            return $txn;
+        });
     }
 
     /**
