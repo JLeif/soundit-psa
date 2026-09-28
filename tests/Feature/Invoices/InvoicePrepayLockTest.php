@@ -21,6 +21,7 @@ class InvoicePrepayLockTest extends TestCase
 
     private function fixture(): array
     {
+        Client::factory()->count(2)->create();
         $contract = Contract::create([
             'client_id' => Client::factory()->create()->id,
             'name' => 'Synthetic prepaid contract', 'type' => 'managed',
@@ -33,6 +34,11 @@ class InvoicePrepayLockTest extends TestCase
             'invoice_number' => 'INV-LOCK-1', 'invoice_date' => '2026-01-01', 'due_date' => '2026-02-01',
             'status' => InvoiceStatus::Posted, 'subtotal' => 100, 'total' => 100,
         ]);
+        $filler = $invoice;
+        $invoice = $filler->replicate();
+        $invoice->invoice_number = 'INV-LOCK-2';
+        $invoice->save();
+        $this->assertCount(3, array_unique([$invoice->id, $contract->id, $contract->client_id]));
         $invoice->lines()->create([
             'description' => 'Synthetic hours', 'quantity' => 1,
             'unit_price' => 100, 'amount' => 100, 'prepaid_time_minutes' => 120,
@@ -52,7 +58,7 @@ class InvoicePrepayLockTest extends TestCase
 
             public function compileSelect(Builder $query)
             {
-                $this->reads[] = [$query->from, $query->lock, $query->getBindings(), $query->getConnection()->transactionLevel()];
+                $this->reads[] = [$query->from, $query->lock, $query->getBindings(), $query->getConnection()->transactionLevel(), $query->wheres];
 
                 return parent::compileSelect($query);
             }
@@ -75,7 +81,10 @@ class InvoicePrepayLockTest extends TestCase
         $this->assertNotEmpty($grammar->reads);
         $this->assertSame('invoices', $grammar->reads[0][0], 'Invoice read must precede ledger reads');
         $this->assertTrue($grammar->reads[0][1], 'Invoice read must request FOR UPDATE');
-        $this->assertContains($invoiceId, $grammar->reads[0][2]);
+        $this->assertSame([$invoiceId], $grammar->reads[0][2]);
+        $this->assertSame('invoices.id', $grammar->reads[0][4][0]['column']);
+        $this->assertSame('=', $grammar->reads[0][4][0]['operator']);
+        $this->assertSame($invoiceId, $grammar->reads[0][4][0]['value']);
         $this->assertNotEmpty($queries);
         foreach ($queries as [$sql, $depth]) {
             $this->assertSame($base + 1, $depth, 'Whole operation must share its transaction: '.$sql);
@@ -88,6 +97,7 @@ class InvoicePrepayLockTest extends TestCase
     {
         [$invoice, $contract] = $this->fixture();
         $service = app(PrepayService::class);
+        $invoice->updateQuietly(['status' => InvoiceStatus::Paid]);
         // Sequential delivery plus lock/transaction seam, NOT a SQLite concurrency proof.
         for ($i = 0; $i < 2; $i++) {
             $this->observe(fn () => $service->depositFromInvoice($invoice, $contract), $invoice->id);
@@ -100,12 +110,65 @@ class InvoicePrepayLockTest extends TestCase
     {
         [$invoice, $contract] = $this->fixture();
         $service = app(PrepayService::class);
+        $invoice->updateQuietly(['status' => InvoiceStatus::Paid]);
         $service->depositFromInvoice($invoice, $contract);
+        $invoice->updateQuietly(['status' => InvoiceStatus::Posted]);
         for ($i = 0; $i < 2; $i++) {
             $this->observe(fn () => $service->reverseDepositForInvoice($invoice, $contract), $invoice->id);
         }
         $this->assertSame(2, PrepayTransaction::where('invoice_id', $invoice->id)->count());
         $this->assertEquals(0, $contract->fresh()->prepay_balance);
+    }
+
+    public static function notPaidStatuses(): array
+    {
+        return [[InvoiceStatus::Void], [InvoiceStatus::Posted]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('notPaidStatuses')]
+    public function test_stale_paid_model_cannot_deposit_on_void_or_posted_row(InvoiceStatus $status): void
+    {
+        [$invoice, $contract] = $this->fixture();
+        $invoice->updateQuietly(['status' => InvoiceStatus::Paid]);
+        Invoice::whereKey($invoice->id)->update(['status' => $status]);
+        $this->assertNull(app(PrepayService::class)->depositFromInvoice($invoice, $contract), 'Stale Paid model must not deposit on '.$status->value);
+        $this->assertSame(0, PrepayTransaction::where('invoice_id', $invoice->id)->count());
+        $this->assertEquals(0, $contract->fresh()->prepay_balance);
+    }
+
+    public function test_stale_not_paid_model_cannot_reverse_paid_row(): void
+    {
+        [$invoice, $contract] = $this->fixture();
+        $invoice->updateQuietly(['status' => InvoiceStatus::Paid]);
+        app(PrepayService::class)->depositFromInvoice($invoice, $contract);
+        $invoice->status = InvoiceStatus::Posted;
+        $this->assertNull(app(PrepayService::class)->reverseDepositForInvoice($invoice, $contract), 'Stale not-Paid model must not reverse Paid row');
+        $this->assertSame(1, PrepayTransaction::where('invoice_id', $invoice->id)->count());
+        $this->assertEquals(2, $contract->fresh()->prepay_balance);
+    }
+
+    public function test_missing_invoice_refuses_both_writes_and_logs(): void
+    {
+        [$invoice, $contract] = $this->fixture();
+        $invoice->forceDelete();
+        \Illuminate\Support\Facades\Log::spy();
+        $service = app(PrepayService::class);
+        $this->assertNull($service->depositFromInvoice($invoice, $contract));
+        $this->assertNull($service->reverseDepositForInvoice($invoice, $contract));
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->assertEquals(0, $contract->fresh()->prepay_balance);
+        foreach (['deposit', 'reversal'] as $operation) {
+            \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')->with('[Prepay] Invoice '.$operation.' refused', ['invoice_id' => $invoice->id])->once();
+        }
+    }
+
+    public function test_soft_deleted_paid_invoice_is_read_under_the_lock(): void
+    {
+        [$invoice, $contract] = $this->fixture();
+        $invoice->updateQuietly(['status' => InvoiceStatus::Paid]);
+        $invoice->delete();
+        $this->assertNotNull(app(PrepayService::class)->depositFromInvoice($invoice, $contract));
+        $this->assertEquals(2, $contract->fresh()->prepay_balance);
     }
 
     public function test_paid_open_paid_still_restores_a_second_deposit(): void

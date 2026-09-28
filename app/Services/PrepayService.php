@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\InvoiceStatus;
 use App\Enums\PrepayTransactionSource;
 use App\Models\Contract;
 use App\Models\ContractActivity;
@@ -21,13 +22,23 @@ class PrepayService
 {
     /**
      * Create a prepay deposit from an invoice's prepaid time lines.
-     * Called by BillingService::generateInvoice() after lines are created.
+     * Called by InvoiceObserver::handlePaid() and BackfillPrepaidTime.
      */
     public function depositFromInvoice(Invoice $invoice, Contract $contract): ?PrepayTransaction
     {
         return DB::transaction(function () use ($invoice, $contract) {
-            // Lock order: invoice -> contract (initialization / balance writes).
-            Invoice::whereKey($invoice->id)->lockForUpdate()->first();
+            // This method takes the invoice lock before the contract lock.
+            $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
+
+            if ($lockedInvoice === null) {
+                Log::warning('[Prepay] Invoice deposit refused', ['invoice_id' => $invoice->id]);
+
+                return null;
+            }
+
+            if ($lockedInvoice->status !== InvoiceStatus::Paid) {
+                return null;
+            }
 
             // Guard: skip dollar-based contracts (auto-deposit is hours-based)
             if ($contract->has_prepay && $contract->prepay_as_amount) {
@@ -128,8 +139,18 @@ class PrepayService
         ?string $description = null,
     ): ?PrepayTransaction {
         return DB::transaction(function () use ($invoice, $contract, $description) {
-            // Share the deposit's invoice lock before reading the ledger.
-            Invoice::whereKey($invoice->id)->lockForUpdate()->first();
+            // Take the same exclusive invoice lock as depositFromInvoice().
+            $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
+
+            if ($lockedInvoice === null) {
+                Log::warning('[Prepay] Invoice reversal refused', ['invoice_id' => $invoice->id]);
+
+                return null;
+            }
+
+            if ($lockedInvoice->status === InvoiceStatus::Paid) {
+                return null;
+            }
 
             // The LATEST deposit, not the first: an invoice may have been
             // deposited, reversed and deposited again across paid/open cycles, and
