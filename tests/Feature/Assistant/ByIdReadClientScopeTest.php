@@ -154,7 +154,9 @@ class ByIdReadClientScopeTest extends TestCase
         // below is the malformed scope being refused, not the row being absent.
         $this->assertStringContainsString('BYID-', json_encode($mcp([$key => $record->id])));
 
-        foreach (['07', 7.0, 0, -3, ''] as $malformed) {
+        // Not 7.0: postJson() json_encodes without JSON_PRESERVE_ZERO_FRACTION, so
+        // 7.0 goes out as the integer 7, which is a well-formed client_id.
+        foreach (['07', 7.5, 0, -3, ''] as $malformed) {
             $result = $mcp([$key => $record->id, 'client_id' => $malformed]);
             $text = (string) ($result['content'][0]['text'] ?? '');
 
