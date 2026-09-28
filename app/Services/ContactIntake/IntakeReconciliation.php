@@ -19,7 +19,7 @@ final class IntakeReconciliation
     {
         $updated = DB::table('contact_intake_counters')->where('name', 'accepted')->increment('total');
         if ($updated !== 1) {
-            // Throwing rolls back the ledger insert with it, so the two never disagree.
+            // Throwing rolls back the caller's transaction, so no insert commits without its count.
             throw new \RuntimeException('Contact intake accepted counter row is missing.');
         }
     }
