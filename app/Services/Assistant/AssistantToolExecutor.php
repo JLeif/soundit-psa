@@ -1957,8 +1957,7 @@ class AssistantToolExecutor
     }
 
     /**
-     * get_email_item — full email detail by id, cross-client (by id, with no
-     * client gating of its own). Includes the
+     * get_email_item — full email detail by id. Includes the
      * full body_text; only the by-id read exposes it, never the list.
      *
      * @param  array<string, mixed>  $input
@@ -1967,7 +1966,11 @@ class AssistantToolExecutor
     private function getEmailItem(array $input): array
     {
         $id = (int) ($input['email_id'] ?? 0);
-        $email = $id > 0 ? Email::find($id) : null;
+        $emailQuery = Email::query();
+        if ($this->clientId) {
+            $emailQuery->where('client_id', $this->clientId);
+        }
+        $email = $id > 0 ? $emailQuery->find($id) : null;
         if (! $email) {
             return ['error' => 'Email item not found'];
         }
@@ -2067,7 +2070,7 @@ class AssistantToolExecutor
     }
 
     /**
-     * get_phone_call — full call detail by id, cross-client. Includes the
+     * get_phone_call — full call detail by id. Includes the
      * transcription; only the by-id read exposes it, never the list.
      *
      * @param  array<string, mixed>  $input
@@ -2076,7 +2079,11 @@ class AssistantToolExecutor
     private function getPhoneCall(array $input): array
     {
         $id = (int) ($input['phone_call_id'] ?? 0);
-        $call = $id > 0 ? PhoneCall::find($id) : null;
+        $callQuery = PhoneCall::query();
+        if ($this->clientId) {
+            $callQuery->where('client_id', $this->clientId);
+        }
+        $call = $id > 0 ? $callQuery->find($id) : null;
         if (! $call) {
             return ['error' => 'Phone call not found'];
         }
