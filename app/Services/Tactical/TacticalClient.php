@@ -1078,8 +1078,8 @@ class TacticalClient
      * #3971: the HTTP budget for one cmd() call. Tactical answers only after the
      * agent replies: send_raw_cmd (amidaware/tacticalrmm,
      * api/tacticalrmm/agents/views.py) waits `timeout + 2` seconds on NATS. The
-     * client's 30s default therefore ended the wait for any command still
-     * running at 30s.
+     * config-built client's 30s timeout therefore ended the wait for any
+     * command still running at 30s.
      *
      * @throws \InvalidArgumentException when $commandTimeout is not a finite number greater than zero
      */

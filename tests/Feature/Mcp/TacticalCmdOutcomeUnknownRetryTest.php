@@ -121,6 +121,8 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
         $this->assertTrue((bool) $retry->json('result.isError'));
         $this->assertStringContainsString('outcome is unknown; it may have run', $this->text($retry));
         $this->assertStringContainsString('No tactical_run_command was sent', $this->text($retry));
+        $this->assertSame('blocked', json_decode($this->text($retry), true)['tactical_status'] ?? null, 'the refusal itself sent nothing');
+        $this->assertSame(1, TechnicianActionLog::where('action_type', 'tactical_run_command')->where('result_status', 'blocked')->count());
 
         // Only IDENTICAL content is held: a different command still goes out.
         $other = $this->callTool($token, 'tactical_run_command', $this->runArgs($f['client'], 'hostname'));

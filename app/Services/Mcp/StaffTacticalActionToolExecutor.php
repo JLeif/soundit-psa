@@ -373,7 +373,7 @@ class StaffTacticalActionToolExecutor
             // re-approval or re-queue. It stays Executing; tactical_stage_* is
             // outside TechnicianRun::RECOVERY_SAFE_ACTION_TYPES.
             if ($result->isOutcomeUnknown()) {
-                return new TechnicianApprovalResult('gate_declined', message: 'Tactical did not answer before the timeout after the approved action was sent; it may have run. The run is held for manual review, not reopened for re-approval. Check the device before staging it again.');
+                return new TechnicianApprovalResult('gate_declined', message: 'Tactical did not answer before the timeout after the approved action was sent; it may have run. The run is held for manual review, not reopened for re-approval. Check the device to find out whether it ran.');
             }
 
             if (! $result->isOk()) {
@@ -529,10 +529,10 @@ class StaffTacticalActionToolExecutor
         // #3971: an identical action whose last send timed out after it went out
         // may have run, so it is not re-sent on the assumption that it did not.
         if ($this->outcomeUnknownRecently($tool, $clientId, $contentHash)) {
-            $message = "An identical {$tool} was sent in the last ".self::DIRECT_DEDUP_HOURS." hours and its outcome is unknown; it may have run. No {$tool} was sent. Check the device before running it again.";
+            $message = "An identical {$tool} was sent within the last ".self::DIRECT_DEDUP_HOURS." hours and its outcome is unknown; it may have run. No {$tool} was sent: identical re-sends are refused for ".self::DIRECT_DEDUP_HOURS.' hours after an unknown outcome. Check the device to find out whether it ran.';
             $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, $message, $actorLabel);
 
-            return ['error' => $message, 'tactical_status' => 'outcome_unknown'];
+            return ['error' => $message, 'tactical_status' => 'blocked'];
         }
 
         if ($this->cooldownActive($tool, $asset, $ticket, self::COOLDOWNS[$tool] ?? 0)) {
@@ -670,10 +670,10 @@ class StaffTacticalActionToolExecutor
         // #3971: an approved identical proposal whose send timed out after it went
         // out may have run; staging it again would invite a second run.
         if ($this->outcomeUnknownRecently($tool, $clientId, $contentHash)) {
-            $message = 'An identical approved action was sent in the last '.self::DIRECT_DEDUP_HOURS.' hours and its outcome is unknown; it may have run. No new proposal was staged. Check the device before staging it again.';
+            $message = 'An identical approved action was sent within the last '.self::DIRECT_DEDUP_HOURS.' hours and its outcome is unknown; it may have run. No new proposal was staged: identical proposals are refused for '.self::DIRECT_DEDUP_HOURS.' hours after an unknown outcome. Check the device to find out whether it ran.';
             $this->auditAttempt($tool, 'blocked', $clientId, $ticket, $asset, $contentHash, $message, $actorLabel);
 
-            return ['error' => $message, 'tactical_status' => 'outcome_unknown'];
+            return ['error' => $message, 'tactical_status' => 'blocked'];
         }
 
         // "Still awaiting approval" is decided by the LIVE runs table ONLY, never the

@@ -76,7 +76,8 @@ class TacticalClientException extends RuntimeException
      * opened and when the request went out and no answer came back in time. The
      * handler context separates them: cURL's request_size (CURLINFO_REQUEST_SIZE)
      * is the size of the request it issued, and is 0 when the timeout fired
-     * before the connection and any TLS handshake completed. A context without
+     * before the connection and any TLS handshake completed (measured on cURL
+     * 8.5 against loopback; TacticalClientCmdTimeoutTest). A context without
      * those keys proves nothing, so it answers false.
      */
     private static function timedOutAfterRequestSent(Throwable $e): bool
@@ -108,7 +109,7 @@ class TacticalClientException extends RuntimeException
      */
     public function timedOutAfterSend(): bool
     {
-        return $this->timedOutAfterSend;
+        return $this->transportFailure && $this->statusCode === null && $this->timedOutAfterSend;
     }
 
     /**

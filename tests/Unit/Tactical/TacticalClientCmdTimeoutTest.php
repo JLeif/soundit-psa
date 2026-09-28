@@ -246,4 +246,13 @@ class TacticalClientCmdTimeoutTest extends TestCase
         $this->assertSame(7, $e->getPrevious()->getHandlerContext()['errno'], 'precondition: the refusal came from the closed port');
         $this->assertFalse($e->timedOutAfterSend());
     }
+
+    public function test_a_failure_that_carried_an_http_response_is_never_outcome_unknown(): void
+    {
+        // Even when a caller builds the exception by hand with the flag set, an
+        // HTTP answer means Tactical replied, so the outcome is not unknown.
+        $e = new TacticalClientException('Tactical API error (HTTP 504)', statusCode: 504, transportFailure: false, timedOutAfterSend: true);
+
+        $this->assertFalse($e->timedOutAfterSend());
+    }
 }
