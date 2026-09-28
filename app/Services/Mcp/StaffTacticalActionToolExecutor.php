@@ -390,6 +390,13 @@ class StaffTacticalActionToolExecutor
                     return new TechnicianApprovalResult('gate_declined', message: 'The approved parameters are no longer accepted, so nothing was sent: '.$result->message.' Approving again will be refused the same way; deny this proposal and stage it again with accepted parameters.');
                 }
 
+                // #3971: the bus blocks only before execute(), so nothing was sent. Its
+                // message is the reason; for the outcome_unknown hold, that reason is
+                // that the command may already have run, which the approver must see.
+                if ($result->status === 'blocked') {
+                    return new TechnicianApprovalResult('gate_declined', message: 'Nothing was sent: '.$result->message);
+                }
+
                 return new TechnicianApprovalResult('gate_declined');
             }
 

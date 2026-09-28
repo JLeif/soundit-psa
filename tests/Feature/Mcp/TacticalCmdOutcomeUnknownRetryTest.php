@@ -275,6 +275,9 @@ class TacticalCmdOutcomeUnknownRetryTest extends TestCase
         $approval = app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $f['actor']->id);
 
         $this->assertSame('gate_declined', $approval->status);
+        $this->assertStringContainsString('Nothing was sent', (string) $approval->message);
+        $this->assertStringContainsString('may have run', (string) $approval->message, 'the approver is told why, at the point of decision');
+        $this->assertStringContainsString('It was not sent again', (string) $approval->message);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'nothing was sent, so it stays approvable');
         $this->assertSame(1, TacticalActionLog::where('result_status', 'outcome_unknown')->count());
         $this->assertSame(2, TacticalActionLog::where('result_status', 'blocked')->count());
