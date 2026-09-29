@@ -448,7 +448,7 @@ class PrepayService
      */
     public function debitFromTicketNote(TicketNote $note): ?PrepayTransaction
     {
-        if (! $note->exists) {
+        if (! $note->exists || $note->getKey() === null) {
             return null;
         }
 
