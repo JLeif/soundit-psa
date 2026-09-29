@@ -469,42 +469,49 @@ class PrepayService
                 return null;
             }
 
-            $ticket = $note->ticket;
-
-            if (! $ticket) {
-                return null;
-            }
-
-            // Priority: note's contract → ticket's contract → client's hours-based prepay contract
-            $contract = $note->contract_id ? $note->contract : null;
-
-            if (! $contract && $ticket->contract_id) {
-                $contract = $ticket->contract;
-            }
-
-            if (! $contract && $ticket->client_id) {
-                $contract = Contract::where('client_id', $ticket->client_id)
-                    ->where('status', 'active')
-                    ->whereNotNull('prepay_balance')
-                    ->where('prepay_as_amount', false)
-                    ->orderBy('id')
-                    ->first();
-            }
-
-            if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
-                return null;
-            }
-
             $hours = round($note->time_minutes / 60, 4);
-            $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
-            $description = "Ticket #{$ticket->id}: {$subject}";
 
-            $alertContract = $contract;
             // A missing-key locking read can gap-lock unrelated new notes on InnoDB.
             $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
             if ($existing) {
                 $existing = PrepayTransaction::whereKey($existing->id)->lockForUpdate()->first();
             }
+
+            $ticket = $note->ticket;
+            $contract = null;
+            $description = null;
+
+            if ($ticket) {
+                // Priority: note's contract → ticket's contract → client's hours-based prepay contract
+                $contract = $note->contract_id ? $note->contract : null;
+
+                if (! $contract && $ticket->contract_id) {
+                    $contract = $ticket->contract;
+                }
+
+                if (! $contract && $ticket->client_id) {
+                    $contract = Contract::where('client_id', $ticket->client_id)
+                        ->where('status', 'active')
+                        ->whereNotNull('prepay_balance')
+                        ->where('prepay_as_amount', false)
+                        ->orderBy('id')
+                        ->first();
+                }
+
+                if ($contract && (! $contract->has_prepay || $contract->prepay_as_amount)) {
+                    $contract = null;
+                }
+
+                $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
+                $description = "Ticket #{$ticket->id}: {$subject}";
+            }
+
+            // Only a new debit needs an eligible resolved contract; an existing one stays on its ledger contract.
+            if (! $existing && ! $contract) {
+                return null;
+            }
+
+            $alertContract = $contract;
 
             if (! $existing) {
                 try {
@@ -537,11 +544,11 @@ class PrepayService
 
                     return null;
                 }
-                $moved = $contract->id !== $existing->contract_id;
+                $moved = $contract?->id !== $existing->contract_id;
                 if ($moved) {
                     Log::warning('[Prepay] Ticket note contract mismatch', [
                         'ticket_note_id' => $note->id,
-                        'resolved_contract_id' => $contract->id,
+                        'resolved_contract_id' => $contract?->id,
                         'ledger_contract_id' => $existing->contract_id,
                     ]);
                 }

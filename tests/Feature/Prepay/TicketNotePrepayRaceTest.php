@@ -351,6 +351,33 @@ class TicketNotePrepayRaceTest extends TestCase
         $this->assertEquals(10, $other->fresh()->prepay_balance);
     }
 
+    public function test_existing_debit_difference_stays_on_ledger_contract_without_eligible_target(): void
+    {
+        [$note, $contract] = $this->fixture();
+        $service = app(PrepayService::class);
+        $service->debitFromTicketNote($note);
+        $otherTicket = Ticket::factory()->create();
+        $handler = new \Monolog\Handler\TestHandler;
+        \Illuminate\Support\Facades\Log::getLogger()->pushHandler($handler);
+        $note->ticket->update(['client_id' => $otherTicket->client_id, 'contract_id' => null]);
+        $note->time_minutes = 180;
+        $note->saveQuietly();
+        $service->debitFromTicketNote($note);
+        $this->assertDebit($note, $contract, 3.0);
+        DB::table('tickets')->where('id', $note->ticket_id)->update(['deleted_at' => now()]);
+        $note->time_minutes = 30;
+        $note->saveQuietly();
+        $service->debitFromTicketNote($note);
+        $this->assertDebit($note, $contract, 0.5);
+        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch'));
+        $this->assertCount(2, $records);
+        foreach ($records as $record) {
+            $this->assertSame(\Monolog\Level::Warning, $record->level);
+            $this->assertNull($record->context['resolved_contract_id']);
+            $this->assertSame($contract->id, $record->context['ledger_contract_id']);
+        }
+    }
+
     public function test_direct_debit_call_unbillable_zero_time_and_soft_delete_restore(): void
     {
         [$note, $contract] = $this->fixture();
