@@ -448,6 +448,10 @@ class PrepayService
      */
     public function debitFromTicketNote(TicketNote $note): ?PrepayTransaction
     {
+        if (! $note->exists) {
+            return null;
+        }
+
         $alertContract = null;
         $txn = DB::transaction(function () use ($note, &$alertContract) {
             // Lock order: note -> existing prepay transaction -> contract.
