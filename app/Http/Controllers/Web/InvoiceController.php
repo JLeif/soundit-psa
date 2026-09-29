@@ -157,7 +157,10 @@ class InvoiceController extends Controller
                 ->with('error', 'This invoice cannot be edited.');
         }
 
-        $this->invoiceService->updateInvoice($invoice, $request->validated(), $request->user());
+        if (! $this->invoiceService->updateInvoice($invoice, $request->validated(), $request->user())) {
+            return redirect()->route('invoices.show', $invoice)
+                ->with('error', 'This invoice is no longer editable.');
+        }
 
         return redirect()->route('invoices.show', $invoice)
             ->with('success', 'Invoice updated.');
