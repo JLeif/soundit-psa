@@ -581,10 +581,13 @@ class PrepayService
             return $txn;
         });
 
-        // Check alert threshold after transaction commits
+        // Check alert threshold after transaction commits; a soft-deleted ledger contract
+        // still takes the difference but is never alerted on.
         if ($alertContract) {
             $alertContract->refresh();
-            app(PrepayAlertService::class)->checkThreshold($alertContract);
+            if (! $alertContract->trashed()) {
+                app(PrepayAlertService::class)->checkThreshold($alertContract);
+            }
         }
 
         return $txn;

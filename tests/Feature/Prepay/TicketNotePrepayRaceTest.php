@@ -195,7 +195,9 @@ class TicketNotePrepayRaceTest extends TestCase
         $other->save();
         $note->forceFill(['contract_id' => $other->id, 'time_minutes' => 120])->saveQuietly();
         $contract->delete();
+        $alerts = $this->spy(\App\Services\PrepayAlertService::class);
         $service->debitFromTicketNote($note);
+        $alerts->shouldNotHaveReceived('checkThreshold');
         $this->assertEquals(8, Contract::withTrashed()->find($contract->id)->prepay_balance);
         $service->reverseDebitForTicketNote($note);
         $this->assertEquals(10, Contract::withTrashed()->find($contract->id)->prepay_balance);
