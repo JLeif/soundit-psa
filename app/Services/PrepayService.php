@@ -472,6 +472,7 @@ class PrepayService
                 ->where('status', 'active')
                 ->whereNotNull('prepay_balance')
                 ->where('prepay_as_amount', false)
+                ->orderBy('id')
                 ->first();
         }
 
@@ -490,11 +491,35 @@ class PrepayService
         $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
         $description = "Ticket #{$ticket->id}: {$subject}";
 
-        $txn = DB::transaction(function () use ($contract, $note, $hours, $description) {
-            $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+        $alertContract = $contract;
+        $txn = DB::transaction(function () use ($contract, $note, $hours, $description, &$alertContract) {
+            // Include soft-deleted notes: the deleted observer reverses after deletion.
+            // Lock order: note -> prepay transaction -> contract.
+            TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
+            $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+
+            if (! $existing) {
+                try {
+                    $txn = PrepayTransaction::create([
+                        'contract_id' => $contract->id,
+                        'source' => PrepayTransactionSource::TicketTime,
+                        'ticket_note_id' => $note->id,
+                        'user_id' => $note->author_id,
+                        'date' => $note->noted_at ?? $note->created_at,
+                        'hours' => -$hours,
+                        'description' => $description,
+                    ]);
+                } catch (UniqueConstraintViolationException $e) {
+                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+                    if (! $existing) {
+                        throw $e;
+                    }
+                }
+            }
 
             if ($existing) {
-                // Update existing debit — adjust balance by difference
+                $originalContract = $existing->contract()->lockForUpdate()->first();
+                $alertContract = $originalContract;
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
@@ -503,24 +528,13 @@ class PrepayService
                 ]);
 
                 $diff = $hours - $oldHours;
-                if ($diff != 0) {
-                    $contract->increment('prepay_used', $diff);
-                    $contract->decrement('prepay_balance', $diff);
+                if ($diff != 0 && $originalContract) {
+                    $originalContract->increment('prepay_used', $diff);
+                    $originalContract->decrement('prepay_balance', $diff);
                 }
 
                 return $existing;
             }
-
-            // Create new debit
-            $txn = PrepayTransaction::create([
-                'contract_id' => $contract->id,
-                'source' => PrepayTransactionSource::TicketTime,
-                'ticket_note_id' => $note->id,
-                'user_id' => $note->author_id,
-                'date' => $note->noted_at ?? $note->created_at,
-                'hours' => -$hours,
-                'description' => $description,
-            ]);
 
             $contract->increment('prepay_used', $hours);
             $contract->decrement('prepay_balance', $hours);
@@ -535,8 +549,10 @@ class PrepayService
         });
 
         // Check alert threshold after transaction commits
-        $contract->refresh();
-        app(PrepayAlertService::class)->checkThreshold($contract);
+        if ($alertContract) {
+            $alertContract->refresh();
+            app(PrepayAlertService::class)->checkThreshold($alertContract);
+        }
 
         return $txn;
     }
@@ -569,6 +585,7 @@ class PrepayService
                 ->where('status', 'active')
                 ->whereNotNull('prepay_balance')
                 ->where('prepay_as_amount', false)
+                ->orderBy('id')
                 ->first();
         }
 
@@ -721,26 +738,29 @@ class PrepayService
      */
     public function reverseDebitForTicketNote(TicketNote $note): void
     {
-        $txn = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+        DB::transaction(function () use ($note) {
+            TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
+            $txn = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
 
-        if (! $txn) {
-            return;
-        }
+            if (! $txn) {
+                return;
+            }
 
-        $hours = abs((float) $txn->hours);
-        $contract = $txn->contract;
+            $hours = abs((float) $txn->hours);
+            $contract = $txn->contract()->lockForUpdate()->first();
 
-        $txn->delete();
+            $txn->delete();
 
-        if ($contract) {
-            $contract->decrement('prepay_used', $hours);
-            $contract->increment('prepay_balance', $hours);
-        }
+            if ($contract) {
+                $contract->decrement('prepay_used', $hours);
+                $contract->increment('prepay_balance', $hours);
+            }
 
-        Log::info('[Prepay] Ticket time debit reversed', [
-            'ticket_note_id' => $note->id,
-            'hours' => $hours,
-        ]);
+            Log::info('[Prepay] Ticket time debit reversed', [
+                'ticket_note_id' => $note->id,
+                'hours' => $hours,
+            ]);
+        });
     }
 
     /**
