@@ -57,6 +57,84 @@ class TicketNotePrepayRaceTest extends TestCase
         $this->assertEquals(10 - $hours, $contract->fresh()->prepay_balance);
     }
 
+    public function test_observer_zero_time_edit_restores_debit(): void
+    {
+        [$note, $contract] = $this->fixture();
+        $note->time_minutes = 120;
+        $note->save();
+        $this->assertDebit($note, $contract, 2.0);
+        $note->time_minutes = 0;
+        $note->save();
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count());
+        $this->assertEquals(0, $contract->fresh()->prepay_used);
+        $this->assertEquals(10, $contract->fresh()->prepay_balance);
+    }
+
+    public function test_observer_new_zero_time_note_creates_nothing(): void
+    {
+        [$note, $contract] = $this->fixture();
+        $new = $note->replicate();
+        $new->time_minutes = 0;
+        $new->save();
+        $this->assertTrue($new->exists);
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->assertEquals(10, $contract->fresh()->prepay_balance);
+    }
+
+    public function test_catch_locked_reread_missing_row_propagates_original_exception(): void
+    {
+        [$note, $contract] = $this->fixture();
+        $this->recordLocks();
+        $exception = new \Illuminate\Database\UniqueConstraintViolationException('sqlite', 'synthetic insert', [], new \PDOException('synthetic collision'));
+        PrepayTransaction::creating(function ($txn) use ($exception) {
+            DB::table('prepay_transactions')->insert($txn->getAttributes());
+            throw $exception;
+        });
+        $removed = false;
+        DB::connection()->beforeExecuting(function ($sql) use (&$removed, $note) {
+            if (str_starts_with($sql, 'select * from "prepay_transactions"') && str_contains($sql, '/* requested update lock */')) {
+                $removed = true;
+                DB::table('prepay_transactions')->where('ticket_note_id', $note->id)->delete();
+            }
+        });
+        $caught = null;
+        try {
+            app(PrepayService::class)->debitFromTicketNote($note);
+        } catch (\Throwable $e) {
+            $caught = $e;
+        } finally {
+            PrepayTransaction::flushEventListeners();
+        }
+        $this->assertTrue($removed);
+        $this->assertSame($exception, $caught, 'The original collision must propagate when the locked re-read finds nothing');
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->assertEquals(0, $contract->fresh()->prepay_used);
+        $this->assertEquals(10, $contract->fresh()->prepay_balance);
+    }
+
+    public function test_existing_debit_dollar_target_keeps_original_contract_and_warning(): void
+    {
+        [$note, $contract] = $this->fixture();
+        $service = app(PrepayService::class);
+        $txn = $service->debitFromTicketNote($note);
+        $description = $txn->description;
+        $other = $contract->replicate();
+        $other->forceFill(['prepay_as_amount' => true, 'prepay_used' => 0, 'prepay_balance' => 10])->save();
+        $handler = new \Monolog\Handler\TestHandler;
+        \Illuminate\Support\Facades\Log::getLogger()->pushHandler($handler);
+        $note->forceFill(['contract_id' => $other->id, 'time_minutes' => 150])->saveQuietly();
+        $service->debitFromTicketNote($note);
+        $this->assertDebit($note, $contract, 2.5);
+        $this->assertEquals(10, $other->fresh()->prepay_balance);
+        $this->assertEquals(0, $other->fresh()->prepay_used);
+        $this->assertSame($description, $txn->fresh()->description);
+        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch'));
+        $this->assertCount(1, $records);
+        $this->assertSame(\Monolog\Level::Warning, $records[0]->level);
+        $this->assertNull($records[0]->context['resolved_contract_id']);
+        $this->assertSame($contract->id, $records[0]->context['ledger_contract_id']);
+    }
+
     public function test_unmatched_unique_exception_is_rethrown(): void
     {
         [$note] = $this->fixture();
@@ -206,6 +284,14 @@ class TicketNotePrepayRaceTest extends TestCase
     {
         [$note, $contract] = $this->fixture();
         $injected = false;
+        $this->recordLocks();
+        $reads = [];
+        DB::listen(function ($query) use (&$reads) {
+            if (str_starts_with($query->sql, 'select * from "prepay_transactions"')) {
+                $reads[] = $query->sql;
+            }
+        });
+        // SQLite cannot prove InnoDB REPEATABLE READ snapshot semantics.
         // Deterministic interleaving: a winner writes its ledger and totals after
         // the loser's empty read, before the loser's INSERT reaches the database.
         PrepayTransaction::creating(function ($txn) use (&$injected, $contract) {
@@ -226,6 +312,8 @@ class TicketNotePrepayRaceTest extends TestCase
                 $this->fail('A winning row must be re-read after the unique collision');
             }
             $this->assertTrue($injected);
+            $this->assertStringContainsString('/* requested update lock */', $reads[1], 'The catch-path re-read must be a current locking read');
+            $this->assertStringContainsString('"ticket_note_id" = ?', $reads[1]);
             $this->assertDebit($note, $contract, 1.0);
         } finally {
             PrepayTransaction::flushEventListeners();

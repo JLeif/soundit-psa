@@ -525,11 +525,12 @@ class PrepayService
                         'description' => $description,
                     ]);
                 } catch (UniqueConstraintViolationException $e) {
-                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+                    // The collided key now exists: use a current locking read to see the
+                    // winner under InnoDB REPEATABLE READ, not the earlier empty snapshot.
+                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
                     if (! $existing) {
                         throw $e;
                     }
-                    $existing = PrepayTransaction::whereKey($existing->id)->lockForUpdate()->first();
                 }
             }
 
