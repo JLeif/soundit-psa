@@ -143,12 +143,8 @@ class QboSyncService
      */
     public function createQboCustomerForClient(Client $client): array
     {
-        // Cheap pre-check on the caller's model. The locked re-read below is
-        // the authoritative one.
-        if (filled($client->qbo_customer_id)) {
-            throw QboCustomerCreateException::alreadyMapped((string) $client->qbo_customer_id);
-        }
-
+        // The mapped check reads the LOCKED row only. A check on $client alone
+        // would read a model that may predate another press's commit.
         $created = DB::transaction(function () use ($client): array {
             $locked = Client::withTrashed()->whereKey($client->getKey())->lockForUpdate()->firstOrFail();
 

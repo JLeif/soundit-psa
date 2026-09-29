@@ -352,6 +352,56 @@ class QboCustomerCreateTest extends TestCase
         $this->assertSame('12', $client->fresh()->qbo_customer_id);
     }
 
+    /**
+     * SQLite compiles lockForUpdate() to '' (SQLiteGrammar::compileLock), so no
+     * SQL-level assertion can see the lock in this suite. A recording grammar
+     * captures what the builder ASKED for: lock=true on `clients`, inside a
+     * transaction, before any request reaches QBO.
+     */
+    public function test_client_row_is_locked_inside_a_transaction_before_qbo_is_called(): void
+    {
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([]), $this->createdResponse('66', 'Harbor Test Co'));
+
+        $conn = \Illuminate\Support\Facades\DB::connection();
+        $history = &$this->history;
+        $grammar = new class($conn) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
+        {
+            /** @var list<array{table: mixed, lock: mixed, level: int, requests_sent: int}> */
+            public array $locks = [];
+
+            /** @var \Closure(): int */
+            public \Closure $requestsSent;
+
+            protected function compileLock(\Illuminate\Database\Query\Builder $query, $value)
+            {
+                $this->locks[] = [
+                    'table' => $query->from,
+                    'lock' => $value,
+                    'level' => $this->connection->transactionLevel(),
+                    'requests_sent' => ($this->requestsSent)(),
+                ];
+
+                return parent::compileLock($query, $value);
+            }
+        };
+        $grammar->requestsSent = function () use (&$history): int {
+            return count($history);
+        };
+        $conn->setQueryGrammar($grammar);
+
+        // RefreshDatabase already holds a transaction; the lock must sit in
+        // one the service opened, i.e. deeper than the level at the call.
+        $baseLevel = $conn->transactionLevel();
+        $this->create($client);
+
+        $clientLocks = array_values(array_filter($grammar->locks, fn ($l) => $l['table'] === 'clients' && $l['lock'] === true));
+        $this->assertCount(1, $clientLocks, 'exactly one FOR UPDATE read of the client row');
+        $this->assertGreaterThan($baseLevel, $clientLocks[0]['level'], 'the lock is taken inside the service transaction');
+        $this->assertSame(0, $clientLocks[0]['requests_sent'], 'the lock is taken before QBO is called');
+        $this->assertSame('66', $client->fresh()->qbo_customer_id);
+    }
+
     // ── service: after the POST ──
 
     public function test_qbo_fault_is_surfaced_and_client_unchanged(): void

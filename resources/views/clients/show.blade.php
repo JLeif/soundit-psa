@@ -1327,10 +1327,10 @@
                                 @endif
 
                                 {{-- QuickBooks Online: create a customer named after this client and link it (#3737).
-                                     This loop only lists vendors whose configCheck passed (for qbo: connected) and
-                                     that are unmapped; the explicit checks keep the button honest if either moves.
-                                     Admin-only, matching the route. --}}
-                                @if($vendor === 'qbo' && empty($client->qbo_customer_id) && auth()->user()?->isAdmin() && app(\App\Services\Qbo\QboClient::class)->isConnected())
+                                     "Connected" and "no qbo_customer_id" are enforced by this loop itself: it lists only
+                                     vendors whose configCheck passed (qbo: QboClient::isConnected()) and that are
+                                     unmapped (ClientIntegrationService::buildIntegrationsData). Admin-only, matching the route. --}}
+                                @if($vendor === 'qbo' && auth()->user()?->isAdmin())
                                     <form action="{{ route('clients.qbo.provision', $client) }}" method="POST" class="d-inline ms-1" data-qbo-create
                                           onsubmit="return confirm({{ \Illuminate\Support\Js::from('Create a new QuickBooks Online customer named "'.trim($client->name).'" and link it to this client? If QuickBooks already has a customer with this name, nothing is created and you should use Link instead.') }})">
                                         @csrf
