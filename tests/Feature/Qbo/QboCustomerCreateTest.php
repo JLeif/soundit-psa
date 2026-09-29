@@ -503,7 +503,12 @@ class QboCustomerCreateTest extends TestCase
         $lock = \Mockery::mock(\Illuminate\Contracts\Cache\Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once()->andThrow(new \RuntimeException('cache_locks unreachable'));
-        Cache::partialMock()->shouldReceive('lock')->once()->andReturn($lock);
+        // Cache::partialMock() builds a CacheManager mock without calling its
+        // constructor, so it has no container and any Cache call left to the
+        // real method fails. The success path's Cache::forget() is stubbed here.
+        $cache = Cache::partialMock();
+        $cache->shouldReceive('lock')->once()->andReturn($lock);
+        $cache->shouldReceive('forget')->with('integration_entities_qbo')->andReturnTrue();
     }
 
     /** @return list<MessageLogged> every record of the lock-release failure, at any level */
