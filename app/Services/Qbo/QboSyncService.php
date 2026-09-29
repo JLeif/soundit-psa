@@ -13,6 +13,7 @@ use App\Models\Sku;
 use App\Services\InvoiceVoidService;
 use App\Support\InvoiceStatusChangeContext;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -99,6 +100,252 @@ class QboSyncService
         }
 
         return compact('matched', 'unmatched', 'ambiguous');
+    }
+
+    /**
+     * QBO's documented DisplayName limit, in characters. Source: Intuit's
+     * published Accounting OpenAPI (components.schemas.Customer.DisplayName,
+     * maxLength: 500), the spec harvested byte-identical as
+     * api-evangelist/intuit openapi/_original/quickbooks-accounting.yml.
+     */
+    public const QBO_DISPLAY_NAME_MAX = 500;
+
+    /** Page size for the pre-flight name scan; QBO's query MAXRESULTS ceiling. */
+    private const PREFLIGHT_PAGE_SIZE = 1000;
+
+    /** Most pages the pre-flight reads before refusing rather than guessing. */
+    private const PREFLIGHT_MAX_PAGES = 50;
+
+    /**
+     * Create a QuickBooks customer for ONE client and link it (#3737).
+     *
+     * Two guards stop a second customer:
+     *
+     *  1. A row lock. The client row is re-read under lockForUpdate inside a
+     *     transaction and qbo_customer_id is re-checked on the LOCKED row, so
+     *     two presses of Create for the same client serialise here and the
+     *     second sees the first one's link. The lock covers only PSA's row. It
+     *     does not cover QuickBooks: a customer created in the QBO UI, or by
+     *     another system, meanwhile is invisible to it.
+     *  2. The pre-flight name check. Before the POST, every QBO customer,
+     *     active AND inactive, is compared on the same normalised name
+     *     autoMatchClients() uses. Any match refuses the create and names the
+     *     match so the operator can Link instead. That is the guard for the
+     *     vendor side the lock cannot see.
+     *
+     * The POST cannot be rolled back by SQL. Every outcome after the POST is
+     * sent is therefore reported as "a customer exists" or "may exist", never
+     * as "nothing happened" (see QboCustomerCreateException).
+     *
+     * @return array{Id: string, DisplayName: string}
+     *
+     * @throws QboCustomerCreateException
+     */
+    public function createQboCustomerForClient(Client $client): array
+    {
+        // Cheap pre-check on the caller's model. The locked re-read below is
+        // the authoritative one.
+        if (filled($client->qbo_customer_id)) {
+            throw QboCustomerCreateException::alreadyMapped((string) $client->qbo_customer_id);
+        }
+
+        $created = DB::transaction(function () use ($client): array {
+            $locked = Client::withTrashed()->whereKey($client->getKey())->lockForUpdate()->firstOrFail();
+
+            if (filled($locked->qbo_customer_id)) {
+                throw QboCustomerCreateException::alreadyMapped((string) $locked->qbo_customer_id);
+            }
+
+            $name = trim((string) $locked->name);
+            if ($name === '') {
+                throw QboCustomerCreateException::invalidName('the client has no name.');
+            }
+            if (mb_strlen($name) > self::QBO_DISPLAY_NAME_MAX) {
+                throw QboCustomerCreateException::invalidName(
+                    'the client name is longer than QuickBooks allows ('.self::QBO_DISPLAY_NAME_MAX.' characters).'
+                );
+            }
+
+            $matches = $this->qboCustomersNamed($name);
+            if ($matches !== []) {
+                throw QboCustomerCreateException::nameExists($name, $matches);
+            }
+
+            try {
+                $response = $this->qboClient->post('customer', $this->qboCustomerPayload($locked, $name));
+            } catch (QboClientException $e) {
+                $status = $e->getHttpStatus();
+
+                // 4xx: QuickBooks answered and refused (validation, Fault 6240
+                // duplicate name). Anything else (no response, 5xx, an
+                // unreadable body) leaves the outcome unknown.
+                throw ($status >= 400 && $status < 500)
+                    ? QboCustomerCreateException::rejected($e->getMessage())
+                    : QboCustomerCreateException::outcomeUnknown($name, $e->getMessage());
+            }
+
+            // Vendor shape: the create response is {"Customer": {...}, "time": ...}
+            // (CustomerResponse in the same spec). The unwrapped fallback
+            // mirrors pushItemToQbo()'s handling of the item response.
+            $customer = $response['Customer'] ?? $response;
+            $id = is_array($customer) ? ($customer['Id'] ?? null) : null;
+
+            if ((! is_string($id) && ! is_int($id)) || (string) $id === '') {
+                throw QboCustomerCreateException::outcomeUnknown($name, 'the response carried no customer Id');
+            }
+
+            $id = (string) $id;
+            $displayName = is_string($customer['DisplayName'] ?? null) && $customer['DisplayName'] !== ''
+                ? $customer['DisplayName']
+                : $name;
+
+            try {
+                $locked->update([
+                    'qbo_customer_id' => $id,
+                    'qbo_display_name' => $displayName,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('[QBO] Customer created, client link not saved', [
+                    'client_id' => $locked->getKey(),
+                    'qbo_customer_id' => $id,
+                    'exception' => $e::class,
+                ]);
+
+                throw QboCustomerCreateException::createdNotLinked(
+                    $id,
+                    $displayName,
+                    $e instanceof \Illuminate\Database\UniqueConstraintViolationException
+                        ? 'another PSA client is already linked to that Id'
+                        : 'database error '.class_basename($e),
+                );
+            }
+
+            return ['Id' => $id, 'DisplayName' => $displayName];
+        });
+
+        $client->forceFill([
+            'qbo_customer_id' => $created['Id'],
+            'qbo_display_name' => $created['DisplayName'],
+        ])->syncOriginal();
+
+        Cache::forget('integration_entities_qbo');
+
+        Log::info('[QBO] Customer created and linked', [
+            'client_id' => $client->getKey(),
+            'qbo_customer_id' => $created['Id'],
+        ]);
+
+        return $created;
+    }
+
+    /**
+     * Every QBO customer, active or inactive, whose DisplayName normalises to
+     * the same value as $name.
+     *
+     * `SELECT * FROM Customer` returns ACTIVE customers only; Intuit's query
+     * docs state that inactive name-list objects need an explicit Active
+     * filter. DisplayName uniqueness is enforced across inactive customers
+     * too, so the scan asks for both. The normalised comparison is done here
+     * because QBO's query language cannot express it. A read that cannot be
+     * trusted throws instead of returning "no match", because "no match" is
+     * what licenses the create.
+     *
+     * @return list<array{Id: string, DisplayName: string, Active: bool, linked_client: ?string}>
+     *
+     * @throws QboCustomerCreateException
+     */
+    private function qboCustomersNamed(string $name): array
+    {
+        $wanted = $this->normalizeName($name);
+        $matches = [];
+
+        for ($page = 0; $page < self::PREFLIGHT_MAX_PAGES; $page++) {
+            $start = $page * self::PREFLIGHT_PAGE_SIZE + 1;
+
+            try {
+                $result = $this->qboClient->query(
+                    'SELECT * FROM Customer WHERE Active IN (true, false) STARTPOSITION '.$start.' MAXRESULTS '.self::PREFLIGHT_PAGE_SIZE
+                );
+            } catch (QboClientException $e) {
+                throw QboCustomerCreateException::preflightFailed($name, $e->getMessage());
+            }
+
+            if (! isset($result['QueryResponse']) || ! is_array($result['QueryResponse'])) {
+                throw QboCustomerCreateException::preflightFailed($name, 'The QuickBooks response had no QueryResponse.');
+            }
+
+            $rows = $result['QueryResponse']['Customer'] ?? [];
+            if (! is_array($rows) || ! array_is_list($rows)) {
+                throw QboCustomerCreateException::preflightFailed($name, 'The QuickBooks customer list was not a list.');
+            }
+
+            foreach ($rows as $row) {
+                $id = is_array($row) ? ($row['Id'] ?? null) : null;
+                $display = is_array($row) ? ($row['DisplayName'] ?? null) : null;
+
+                if ((! is_string($id) && ! is_int($id)) || ! is_string($display)) {
+                    throw QboCustomerCreateException::preflightFailed($name, 'A QuickBooks customer row had no readable Id or DisplayName.');
+                }
+
+                if ($this->normalizeName($display) === $wanted) {
+                    $matches[] = [
+                        'Id' => (string) $id,
+                        'DisplayName' => $display,
+                        'Active' => ($row['Active'] ?? true) !== false,
+                        'linked_client' => Client::withTrashed()->where('qbo_customer_id', (string) $id)->value('name'),
+                    ];
+                }
+            }
+
+            if (count($rows) < self::PREFLIGHT_PAGE_SIZE) {
+                return $matches;
+            }
+        }
+
+        throw QboCustomerCreateException::preflightFailed(
+            $name,
+            'QuickBooks returned more than '.(self::PREFLIGHT_MAX_PAGES * self::PREFLIGHT_PAGE_SIZE).' customers; the check stopped rather than guess.'
+        );
+    }
+
+    /**
+     * The create payload: only fields PSA holds, and only when non-empty.
+     * Field names and nesting from the Customer, EmailAddress,
+     * TelephoneNumber and PhysicalAddress schemas of Intuit's Accounting
+     * OpenAPI (see QBO_DISPLAY_NAME_MAX).
+     *
+     * @return array<string, mixed>
+     */
+    private function qboCustomerPayload(Client $client, string $name): array
+    {
+        $payload = [
+            'DisplayName' => $name,
+            'CompanyName' => $name,
+        ];
+
+        $email = trim((string) $client->email);
+        if ($email !== '') {
+            $payload['PrimaryEmailAddr'] = ['Address' => $email];
+        }
+
+        $phone = trim((string) $client->phone);
+        if ($phone !== '') {
+            $payload['PrimaryPhone'] = ['FreeFormNumber' => $phone];
+        }
+
+        $address = array_filter([
+            'Line1' => trim((string) $client->address_line1),
+            'Line2' => trim((string) $client->address_line2),
+            'City' => trim((string) $client->city),
+            'CountrySubDivisionCode' => trim((string) $client->state),
+            'PostalCode' => trim((string) $client->postcode),
+        ], fn (string $v) => $v !== '');
+
+        if ($address !== []) {
+            $payload['BillAddr'] = $address;
+        }
+
+        return $payload;
     }
 
     // ── Item/SKU Sync ──

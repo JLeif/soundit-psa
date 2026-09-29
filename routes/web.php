@@ -173,6 +173,9 @@ Route::middleware('auth')->group(function () {
     Route::post('/clients/{client}/controld/onboard', [\App\Http\Controllers\Web\ClientControlDOnboardingController::class, 'stage'])->middleware(['admin', 'throttle:10,1'])->name('clients.controld.onboard');
     Route::post('/clients/{client}/comet/provision-user', [ClientIntegrationController::class, 'provisionCometUser'])->name('clients.comet.provision-user');
     Route::post('/clients/{client}/tactical/provision', [ClientIntegrationController::class, 'provisionTactical'])->name('clients.tactical.provision');
+    // #3737: creates a customer in the accounting system, so Admin-only and throttled
+    // like the Control D onboarding route above (the Comet/Tactical provision routes are not gated).
+    Route::post('/clients/{client}/qbo/provision', [ClientIntegrationController::class, 'provisionQbo'])->middleware(['admin', 'throttle:10,1'])->name('clients.qbo.provision');
 
     // Client Portal Management
     Route::get('/clients/{client}/portal', [PortalManagementController::class, 'index'])->name('clients.portal');

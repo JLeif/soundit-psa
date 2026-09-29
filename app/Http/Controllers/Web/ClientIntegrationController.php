@@ -5,6 +5,9 @@ namespace App\Http\Controllers\Web;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Services\ClientIntegrationService;
+use App\Services\Qbo\QboClient;
+use App\Services\Qbo\QboCustomerCreateException;
+use App\Services\Qbo\QboSyncService;
 use App\Support\CometConfig;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -221,6 +224,27 @@ class ClientIntegrationController extends Controller
         } catch (\App\Services\Tactical\TacticalClientException $e) {
             return back()->with('error', 'Tactical provisioning failed: '.$e->getMessage());
         }
+    }
+
+    /**
+     * Create a QuickBooks Online customer named after this client and link it
+     * (#3737). One client per press. The route is admin-only and throttled
+     * because this writes to the accounting system; the service holds the
+     * duplicate guards and words every outcome for the operator.
+     */
+    public function provisionQbo(Client $client, QboClient $qboClient, QboSyncService $qboSync)
+    {
+        if (! $qboClient->isConnected()) {
+            return back()->with('error', 'QuickBooks Online is not connected.');
+        }
+
+        try {
+            $created = $qboSync->createQboCustomerForClient($client);
+        } catch (QboCustomerCreateException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+
+        return back()->with('success', "QuickBooks customer \"{$created['DisplayName']}\" (Id {$created['Id']}) created and linked to this client.");
     }
 
     /**

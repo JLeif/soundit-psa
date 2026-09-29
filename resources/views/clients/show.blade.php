@@ -1326,6 +1326,20 @@
                                     </form>
                                 @endif
 
+                                {{-- QuickBooks Online: create a customer named after this client and link it (#3737).
+                                     This loop only lists vendors whose configCheck passed (for qbo: connected) and
+                                     that are unmapped; the explicit checks keep the button honest if either moves.
+                                     Admin-only, matching the route. --}}
+                                @if($vendor === 'qbo' && empty($client->qbo_customer_id) && auth()->user()?->isAdmin() && app(\App\Services\Qbo\QboClient::class)->isConnected())
+                                    <form action="{{ route('clients.qbo.provision', $client) }}" method="POST" class="d-inline ms-1" data-qbo-create
+                                          onsubmit="return confirm({{ \Illuminate\Support\Js::from('Create a new QuickBooks Online customer named "'.trim($client->name).'" and link it to this client? If QuickBooks already has a customer with this name, nothing is created and you should use Link instead.') }})">
+                                        @csrf
+                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                            <i class="bi bi-plus-circle me-1"></i>Create
+                                        </button>
+                                    </form>
+                                @endif
+
                                 {{-- Link form (hidden by default) --}}
                                 <div class="integration-link-form d-none" data-vendor="{{ $vendor }}">
                                     <div class="integration-loading text-muted small mb-2">
