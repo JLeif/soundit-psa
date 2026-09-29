@@ -116,22 +116,31 @@ class QboSyncService
     /** Most pages the pre-flight reads before refusing rather than guessing. */
     private const PREFLIGHT_MAX_PAGES = 50;
 
+    /** Lifetime, in seconds, of the per-client lock createQboCustomerForClient() holds. */
+    private const CREATE_LOCK_SECONDS = 1800;
+
     /**
      * Create a QuickBooks customer for ONE client and link it (#3737).
      *
-     * Two guards stop a second customer:
+     * No QuickBooks request is sent inside a database transaction. Any QBO
+     * request can make QboClient refresh the stored tokens, or disconnect()
+     * when the refresh fails; those `settings` writes must commit whatever
+     * this create's outcome, and no row lock may be held across a QBO round
+     * trip. Three guards stop a second customer:
      *
-     *  1. A row lock. The client row is re-read under lockForUpdate inside a
-     *     transaction and qbo_customer_id is re-checked on the LOCKED row, so
-     *     two presses of Create for the same client serialise here and the
-     *     second sees the first one's link. The lock covers only PSA's row. It
-     *     does not cover QuickBooks: a customer created in the QBO UI, or by
-     *     another system, meanwhile is invisible to it.
+     *  1. A per-client cache lock, held from the mapped check to the link
+     *     write, so two presses of Create for the same client do not check
+     *     and POST side by side. A press that cannot take it sends nothing.
      *  2. The pre-flight name check. Before the POST, every QBO customer,
      *     active AND inactive, is compared on the same normalised name
      *     autoMatchClients() uses. Any match refuses the create and names the
-     *     match so the operator can Link instead. That is the guard for the
-     *     vendor side the lock cannot see.
+     *     match so the operator can Link instead. That is the guard for
+     *     customers created in the QBO UI or by another system, which no PSA
+     *     lock can see.
+     *  3. The link write. It re-reads the client under lockForUpdate in a
+     *     transaction that sends nothing to QBO, and saves the link only if
+     *     the LOCKED row is still unlinked; a Link press, or a Create whose
+     *     cache lock expired, may have linked it meanwhile.
      *
      * The POST cannot be rolled back by SQL. Every outcome after the POST is
      * sent is therefore reported as "a customer exists" or "may exist", never
@@ -143,81 +152,25 @@ class QboSyncService
      */
     public function createQboCustomerForClient(Client $client): array
     {
-        // The mapped check reads the LOCKED row only. A check on $client alone
-        // would read a model that may predate another press's commit.
-        $created = DB::transaction(function () use ($client): array {
-            $locked = Client::withTrashed()->whereKey($client->getKey())->lockForUpdate()->firstOrFail();
+        $lock = Cache::lock('qbo-create-customer:'.$client->getKey(), self::CREATE_LOCK_SECONDS);
 
-            if (filled($locked->qbo_customer_id)) {
-                throw QboCustomerCreateException::alreadyMapped((string) $locked->qbo_customer_id);
-            }
+        try {
+            $acquired = $lock->get();
+        } catch (\Throwable $e) {
+            throw QboCustomerCreateException::notStarted('the per-client create lock could not be taken ('.class_basename($e).')');
+        }
 
-            $name = trim((string) $locked->name);
-            if ($name === '') {
-                throw QboCustomerCreateException::invalidName('the client has no name.');
-            }
-            if (mb_strlen($name) > self::QBO_DISPLAY_NAME_MAX) {
-                throw QboCustomerCreateException::invalidName(
-                    'the client name is longer than QuickBooks allows ('.self::QBO_DISPLAY_NAME_MAX.' characters).'
-                );
-            }
+        if (! $acquired) {
+            throw QboCustomerCreateException::notStarted(
+                'another Create for this client took its lock less than '.intdiv(self::CREATE_LOCK_SECONDS, 60).' minutes ago and has not released it. Reload the page to see whether that one linked a customer'
+            );
+        }
 
-            $matches = $this->qboCustomersNamed($name);
-            if ($matches !== []) {
-                throw QboCustomerCreateException::nameExists($name, $matches);
-            }
-
-            try {
-                $response = $this->qboClient->post('customer', $this->qboCustomerPayload($locked, $name));
-            } catch (QboClientException $e) {
-                $status = $e->getHttpStatus();
-
-                // 4xx: QuickBooks answered and refused (validation, Fault 6240
-                // duplicate name). Anything else (no response, 5xx, an
-                // unreadable body) leaves the outcome unknown.
-                throw ($status >= 400 && $status < 500)
-                    ? QboCustomerCreateException::rejected($e->getMessage())
-                    : QboCustomerCreateException::outcomeUnknown($name, $e->getMessage());
-            }
-
-            // Vendor shape: the create response is {"Customer": {...}, "time": ...}
-            // (CustomerResponse in the same spec). The unwrapped fallback
-            // mirrors pushItemToQbo()'s handling of the item response.
-            $customer = $response['Customer'] ?? $response;
-            $id = is_array($customer) ? ($customer['Id'] ?? null) : null;
-
-            if ((! is_string($id) && ! is_int($id)) || (string) $id === '') {
-                throw QboCustomerCreateException::outcomeUnknown($name, 'the response carried no customer Id');
-            }
-
-            $id = (string) $id;
-            $displayName = is_string($customer['DisplayName'] ?? null) && $customer['DisplayName'] !== ''
-                ? $customer['DisplayName']
-                : $name;
-
-            try {
-                $locked->update([
-                    'qbo_customer_id' => $id,
-                    'qbo_display_name' => $displayName,
-                ]);
-            } catch (\Throwable $e) {
-                Log::warning('[QBO] Customer created, client link not saved', [
-                    'client_id' => $locked->getKey(),
-                    'qbo_customer_id' => $id,
-                    'exception' => $e::class,
-                ]);
-
-                throw QboCustomerCreateException::createdNotLinked(
-                    $id,
-                    $displayName,
-                    $e instanceof \Illuminate\Database\UniqueConstraintViolationException
-                        ? 'another PSA client is already linked to that Id'
-                        : 'database error '.class_basename($e),
-                );
-            }
-
-            return ['Id' => $id, 'DisplayName' => $displayName];
-        });
+        try {
+            $created = $this->createAndLinkQboCustomer($client);
+        } finally {
+            $lock->release();
+        }
 
         $client->forceFill([
             'qbo_customer_id' => $created['Id'],
@@ -232,6 +185,110 @@ class QboSyncService
         ]);
 
         return $created;
+    }
+
+    /**
+     * createQboCustomerForClient() while its per-client lock is held.
+     *
+     * @return array{Id: string, DisplayName: string}
+     *
+     * @throws QboCustomerCreateException
+     */
+    private function createAndLinkQboCustomer(Client $client): array
+    {
+        // A fresh read, not $client: the caller's model may predate another
+        // press's commit.
+        $current = Client::withTrashed()->whereKey($client->getKey())->firstOrFail();
+
+        if (filled($current->qbo_customer_id)) {
+            throw QboCustomerCreateException::alreadyMapped((string) $current->qbo_customer_id);
+        }
+
+        $name = trim((string) $current->name);
+        if ($name === '') {
+            throw QboCustomerCreateException::invalidName('the client has no name.');
+        }
+        if (mb_strlen($name) > self::QBO_DISPLAY_NAME_MAX) {
+            throw QboCustomerCreateException::invalidName(
+                'the client name is longer than QuickBooks allows ('.self::QBO_DISPLAY_NAME_MAX.' characters).'
+            );
+        }
+
+        $matches = $this->qboCustomersNamed($name);
+        if ($matches !== []) {
+            throw QboCustomerCreateException::nameExists($name, $matches);
+        }
+
+        try {
+            $response = $this->qboClient->post('customer', $this->qboCustomerPayload($current, $name));
+        } catch (QboClientException $e) {
+            $status = $e->getHttpStatus();
+
+            // 4xx: QuickBooks answered and refused (validation, Fault 6240
+            // duplicate name). Anything else (no response, 5xx, an
+            // unreadable body) leaves the outcome unknown.
+            throw ($status >= 400 && $status < 500)
+                ? QboCustomerCreateException::rejected($e->getMessage())
+                : QboCustomerCreateException::outcomeUnknown($name, $e->getMessage());
+        }
+
+        // Vendor shape: the create response is {"Customer": {...}, "time": ...}
+        // (CustomerResponse in the same spec). The unwrapped fallback
+        // mirrors pushItemToQbo()'s handling of the item response.
+        $customer = $response['Customer'] ?? $response;
+        $id = is_array($customer) ? ($customer['Id'] ?? null) : null;
+
+        if ((! is_string($id) && ! is_int($id)) || (string) $id === '') {
+            throw QboCustomerCreateException::outcomeUnknown($name, 'the response carried no customer Id');
+        }
+
+        $id = (string) $id;
+        $displayName = is_string($customer['DisplayName'] ?? null) && $customer['DisplayName'] !== ''
+            ? $customer['DisplayName']
+            : $name;
+
+        $linkedMeanwhile = null;
+        $failure = null;
+
+        try {
+            $linkedMeanwhile = DB::transaction(function () use ($client, $id, $displayName): ?string {
+                $locked = Client::withTrashed()->whereKey($client->getKey())->lockForUpdate()->firstOrFail();
+
+                if (filled($locked->qbo_customer_id)) {
+                    return (string) $locked->qbo_customer_id;
+                }
+
+                $locked->update([
+                    'qbo_customer_id' => $id,
+                    'qbo_display_name' => $displayName,
+                ]);
+
+                return null;
+            });
+        } catch (\Throwable $e) {
+            $failure = $e;
+        }
+
+        if ($linkedMeanwhile !== null || $failure !== null) {
+            Log::warning('[QBO] Customer created, client link not saved', [
+                'client_id' => $client->getKey(),
+                'qbo_customer_id' => $id,
+                'linked_meanwhile_to' => $linkedMeanwhile,
+                'exception' => $failure !== null ? $failure::class : null,
+            ]);
+
+            throw QboCustomerCreateException::createdNotLinked(
+                $id,
+                $displayName,
+                match (true) {
+                    $linkedMeanwhile !== null => "this client was linked to QuickBooks customer Id {$linkedMeanwhile} while the create was running",
+                    $failure instanceof \Illuminate\Database\UniqueConstraintViolationException => 'another PSA client is already linked to that Id',
+                    default => 'database error '.class_basename($failure),
+                },
+            );
+        }
+
+        return ['Id' => $id, 'DisplayName' => $displayName];
     }
 
     /**

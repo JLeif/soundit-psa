@@ -17,6 +17,7 @@ use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
@@ -356,14 +357,29 @@ class QboCustomerCreateTest extends TestCase
      * SQLite compiles lockForUpdate() to '' (SQLiteGrammar::compileLock), so no
      * SQL-level assertion can see the lock in this suite. A recording grammar
      * captures what the builder ASKED for: lock=true on `clients`, inside a
-     * transaction, before any request reaches QBO.
+     * transaction, for the link write only, after QBO has answered. QBO itself
+     * is never called inside a transaction the service opened: QboClient's
+     * token refresh and disconnect() write `settings`, and those writes must
+     * not be rolled back with a refused create.
      */
-    public function test_client_row_is_locked_inside_a_transaction_before_qbo_is_called(): void
+    public function test_client_row_is_locked_only_for_the_link_write_and_qbo_is_called_outside_any_transaction(): void
     {
         $client = $this->makeClient();
-        $this->mock->append($this->queryPage([]), $this->createdResponse('66', 'Harbor Test Co'));
-
         $conn = \Illuminate\Support\Facades\DB::connection();
+        $levelsAtRequest = [];
+        $this->mock->append(
+            function () use ($conn, &$levelsAtRequest) {
+                $levelsAtRequest[] = $conn->transactionLevel();
+
+                return $this->queryPage([]);
+            },
+            function () use ($conn, &$levelsAtRequest) {
+                $levelsAtRequest[] = $conn->transactionLevel();
+
+                return $this->createdResponse('66', 'Harbor Test Co');
+            },
+        );
+
         $history = &$this->history;
         $grammar = new class($conn) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
         {
@@ -398,8 +414,113 @@ class QboCustomerCreateTest extends TestCase
         $clientLocks = array_values(array_filter($grammar->locks, fn ($l) => $l['table'] === 'clients' && $l['lock'] === true));
         $this->assertCount(1, $clientLocks, 'exactly one FOR UPDATE read of the client row');
         $this->assertGreaterThan($baseLevel, $clientLocks[0]['level'], 'the lock is taken inside the service transaction');
-        $this->assertSame(0, $clientLocks[0]['requests_sent'], 'the lock is taken before QBO is called');
+        $this->assertSame(2, $clientLocks[0]['requests_sent'], 'the row lock is taken for the link write, after the query and the POST');
+        $this->assertSame([$baseLevel, $baseLevel], $levelsAtRequest, 'no QBO request is sent inside a transaction the service opened');
         $this->assertSame('66', $client->fresh()->qbo_customer_id);
+    }
+
+    // ── service: QBO token writes and the per-client lock ──
+
+    /**
+     * QboClient refreshes the stored tokens on any request once they are near
+     * expiry. That write must commit even when the create is then refused:
+     * the vendor has already rotated the refresh token.
+     */
+    public function test_token_refresh_during_the_preflight_survives_a_refusal(): void
+    {
+        Setting::setValue('qbo_token_expires_at', now()->subMinute()->toDateTimeString());
+        Setting::setEncrypted('qbo_refresh_token', 'old-refresh-token');
+        $client = $this->makeClient();
+        $this->mock->append(
+            new Response(200, ['Content-Type' => 'application/json'], (string) json_encode([
+                'access_token' => 'rotated-access-token',
+                'refresh_token' => 'rotated-refresh-token',
+                'expires_in' => 3600,
+                'token_type' => 'bearer',
+            ])),
+            $this->queryPage([['Id' => '42', 'DisplayName' => 'Harbor Test Co', 'Active' => true]]),
+        );
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::NAME_EXISTS, $e->kind);
+        $this->assertCount(2, $this->history, 'one token refresh, one query');
+        $this->assertSame('Bearer rotated-access-token', $this->history[1]['request']->getHeaderLine('Authorization'));
+        $this->assertSame('rotated-access-token', Setting::getEncrypted('qbo_access_token'));
+        $this->assertSame('rotated-refresh-token', Setting::getEncrypted('qbo_refresh_token'));
+    }
+
+    public function test_disconnect_on_a_failed_refresh_survives_the_refusal(): void
+    {
+        Setting::setValue('qbo_token_expires_at', now()->subMinute()->toDateTimeString());
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([]), $this->createdResponse('99', 'Harbor Test Co'));
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::PREFLIGHT_FAILED, $e->kind);
+        $this->assertStringContainsString('Please reconnect to QuickBooks', $e->getMessage());
+        $this->assertSame([], $this->history);
+        $this->assertNull(Setting::getValue('qbo_realm_id'), 'the disconnect QboClient made is not rolled back');
+        $this->assertNull(Setting::getEncrypted('qbo_access_token'));
+        $this->assertFalse(app(QboClient::class)->isConnected());
+    }
+
+    public function test_a_press_while_another_holds_the_create_lock_sends_nothing(): void
+    {
+        $client = $this->makeClient();
+        $held = Cache::lock('qbo-create-customer:'.$client->id, 60);
+        $this->assertTrue($held->get());
+        $this->mock->append($this->queryPage([]), $this->createdResponse('99', 'Harbor Test Co'));
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::NOT_STARTED, $e->kind);
+        $this->assertSame([], $this->history);
+        $this->assertFalse($e->mayExistInQbo());
+        $this->assertStringContainsString('has not released it', $e->getMessage());
+        $this->assertStringContainsString('Nothing was sent to QuickBooks by this press', $e->getMessage());
+        $this->assertNull($client->fresh()->qbo_customer_id);
+        $held->release();
+    }
+
+    public function test_the_create_lock_is_released_after_a_refusal(): void
+    {
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([['Id' => '42', 'DisplayName' => 'Harbor Test Co', 'Active' => true]]));
+
+        $this->assertSame(QboCustomerCreateException::NAME_EXISTS, $this->createExpectingFailure($client)->kind);
+
+        $this->assertTrue(Cache::lock('qbo-create-customer:'.$client->id, 60)->get(), 'the lock is free again');
+    }
+
+    public function test_client_linked_while_the_create_runs_reports_created_not_linked(): void
+    {
+        $client = $this->makeClient();
+        $this->mock->append(
+            $this->queryPage([]),
+            function () use ($client) {
+                Client::whereKey($client->id)->update(['qbo_customer_id' => '12', 'qbo_display_name' => 'Harbor Test Co']);
+
+                return $this->createdResponse('67', 'Harbor Test Co');
+            },
+        );
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::CREATED_NOT_LINKED, $e->kind);
+        $this->assertSame('67', $e->qboCustomerId);
+        $this->assertTrue($e->mayExistInQbo());
+        $this->assertStringContainsString('(Id 67) now EXISTS in QuickBooks', $e->getMessage());
+        $this->assertStringContainsString('linked to QuickBooks customer Id 12 while the create was running', $e->getMessage());
+        $this->assertSame('12', $client->fresh()->qbo_customer_id, 'the link made meanwhile is not overwritten');
+
+        $unsaved = array_values(array_filter($this->logs, fn ($r) => $r->message === '[QBO] Customer created, client link not saved'));
+        $this->assertCount(1, $unsaved);
+        $this->assertSame('warning', $unsaved[0]->level);
+        $this->assertSame('67', $unsaved[0]->context['qbo_customer_id']);
+        $this->assertSame('12', $unsaved[0]->context['linked_meanwhile_to']);
+        $this->assertSame([], array_filter($this->logs, fn ($r) => $r->message === '[QBO] Customer created and linked'));
     }
 
     // ── service: after the POST ──

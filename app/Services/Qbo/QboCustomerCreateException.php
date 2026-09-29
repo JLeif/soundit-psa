@@ -13,16 +13,17 @@ use RuntimeException;
  * by SQL, so an arm that reached QBO's POST must never read like an arm that
  * did not.
  *
- *  - ALREADY_MAPPED, NAME_EXISTS, PREFLIGHT_FAILED, INVALID_NAME: no POST was
- *    sent.
+ *  - ALREADY_MAPPED, NAME_EXISTS, PREFLIGHT_FAILED, INVALID_NAME, NOT_STARTED:
+ *    this request sent no POST.
  *  - REJECTED: the POST was answered with a 4xx; QuickBooks' own message is
  *    carried in the text.
  *  - OUTCOME_UNKNOWN: the create got no usable answer (no response, a 5xx,
  *    an unreadable body, or a failure before the request could be sent that
  *    QboClient reports without a status); PSA cannot tell whether a customer
  *    exists, so it says exactly that.
- *  - CREATED_NOT_LINKED: QuickBooks returned a customer, and PSA failed to
- *    store the link. $qboCustomerId names it.
+ *  - CREATED_NOT_LINKED: QuickBooks returned a customer, and PSA did not
+ *    store the link (a database error, or the client was linked meanwhile).
+ *    $qboCustomerId names it.
  */
 class QboCustomerCreateException extends RuntimeException
 {
@@ -39,6 +40,8 @@ class QboCustomerCreateException extends RuntimeException
     public const OUTCOME_UNKNOWN = 'outcome_unknown';
 
     public const CREATED_NOT_LINKED = 'created_not_linked';
+
+    public const NOT_STARTED = 'not_started';
 
     /**
      * @param  list<array{Id: string, DisplayName: string, Active: bool, linked_client: ?string}>  $matches
@@ -58,6 +61,14 @@ class QboCustomerCreateException extends RuntimeException
             "This client is already linked to QuickBooks customer Id {$qboCustomerId}. Nothing was sent to QuickBooks.",
             self::ALREADY_MAPPED,
             $qboCustomerId,
+        );
+    }
+
+    public static function notStarted(string $reason): self
+    {
+        return new self(
+            "Cannot create a QuickBooks customer now: {$reason}. Nothing was sent to QuickBooks by this press.",
+            self::NOT_STARTED,
         );
     }
 
