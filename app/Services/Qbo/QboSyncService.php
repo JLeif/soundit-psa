@@ -169,7 +169,16 @@ class QboSyncService
         try {
             $created = $this->createAndLinkQboCustomer($client);
         } finally {
-            $lock->release();
+            // A release that throws must not replace the create's own outcome
+            // or success; a lock left behind lapses after CREATE_LOCK_SECONDS.
+            try {
+                $lock->release();
+            } catch (\Throwable $e) {
+                Log::warning('[QBO] Customer create lock not released', [
+                    'client_id' => $client->getKey(),
+                    'exception' => $e::class,
+                ]);
+            }
         }
 
         $client->forceFill([

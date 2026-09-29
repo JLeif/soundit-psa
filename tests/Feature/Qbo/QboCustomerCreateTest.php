@@ -494,6 +494,72 @@ class QboCustomerCreateTest extends TestCase
         $this->assertTrue(Cache::lock('qbo-create-customer:'.$client->id, 60)->get(), 'the lock is free again');
     }
 
+    /**
+     * A create lock whose release() throws, as DatabaseLock::release() does
+     * when its DELETE fails (the default `database` cache store).
+     */
+    private function createLockThatFailsToRelease(): void
+    {
+        $lock = \Mockery::mock(\Illuminate\Contracts\Cache\Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once()->andThrow(new \RuntimeException('cache_locks unreachable'));
+        Cache::partialMock()->shouldReceive('lock')->once()->andReturn($lock);
+    }
+
+    /** @return list<MessageLogged> every record of the lock-release failure, at any level */
+    private function lockReleaseLogs(): array
+    {
+        return array_values(array_filter($this->logs, fn ($r) => $r->message === '[QBO] Customer create lock not released'));
+    }
+
+    public function test_a_failed_lock_release_does_not_hide_created_not_linked(): void
+    {
+        $this->makeClient(['name' => 'Other Client', 'qbo_customer_id' => '58']);
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([]), $this->createdResponse('58', 'Harbor Test Co'));
+        $this->createLockThatFailsToRelease();
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::CREATED_NOT_LINKED, $e->kind);
+        $this->assertSame('58', $e->qboCustomerId);
+        $this->assertStringContainsString('(Id 58) now EXISTS in QuickBooks', $e->getMessage());
+        $released = $this->lockReleaseLogs();
+        $this->assertCount(1, $released);
+        $this->assertSame('warning', $released[0]->level);
+        $this->assertSame(\RuntimeException::class, $released[0]->context['exception']);
+    }
+
+    public function test_a_failed_lock_release_does_not_hide_outcome_unknown(): void
+    {
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([]), new Response(503, ['Content-Type' => 'application/json'], '{}'));
+        $this->createLockThatFailsToRelease();
+
+        $e = $this->createExpectingFailure($client);
+
+        $this->assertSame(QboCustomerCreateException::OUTCOME_UNKNOWN, $e->kind);
+        $this->assertTrue($e->mayExistInQbo());
+        $this->assertCount(1, $this->lockReleaseLogs());
+    }
+
+    public function test_a_failed_lock_release_does_not_turn_a_linked_create_into_an_error(): void
+    {
+        $client = $this->makeClient();
+        $this->mock->append($this->queryPage([]), $this->createdResponse('72', 'Harbor Test Co'));
+        $this->createLockThatFailsToRelease();
+
+        $this->assertSame(['Id' => '72', 'DisplayName' => 'Harbor Test Co'], $this->create($client));
+
+        $this->assertSame('72', $client->fresh()->qbo_customer_id);
+        $linked = array_values(array_filter($this->logs, fn ($r) => $r->message === '[QBO] Customer created and linked'));
+        $this->assertCount(1, $linked);
+        $this->assertSame('info', $linked[0]->level);
+        $released = $this->lockReleaseLogs();
+        $this->assertCount(1, $released);
+        $this->assertSame('warning', $released[0]->level);
+    }
+
     public function test_client_linked_while_the_create_runs_reports_created_not_linked(): void
     {
         $client = $this->makeClient();
