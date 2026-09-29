@@ -9,6 +9,7 @@ use App\Models\Invoice;
 use App\Models\PrepayTransaction;
 use App\Models\User;
 use App\Services\InvoiceService;
+use App\Services\Qbo\QboSyncService;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\Grammars\SQLiteGrammar;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -136,9 +137,79 @@ class InvoiceEditLockTest extends TestCase
         $this->assertEquals(0, $contract->fresh()->prepay_balance);
     }
 
+    public function test_qbo_push_receives_post_edit_lines_and_total(): void
+    {
+        [$invoice, , $user, $data] = $this->fixture();
+        $invoice->update(['qbo_invoice_id' => 'synthetic-qbo']);
+        $deleted = $invoice->lines()->create([
+            'description' => 'Delete me', 'quantity' => 1, 'unit_price' => 25, 'amount' => 25,
+        ]);
+        $data['lines'][] = ['id' => $deleted->id, '_delete' => true];
+        $pushed = null;
+        $this->mock(QboSyncService::class)->shouldReceive('pushInvoiceToQbo')->once()
+            ->andReturnUsing(function (Invoice $model) use (&$pushed) {
+                // Capture at the consumer boundary; assertions outside the service catch.
+                $model->loadMissing(['client', 'lines']);
+                $pushed = [$model->total, $model->lines->map->getAttributes()->all()];
+
+                return true;
+            });
+
+        $this->assertTrue(app(InvoiceService::class)->updateInvoice($invoice, $data, $user));
+        $this->assertNotNull($pushed);
+        $this->assertEquals(300, $pushed[0]);
+        $this->assertCount(1, $pushed[1], 'QBO must not receive the deleted line');
+        $this->assertSame($data['lines'][0]['id'], $pushed[1][0]['id']);
+        $this->assertEquals(3, $pushed[1][0]['quantity']);
+        $this->assertEquals(100, $pushed[1][0]['unit_price']);
+        $this->assertEquals(300, $pushed[1][0]['amount']);
+    }
+
+    public function test_stale_editable_model_uses_locked_header_lines_and_totals(): void
+    {
+        [$stale, , $user, $data] = $this->fixture();
+        $stale->update(['qbo_invoice_id' => 'synthetic-qbo']);
+        // Requested header and total match the caller's originals, but not the row.
+        $data['invoice_date'] = '2026-01-01';
+        $data['due_date'] = '2026-02-01';
+        $data['notes'] = 'Original';
+        $data['lines'][0]['quantity'] = 2;
+        $data['lines'][0]['unit_price'] = 50;
+        $data['lines'][0]['unit_cost'] = 0;
+        DB::table('invoices')->where('id', $stale->id)->update([
+            'notes' => 'Concurrent header', 'invoice_date' => '2026-05-01',
+            'due_date' => '2026-06-01', 'subtotal' => 777, 'total' => 777,
+        ]);
+        DB::table('invoice_lines')->where('id', $data['lines'][0]['id'])->update([
+            'quantity' => 2, 'unit_price' => 50, 'amount' => 100,
+            'quantity_source' => 'Concurrent line',
+        ]);
+        $pushed = null;
+        $this->mock(QboSyncService::class)->shouldReceive('pushInvoiceToQbo')->once()
+            ->andReturnUsing(function (Invoice $model) use (&$pushed) {
+                $model->loadMissing(['client', 'lines']);
+                $pushed = $model->lines->map->getAttributes()->all();
+
+                return true;
+            });
+        $this->assertTrue(app(InvoiceService::class)->updateInvoice($stale, $data, $user));
+        $fresh = $stale->fresh();
+        $this->assertSame('Original', $fresh->notes);
+        $this->assertSame('2026-01-01', $fresh->invoice_date->format('Y-m-d'));
+        $this->assertSame('2026-02-01', $fresh->due_date->format('Y-m-d'));
+        $this->assertEquals(100, $fresh->subtotal);
+        $this->assertEquals(100, $fresh->total);
+        $this->assertSame('Concurrent line', $fresh->lines->first()->quantity_source);
+        $this->assertNotNull($pushed);
+        $this->assertSame('Changed hours', $pushed[0]['description']);
+        $this->assertEquals(2, $pushed[0]['quantity']);
+        $this->assertEquals(100, $pushed[0]['amount']);
+    }
+
     public function test_d_editable_invoice_preserves_edit_behavior(): void
     {
         [$invoice, , $user, $data] = $this->fixture();
+        $this->freezeTime();
         $this->actingAs($user)->patch(route('invoices.update', $invoice), $data)
             ->assertRedirect(route('invoices.show', $invoice))
             ->assertSessionHas('success', 'Invoice updated.')

@@ -139,7 +139,6 @@ class InvoiceService
                 'notes' => $validated['notes'] ?? null,
             ]);
 
-            $existingLineIds = $locked->lines->pluck('id')->toArray();
             $keptLineIds = [];
             $subtotal = 0;
             $totalCost = 0;
@@ -233,6 +232,9 @@ class InvoiceService
                 'total_cost' => $totalCost,
                 'margin' => round($subtotal - $totalCost, 2),
             ]);
+
+            // QBO uses loadMissing: discard any pre-edit relation snapshot.
+            $locked->unsetRelation('lines');
 
             return $locked;
         });
