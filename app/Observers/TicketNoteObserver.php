@@ -59,7 +59,7 @@ class TicketNoteObserver
 
     private function syncPrepayDebit(TicketNote $note): void
     {
-        if ($note->isUnverifiedContactIntake() || ! $note->time_minutes) {
+        if ($note->isUnverifiedContactIntake() || (! $note->time_minutes && ! $note->wasChanged('time_minutes'))) {
             return;
         }
 
