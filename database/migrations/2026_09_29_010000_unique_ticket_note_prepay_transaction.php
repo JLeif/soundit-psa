@@ -9,6 +9,17 @@ return new class extends Migration
 {
     public function up(): void
     {
+        $duplicates = DB::table('prepay_transactions')
+            ->whereNotNull('ticket_note_id')
+            ->groupBy('ticket_note_id')
+            ->havingRaw('COUNT(*) > 1')
+            ->orderBy('ticket_note_id')
+            ->pluck('ticket_note_id');
+
+        if ($duplicates->isNotEmpty()) {
+            throw new RuntimeException('Ticket-note prepay duplicates require money reconciliation; ticket_note_ids: '.$duplicates->implode(', '));
+        }
+
         Schema::table('prepay_transactions', function (Blueprint $table) {
             $table->unique('ticket_note_id');
         });

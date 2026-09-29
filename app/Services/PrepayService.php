@@ -448,55 +448,59 @@ class PrepayService
      */
     public function debitFromTicketNote(TicketNote $note): ?PrepayTransaction
     {
-        // Note-level only (r2 diff:6): a contained note already carries no time, and staff
-        // billable time on a held ticket debits prepay exactly as it would be invoiced.
-        if ($note->isUnverifiedContactIntake()) {
-            return null;
-        }
+        $alertContract = null;
+        $txn = DB::transaction(function () use ($note, &$alertContract) {
+            // Lock order: note -> existing prepay transaction -> contract.
+            $lockedNote = TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
+            if (! $lockedNote || $lockedNote->trashed() || ! $lockedNote->is_billable || $lockedNote->time_minutes <= 0) {
+                $this->reverseDebitForTicketNote($note);
 
-        $ticket = $note->ticket;
+                return null;
+            }
+            $note = $lockedNote;
 
-        if (! $ticket) {
-            return null;
-        }
+            // Note-level only (r2 diff:6): a contained note already carries no time, and staff
+            // billable time on a held ticket debits prepay exactly as it would be invoiced.
+            if ($note->isUnverifiedContactIntake()) {
+                return null;
+            }
 
-        // Priority: note's contract → ticket's contract → client's hours-based prepay contract
-        $contract = $note->contract_id ? $note->contract : null;
+            $ticket = $note->ticket;
 
-        if (! $contract && $ticket->contract_id) {
-            $contract = $ticket->contract;
-        }
+            if (! $ticket) {
+                return null;
+            }
 
-        if (! $contract && $ticket->client_id) {
-            $contract = Contract::where('client_id', $ticket->client_id)
-                ->where('status', 'active')
-                ->whereNotNull('prepay_balance')
-                ->where('prepay_as_amount', false)
-                ->orderBy('id')
-                ->first();
-        }
+            // Priority: note's contract → ticket's contract → client's hours-based prepay contract
+            $contract = $note->contract_id ? $note->contract : null;
 
-        if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
-            return null;
-        }
+            if (! $contract && $ticket->contract_id) {
+                $contract = $ticket->contract;
+            }
 
-        if (! $note->is_billable || ! $note->time_minutes || $note->time_minutes <= 0) {
-            // If note is no longer billable/has no time, reverse any existing debit
-            $this->reverseDebitForTicketNote($note);
+            if (! $contract && $ticket->client_id) {
+                $contract = Contract::where('client_id', $ticket->client_id)
+                    ->where('status', 'active')
+                    ->whereNotNull('prepay_balance')
+                    ->where('prepay_as_amount', false)
+                    ->orderBy('id')
+                    ->first();
+            }
 
-            return null;
-        }
+            if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
+                return null;
+            }
 
-        $hours = round($note->time_minutes / 60, 4);
-        $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
-        $description = "Ticket #{$ticket->id}: {$subject}";
+            $hours = round($note->time_minutes / 60, 4);
+            $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
+            $description = "Ticket #{$ticket->id}: {$subject}";
 
-        $alertContract = $contract;
-        $txn = DB::transaction(function () use ($contract, $note, $hours, $description, &$alertContract) {
-            // Include soft-deleted notes: the deleted observer reverses after deletion.
-            // Lock order: note -> prepay transaction -> contract.
-            TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
-            $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+            $alertContract = $contract;
+            // A missing-key locking read can gap-lock unrelated new notes on InnoDB.
+            $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+            if ($existing) {
+                $existing = PrepayTransaction::whereKey($existing->id)->lockForUpdate()->first();
+            }
 
             if (! $existing) {
                 try {
@@ -510,20 +514,37 @@ class PrepayService
                         'description' => $description,
                     ]);
                 } catch (UniqueConstraintViolationException $e) {
-                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
                     if (! $existing) {
                         throw $e;
                     }
+                    $existing = PrepayTransaction::whereKey($existing->id)->lockForUpdate()->first();
                 }
             }
 
             if ($existing) {
-                $originalContract = $existing->contract()->lockForUpdate()->first();
+                $originalContract = $existing->contract()->withTrashed()->lockForUpdate()->first();
                 $alertContract = $originalContract;
+                if (! $originalContract) {
+                    Log::warning('[Prepay] Ticket note difference refused', [
+                        'ticket_note_id' => $note->id,
+                        'contract_id' => $existing->contract_id,
+                    ]);
+
+                    return null;
+                }
+                $moved = $contract->id !== $existing->contract_id;
+                if ($moved) {
+                    Log::warning('[Prepay] Ticket note contract mismatch', [
+                        'ticket_note_id' => $note->id,
+                        'resolved_contract_id' => $contract->id,
+                        'ledger_contract_id' => $existing->contract_id,
+                    ]);
+                }
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
-                    'description' => $description,
+                    'description' => $moved ? $existing->description : $description,
                     'date' => $note->noted_at ?? $note->created_at,
                 ]);
 
@@ -739,15 +760,27 @@ class PrepayService
     public function reverseDebitForTicketNote(TicketNote $note): void
     {
         DB::transaction(function () use ($note) {
+            // Include soft-deleted notes: the deleted observer reverses after deletion.
             TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
-            $txn = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+            $txn = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+            if ($txn) {
+                $txn = PrepayTransaction::whereKey($txn->id)->lockForUpdate()->first();
+            }
 
             if (! $txn) {
                 return;
             }
 
             $hours = abs((float) $txn->hours);
-            $contract = $txn->contract()->lockForUpdate()->first();
+            $contract = $txn->contract()->withTrashed()->lockForUpdate()->first();
+            if (! $contract) {
+                Log::warning('[Prepay] Ticket note reversal refused', [
+                    'ticket_note_id' => $note->id,
+                    'contract_id' => $txn->contract_id,
+                ]);
+
+                return;
+            }
 
             $txn->delete();
 
