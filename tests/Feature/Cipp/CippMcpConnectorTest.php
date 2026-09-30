@@ -411,20 +411,23 @@ class CippMcpConnectorTest extends TestCase
         }
         $this->assertCount(1, $this->tokenPosts(), 'one doomed POST, then the cached failure answers');
 
-        $this->travel(CippMcpClient::SIGN_IN_FAILURE_TTL - 1)->seconds();
+        // Literal wall-clock bounds, not the constant: the cache must be SHORT
+        // (a fixed credential is retried within about a minute), and a test that
+        // read the constant would move with any change to it.
+        $this->travel(59)->seconds();
         try {
             $this->token($client);
         } catch (CippMcpAuthException $e) {
             $this->assertStringContainsString('not retrying yet', $e->getMessage());
         }
-        $this->assertCount(1, $this->tokenPosts(), 'still inside the TTL');
+        $this->assertCount(1, $this->tokenPosts(), 'still inside the TTL at 59s');
 
         $this->travel(2)->seconds();
         try {
             $this->token($client);
         } catch (CippMcpAuthException) {
         }
-        $this->assertCount(2, $this->tokenPosts(), 'exactly one retry once the TTL has passed');
+        $this->assertCount(2, $this->tokenPosts(), 'exactly one retry at 61s, once the 60s TTL has passed');
     }
 
     public function test_negative_cache_also_bounds_the_delegated_refresh(): void
