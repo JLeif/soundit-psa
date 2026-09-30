@@ -598,7 +598,7 @@ class CippMcpConnectorTest extends TestCase
         Setting::setValue(CippMcpConnector::UPN, 'svc-cipp@msp.example');
     }
 
-    private function mcpClient(bool $withConnector = true, string $secret = ''): CippMcpClient
+    private function mcpClient(bool $withConnector = true, ?string $secret = null): CippMcpClient
     {
         return new CippMcpClient([
             'api_url' => 'https://cipp.example.test',
