@@ -1761,7 +1761,7 @@
                             @php
                                 $cippMcpConnectorPresent = ($cippMcpConnector['state'] ?? 'not_connected') !== 'not_connected';
                             @endphp
-                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID <small class="text-muted">{{ $cippMcpConnectorPresent ? '(MCP client app)' : '(legacy, CIPP < v11)' }}</small></label>
+                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID <small class="text-muted">(required for Connect CIPP MCP)</small></label>
                             <input type="text" class="form-control" id="cipp_mcp_client_id" name="mcp_client_id"
                                    value="{{ $cippMcpClientId ?? '' }}"
                                    placeholder="Readonly MCP Access client ID">
@@ -1789,7 +1789,7 @@
                                     @endif
                                 </small>
                             @else
-                                <small class="text-muted">Legacy (CIPP &lt; v11). CIPP v11 no longer accepts this app-only MCP sign-in; use <strong>Connect CIPP MCP</strong> below. The curated cipp_* read tools do not need these. Without them, or when the MCP sign-in fails, those tools are answered over the CIPP REST API with the Client ID and secret above.</small>
+                                <small class="text-muted">The MCP Client ID is required for <strong>Connect CIPP MCP</strong>; only the secret is optional. Legacy (CIPP &lt; v11): a secret alone was the app-only MCP sign-in, which CIPP v11 no longer accepts; use <strong>Connect CIPP MCP</strong> below. The curated cipp_* read tools do not need these. Without them, or when the MCP sign-in fails, those tools are answered over the CIPP REST API with the Client ID and secret above.</small>
                             @endif
                         </div>
                         <div class="col-md-6 mb-3">
@@ -1854,6 +1854,32 @@
                                 as a <strong>Mobile/desktop</strong> (public) redirect, or as a Web redirect with the MCP Client Secret saved.
                             @endif
                         </small>
+                        {{-- Check setup (card jOWYaBuZ): every Connect prerequisite, one fix line per problem. Admin-only like Connect. --}}
+                        <div class="mt-3" id="cipp-setup-check">
+                            <form method="POST" action="{{ route('settings.integrations.cipp.check-setup') }}" class="d-inline">
+                                @csrf
+                                <button type="submit" class="btn btn-outline-secondary btn-sm" id="cipp-check-setup-btn">
+                                    <i class="bi bi-list-check me-1"></i>Check setup
+                                </button>
+                            </form>
+                            <small class="text-muted d-block mt-1">One-time setup, in order: (1) save the Tenant ID, MCP Client ID and MCP backend host (the bare Application ID URI from Entra &rarr; App registrations &rarr; CIPP-MCP &rarr; Expose an API, no <code>/api/...</code>); (2) in Entra &rarr; App registrations &rarr; your MCP client app &rarr; Authentication, add the callback above under Mobile and desktop applications and set Allow public client flows to Yes; (3) if your Conditional Access blocks sign-ins from the PSA server (AADSTS53003), use a dedicated CIPP service account excluded from that policy; (4) click Check setup, then Connect CIPP MCP.</small>
+                            @if(is_array(session('cipp_setup_check')))
+                                <ul class="list-unstyled small mt-2 mb-0" id="cipp-setup-check-results">
+                                    @foreach(session('cipp_setup_check') as $line)
+                                        @php
+                                            [$icon, $color, $word] = match ($line['status'] ?? '') {
+                                                'pass' => ['bi-check-circle', 'text-success', 'Pass'],
+                                                'fail' => ['bi-x-circle', 'text-danger', 'Fail'],
+                                                default => ['bi-question-circle', 'text-warning', "Can't check"],
+                                            };
+                                        @endphp
+                                        <li class="mb-1" data-check="{{ $line['key'] ?? '' }}" data-status="{{ $line['status'] ?? '' }}">
+                                            <i class="bi {{ $icon }} {{ $color }} me-1" aria-hidden="true"></i><strong>{{ $word }}</strong>: {{ $line['label'] ?? '' }}. {{ $line['message'] ?? '' }}
+                                        </li>
+                                    @endforeach
+                                </ul>
+                            @endif
+                        </div>
                     @endif
                 </div>
 

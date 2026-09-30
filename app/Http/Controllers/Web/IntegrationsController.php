@@ -1476,7 +1476,12 @@ class IntegrationsController extends Controller
             Setting::setEncrypted('cipp_mcp_client_secret', $validated['mcp_client_secret']);
         }
         if (! empty($validated['mcp_backend_host'])) {
-            Setting::setValue('cipp_mcp_backend_host', trim($validated['mcp_backend_host']));
+            // Keep only the bare Application ID URI: a pasted path such as
+            // /api/ExecMcp, a trailing slash or whitespace is stripped (card jOWYaBuZ).
+            $bareHost = \App\Services\Cipp\CippMcpConnector::normaliseBackendHost($validated['mcp_backend_host']);
+            if ($bareHost !== '') {
+                Setting::setValue('cipp_mcp_backend_host', $bareHost);
+            }
         }
         if ($removeMcpSecret) {
             Setting::where('key', \App\Services\Cipp\CippMcpConnector::CLIENT_SECRET_SETTING)->delete();
@@ -1517,6 +1522,18 @@ class IntegrationsController extends Controller
         } catch (\Throwable $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()]);
         }
+    }
+
+    /**
+     * "Check setup" (card jOWYaBuZ): run every Connect CIPP MCP prerequisite and
+     * flash one pass / fail / can't-check line each. Admin-only at the route, like
+     * Connect CIPP MCP. Reads existing settings and runs the Test Connection REST
+     * call; writes nothing.
+     */
+    public function checkCippSetup(\App\Services\Cipp\CippSetupCheck $check)
+    {
+        return redirect()->route('settings.integrations')
+            ->with('cipp_setup_check', $check->run(route('auth.cipp-mcp.callback')));
     }
 
     public function syncCipp()
