@@ -9,6 +9,7 @@ enum AlertSource: string
     case Comet = 'comet';
     case Huntress = 'huntress';
     case Cipp = 'cipp';
+    case AppRiver = 'appriver';
 
     public function label(): string
     {
@@ -18,6 +19,7 @@ enum AlertSource: string
             self::Comet => 'Comet Backup',
             self::Huntress => 'Huntress',
             self::Cipp => 'CIPP',
+            self::AppRiver => 'AppRiver',
         };
     }
 
@@ -29,6 +31,7 @@ enum AlertSource: string
             self::Comet => 'bi-cloud-arrow-up',
             self::Huntress => 'bi-shield-check',
             self::Cipp => 'bi-microsoft',
+            self::AppRiver => 'bi-key',
         };
     }
 }

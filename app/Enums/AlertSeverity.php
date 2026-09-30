@@ -68,6 +68,7 @@ enum AlertSeverity: string
                 default => self::Error,
             },
             AlertSource::Cipp => self::Error, // the MCP connector's refresh failures
+            AlertSource::AppRiver => self::Error, // a dropped login stops licence/billing sync
         };
     }
 }

@@ -392,7 +392,7 @@ These commands execute automatically based on their schedule:
 | `ninja:sync-backup` | Daily at 05:30 | Sync backup storage usage and license counts from NinjaRMM (only if `ninja_enabled=1` and orgs mapped) |
 | `comet:sync-backup` | Daily at 05:40 | Sync backup storage usage and license counts from Comet Backup (only if configured + orgs mapped) |
 | `servosity:sync-licenses` | Daily at 05:45 | Sync backup license counts from Servosity (only if configured + clients mapped) |
-| `appriver:sync-licenses` | Daily at 05:50 | Sync M365 subscription seat counts from AppRiver (only if configured + clients mapped) |
+| `appriver:sync-licenses` | Daily at 05:50 | Sync M365 subscription seat counts from AppRiver (only if connected + clients mapped). If AppRiver was connected but its login has dropped, the run is logged under `[AppRiverSync]` and raises (or refreshes) one Alerts Hub alert instead of skipping silently |
 | `cipp:sync-contacts` | Daily at 05:55 | Sync M365 users as contacts + mailbox/MFA enrichment from CIPP (only if contact sync enabled + tenants mapped) |
 | `cipp:sync-devices` | Daily at 05:59 | Sync Intune devices + Defender state to assets from CIPP (only if device sync enabled + tenants mapped) |
 | `assets:refresh-health` | Daily at 06:30 | Recompute cached asset health scores (0-100) and the AI explanation from the overnight-synced signals (RMM, alerts, backup, patch, M365, tickets). Flags: `--no-ai` (deterministic explanation only), `--client=ID`, `--stale-hours=N`, `--limit=N`. |
@@ -1518,9 +1518,10 @@ Syncs M365 subscription seat counts from AppRiver (reseller-side view). Shows as
 2. Enter your **Client ID** and **Client Secret** (from the OpenText Cloud Management Portal at cp.appriver.com > Integrations > API)
 3. Click **Test Connection** to verify OAuth2 credentials
 4. Go to **Customer Mapping** to map AppRiver customers to local clients (Auto-Match available for exact name matches)
-5. Click **Sync Licenses Now** or wait for the daily 05:50 cron
+5. Click **Sync Licenses Now** or wait for the daily 05:50 cron. The manual sync runs as a detached `php artisan appriver:sync-licenses --manual` process, not on the queue worker, so the worker's `--timeout` does not bound it; its result (success or failure, with the time) shows on the AppRiver card when it finishes
 6. View license utilization on the Licenses page — filter "Waste only" to find unused seats
 7. Click the edit icon next to an AppRiver license quantity to adjust seat counts (pushes to AppRiver API)
+8. If the AppRiver login drops (its refresh token is rejected and the stored tokens are cleared), an **AppRiver** alert opens in the Alerts Hub naming the fix: *Reconnect in Settings > Integrations > AppRiver*. There is one alert per dropped-login episode, and it resolves itself on reconnect. Active AppRiver rows on the Licenses page last synced more than 48 hours ago carry a **Stale** badge (vendor-held Suspended/Pending rows, rows that are no longer active, rows of clients that are not operational (stage other than Active, or inactive), and rows of clients the last sync skipped as CustomerType Referred are not flagged: a healthy sync does not re-stamp them)
 
 **Note:** If you also use CIPP, both integrations coexist — CIPP shows the tenant-side M365 view while AppRiver shows the reseller-side view. They use separate vendor/license type records.
 

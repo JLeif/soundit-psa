@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Enums\ClientStage;
+use App\Services\AppRiver\AppRiverLicenseSyncService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -21,6 +23,13 @@ class License extends Model
      * either reading until the vendor reports it active again.
      */
     public const VENDOR_HELD_STATUSES = ['Suspended', 'Pending'];
+
+    /**
+     * An AppRiver row the nightly sync re-stamps (see getSyncStaleAttribute()) whose last sync
+     * is MORE than this many hours old is flagged stale on the licence view (card 6abc5913): a dropped login stopped the
+     * daily sync for 12 days while these counts fed billing, and nothing showed it.
+     */
+    public const APPRIVER_STALE_AFTER_HOURS = 48;
 
     protected $fillable = [
         'license_type_id',
@@ -114,6 +123,33 @@ class License extends Model
             && $this->licenseType
             && $this->licenseType->vendor === 'appriver'
             && $this->client?->appriver_customer_id;
+    }
+
+    /**
+     * AppRiver-sourced, active, not vendor-held, belonging to a client the nightly
+     * sync visits, and last synced more than APPRIVER_STALE_AFTER_HOURS ago. These
+     * rows are excluded because a healthy nightly sync never re-stamps them, so their
+     * synced_at ages on a working install and says nothing about the sync:
+     *   - a vendor-held (VENDOR_HELD_STATUSES) row has only vendor_status rewritten;
+     *   - a row that is no longer active is left alone once zeroed;
+     *   - a row of a client that is not operational (Client::scopeOperational: stage
+     *     Active and is_active) — the sync never loads that client;
+     *   - a row of a client the last run skipped as CustomerType Referred
+     *     (AppRiverLicenseSyncService::referredClientIds()).
+     * Manual rows (synced_at null) are never stale: they were never synced.
+     */
+    public function getSyncStaleAttribute(): bool
+    {
+        return $this->synced_at !== null
+            && $this->status === 'active'
+            && ! in_array($this->vendor_status, self::VENDOR_HELD_STATUSES, true)
+            && $this->licenseType?->vendor === 'appriver'
+            // Mirrors Client::scopeOperational(), the sync's client filter.
+            && $this->client?->stage === ClientStage::Active
+            && $this->client->is_active
+            && $this->synced_at->lt(now()->subHours(self::APPRIVER_STALE_AFTER_HOURS))
+            // Last: one settings read, only for rows that are otherwise stale.
+            && ! in_array((int) $this->client_id, AppRiverLicenseSyncService::referredClientIds(), true);
     }
 
     /**

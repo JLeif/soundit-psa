@@ -193,8 +193,9 @@ Schedule::command('appriver:sync-licenses')
     ->dailyAt('05:50')
     ->withoutOverlapping()
     ->runInBackground()
-    ->when(fn () => \App\Services\AppRiver\AppRiverClient::isConnected()
-        && \App\Models\Client::whereNotNull('appriver_customer_id')->exists());
+    // Card 6abc5913: a previously-connected, now-disconnected login is logged under
+    // [AppRiverSync] and raises/refreshes the Alerts Hub alert, not skipped silently.
+    ->when(fn () => \App\Services\AppRiver\AppRiverLoginMonitor::scheduledSyncShouldRun());
 
 // Printix license sync — daily
 Schedule::command('printix:sync-licenses')
