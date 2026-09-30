@@ -85,6 +85,6 @@ class CippConfig
             && ! empty(self::get('tenant_id'))
             && ! empty(self::get('mcp_client_id'))
             && (! empty(self::get('mcp_client_secret'))
-                || ! empty(Setting::getValue(\App\Services\Cipp\CippMcpConnector::REFRESH_TOKEN)));
+                || ! empty(Setting::getValue(\App\Services\Cipp\CippMcpConnector::REFRESH_TOKEN_SETTING)));
     }
 }

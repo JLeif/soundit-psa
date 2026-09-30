@@ -35,7 +35,7 @@ use Illuminate\Support\Str;
  */
 class CippMcpConnector
 {
-    public const REFRESH_TOKEN = 'cipp_mcp_connector_refresh_token';
+    public const REFRESH_TOKEN_SETTING = 'cipp_mcp_connector_refresh_token';
 
     public const CONNECTED_AT = 'cipp_mcp_connector_connected_at';
 
@@ -54,13 +54,13 @@ class CippMcpConnector
 
     public function isConnected(): bool
     {
-        return (string) Setting::getValue(self::REFRESH_TOKEN, '') !== '';
+        return (string) Setting::getValue(self::REFRESH_TOKEN_SETTING, '') !== '';
     }
 
     /** Decrypted refresh token, or null when not connected. Never log the result. */
     public function refreshToken(): ?string
     {
-        $token = Setting::getEncrypted(self::REFRESH_TOKEN);
+        $token = Setting::getEncrypted(self::REFRESH_TOKEN_SETTING);
 
         return is_string($token) && $token !== '' ? $token : null;
     }
@@ -94,6 +94,17 @@ class CippMcpConnector
         }
 
         return rtrim($host, '/').'/user_impersonation offline_access';
+    }
+
+    /**
+     * The interactive sign-in's scope: scope() plus `openid profile`. Without openid
+     * Entra returns no id_token, and without profile the id_token carries no
+     * preferred_username, so the signed-in UPN could not be stored. Refreshes ask
+     * for scope() alone.
+     */
+    public static function signInScope(): string
+    {
+        return 'openid profile '.self::scope();
     }
 
     public static function tokenUrl(string $tenantId): string
@@ -157,7 +168,7 @@ class CippMcpConnector
                 'code' => $code,
                 'redirect_uri' => $redirectUri,
                 'code_verifier' => $verifier,
-                'scope' => self::scope(),
+                'scope' => self::signInScope(),
             ]);
         } catch (CippMcpAuthException $e) {
             throw $e;
@@ -174,7 +185,7 @@ class CippMcpConnector
             throw new CippMcpAuthException('CIPP MCP code exchange returned no refresh token (is offline_access granted?)');
         }
 
-        Setting::setEncrypted(self::REFRESH_TOKEN, $refresh);
+        Setting::setEncrypted(self::REFRESH_TOKEN_SETTING, $refresh);
         Setting::setValue(self::CONNECTED_AT, now()->toIso8601String());
         Setting::setValue(self::UPN, self::upnFromIdToken($response->json('id_token')));
         $this->recordAccessExpiry((int) ($response->json('expires_in') ?? 0));
@@ -192,7 +203,7 @@ class CippMcpConnector
     public function storeRotatedRefreshToken(mixed $refreshToken): void
     {
         if (is_string($refreshToken) && $refreshToken !== '' && $refreshToken !== $this->refreshToken()) {
-            Setting::setEncrypted(self::REFRESH_TOKEN, $refreshToken);
+            Setting::setEncrypted(self::REFRESH_TOKEN_SETTING, $refreshToken);
         }
     }
 

@@ -80,7 +80,7 @@ class CippMcpConnectorTest extends TestCase
 
         $this->assertSame('mcp-client', $query['client_id']);
         $this->assertSame('code', $query['response_type']);
-        $this->assertSame(self::HOST.'/user_impersonation offline_access', $query['scope']);
+        $this->assertSame('openid profile '.self::HOST.'/user_impersonation offline_access', $query['scope'], 'openid profile, or Entra returns no id_token to take the UPN from');
         $this->assertSame(route('auth.cipp-mcp.callback'), $query['redirect_uri']);
         $this->assertSame('S256', $query['code_challenge_method']);
         $this->assertSame(session('cipp_mcp_oauth_state'), $query['state']);
@@ -165,12 +165,14 @@ class CippMcpConnectorTest extends TestCase
     public function test_code_exchange_stores_the_refresh_token_encrypted_and_leaks_no_token(): void
     {
         $this->captureLogs();
-        $idToken = 'eyJhbGciOiJub25lIn0.'.rtrim(strtr(base64_encode(json_encode(['preferred_username' => 'svc-cipp@msp.example'])), '+/', '-_'), '=').'.sig';
+        // Entra returns an id_token because the sign-in asks for openid, and
+        // preferred_username in it because it asks for profile.
+        $idJwt = 'eyJhbGciOiJub25lIn0.'.rtrim(strtr(base64_encode(json_encode(['preferred_username' => 'svc-cipp@msp.example'])), '+/', '-_'), '=').'.sig';
         Http::fake(['login.microsoftonline.com/*' => Http::response([
             'token_type' => 'Bearer',
             'access_token' => self::ACCESS,
             'refresh_token' => self::REFRESH,
-            'id_token' => $idToken,
+            'id_token' => $idJwt,
             'expires_in' => 3600,
         ])]);
         $admin = User::factory()->admin()->create();
@@ -191,14 +193,14 @@ class CippMcpConnectorTest extends TestCase
         $this->assertSame(self::CODE, $posts[0]['code']);
         $this->assertSame($verifier, $posts[0]['code_verifier']);
         $this->assertSame(route('auth.cipp-mcp.callback'), $posts[0]['redirect_uri']);
-        $this->assertSame(self::HOST.'/user_impersonation offline_access', $posts[0]['scope']);
+        $this->assertSame('openid profile '.self::HOST.'/user_impersonation offline_access', $posts[0]['scope']);
         $this->assertArrayNotHasKey('client_secret', $posts[0], 'a public client sends no secret');
 
         // Stored ENCRYPTED: the raw column is not the token, and decrypts to it.
-        $raw = (string) DB::table('settings')->where('key', CippMcpConnector::REFRESH_TOKEN)->value('value');
+        $raw = (string) DB::table('settings')->where('key', CippMcpConnector::REFRESH_TOKEN_SETTING)->value('value');
         $this->assertNotSame('', $raw);
         $this->assertStringNotContainsString(self::REFRESH, $raw);
-        $this->assertSame(self::REFRESH, Setting::getEncrypted(CippMcpConnector::REFRESH_TOKEN));
+        $this->assertSame(self::REFRESH, Setting::getEncrypted(CippMcpConnector::REFRESH_TOKEN_SETTING));
 
         $status = app(CippMcpConnector::class)->status();
         $this->assertSame('connected', $status['state']);
@@ -213,7 +215,7 @@ class CippMcpConnectorTest extends TestCase
         // Positive controls: the haystacks searched below are not empty.
         $this->assertStringContainsString('[CIPP MCP OAuth] Connected', json_encode($this->logs));
         $this->assertStringContainsString('CIPP MCP connected as svc-cipp@msp.example', (string) session('success'));
-        $this->assertNoTokenLeaked([self::REFRESH, self::ACCESS, self::CODE, $idToken, $verifier]);
+        $this->assertNoTokenLeaked([self::REFRESH, self::ACCESS, self::CODE, $idJwt, $verifier]);
     }
 
     public function test_a_refused_code_exchange_flashes_the_error_code_only(): void
@@ -308,8 +310,8 @@ class CippMcpConnectorTest extends TestCase
 
         $this->token($this->mcpClient());
 
-        $this->assertSame(self::ROTATED, Setting::getEncrypted(CippMcpConnector::REFRESH_TOKEN));
-        $raw = (string) DB::table('settings')->where('key', CippMcpConnector::REFRESH_TOKEN)->value('value');
+        $this->assertSame(self::ROTATED, Setting::getEncrypted(CippMcpConnector::REFRESH_TOKEN_SETTING));
+        $raw = (string) DB::table('settings')->where('key', CippMcpConnector::REFRESH_TOKEN_SETTING)->value('value');
         $this->assertStringNotContainsString(self::ROTATED, $raw);
         $this->assertNoTokenLeaked([self::REFRESH, self::ROTATED, self::ACCESS]);
     }
@@ -460,7 +462,7 @@ class CippMcpConnectorTest extends TestCase
 
         // Operator reconnects (a new connected_at generation) within the TTL.
         $this->travel(5)->seconds();
-        Setting::setEncrypted(CippMcpConnector::REFRESH_TOKEN, self::ROTATED);
+        Setting::setEncrypted(CippMcpConnector::REFRESH_TOKEN_SETTING, self::ROTATED);
         Setting::setValue(CippMcpConnector::CONNECTED_AT, now()->toIso8601String());
 
         $this->assertSame(self::ACCESS, $this->token($client));
@@ -500,6 +502,7 @@ class CippMcpConnectorTest extends TestCase
         $this->assertStringContainsString('Connect CIPP MCP', $panel);
         $this->assertStringContainsString(route('auth.cipp-mcp'), $panel);
         $this->assertStringContainsString('Legacy (CIPP &lt; v11)', $this->credentialsHelp());
+        $this->assertStringContainsString('as a <strong>Mobile/desktop</strong> (public) redirect', $panel, 'no secret stored: a public redirect works');
     }
 
     public function test_panel_renders_connected_with_upn_since_and_expiry_and_real_help_text(): void
@@ -521,6 +524,7 @@ class CippMcpConnectorTest extends TestCase
         $help = $this->credentialsHelp();
         $this->assertStringNotContainsString('Legacy', $help);
         $this->assertStringContainsString('connection below signs in through', $help);
+        $this->assertStringContainsString('No secret is stored, so none is sent', $help);
         $this->assertStringNotContainsString(self::REFRESH, $panel.$help);
     }
 
@@ -545,6 +549,38 @@ class CippMcpConnectorTest extends TestCase
         $this->assertTrue(\App\Support\CippConfig::isMcpConfigured());
     }
 
+    public function test_a_stored_mcp_secret_is_sent_on_exchange_and_refresh_and_the_panel_asks_for_a_web_redirect(): void
+    {
+        // The prod state: the pre-v11 app-only secret is still saved for the MCP client app.
+        Setting::setEncrypted('cipp_mcp_client_secret', 'legacy-mcp-secret');
+        Http::fake(['login.microsoftonline.com/*' => Http::response([
+            'token_type' => 'Bearer',
+            'access_token' => self::ACCESS,
+            'refresh_token' => self::REFRESH,
+            'expires_in' => 3600,
+        ])]);
+        $admin = User::factory()->admin()->create();
+        $state = str_repeat('s', 40);
+
+        $this->actingAs($admin)
+            ->withSession(['cipp_mcp_oauth_state' => $state, 'cipp_mcp_oauth_verifier' => str_repeat('v', 64)])
+            ->get(route('auth.cipp-mcp.callback', ['state' => $state, 'code' => self::CODE]))
+            ->assertRedirect(route('settings.integrations'));
+        $this->token(app(CippMcpClient::class));
+
+        $posts = $this->tokenPosts();
+        $this->assertCount(2, $posts);
+        $this->assertSame('authorization_code', $posts[0]['grant_type']);
+        $this->assertSame('legacy-mcp-secret', $posts[0]['client_secret'] ?? null, 'sent with the sign-in');
+        $this->assertSame('refresh_token', $posts[1]['grant_type']);
+        $this->assertSame('legacy-mcp-secret', $posts[1]['client_secret'] ?? null, 'sent with the refresh');
+
+        $this->assertStringContainsString('as a <strong>Web</strong> redirect, because an MCP Client Secret is stored', $this->panel());
+        $help = $this->credentialsHelp();
+        $this->assertStringContainsString('A secret is stored and is sent with the sign-in and every refresh', $help);
+        $this->assertStringNotContainsString('No secret is stored', $help);
+    }
+
     // --- helpers -------------------------------------------------------------
 
     private function captureLogs(): void
@@ -557,7 +593,7 @@ class CippMcpConnectorTest extends TestCase
 
     private function connect(string $refresh = self::REFRESH): void
     {
-        Setting::setEncrypted(CippMcpConnector::REFRESH_TOKEN, $refresh);
+        Setting::setEncrypted(CippMcpConnector::REFRESH_TOKEN_SETTING, $refresh);
         Setting::setValue(CippMcpConnector::CONNECTED_AT, now()->subDay()->toIso8601String());
         Setting::setValue(CippMcpConnector::UPN, 'svc-cipp@msp.example');
     }
@@ -627,7 +663,7 @@ class CippMcpConnectorTest extends TestCase
             // else in the session, the flash message included, is checked.
             'session' => json_encode(\Illuminate\Support\Arr::except(session()->all(), ['_previous'])),
             'alerts' => json_encode(Alert::all()->toArray()),
-            'settings' => json_encode(Setting::where('key', '!=', CippMcpConnector::REFRESH_TOKEN)->pluck('value', 'key')),
+            'settings' => json_encode(Setting::where('key', '!=', CippMcpConnector::REFRESH_TOKEN_SETTING)->pluck('value', 'key')),
             'extra' => $extraHaystack,
         ];
         foreach ($haystacks as $where => $text) {

@@ -45,7 +45,7 @@ class CippMcpOAuthController extends Controller
             'response_type' => 'code',
             'redirect_uri' => route('auth.cipp-mcp.callback'),
             'response_mode' => 'query',
-            'scope' => CippMcpConnector::scope(),
+            'scope' => CippMcpConnector::signInScope(),
             'state' => $state,
             'code_challenge' => CippMcpConnector::codeChallenge($verifier),
             'code_challenge_method' => 'S256',

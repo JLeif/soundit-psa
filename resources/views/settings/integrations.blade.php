@@ -1774,7 +1774,13 @@
                         </div>
                         <div class="col-12 mb-3" id="cipp-mcp-credentials-help">
                             @if($cippMcpConnectorPresent)
-                                <small class="text-muted">The CIPP API client with MCP Access that the CIPP MCP connection below signs in through. The Client ID is required; it is used with the stored sign-in to refresh access to CIPP MCP. The secret is needed only if that app's PSA redirect is registered as a Web (confidential) redirect. Leave it empty for a Mobile/desktop (public) redirect.</small>
+                                <small class="text-muted">The CIPP API client with MCP Access that the CIPP MCP connection below signs in through. The Client ID is required; it is used with the stored sign-in to refresh access to CIPP MCP.
+                                    @if($cippMcpHasSecret ?? false)
+                                        A secret is stored and is sent with the sign-in and every refresh, so that app's PSA redirect must be registered as a Web (confidential) redirect, not a Mobile/desktop (public) one. It cannot be cleared here.
+                                    @else
+                                        No secret is stored, so none is sent: register that app's PSA redirect as a Mobile/desktop (public) redirect, or save the app's secret here and register a Web (confidential) redirect.
+                                    @endif
+                                </small>
                             @else
                                 <small class="text-muted">Legacy (CIPP &lt; v11). CIPP v11 no longer accepts this app-only MCP sign-in; use <strong>Connect CIPP MCP</strong> below. The curated cipp_* read tools do not need these. Without them, or when the MCP sign-in fails, those tools are answered over the CIPP REST API with the Client ID and secret above.</small>
                             @endif
@@ -1784,7 +1790,7 @@
                             <input type="text" class="form-control" id="cipp_mcp_backend_host" name="mcp_backend_host"
                                    value="{{ $cippMcpBackendHost ?? '' }}"
                                    placeholder="Application ID URI of the CIPP-MCP app">
-                            <small class="text-muted">The Application ID URI of the shared CIPP-MCP resource app. The connection asks for <code>&lt;this&gt;/user_impersonation offline_access</code>.</small>
+                            <small class="text-muted">The Application ID URI of the shared CIPP-MCP resource app. The connection asks for <code>&lt;this&gt;/user_impersonation offline_access</code>, plus <code>openid profile</code> at sign-in to learn the signed-in account.</small>
                         </div>
                     </div>
 
@@ -1834,7 +1840,13 @@
                         <a href="{{ route('auth.cipp-mcp') }}" class="btn btn-outline-primary btn-sm" id="cipp-mcp-connect-btn">
                             <i class="bi bi-box-arrow-in-right me-1"></i>{{ $cippMcpState === 'not_connected' ? 'Connect CIPP MCP' : 'Reconnect CIPP MCP' }}
                         </a>
-                        <small class="text-muted d-block mt-1">Sign in as the dedicated CIPP service account, not a personal admin. Requires the MCP Client ID and MCP backend host above, and the PSA callback <code>{{ route('auth.cipp-mcp.callback') }}</code> registered on that app.</small>
+                        <small class="text-muted d-block mt-1">Sign in as the dedicated CIPP service account, not a personal admin. Requires the MCP Client ID and MCP backend host above, and the PSA callback <code>{{ route('auth.cipp-mcp.callback') }}</code> registered on that app
+                            @if($cippMcpHasSecret ?? false)
+                                as a <strong>Web</strong> redirect, because an MCP Client Secret is stored and is sent with the sign-in.
+                            @else
+                                as a <strong>Mobile/desktop</strong> (public) redirect, or as a Web redirect with the MCP Client Secret saved.
+                            @endif
+                        </small>
                     @endif
                 </div>
 
