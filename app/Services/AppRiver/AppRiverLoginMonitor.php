@@ -10,6 +10,7 @@ use App\Models\Client;
 use App\Models\Setting;
 use App\Services\AlertService;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -25,6 +26,10 @@ use Illuminate\Support\Str;
  *   - ONE open alert per dropped-login episode. The episode is claimed with a
  *     conditional UPDATE on a null marker (or the unique-key INSERT of it),
  *     never read-then-write, so two concurrent failures open one episode.
+ *     Raising or refreshing the alert then runs inside a transaction holding
+ *     that marker row's lock (SELECT ... FOR UPDATE), so a sighting that lost
+ *     the claim waits for the raiser to record ALERT_ID and refreshes that
+ *     alert instead of raising a second one.
  *   - Later sightings in the same episode REFRESH that alert (refired_count),
  *     they never create a second one.
  *   - The episode ends on the next successful token store (reconnect or refresh),
@@ -90,8 +95,14 @@ class AppRiverLoginMonitor
             $opened = $this->openEpisode();
         });
 
-        self::guard($opened ? 'raiseAlert' : 'refreshAlert', function () use ($opened, $reason): void {
-            $alert = $opened ? null : $this->openAlert();
+        self::guard($opened ? 'raiseAlert' : 'refreshAlert', fn () => DB::transaction(function () use ($reason): void {
+            // One critical section per episode: the ALERT_ID read below and the
+            // raise-and-record after it hold the marker row's lock, so a concurrent
+            // sighting waits here until the raiser commits, then refreshes its alert.
+            // Consulted by the claim winner too: a loser may have taken the lock first.
+            Setting::where('key', self::DROPPED_AT)->lockForUpdate()->first();
+
+            $alert = $this->openAlert();
 
             if ($alert !== null) {
                 // Same source_alert_id → AlertService re-fires the open row.
@@ -116,7 +127,7 @@ class AppRiverLoginMonitor
                 'metadata' => ['reason' => $reason, 'action' => self::RECONNECT_ACTION],
             ]);
             Setting::setValue(self::ALERT_ID, (string) $alert->id);
-        });
+        }));
     }
 
     /**

@@ -78,4 +78,30 @@ class AppRiverLicenseStaleFlagTest extends TestCase
         $html = $this->actingAs(User::factory()->create())->get(route('licenses.index'))->assertOk()->getContent();
         $this->assertStringNotContainsString('data-stale-license=', $html);
     }
+
+    public function test_rows_a_healthy_sync_never_re_stamps_are_not_flagged(): void
+    {
+        // Vendor-held rows get only vendor_status rewritten each night, and a zeroed,
+        // suspended row is left alone: their synced_at ages on a working install.
+        $held = $this->license('appriver', now()->subDays(12), 'held-sku');
+        $held->update(['vendor_status' => 'Suspended']);
+        $pending = $this->license('appriver', now()->subDays(12), 'pending-sku');
+        $pending->update(['vendor_status' => 'Pending']);
+        $suspended = $this->license('appriver', now()->subDays(12), 'suspended-sku');
+        $suspended->update(['status' => 'suspended', 'quantity' => 0]);
+        // Positive control: an active row the vendor reports Active is still flagged.
+        $live = $this->license('appriver', now()->subDays(12), 'live-sku');
+        $live->update(['vendor_status' => 'Active']);
+
+        foreach ([$held, $pending, $suspended] as $license) {
+            $this->assertFalse($license->fresh()->sync_stale, "licence {$license->id} is not re-stamped by a healthy sync");
+        }
+        $this->assertTrue($live->fresh()->sync_stale);
+
+        $html = $this->actingAs(User::factory()->create())->get(route('licenses.index'))->assertOk()->getContent();
+        $this->assertStringContainsString('data-stale-license="'.$live->id.'"', $html);
+        foreach ([$held, $pending, $suspended] as $license) {
+            $this->assertStringNotContainsString('data-stale-license="'.$license->id.'"', $html);
+        }
+    }
 }
