@@ -107,18 +107,28 @@ class RunCommandActionTest extends TestCase
         $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 9]);
     }
 
+    public function test_validate_accepts_30_and_rejects_31_so_every_accepted_timeout_fits_the_cmd_budget(): void
+    {
+        // #3971: TacticalClient::cmd() waits timeout + 15s, capped at 45s.
+        $this->assertSame(30, $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 30])['timeout']);
+
+        $this->expectException(InvalidActionParams::class);
+        $this->expectExceptionMessage('between 10 and 30 seconds');
+        $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 31]);
+    }
+
     public function test_validate_returns_the_canonical_typed_triplet(): void
     {
         $params = $this->action->validateParams([
             'cmd' => '  ipconfig /all  ',
             'shell' => 'cmd',
-            'timeout' => '45',
+            'timeout' => '25',
         ]);
 
         // Only an outer trim (A2) — inner content is NOT altered. timeout is an int.
         $this->assertSame('ipconfig /all', $params['cmd']);
         $this->assertSame('cmd', $params['shell']);
-        $this->assertSame(45, $params['timeout']);
+        $this->assertSame(25, $params['timeout']);
         $this->assertIsInt($params['timeout']);
     }
 
@@ -177,7 +187,7 @@ class RunCommandActionTest extends TestCase
     {
         $base = $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 30]);
         $shell = $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'powershell', 'timeout' => 30]);
-        $time = $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 60]);
+        $time = $this->action->validateParams(['cmd' => 'whoami', 'shell' => 'cmd', 'timeout' => 20]);
 
         $this->assertNotSame($this->action->payloadHash($base), $this->action->payloadHash($shell));
         $this->assertNotSame($this->action->payloadHash($base), $this->action->payloadHash($time));
@@ -197,7 +207,7 @@ class RunCommandActionTest extends TestCase
         $params = $this->action->validateParams([
             'cmd' => 'mysql --password=supersecretvalue1234 -e "show databases"',
             'shell' => 'cmd',
-            'timeout' => 60,
+            'timeout' => 30,
         ]);
 
         $this->assertStringNotContainsString('supersecretvalue1234', $this->action->summary($params));
@@ -211,7 +221,7 @@ class RunCommandActionTest extends TestCase
         $params = $this->action->validateParams([
             'cmd' => 'mysqldump -u root -pSuperSecret123 mydb',
             'shell' => 'shell',
-            'timeout' => 120,
+            'timeout' => 30,
         ]);
 
         $this->assertStringNotContainsString('SuperSecret123', $this->action->summary($params));
@@ -224,7 +234,7 @@ class RunCommandActionTest extends TestCase
         $params = $this->action->validateParams([
             'cmd' => 'net user deploy P@ssw0rdLong /add',
             'shell' => 'cmd',
-            'timeout' => 60,
+            'timeout' => 30,
         ]);
 
         $this->assertStringNotContainsString('P@ssw0rdLong', $this->action->summary($params));
@@ -238,7 +248,7 @@ class RunCommandActionTest extends TestCase
         $params = $this->action->validateParams([
             'cmd' => "curl https://api.example/ingest -H authtok:{$token}",
             'shell' => 'shell',
-            'timeout' => 60,
+            'timeout' => 30,
         ]);
 
         $this->assertStringNotContainsString($token, $this->action->summary($params));

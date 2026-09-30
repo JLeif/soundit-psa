@@ -77,7 +77,7 @@ class OperatorBridgeTools
             ],
             [
                 'name' => 'poll_signals',
-                'description' => 'Poll reference-only Alerts Hub signal inbox rows for this scoped token. Pass cursor equal to the highest inbox_id confirmed processed to ack rows up to that cursor; limit defaults to 20 and caps at 50.',
+                'description' => 'Poll reference-only Alerts Hub signal inbox rows for this scoped token. Each row is a DELIVERY, not an event: the same event can appear more than once (one row per matching route, escalation step or destination carrying this token\'s label), each with its own inbox_id. event_id identifies the occurrence: dedupe on event_id, never on entity id (two separate events on one entity have different event_ids). Pass cursor equal to the highest inbox_id confirmed processed to ack rows up to that cursor; limit defaults to 20 and caps at 50.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [

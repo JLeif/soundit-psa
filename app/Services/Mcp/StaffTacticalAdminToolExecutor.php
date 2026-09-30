@@ -1092,14 +1092,14 @@ class StaffTacticalAdminToolExecutor
             return ['error' => 'At least one script field is required'];
         }
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate Tactical script update suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate Tactical script update suppressed; no script update was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical script recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical script recently; no script update was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Tactical script update cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Tactical script update cooldown active; no script update was sent.', $actorLabel);
 
-            return ['error' => 'tactical_update_script cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_update_script cooldown active; no script update was sent.'];
         }
 
         try {
@@ -1151,14 +1151,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate Tactical script delete suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate Tactical script delete suppressed; no script delete was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical script recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical script recently; no script delete was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Tactical script delete cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Tactical script delete cooldown active; no script delete was sent.', $actorLabel);
 
-            return ['error' => 'tactical_delete_script cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_delete_script cooldown active; no script delete was sent.'];
         }
 
         try {
@@ -1301,14 +1301,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy create suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy create suppressed; no automation-policy create was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical automation policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical automation policy recently; no automation-policy create was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy create cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy create cooldown active; no automation-policy create was sent.', $actorLabel);
 
-            return ['error' => 'tactical_create_automation_policy cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_create_automation_policy cooldown active; no automation-policy create was sent.'];
         }
 
         try {
@@ -1390,14 +1390,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy update suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy update suppressed; no automation-policy update was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical automation policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical automation policy recently; no automation-policy update was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy update cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy update cooldown active; no automation-policy update was sent.', $actorLabel);
 
-            return ['error' => 'tactical_update_automation_policy cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_update_automation_policy cooldown active; no automation-policy update was sent.'];
         }
 
         try {
@@ -1442,14 +1442,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy delete suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate automation-policy delete suppressed; no automation-policy delete was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical automation policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical automation policy recently; no automation-policy delete was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy delete cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Automation-policy delete cooldown active; no automation-policy delete was sent.', $actorLabel);
 
-            return ['error' => 'tactical_delete_automation_policy cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_delete_automation_policy cooldown active; no automation-policy delete was sent.'];
         }
 
         try {
@@ -1535,14 +1535,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate automation-policy assignment suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate automation-policy assignment suppressed; no assignment was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already assigned this Tactical automation policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already assigned this Tactical automation policy recently; no assignment was sent.'];
         }
         if ($this->cooldownActiveForContent($tool, $clientId, $contentHash, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Automation-policy assignment cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Automation-policy assignment cooldown active; no assignment was sent.', $actorLabel);
 
-            return ['error' => 'tactical_assign_automation_policy cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_assign_automation_policy cooldown active for this client; no assignment was sent.'];
         }
 
         try {
@@ -1839,14 +1839,14 @@ class StaffTacticalAdminToolExecutor
         $targetClientId = ($target['target_type'] ?? null) === 'agent' ? $clientId : null;
         $contentHash = $this->contentHash($tool, $targetClientId, $targetKey, $payload);
         if ($this->alreadyExecuted($tool, $targetClientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $targetClientId, $contentHash, 'Duplicate Tactical check create suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $targetClientId, $contentHash, 'Duplicate Tactical check create suppressed; no check create was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical check recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical check recently; no check create was sent.'];
         }
         if ($this->cooldownActive($tool, $targetClientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $targetClientId, $contentHash, 'Tactical check create cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $targetClientId, $contentHash, 'Tactical check create cooldown active; no check create was sent.', $actorLabel);
 
-            return ['error' => 'tactical_create_check cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_create_check cooldown active; no check create was sent.'];
         }
 
         try {
@@ -1914,14 +1914,14 @@ class StaffTacticalAdminToolExecutor
         $payload = ['agent' => (string) $asset->tacticalAsset->agent_id] + $body['body'];
         $contentHash = $this->contentHash($tool, $clientId, 'agent-'.$asset->id, $payload);
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate agent task create suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate agent task create suppressed; no task create was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical agent task recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical agent task recently; no task create was sent.'];
         }
         if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Agent task create cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Agent task create cooldown active; no task create was sent.', $actorLabel);
 
-            return ['error' => 'tactical_create_agent_task cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_create_agent_task cooldown active for this client; no task create was sent.'];
         }
 
         try {
@@ -1982,14 +1982,14 @@ class StaffTacticalAdminToolExecutor
         $payload = ['policy' => (int) $resolvedPolicy['policy_id']] + $body['body'];
         $contentHash = $this->contentHash($tool, null, 'policy-'.$resolvedPolicy['policy_id'], $payload);
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate policy task create suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate policy task create suppressed; no task create was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical policy task recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical Tactical policy task recently; no task create was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Policy task create cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Policy task create cooldown active; no task create was sent.', $actorLabel);
 
-            return ['error' => 'tactical_create_policy_task cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_create_policy_task cooldown active; no task create was sent.'];
         }
 
         try {
@@ -2067,14 +2067,14 @@ class StaffTacticalAdminToolExecutor
         $contentHash = $this->contentHash($tool, null, 'task-'.$resolved['task_id'], $body['body']);
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate task update suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate task update suppressed; no task update was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical task recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this Tactical task recently; no task update was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Task update cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Task update cooldown active; no task update was sent.', $actorLabel);
 
-            return ['error' => 'tactical_update_task cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_update_task cooldown active; no task update was sent.'];
         }
 
         try {
@@ -2113,14 +2113,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, null, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate task delete suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Duplicate task delete suppressed; no task delete was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical task recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this Tactical task recently; no task delete was sent.'];
         }
         if ($this->cooldownActive($tool, null, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Task delete cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', null, $contentHash, 'Task delete cooldown active; no task delete was sent.', $actorLabel);
 
-            return ['error' => 'tactical_delete_task cooldown active; no upstream call was made.'];
+            return ['error' => 'tactical_delete_task cooldown active; no task delete was sent.'];
         }
 
         try {
@@ -2167,14 +2167,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate agent task run suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate agent task run suppressed; no task run was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical agent task recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical agent task recently; no task run was sent.'];
         }
         if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Agent task run cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Agent task run cooldown active; no task run was sent.', $actorLabel);
 
-            return ['error' => 'tactical_run_agent_task cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_run_agent_task cooldown active for this client; no task run was sent.'];
         }
 
         try {
@@ -2231,14 +2231,14 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate policy task single-agent run suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate policy task single-agent run suppressed; no task run was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical policy task on that agent recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical policy task on that agent recently; no task run was sent.'];
         }
         if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Policy task single-agent run cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Policy task single-agent run cooldown active; no task run was sent.', $actorLabel);
 
-            return ['error' => 'tactical_run_policy_task_on_agent cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_run_policy_task_on_agent cooldown active for this client; no task run was sent.'];
         }
 
         try {
@@ -2501,14 +2501,14 @@ class StaffTacticalAdminToolExecutor
 
             $payload = ['policy' => $policyId] + ($body['body'] ?? []);
             if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy create suppressed before upstream call.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy create suppressed; no patch-policy create was sent.', $actorLabel);
 
-                return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical patch policy recently; no upstream call was made.'];
+                return ['success' => true, 'idempotent' => true, 'message' => 'Already created an identical patch policy recently; no patch-policy create was sent.'];
             }
             if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy create cooldown active; upstream call refused.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy create cooldown active; no patch-policy create was sent.', $actorLabel);
 
-                return ['error' => 'tactical_create_patch_policy cooldown active for this client; no upstream call was made.'];
+                return ['error' => 'tactical_create_patch_policy cooldown active for this client; no patch-policy create was sent.'];
             }
 
             $this->client->createPatchPolicy($payload);
@@ -2551,14 +2551,14 @@ class StaffTacticalAdminToolExecutor
             return ['error' => 'At least one patch policy field is required'];
         }
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy update suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy update suppressed; no patch-policy update was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this patch policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already updated this patch policy recently; no patch-policy update was sent.'];
         }
         if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy update cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy update cooldown active; no patch-policy update was sent.', $actorLabel);
 
-            return ['error' => 'tactical_update_patch_policy cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_update_patch_policy cooldown active for this client; no patch-policy update was sent.'];
         }
 
         try {
@@ -2599,14 +2599,14 @@ class StaffTacticalAdminToolExecutor
 
         $contentHash = $this->contentHash($tool, $clientId, 'patch-policy-'.$resolved['patch_policy_id'], ['policy_id' => $resolved['policy_id']]);
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy delete suppressed before upstream call.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy delete suppressed; no patch-policy delete was sent.', $actorLabel);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this patch policy recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already deleted this patch policy recently; no patch-policy delete was sent.'];
         }
         if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy delete cooldown active; upstream call refused.', $actorLabel);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy delete cooldown active; no patch-policy delete was sent.', $actorLabel);
 
-            return ['error' => 'tactical_delete_patch_policy cooldown active for this client; no upstream call was made.'];
+            return ['error' => 'tactical_delete_patch_policy cooldown active for this client; no patch-policy delete was sent.'];
         }
 
         try {
@@ -2979,9 +2979,9 @@ class StaffTacticalAdminToolExecutor
         }
 
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate Tactical agent removal suppressed before upstream call.', $actorLabel, $run?->id, $approverId);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate Tactical agent removal suppressed; no agent removal was sent.', $actorLabel, $run?->id, $approverId);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already removed this Tactical agent recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already removed this Tactical agent recently; no agent removal was sent.'];
         }
 
         try {
@@ -3399,20 +3399,29 @@ class StaffTacticalAdminToolExecutor
         // fleet, so a target the approver never read is refused, not written. A
         // proposal carrying no pinned id is refused too: it cannot show that the
         // target the approver read and the one resolved now are the same client.
+        //
+        // Both refusals below name the WRITE, not the upstream connection (#3879).
+        // They are reached only after clientCustomFieldTarget ->
+        // resolveUpstreamTacticalClient has already sent GET /clients/ to pin the
+        // target, so "no upstream call was made" was false here: a read is an
+        // upstream call. What these arms do establish is that the custom-field
+        // write never went out, which is the fact an approver acts on. This is the
+        // same convention patchResetScope and tacticalClientSiteTarget already use
+        // ("no reset was sent", "no assignment was sent").
         $stagedClientId = $this->positiveInteger($arguments['staged_upstream_client_id'] ?? null);
         if ($run !== null && $stagedClientId !== $target['upstream_client_id']) {
             $message = $stagedClientId === null
-                ? 'This proposal recorded no upstream Tactical client id, so the approved target cannot be confirmed; no upstream call was made. Deny it in the cockpit, then stage the write again: a proposal awaiting approval is never rewritten in place, so the replacement is read and approved on its own proposal.'
-                : "The approved proposal targeted Tactical client #{$stagedClientId}, but '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is what this PSA client's mapping resolves to now; the approved target changed and no upstream call was made. Deny this proposal in the cockpit, then stage the write again so '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is read and approved on its own proposal.";
+                ? 'This proposal recorded no upstream Tactical client id, so the approved target cannot be confirmed; no custom-field write was sent. Deny it in the cockpit, then stage the write again: a proposal awaiting approval is never rewritten in place, so the replacement is read and approved on its own proposal.'
+                : "The approved proposal targeted Tactical client #{$stagedClientId}, but '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is what this PSA client's mapping resolves to now; the approved target changed and no custom-field write was sent. Deny this proposal in the cockpit, then stage the write again so '{$target['upstream_client_name']}' (#{$target['upstream_client_id']}) is read and approved on its own proposal.";
             $this->auditAttempt($tool, 'rejected', $clientId, $contentHash, $message, $actorLabel, $run?->id, $approverId);
 
             return ['error' => $message];
         }
 
         if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate Tactical client custom-field write suppressed before upstream call.', $actorLabel, $run?->id, $approverId);
+            $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate Tactical client custom-field write suppressed; no custom-field write was sent.', $actorLabel, $run?->id, $approverId);
 
-            return ['success' => true, 'idempotent' => true, 'message' => 'Already wrote this Tactical client custom field recently; no upstream call was made.'];
+            return ['success' => true, 'idempotent' => true, 'message' => 'Already wrote this Tactical client custom field recently; no custom-field write was sent.'];
         }
 
         try {
@@ -3660,6 +3669,11 @@ class StaffTacticalAdminToolExecutor
     {
         $siteKey = is_string($client->tactical_site_id) ? trim($client->tactical_site_id) : '';
         $clientName = $siteKey === '' ? '' : trim(explode('|', $siteKey, 2)[0]);
+        // THE ONE PRE-READ ARM. This returns before getClients() is attempted, so
+        // it is the one refusal here that says nothing reached Tactical (#3879).
+        // Every arm below it follows a read ATTEMPT, not necessarily a read that
+        // left: the catch arm also fires when TacticalClient refuses the request
+        // before dispatch (#3885). So the arms below name the WRITE instead.
         if ($clientName === '') {
             return ['error' => 'Client has no Tactical site mapping; no upstream call was made.'];
         }
@@ -3667,7 +3681,7 @@ class StaffTacticalAdminToolExecutor
         try {
             $candidates = $this->client->getClients();
         } catch (TacticalClientException) {
-            return ['error' => 'Could not read Tactical clients to resolve the custom-field target; no upstream call was made.'];
+            return ['error' => 'Could not read Tactical clients to resolve the custom-field target; no custom-field write was sent.'];
         }
 
         $matches = [];
@@ -3678,14 +3692,14 @@ class StaffTacticalAdminToolExecutor
 
             $id = $this->positiveInteger($candidate['id'] ?? null);
             if ($id === null) {
-                return ['error' => "A Tactical client named '{$clientName}' has no numeric id; no upstream call was made."];
+                return ['error' => "A Tactical client named '{$clientName}' has no numeric id; no custom-field write was sent."];
             }
 
             $matches[] = ['id' => $id, 'name' => (string) ($candidate['name'] ?? $clientName)];
         }
 
         if ($matches === []) {
-            return ['error' => "Tactical client '{$clientName}' was not found; no upstream call was made."];
+            return ['error' => "Tactical client '{$clientName}' was not found; no custom-field write was sent."];
         }
 
         // Exact-case first (#1291). Upstream names are unique case-sensitively, so
@@ -3707,7 +3721,7 @@ class StaffTacticalAdminToolExecutor
             ));
 
             return ['error' => "Tactical client name '{$clientName}' is ambiguous: it matches ".count($matches)
-                ." upstream clients — {$described}. Upstream client names are unique only case-sensitively, so this cannot be resolved from the stored name pair; no upstream call was made."];
+                ." upstream clients — {$described}. Upstream client names are unique only case-sensitively, so this cannot be resolved from the stored name pair; no custom-field write was sent."];
         }
 
         return $matches[0];
@@ -3733,7 +3747,7 @@ class StaffTacticalAdminToolExecutor
             }
 
             $client = Client::find((int) ($payload['client_id'] ?? 0));
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $ticket = Ticket::automationVisible()->find((int) ($payload['ticket_id'] ?? 0));
             if (! $client || ! $ticket || (int) $ticket->client_id !== (int) $run->client_id) {
                 $run->releaseClaim();
 
@@ -3816,14 +3830,14 @@ class StaffTacticalAdminToolExecutor
 
         if ($run === null) {
             if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy reset suppressed before upstream call.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate patch-policy reset suppressed; no reset was sent.', $actorLabel);
 
-                return ['success' => true, 'idempotent' => true, 'message' => 'Already reset this Tactical patch-policy scope recently; no upstream call was made.'];
+                return ['success' => true, 'idempotent' => true, 'message' => 'Already reset this Tactical patch-policy scope recently; no reset was sent.'];
             }
             if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy reset cooldown active; upstream call refused.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Patch-policy reset cooldown active; no reset was sent.', $actorLabel);
 
-                return ['error' => 'tactical_reset_patch_policies cooldown active for this client; no upstream call was made.'];
+                return ['error' => 'tactical_reset_patch_policies cooldown active for this client; no reset was sent.'];
             }
         }
 
@@ -5297,14 +5311,14 @@ class StaffTacticalAdminToolExecutor
 
         if ($run === null) {
             if ($this->alreadyExecuted($tool, $clientId, $contentHash)) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate policy task all-agents run suppressed before upstream call.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Duplicate policy task all-agents run suppressed; no task run was sent.', $actorLabel);
 
-                return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical policy task for all affected agents recently; no upstream call was made.'];
+                return ['success' => true, 'idempotent' => true, 'message' => 'Already ran this Tactical policy task for all affected agents recently; no task run was sent.'];
             }
             if ($this->cooldownActive($tool, $clientId, self::COOLDOWNS[$tool])) {
-                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Policy task all-agents run cooldown active; upstream call refused.', $actorLabel);
+                $this->auditAttempt($tool, 'blocked', $clientId, $contentHash, 'Policy task all-agents run cooldown active; no task run was sent.', $actorLabel);
 
-                return ['error' => 'tactical_run_policy_task_all cooldown active; no upstream call was made.'];
+                return ['error' => 'tactical_run_policy_task_all cooldown active; no task run was sent.'];
             }
         }
 
@@ -5490,8 +5504,14 @@ class StaffTacticalAdminToolExecutor
             return ['error' => $missingMessage];
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+            }
+
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 

@@ -56,6 +56,9 @@
                     <option value="unknown-caller" {{ ($filters['status'] ?? '') === 'unknown-caller' ? 'selected' : '' }}>
                         Unknown caller — needs follow-up
                     </option>
+                    <option value="resolved-no-ticket" {{ ($filters['status'] ?? '') === 'resolved-no-ticket' ? 'selected' : '' }}>
+                        Resolved client, no ticket
+                    </option>
                 </select>
             </div>
             <div class="col-md-3">

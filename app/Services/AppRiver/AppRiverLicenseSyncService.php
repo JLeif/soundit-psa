@@ -5,6 +5,7 @@ namespace App\Services\AppRiver;
 use App\Models\Client;
 use App\Models\License;
 use App\Models\LicenseType;
+use App\Models\Setting;
 use App\Services\SyncResult;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -33,6 +34,21 @@ class AppRiverLicenseSyncService
      */
     private const INCONCLUSIVE_SUBSCRIPTION_STATUSES = ['Suspended', 'Pending'];
 
+    /**
+     * JSON list of the client ids the last run skipped as CustomerType Referred.
+     * Their licence rows are left unsynced by design, so License::getSyncStaleAttribute()
+     * reads this to keep them out of the Stale flag.
+     */
+    public const REFERRED_CLIENTS_SETTING = 'appriver_sync_referred_client_ids';
+
+    /** @return list<int> the clients the last run skipped as CustomerType Referred */
+    public static function referredClientIds(): array
+    {
+        $ids = json_decode((string) Setting::getValue(self::REFERRED_CLIENTS_SETTING, '[]'), true);
+
+        return is_array($ids) ? array_values(array_map('intval', $ids)) : [];
+    }
+
     public function __construct(
         private readonly AppRiverClient $client,
     ) {}
@@ -59,6 +75,7 @@ class AppRiverLicenseSyncService
 
         $seenLicenseIds = [];
         $successfulClientIds = [];
+        $referredClientIds = [];
 
         foreach ($clients as $appriverCustomerId => $client) {
             // A Referred customer buys from AppRiver directly — Sound IT takes a
@@ -83,6 +100,7 @@ class AppRiverLicenseSyncService
                 // recordWithdrawn(): loud in the summary, silent in the exit status.
                 Log::info("[AppRiverSync] Skipping {$client->name}: CustomerType Referred; no partner access by design");
                 $result->recordSkipped("Skipped {$client->name}: CustomerType Referred; no partner access by design — its licences were not synced and stale cleanup was withheld");
+                $referredClientIds[] = $client->id;
 
                 continue;
             }
@@ -120,6 +138,10 @@ class AppRiverLicenseSyncService
                 $onProgress($result);
             }
         }
+
+        // Replaced, not merged: a client reclassified out of Referred drops off the list
+        // and its rows are flagged again if they then stop being re-stamped.
+        Setting::setValue(self::REFERRED_CLIENTS_SETTING, json_encode($referredClientIds));
 
         // Deactivate stale licenses only for clients we successfully synced
         $this->deactivateStale($seenLicenseIds, $successfulClientIds, $result);

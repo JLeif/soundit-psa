@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\InvoiceStatus;
 use App\Enums\PrepayTransactionSource;
 use App\Models\Contract;
 use App\Models\ContractActivity;
@@ -11,6 +12,7 @@ use App\Models\PrepayTransaction;
 use App\Models\TicketNote;
 use App\Models\User;
 use Carbon\CarbonInterface;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -20,83 +22,98 @@ class PrepayService
 {
     /**
      * Create a prepay deposit from an invoice's prepaid time lines.
-     * Called by BillingService::generateInvoice() after lines are created.
+     * Called by InvoiceObserver::handlePaid() and BackfillPrepaidTime.
      */
     public function depositFromInvoice(Invoice $invoice, Contract $contract): ?PrepayTransaction
     {
-        // Guard: skip dollar-based contracts (auto-deposit is hours-based)
-        if ($contract->has_prepay && $contract->prepay_as_amount) {
-            Log::warning('[Prepay] Skipping deposit — contract uses dollar-based prepay', [
+        return DB::transaction(function () use ($invoice, $contract) {
+            // This method takes the invoice lock before the contract lock.
+            $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
+
+            if ($lockedInvoice === null) {
+                Log::warning('[Prepay] Invoice deposit refused', ['invoice_id' => $invoice->id]);
+
+                return null;
+            }
+
+            if ($lockedInvoice->status !== InvoiceStatus::Paid) {
+                return null;
+            }
+
+            // Guard: skip dollar-based contracts (auto-deposit is hours-based)
+            if ($contract->has_prepay && $contract->prepay_as_amount) {
+                Log::warning('[Prepay] Skipping deposit — contract uses dollar-based prepay', [
+                    'contract_id' => $contract->id,
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            // Idempotency: at most ONE unmatched deposit at a time. Counted
+            // against the reversals rather than tested for existence, because a
+            // reversal is a compensating -hours row, not a delete: an existence
+            // test would refuse for ever once an invoice had been reverted once,
+            // so a QBO payment unapplied and then re-applied would leave the
+            // invoice Paid, the client charged, and the hours they bought gone
+            // (#1173). Balanced counts mean nothing is deposited right now.
+            $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->count();
+
+            $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceReversal)
+                ->count();
+
+            if ($deposits > $reversals) {
+                Log::debug('[Prepay] Deposit already exists for invoice', [
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            $totalMinutes = (int) $invoice->lines->sum('prepaid_time_minutes');
+
+            if ($totalMinutes <= 0) {
+                return null;
+            }
+
+            $totalHours = round($totalMinutes / 60, 4);
+
+            // Initialize prepay on contract if this is the first deposit
+            $this->ensurePrepayInitialized($contract);
+
+            $txn = PrepayTransaction::create([
+                'contract_id' => $contract->id,
+                'source' => PrepayTransactionSource::InvoiceDeposit,
+                'invoice_id' => $invoice->id,
+                'date' => $invoice->invoice_date,
+                'hours' => $totalHours,
+                'description' => "Auto-deposit from {$invoice->invoice_number} ({$totalMinutes} min)",
+                'invoice_number' => $invoice->invoice_number,
+                'invoice_date' => $invoice->invoice_date,
+                // A RE-deposit is a new lot restored after a reversal, so its life
+                // cannot be measured from the original invoice date — see
+                // restoredExpiry(). The first deposit is unchanged.
+                'expiry_date' => $deposits > 0
+                    ? $this->restoredExpiry($contract, $invoice)
+                    : $this->expiryForCredit($contract, $invoice->invoice_date),
+            ]);
+
+            // Update denormalized balance on contract
+            $contract->increment('prepay_total', $totalHours);
+            $contract->increment('prepay_balance', $totalHours);
+
+            Log::info('[Prepay] Auto-deposit from invoice', [
                 'contract_id' => $contract->id,
                 'invoice_id' => $invoice->id,
+                'minutes' => $totalMinutes,
+                'hours' => $totalHours,
             ]);
 
-            return null;
-        }
-
-        // Idempotency: at most ONE unmatched deposit at a time. Counted
-        // against the reversals rather than tested for existence, because a
-        // reversal is a compensating -hours row, not a delete: an existence
-        // test would refuse for ever once an invoice had been reverted once,
-        // so a QBO payment unapplied and then re-applied would leave the
-        // invoice Paid, the client charged, and the hours they bought gone
-        // (#1173). Balanced counts mean nothing is deposited right now.
-        $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->count();
-
-        $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceReversal)
-            ->count();
-
-        if ($deposits > $reversals) {
-            Log::debug('[Prepay] Deposit already exists for invoice', [
-                'invoice_id' => $invoice->id,
-            ]);
-
-            return null;
-        }
-
-        $totalMinutes = (int) $invoice->lines->sum('prepaid_time_minutes');
-
-        if ($totalMinutes <= 0) {
-            return null;
-        }
-
-        $totalHours = round($totalMinutes / 60, 4);
-
-        // Initialize prepay on contract if this is the first deposit
-        $this->ensurePrepayInitialized($contract);
-
-        $txn = PrepayTransaction::create([
-            'contract_id' => $contract->id,
-            'source' => PrepayTransactionSource::InvoiceDeposit,
-            'invoice_id' => $invoice->id,
-            'date' => $invoice->invoice_date,
-            'hours' => $totalHours,
-            'description' => "Auto-deposit from {$invoice->invoice_number} ({$totalMinutes} min)",
-            'invoice_number' => $invoice->invoice_number,
-            'invoice_date' => $invoice->invoice_date,
-            // A RE-deposit is a new lot restored after a reversal, so its life
-            // cannot be measured from the original invoice date — see
-            // restoredExpiry(). The first deposit is unchanged.
-            'expiry_date' => $deposits > 0
-                ? $this->restoredExpiry($contract, $invoice)
-                : $this->expiryForCredit($contract, $invoice->invoice_date),
-        ]);
-
-        // Update denormalized balance on contract
-        $contract->increment('prepay_total', $totalHours);
-        $contract->increment('prepay_balance', $totalHours);
-
-        Log::info('[Prepay] Auto-deposit from invoice', [
-            'contract_id' => $contract->id,
-            'invoice_id' => $invoice->id,
-            'minutes' => $totalMinutes,
-            'hours' => $totalHours,
-        ]);
-
-        return $txn;
+            return $txn;
+        });
     }
 
     /**
@@ -121,58 +138,73 @@ class PrepayService
         Contract $contract,
         ?string $description = null,
     ): ?PrepayTransaction {
-        // The LATEST deposit, not the first: an invoice may have been
-        // deposited, reversed and deposited again across paid/open cycles, and
-        // the live one is the last.
-        $deposit = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->latest('id')
-            ->first();
+        return DB::transaction(function () use ($invoice, $contract, $description) {
+            // Take the same exclusive invoice lock as depositFromInvoice().
+            $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
 
-        if (! $deposit) {
-            return null;
-        }
+            if ($lockedInvoice === null) {
+                Log::warning('[Prepay] Invoice reversal refused', ['invoice_id' => $invoice->id]);
 
-        // Idempotency: refuse only when every deposit already has a reversal.
-        $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceDeposit)
-            ->count();
+                return null;
+            }
 
-        $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
-            ->where('source', PrepayTransactionSource::InvoiceReversal)
-            ->count();
+            if ($lockedInvoice->status === InvoiceStatus::Paid) {
+                return null;
+            }
 
-        if ($reversals >= $deposits) {
-            Log::debug('[Prepay] Reversal already exists for invoice', [
+            // The LATEST deposit, not the first: an invoice may have been
+            // deposited, reversed and deposited again across paid/open cycles, and
+            // the live one is the last.
+            $deposit = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->latest('id')
+                ->first();
+
+            if (! $deposit) {
+                return null;
+            }
+
+            // Idempotency: refuse only when every deposit already has a reversal.
+            $deposits = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceDeposit)
+                ->count();
+
+            $reversals = PrepayTransaction::where('invoice_id', $invoice->id)
+                ->where('source', PrepayTransactionSource::InvoiceReversal)
+                ->count();
+
+            if ($reversals >= $deposits) {
+                Log::debug('[Prepay] Reversal already exists for invoice', [
+                    'invoice_id' => $invoice->id,
+                ]);
+
+                return null;
+            }
+
+            $hours = abs((float) $deposit->hours);
+
+            $txn = PrepayTransaction::create([
+                'contract_id' => $contract->id,
+                'source' => PrepayTransactionSource::InvoiceReversal,
                 'invoice_id' => $invoice->id,
+                'date' => now(),
+                'hours' => -$hours,
+                'description' => $description ?? "Reversal — invoice {$invoice->invoice_number} voided",
+                'invoice_number' => $invoice->invoice_number,
+                'invoice_date' => $invoice->invoice_date,
             ]);
 
-            return null;
-        }
+            $contract->decrement('prepay_total', $hours);
+            $contract->decrement('prepay_balance', $hours);
 
-        $hours = abs((float) $deposit->hours);
+            Log::info('[Prepay] Deposit reversed for voided invoice', [
+                'contract_id' => $contract->id,
+                'invoice_id' => $invoice->id,
+                'hours' => $hours,
+            ]);
 
-        $txn = PrepayTransaction::create([
-            'contract_id' => $contract->id,
-            'source' => PrepayTransactionSource::InvoiceReversal,
-            'invoice_id' => $invoice->id,
-            'date' => now(),
-            'hours' => -$hours,
-            'description' => $description ?? "Reversal — invoice {$invoice->invoice_number} voided",
-            'invoice_number' => $invoice->invoice_number,
-            'invoice_date' => $invoice->invoice_date,
-        ]);
-
-        $contract->decrement('prepay_total', $hours);
-        $contract->decrement('prepay_balance', $hours);
-
-        Log::info('[Prepay] Deposit reversed for voided invoice', [
-            'contract_id' => $contract->id,
-            'invoice_id' => $invoice->id,
-            'hours' => $hours,
-        ]);
-
-        return $txn;
+            return $txn;
+        });
     }
 
     /**
@@ -416,73 +448,126 @@ class PrepayService
      */
     public function debitFromTicketNote(TicketNote $note): ?PrepayTransaction
     {
-        $ticket = $note->ticket;
-
-        if (! $ticket) {
+        if (! $note->exists || $note->getKey() === null) {
             return null;
         }
 
-        // Priority: note's contract → ticket's contract → client's hours-based prepay contract
-        $contract = $note->contract_id ? $note->contract : null;
+        $alertContract = null;
+        $txn = DB::transaction(function () use ($note, &$alertContract) {
+            // Lock order: note -> existing prepay transaction -> contract.
+            $lockedNote = TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
+            if (! $lockedNote || $lockedNote->trashed() || ! $lockedNote->is_billable || $lockedNote->time_minutes <= 0) {
+                $this->reverseDebitForTicketNote($note);
 
-        if (! $contract && $ticket->contract_id) {
-            $contract = $ticket->contract;
-        }
+                return null;
+            }
+            $note = $lockedNote;
 
-        if (! $contract && $ticket->client_id) {
-            $contract = Contract::where('client_id', $ticket->client_id)
-                ->where('status', 'active')
-                ->whereNotNull('prepay_balance')
-                ->where('prepay_as_amount', false)
-                ->first();
-        }
+            // Note-level only (r2 diff:6): a contained note already carries no time, and staff
+            // billable time on a held ticket debits prepay exactly as it would be invoiced.
+            if ($note->isUnverifiedContactIntake()) {
+                return null;
+            }
 
-        if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
-            return null;
-        }
+            $hours = round($note->time_minutes / 60, 4);
 
-        if (! $note->is_billable || ! $note->time_minutes || $note->time_minutes <= 0) {
-            // If note is no longer billable/has no time, reverse any existing debit
-            $this->reverseDebitForTicketNote($note);
-
-            return null;
-        }
-
-        $hours = round($note->time_minutes / 60, 4);
-        $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
-        $description = "Ticket #{$ticket->id}: {$subject}";
-
-        $txn = DB::transaction(function () use ($contract, $note, $hours, $description) {
+            // A missing-key locking read can gap-lock unrelated new notes on InnoDB.
             $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+            if ($existing) {
+                $existing = PrepayTransaction::whereKey($existing->id)->lockForUpdate()->first();
+            }
+
+            $ticket = $note->ticket;
+            $contract = null;
+            $description = null;
+
+            if ($ticket) {
+                // Priority: note's contract → ticket's contract → client's hours-based prepay contract
+                $contract = $note->contract_id ? $note->contract : null;
+
+                if (! $contract && $ticket->contract_id) {
+                    $contract = $ticket->contract;
+                }
+
+                if (! $contract && $ticket->client_id) {
+                    $contract = Contract::where('client_id', $ticket->client_id)
+                        ->where('status', 'active')
+                        ->whereNotNull('prepay_balance')
+                        ->where('prepay_as_amount', false)
+                        ->orderBy('id')
+                        ->first();
+                }
+
+                if ($contract && (! $contract->has_prepay || $contract->prepay_as_amount)) {
+                    $contract = null;
+                }
+
+                $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
+                $description = "Ticket #{$ticket->id}: {$subject}";
+            }
+
+            // Only a new debit needs an eligible resolved contract; an existing one stays on its ledger contract.
+            if (! $existing && ! $contract) {
+                return null;
+            }
+
+            $alertContract = $contract;
+
+            if (! $existing) {
+                try {
+                    $txn = PrepayTransaction::create([
+                        'contract_id' => $contract->id,
+                        'source' => PrepayTransactionSource::TicketTime,
+                        'ticket_note_id' => $note->id,
+                        'user_id' => $note->author_id,
+                        'date' => $note->noted_at ?? $note->created_at,
+                        'hours' => -$hours,
+                        'description' => $description,
+                    ]);
+                } catch (UniqueConstraintViolationException $e) {
+                    // The collided key now exists: use a current locking read to see the
+                    // winner under InnoDB REPEATABLE READ, not the earlier empty snapshot.
+                    $existing = PrepayTransaction::where('ticket_note_id', $note->id)->lockForUpdate()->first();
+                    if (! $existing) {
+                        throw $e;
+                    }
+                }
+            }
 
             if ($existing) {
-                // Update existing debit — adjust balance by difference
+                $originalContract = $existing->contract()->withTrashed()->lockForUpdate()->first();
+                $alertContract = $originalContract;
+                if (! $originalContract) {
+                    Log::warning('[Prepay] Ticket note difference refused', [
+                        'ticket_note_id' => $note->id,
+                        'contract_id' => $existing->contract_id,
+                    ]);
+
+                    return null;
+                }
+                $moved = $contract?->id !== $existing->contract_id;
+                if ($moved) {
+                    Log::warning('[Prepay] Ticket note contract mismatch', [
+                        'ticket_note_id' => $note->id,
+                        'resolved_contract_id' => $contract?->id,
+                        'ledger_contract_id' => $existing->contract_id,
+                    ]);
+                }
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
-                    'description' => $description,
+                    'description' => $moved ? $existing->description : $description,
                     'date' => $note->noted_at ?? $note->created_at,
                 ]);
 
                 $diff = $hours - $oldHours;
-                if ($diff != 0) {
-                    $contract->increment('prepay_used', $diff);
-                    $contract->decrement('prepay_balance', $diff);
+                if ($diff != 0 && $originalContract) {
+                    $originalContract->increment('prepay_used', $diff);
+                    $originalContract->decrement('prepay_balance', $diff);
                 }
 
                 return $existing;
             }
-
-            // Create new debit
-            $txn = PrepayTransaction::create([
-                'contract_id' => $contract->id,
-                'source' => PrepayTransactionSource::TicketTime,
-                'ticket_note_id' => $note->id,
-                'user_id' => $note->author_id,
-                'date' => $note->noted_at ?? $note->created_at,
-                'hours' => -$hours,
-                'description' => $description,
-            ]);
 
             $contract->increment('prepay_used', $hours);
             $contract->decrement('prepay_balance', $hours);
@@ -496,9 +581,14 @@ class PrepayService
             return $txn;
         });
 
-        // Check alert threshold after transaction commits
-        $contract->refresh();
-        app(PrepayAlertService::class)->checkThreshold($contract);
+        // Check alert threshold after transaction commits; a soft-deleted ledger contract
+        // still takes the difference but is never alerted on.
+        if ($alertContract) {
+            $alertContract->refresh();
+            if (! $alertContract->trashed()) {
+                app(PrepayAlertService::class)->checkThreshold($alertContract);
+            }
+        }
 
         return $txn;
     }
@@ -531,6 +621,7 @@ class PrepayService
                 ->where('status', 'active')
                 ->whereNotNull('prepay_balance')
                 ->where('prepay_as_amount', false)
+                ->orderBy('id')
                 ->first();
         }
 
@@ -569,10 +660,41 @@ class PrepayService
         $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
         $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
 
-        $txn = DB::transaction(function () use ($contract, $call, $hours, $description) {
-            $existing = PrepayTransaction::where('phone_call_id', $call->id)->first();
+        $alertContract = $contract;
+        $txn = DB::transaction(function () use ($contract, $call, $hours, $description, &$alertContract) {
+            // Lock the parent call row first so concurrent debits for one call queue
+            // here. Without it, under InnoDB's default REPEATABLE READ a locking read
+            // that finds no prepay row takes only a gap lock, both racers can hold
+            // that gap lock, and their INSERTs then deadlock. The unique index is the
+            // backstop for any writer that skips this lock.
+            PhoneCall::whereKey($call->id)->lockForUpdate()->first();
+
+            $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+
+            if (! $existing) {
+                try {
+                    $txn = PrepayTransaction::create([
+                        'contract_id' => $contract->id,
+                        'source' => PrepayTransactionSource::PhoneCallTime,
+                        'phone_call_id' => $call->id,
+                        'user_id' => $call->answered_by,
+                        'date' => $call->started_at ?? $call->created_at,
+                        'hours' => -$hours,
+                        'description' => $description,
+                    ]);
+                } catch (UniqueConstraintViolationException $e) {
+                    $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+                    if (! $existing) {
+                        throw $e;
+                    }
+                }
+            }
 
             if ($existing) {
+                // Preserve the ledger's target even when this delivery resolves elsewhere.
+                // Lock order remains call -> prepay transaction -> contract.
+                $originalContract = $existing->contract()->lockForUpdate()->first();
+                $alertContract = $originalContract;
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
@@ -582,22 +704,21 @@ class PrepayService
 
                 $diff = $hours - $oldHours;
                 if ($diff != 0) {
-                    $contract->increment('prepay_used', $diff);
-                    $contract->decrement('prepay_balance', $diff);
+                    if ($originalContract) {
+                        $originalContract->increment('prepay_used', $diff);
+                        $originalContract->decrement('prepay_balance', $diff);
+                    } else {
+                        // Like reversal, mutate the ledger even without a live contract.
+                        Log::warning('[Prepay] Phone call difference skipped', [
+                            'phone_call_id' => $call->id,
+                            'contract_id' => $existing->contract_id,
+                            'hours_difference' => $diff,
+                        ]);
+                    }
                 }
 
                 return $existing;
             }
-
-            $txn = PrepayTransaction::create([
-                'contract_id' => $contract->id,
-                'source' => PrepayTransactionSource::PhoneCallTime,
-                'phone_call_id' => $call->id,
-                'user_id' => $call->answered_by,
-                'date' => $call->started_at ?? $call->created_at,
-                'hours' => -$hours,
-                'description' => $description,
-            ]);
 
             $contract->increment('prepay_used', $hours);
             $contract->decrement('prepay_balance', $hours);
@@ -611,8 +732,10 @@ class PrepayService
             return $txn;
         });
 
-        $contract->refresh();
-        app(PrepayAlertService::class)->checkThreshold($contract);
+        if ($alertContract) {
+            $alertContract->refresh();
+            app(PrepayAlertService::class)->checkThreshold($alertContract);
+        }
 
         return $txn;
     }
@@ -622,26 +745,28 @@ class PrepayService
      */
     public function reverseDebitForPhoneCall(PhoneCall $call): void
     {
-        $txn = PrepayTransaction::where('phone_call_id', $call->id)->first();
+        DB::transaction(function () use ($call) {
+            $txn = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
 
-        if (! $txn) {
-            return;
-        }
+            if (! $txn) {
+                return;
+            }
 
-        $hours = abs((float) $txn->hours);
-        $contract = $txn->contract;
+            $hours = abs((float) $txn->hours);
+            $contract = $txn->contract;
 
-        $txn->delete();
+            $txn->delete();
 
-        if ($contract) {
-            $contract->decrement('prepay_used', $hours);
-            $contract->increment('prepay_balance', $hours);
-        }
+            if ($contract) {
+                $contract->decrement('prepay_used', $hours);
+                $contract->increment('prepay_balance', $hours);
+            }
 
-        Log::info('[Prepay] Phone call time debit reversed', [
-            'phone_call_id' => $call->id,
-            'hours' => $hours,
-        ]);
+            Log::info('[Prepay] Phone call time debit reversed', [
+                'phone_call_id' => $call->id,
+                'hours' => $hours,
+            ]);
+        });
     }
 
     /**
@@ -649,26 +774,41 @@ class PrepayService
      */
     public function reverseDebitForTicketNote(TicketNote $note): void
     {
-        $txn = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+        DB::transaction(function () use ($note) {
+            // Include soft-deleted notes: the deleted observer reverses after deletion.
+            TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
+            $txn = PrepayTransaction::where('ticket_note_id', $note->id)->first();
+            if ($txn) {
+                $txn = PrepayTransaction::whereKey($txn->id)->lockForUpdate()->first();
+            }
 
-        if (! $txn) {
-            return;
-        }
+            if (! $txn) {
+                return;
+            }
 
-        $hours = abs((float) $txn->hours);
-        $contract = $txn->contract;
+            $hours = abs((float) $txn->hours);
+            $contract = $txn->contract()->withTrashed()->lockForUpdate()->first();
+            if (! $contract) {
+                Log::warning('[Prepay] Ticket note reversal refused', [
+                    'ticket_note_id' => $note->id,
+                    'contract_id' => $txn->contract_id,
+                ]);
 
-        $txn->delete();
+                return;
+            }
 
-        if ($contract) {
-            $contract->decrement('prepay_used', $hours);
-            $contract->increment('prepay_balance', $hours);
-        }
+            $txn->delete();
 
-        Log::info('[Prepay] Ticket time debit reversed', [
-            'ticket_note_id' => $note->id,
-            'hours' => $hours,
-        ]);
+            if ($contract) {
+                $contract->decrement('prepay_used', $hours);
+                $contract->increment('prepay_balance', $hours);
+            }
+
+            Log::info('[Prepay] Ticket time debit reversed', [
+                'ticket_note_id' => $note->id,
+                'hours' => $hours,
+            ]);
+        });
     }
 
     /**

@@ -22,9 +22,14 @@ use Illuminate\Support\Str;
  *   2. authorize — single-tier capability gate (else `denied`)
  *   3. validate  — action->validateParams (InvalidActionParams ⇒ `rejected`)
  *   4. confirm   — destructive actions require a valid confirm token (else `blocked`)
- *   5. execute   — action->execute, catching TacticalClientException and
- *                  classifying it on the STRUCTURED signal (M2): transport
- *                  failure ⇒ `offline`; HTTP error (401/403/404/5xx) ⇒ `error`
+ *   5. execute   — a run_command matching one that ended `outcome_unknown`
+ *                  on this agent within the hold window is `blocked`, not
+ *                  sent (#3971). Otherwise action->execute, catching
+ *                  TacticalClientException and classifying it on the
+ *                  STRUCTURED signal (M2): transport failure ⇒ `offline`,
+ *                  except a run_command timeout after the request was sent
+ *                  ⇒ `outcome_unknown` (#3971); HTTP error (401/403/404/5xx)
+ *                  ⇒ `error`
  *   6. audit     — write exactly ONE immutable, redacted TacticalActionLog row
  *                  on EVERY path, with a correlation id
  *   7. return    — the normalized result (never an unhandled exception)
@@ -35,6 +40,15 @@ use Illuminate\Support\Str;
  */
 class TacticalActionService
 {
+    /**
+     * #3971: how long a run_command that ended `outcome_unknown` holds a
+     * matching command to the same agent (see commandOutcomeUnknownRecently()).
+     */
+    public const OUTCOME_UNKNOWN_HOLD_HOURS = 24;
+
+    /** #3971: the action key every run_command lane dispatches under. */
+    private const RUN_COMMAND_KEY = 'tactical.run_command';
+
     public function __construct(
         private readonly TacticalClient $client,
         private readonly ActionRedactor $redactor = new ActionRedactor,
@@ -121,11 +135,30 @@ class TacticalActionService
             }
         }
 
+        // #3971: a run_command whose last matching send to this agent timed out
+        // after it went out may have run, so it is not sent again on the
+        // assumption that it did not. Held here, at the chokepoint every lane
+        // dispatches through, so a retry from another surface is held too. The
+        // action is matched by key (isRunCommand()), so the scheduled lane is too.
+        if ($this->isRunCommand($action) && $this->commandOutcomeUnknownRecently($action, $agentId, $params)) {
+            return $this->audit(
+                $action, $target, $actor, $label, $agentId, $params, $ticketId, $correlationId,
+                TacticalActionResult::blocked('A matching command was sent to this device within the last '.self::OUTCOME_UNKNOWN_HOLD_HOURS.' hours and Tactical did not answer before the timeout, so it may have run. It was not sent again. Check the device to find out whether it ran.'),
+            );
+        }
+
         // 5. execute + classify.
         try {
             $result = $action->execute($this->client, $agentId, $params);
         } catch (TacticalClientException $e) {
-            if ($this->isAgentOffline($e)) {
+            // #3971: scoped to run_command, the verb this defect covers; other
+            // actions are classified as before. Checked before isAgentOffline(),
+            // which is true for every transport failure, this one included.
+            if ($e->timedOutAfterSend() && $this->isRunCommand($action)) {
+                $result = TacticalActionResult::outcomeUnknown(
+                    'Tactical did not answer before the timeout after the request was sent; the action may have run. Check the device before retrying.'
+                );
+            } elseif ($this->isAgentOffline($e)) {
                 $result = TacticalActionResult::offline('Tactical agent is unreachable (offline)');
             } else {
                 // M2: a genuine HTTP error (auth/4xx/5xx) is NEVER collapsed to offline.
@@ -185,6 +218,40 @@ class TacticalActionService
         }
 
         return false;
+    }
+
+    /**
+     * #3971: matched on the key, not the class: the scheduled lane sends the
+     * same command as a TacticalScheduledAction keyed tactical.run_command.
+     */
+    private function isRunCommand(TacticalAction $action): bool
+    {
+        return $action->key() === self::RUN_COMMAND_KEY;
+    }
+
+    /**
+     * #3971: whether a run_command with the same shell and command text went to
+     * this agent within the hold window and ended `outcome_unknown`. Timeout,
+     * actor, ticket and lane are not compared: a changed timeout or a retry from
+     * another surface is still the same command on the same device. The audit
+     * row stores params redacted, so the redacted forms are compared; commands
+     * that redact alike are held together, which holds more, never less.
+     *
+     * @param  array<string, mixed>  $params  post-validateParams
+     */
+    private function commandOutcomeUnknownRecently(TacticalAction $action, string $agentId, array $params): bool
+    {
+        $redacted = $this->redactor->redactParams($params);
+
+        return TacticalActionLog::query()
+            ->where('action_key', $action->key())
+            ->where('agent_id', $agentId)
+            ->where('result_status', 'outcome_unknown')
+            ->where('created_at', '>=', now()->subHours(self::OUTCOME_UNKNOWN_HOLD_HOURS))
+            ->get(['params'])
+            ->contains(fn (TacticalActionLog $row): bool => is_array($row->params)
+                && ($row->params['shell'] ?? null) === ($redacted['shell'] ?? null)
+                && ($row->params['cmd'] ?? null) === ($redacted['cmd'] ?? null));
     }
 
     /**

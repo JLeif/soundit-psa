@@ -110,6 +110,8 @@ class AppRiverClient
 
         if (! $refreshToken) {
             $this->disconnect();
+            // Never throws (guarded inside): the exception below stays the only one.
+            (new AppRiverLoginMonitor)->recordLoginDropped('no refresh token was stored');
             throw new AppRiverClientException('AppRiver refresh token not found. Please reconnect.');
         }
 
@@ -386,6 +388,10 @@ class AppRiverClient
         $token = Setting::getEncrypted('appriver_access_token');
 
         if (! $token) {
+            if (AppRiverLoginMonitor::isDropped()) {
+                // connected_at set, no token: the login dropped. Never throws.
+                (new AppRiverLoginMonitor)->recordLoginDropped('no stored access token');
+            }
             throw new AppRiverClientException('AppRiver access token not found. Please connect via Settings > Integrations > AppRiver.');
         }
 
@@ -401,6 +407,10 @@ class AppRiverClient
     {
         if (in_array($e->oauthError, self::DEAD_CREDENTIAL_ERRORS, true)) {
             $this->disconnect();
+            // Card 6abc5913: a cleared login used to stop the daily sync in silence.
+            // Raises (or refreshes) ONE Alerts Hub alert; never throws, so the
+            // caller still receives exactly the exception below.
+            (new AppRiverLoginMonitor)->recordLoginDropped('token refresh rejected: '.$e->oauthError);
             $clean = new AppRiverClientException(
                 'AppRiver session expired. Please reconnect in Settings > Integrations > AppRiver.',
                 401,
@@ -623,6 +633,9 @@ class AppRiverClient
         $expiresIn = (int) ($data['expires_in'] ?? 1800);
         Setting::setValue('appriver_token_expires_at', now()->addSeconds($expiresIn)->toDateTimeString());
         Setting::setValue('appriver_connected_at', now()->toDateTimeString());
+
+        // A stored token ends any dropped-login episode and resolves its alert.
+        (new AppRiverLoginMonitor)->recordConnected();
     }
 
     private function getClientId(): string

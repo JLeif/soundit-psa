@@ -128,6 +128,10 @@ if (app()->environment('local')) {
 
 // Authenticated routes
 Route::middleware('auth')->group(function () {
+    Route::get('/contact-intake', [\App\Http\Controllers\Web\ContactIntakeController::class, 'index'])->name('contact-intake.index');
+    Route::get('/contact-intake/{id}', [\App\Http\Controllers\Web\ContactIntakeController::class, 'show'])->name('contact-intake.show');
+    Route::post('/contact-intake/{id}/action', [\App\Http\Controllers\Web\ContactIntakeController::class, 'act'])->name('contact-intake.act');
+    Route::post('/contact-intake/{id}/draft', [\App\Http\Controllers\Web\ContactIntakeController::class, 'draft'])->middleware('throttle:6,1')->name('contact-intake.draft');
     Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
     Route::get('/dashboard/activity', [DashboardController::class, 'activity'])->name('dashboard.activity');
     Route::post('/dashboard/refresh-profitability', [DashboardController::class, 'refreshProfitability'])->name('dashboard.refresh-profitability');
@@ -169,6 +173,9 @@ Route::middleware('auth')->group(function () {
     Route::post('/clients/{client}/controld/onboard', [\App\Http\Controllers\Web\ClientControlDOnboardingController::class, 'stage'])->middleware(['admin', 'throttle:10,1'])->name('clients.controld.onboard');
     Route::post('/clients/{client}/comet/provision-user', [ClientIntegrationController::class, 'provisionCometUser'])->name('clients.comet.provision-user');
     Route::post('/clients/{client}/tactical/provision', [ClientIntegrationController::class, 'provisionTactical'])->name('clients.tactical.provision');
+    // #3737: creates a customer in the accounting system, so Admin-only and throttled
+    // like the Control D onboarding route above (the Comet/Tactical provision routes are not gated).
+    Route::post('/clients/{client}/qbo/provision', [ClientIntegrationController::class, 'provisionQbo'])->middleware(['admin', 'throttle:10,1'])->name('clients.qbo.provision');
 
     // Client Portal Management
     Route::get('/clients/{client}/portal', [PortalManagementController::class, 'index'])->name('clients.portal');
@@ -583,6 +590,11 @@ Route::middleware('auth')->group(function () {
     // AppRiver OAuth
     Route::get('/auth/appriver', [\App\Http\Controllers\Web\AppRiverOAuthController::class, 'redirect'])->name('auth.appriver');
     Route::get('/auth/appriver/callback', [\App\Http\Controllers\Web\AppRiverOAuthController::class, 'callback'])->name('auth.appriver.callback');
+
+    // CIPP MCP delegated connector (auth-code + PKCE, CIPP v11+). Admin-only: it
+    // grants the PSA a standing delegated sign-in to CIPP.
+    Route::get('/auth/cipp-mcp', [\App\Http\Controllers\Web\CippMcpOAuthController::class, 'redirect'])->middleware('admin')->name('auth.cipp-mcp');
+    Route::get('/auth/cipp-mcp/callback', [\App\Http\Controllers\Web\CippMcpOAuthController::class, 'callback'])->middleware('admin')->name('auth.cipp-mcp.callback');
 
     // AJAX endpoints (must be in web.php for session auth, NOT api.php)
     Route::get('/api/qbo/customers', [QboController::class, 'customers'])->name('api.qbo.customers');

@@ -1163,7 +1163,7 @@ class StaffMeshAdminToolExecutor
             }
 
             $client = Client::find((int) ($payload['client_id'] ?? 0));
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $ticket = Ticket::automationVisible()->find((int) ($payload['ticket_id'] ?? 0));
             if (! $client || ! $ticket || (int) $ticket->client_id !== (int) $run->client_id) {
                 $run->releaseClaim();
 
@@ -1194,10 +1194,9 @@ class StaffMeshAdminToolExecutor
 
             // The refusal text IS the outcome here — an expiry that passed
             // while the card waited, a duplicate brake, a tenant that no longer
-            // matches. A message-less gate_declined renders the cockpit's
-            // generic "the Technician declined (it may be paused). Try again.",
-            // which is not what happened and tells the approver to do the one
-            // thing that cannot work; the specific reason names the re-stage
+            // matches. A message-less gate_declined renders the generic
+            // gate_declined fallback in TechnicianCockpitController::approve(),
+            // which names no reason; the specific reason names the re-stage
             // they actually need.
             if (isset($result['error'])) {
                 $run->releaseClaim();
@@ -1437,8 +1436,14 @@ class StaffMeshAdminToolExecutor
             return ['error' => 'ticket_id is required for a staged Mesh allow rule'];
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
+            // G-14: a held intake ticket in THIS client exists; say so rather than "not found".
+            $held = Ticket::find($ticketId);
+            if ($held?->isUnverifiedContactIntake() && (int) $held->client_id === $clientId) {
+                return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+            }
+
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
@@ -2876,7 +2881,7 @@ class StaffMeshAdminToolExecutor
         // send a second PATCH for a lifetime the PSA already holds. Nothing to
         // enforce differently means nothing to send.
         if (self::sameInstant($previous, $expiresAt)) {
-            $message = "Rule '{$target['rule_id']}' (sender '{$target['sender']}') already ".self::expiryPhrase($previous).' in the PSA; this proposal changes nothing and no upstream call was made.';
+            $message = "Rule '{$target['rule_id']}' (sender '{$target['sender']}') already ".self::expiryPhrase($previous).' in the PSA; this proposal changes nothing and no PATCH was sent.';
             $this->auditAttempt($tool, 'blocked', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
 
             return ['success' => true, 'idempotent' => true, 'message' => $message];

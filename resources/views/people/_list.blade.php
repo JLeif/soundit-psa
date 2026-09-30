@@ -11,6 +11,16 @@
     $showFilters = $showFilters ?? true;
     $showBulkActions = $showBulkActions ?? true;
     $columns = $columns ?? null; // null = show all columns
+    // On a Client's page the sidebar Details card renders its own "Email" row (the
+    // Client's address) beside this list, so an unqualified "Email" column here is
+    // what made a Person's email look like the Client's. Qualify the label in that
+    // context only. Without that prefilter -- people.index today, and any future
+    // caller that lists people across Clients -- no labelled Client email field
+    // renders in the page body, so the plain label is unambiguous and stays. Both
+    // branches, and that body claim, are pinned by
+    // tests/Feature/Clients/ClientPersonEmailLabelTest.php. Keyed on the same
+    // prefilter the Client column is keyed on below.
+    $emailLabel = isset($prefilter['client_id']) ? 'Person email' : 'Email';
 @endphp
 
 @if($showFilters)
@@ -76,7 +86,7 @@
                             <th>Name</th>
                             @endif
                             @if(!$columns || in_array('email', $columns))
-                            <th>Email</th>
+                            <th>{{ $emailLabel }}</th>
                             @endif
                             @if(!$columns || in_array('phone', $columns))
                             <th>Phone</th>
@@ -166,7 +176,7 @@
                             @endif
                         </div>
                         <div class="d-flex justify-content-between gap-3 small py-1">
-                            <span class="data-label">Email</span>
+                            <span class="data-label">{{ $emailLabel }}</span>
                             @if($person->email)
                                 <a href="mailto:{{ $person->email }}" class="text-break text-end">{{ $person->email }}</a>
                             @else

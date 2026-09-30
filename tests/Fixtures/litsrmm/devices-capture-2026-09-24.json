@@ -1,0 +1,56 @@
+{
+  "devices": [
+    {
+      "id": "8f14e45f-ceea-467a-9f38-000000000001",
+      "clientId": "c0a80101-0000-4000-8000-000000000001",
+      "clientName": "Example Client A",
+      "hostname": "EXAMPLE-WORKSTATION-1",
+      "serial": "System Serial Number",
+      "osName": "Win 10 Pro",
+      "osVersion": "Microsoft Windows NT 10.0.19045.0",
+      "osBuild": "19045",
+      "agentVersion": "1.9.0+b93aa362e019395e209ad2a6593e3dbe100b3eb7",
+      "lastUser": "exampleuser",
+      "firstSeen": "2026-09-22T03:47:40Z",
+      "lastSeen": "2026-09-24T01:00:50Z",
+      "enrollmentState": "enrolled",
+      "availabilityState": "offline",
+      "retiredAt": null
+    },
+    {
+      "id": "8f14e45f-ceea-467a-9f38-000000000002",
+      "clientId": "c0a80101-0000-4000-8000-000000000001",
+      "clientName": "Example Client A",
+      "hostname": "EXAMPLE-WORKSTATION-2",
+      "serial": null,
+      "osName": "Win 11 Pro",
+      "osVersion": "Microsoft Windows NT 10.0.26200.0",
+      "osBuild": "26200",
+      "agentVersion": "1.9.0+b93aa362e019395e209ad2a6593e3dbe100b3eb7",
+      "lastUser": "exampleuser",
+      "firstSeen": "2026-09-22T18:20:53.331Z",
+      "lastSeen": "2026-09-24T17:47:04.024Z",
+      "enrollmentState": "enrolled",
+      "availabilityState": "online",
+      "retiredAt": null
+    },
+    {
+      "id": "8f14e45f-ceea-467a-9f38-000000000003",
+      "clientId": "c0a80101-0000-4000-8000-000000000002",
+      "clientName": "Example Client B",
+      "hostname": "EXAMPLE-LAPTOP-3",
+      "serial": "REDACTED0003",
+      "osName": null,
+      "osVersion": null,
+      "osBuild": null,
+      "agentVersion": null,
+      "lastUser": null,
+      "firstSeen": null,
+      "lastSeen": null,
+      "enrollmentState": "pending",
+      "availabilityState": "offline",
+      "retiredAt": null
+    }
+  ],
+  "nextCursor": "ZXhhbXBsZS1jdXJzb3ItdG9rZW4"
+}

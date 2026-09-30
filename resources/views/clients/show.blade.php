@@ -238,10 +238,16 @@
                     @else
                         <div class="table-responsive d-none d-md-block">
                             <table class="table table-hover mb-0">
+                                {{-- "Person email" rather than "Email": the Details card in the
+                                     sidebar is a sibling of this tab column, so its own "Email"
+                                     row (the Client's address) renders on the same screen as this
+                                     table. Two unqualified Email labels on one page is what made a
+                                     Person's email look like the Client's. See README, Core
+                                     entities. The Client's field label is deliberately unchanged. --}}
                                 <thead>
                                     <tr>
                                         <th>Name</th>
-                                        <th>Email</th>
+                                        <th>Person email</th>
                                         <th>Phone</th>
                                         <th>Mobile</th>
                                     </tr>
@@ -307,7 +313,7 @@
                                     </div>
                                     @if($person->email)
                                         <div class="d-flex justify-content-between gap-3 small py-1">
-                                            <span class="data-label">Email</span>
+                                            <span class="data-label">Person email</span>
                                             <a href="mailto:{{ $person->email }}" class="text-break text-end">{{ $person->email }}</a>
                                         </div>
                                     @endif
@@ -1313,6 +1319,20 @@
                                 @if($vendor === 'comet' && \App\Support\CometConfig::isConfigured())
                                     <form action="{{ route('clients.comet.provision', $client) }}" method="POST" class="d-inline ms-1"
                                           onsubmit="return confirm('Create a Comet Backup group and user for {{ addslashes($client->name) }}?')">
+                                        @csrf
+                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                            <i class="bi bi-plus-circle me-1"></i>Create
+                                        </button>
+                                    </form>
+                                @endif
+
+                                {{-- QuickBooks Online: create a customer named after this client and link it (#3737).
+                                     "Connected" and "no qbo_customer_id" are enforced by this loop itself: it lists only
+                                     vendors whose configCheck passed (qbo: QboClient::isConnected()) and that are
+                                     unmapped (ClientIntegrationService::buildIntegrationsData). Admin-only, matching the route. --}}
+                                @if($vendor === 'qbo' && auth()->user()?->isAdmin())
+                                    <form action="{{ route('clients.qbo.provision', $client) }}" method="POST" class="d-inline ms-1" data-qbo-create
+                                          onsubmit="return confirm({{ \Illuminate\Support\Js::from('Create a new QuickBooks Online customer named "'.trim($client->name).'" and link it to this client? If QuickBooks already has a customer with this name, nothing is created and you should use Link instead.') }})">
                                         @csrf
                                         <button type="submit" class="btn btn-outline-success btn-sm">
                                             <i class="bi bi-plus-circle me-1"></i>Create

@@ -1,0 +1,273 @@
+<?php
+
+namespace Tests\Feature\Tactical;
+
+use App\Http\Controllers\Web\AssetController;
+use App\Models\Asset;
+use App\Models\Client;
+use App\Models\Setting;
+use App\Models\TacticalAsset;
+use App\Models\Ticket;
+use App\Services\AssetHealthService;
+use App\Services\Assistant\AssistantToolExecutor;
+use App\Services\Tactical\SignalState;
+use App\Services\Tactical\TacticalClient;
+use App\Services\Tactical\TacticalFieldMap;
+use App\Services\Tactical\TacticalInsightService;
+use App\Services\Tactical\TacticalReadOnlyToolset;
+use App\Services\Triage\TriageToolExecutor;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\TestCase;
+
+class UptimeProvenanceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public static function statuses(): array
+    {
+        return [
+            'overdue' => ['overdue', 'unverified'],
+            'online' => ['online', 'vendor_reported'],
+            'missing' => [null, 'unverified'],
+            'offline' => ['offline', 'unverified'],
+            'unknown' => ['Online', 'unverified'],
+        ];
+    }
+
+    private function asset(): Asset
+    {
+        $this->travelTo(now()->setDate(2026, 9, 24)->startOfDay());
+
+        return Asset::factory()->create([
+            'client_id' => Client::factory()->create()->id,
+            'hostname' => 'synthetic-uptime',
+            'last_boot_at' => now()->subDays(42),
+            'needs_reboot' => false,
+            'ninja_id' => null,
+            'level_id' => null,
+        ]);
+    }
+
+    #[DataProvider('statuses')]
+    public function test_live_read_surfaces_carry_provenance(?string $status, string $state): void
+    {
+        $asset = $this->asset();
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic');
+        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
+        // Field projection from AgentSerializer / AgentTableSerializer at
+        // tacticalrmm e56ebd3e48e99de59f34d4bd7600c127a6f02cf2,
+        // api/tacticalrmm/agents/serializers.py: status, last_seen, boot_time.
+        // Values are synthetic; boot_time is epoch seconds, not a report clock.
+        $agent = ['boot_time' => now()->subDays(42)->timestamp, 'last_seen' => now()->subHours(2)->toIso8601String()];
+        if ($status !== null) {
+            $agent['status'] = $status;
+        }
+        $api = Mockery::mock(TacticalClient::class);
+        $api->shouldReceive('getAgent')->twice()->with('synthetic-agent')->andReturn($agent);
+        $this->app->instance(TacticalClient::class, $api);
+        $ticket = Ticket::factory()->create(['client_id' => $asset->client_id]);
+        $results = [
+            app(TacticalReadOnlyToolset::class)->execute('tactical_get_device', ['hostname' => $asset->hostname], $asset->client_id),
+            (new TriageToolExecutor($ticket))->execute('tactical_get_device', ['hostname' => $asset->hostname]),
+        ];
+        foreach ($results as $result) {
+            $this->assertArrayNotHasKey('error', $result);
+            $this->assertSame('42d', $result['uptime']);
+            $this->assertSame($state, $result['uptime_state'], 'Overdue/missing status must not claim vendor_reported uptime');
+            $this->assertSame($agent['boot_time'], $result['boot_time']);
+            $this->assertSame($status, $result['agent_status']);
+            $this->assertSame($agent['last_seen'], $result['agent_last_seen']);
+            $this->assertNotSame('verified', $result['uptime_state']);
+            $this->assertStringContainsString($status === 'online' ? 'periodic info report' : $agent['last_seen'], $result['freshness_note']);
+            $this->assertArrayNotHasKey('boot_time_as_of', $result);
+        }
+    }
+
+    public static function storedStatuses(): array
+    {
+        return [
+            ...self::statuses(),
+            'stale online' => ['online', 'unverified', 120],
+            'undated online' => ['online', 'unverified', null],
+        ];
+    }
+
+    #[DataProvider('storedStatuses')]
+    public function test_stored_read_surfaces_use_stored_tactical_status(?string $status, string $state, ?int $ageMinutes = 0): void
+    {
+        $asset = $this->asset();
+        if ($status !== null) {
+            TacticalAsset::create([
+                'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
+                'hostname' => $asset->hostname, 'status' => $status,
+                'last_seen_at' => now()->subHours(2),
+                'synced_at' => $ageMinutes !== null ? now()->subMinutes($ageMinutes) : null,
+            ]);
+        }
+        $expected = TacticalFieldMap::storedUptime($asset);
+        $this->assertSame($state, $expected['uptime_state'], 'Stored online needs a recent sync; stale or undated status must be unverified');
+        $results = [
+            (new AssistantToolExecutor(clientId: $asset->client_id))->execute('get_asset', ['asset_id' => $asset->id]),
+            app(AssetController::class)->quickLook($asset)->getData(true),
+        ];
+        foreach ($results as $result) {
+            foreach ($expected as $key => $value) {
+                $this->assertSame($value, $result[$key], $key);
+            }
+        }
+        $this->actingAs(\App\Models\User::factory()->create())
+            ->get(route('assets.show', $asset))
+            ->assertOk()
+            ->assertSee($state)
+            ->assertSee($expected['freshness_note']);
+        $factor = collect(app(AssetHealthService::class)->compute($asset)->factors)->firstWhere('key', 'patch');
+        $this->assertNotNull($factor);
+        $this->assertStringContainsString($state, $factor['detail']);
+        $this->assertStringContainsString($expected['freshness_note'], $factor['detail']);
+        $this->assertStringNotContainsString('up 42d', $factor['detail']);
+    }
+
+    public static function otherRmmLinks(): array
+    {
+        return [
+            'ninja only' => [['ninja_id' => 4242], false],
+            'level only' => [['level_id' => '4243'], false],
+            'ninja and fresh online tactical' => [['ninja_id' => 4242], true],
+            'level and fresh online tactical' => [['level_id' => '4243'], true],
+            'no rmm link' => [[], false],
+        ];
+    }
+
+    #[DataProvider('otherRmmLinks')]
+    public function test_stored_uptime_makes_no_tactical_claim_when_boot_time_may_be_another_rmms(array $links, bool $tactical): void
+    {
+        $asset = $this->asset();
+        $asset->forceFill($links)->save();
+        if ($tactical) {
+            TacticalAsset::create([
+                'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
+                'hostname' => $asset->hostname, 'status' => 'online',
+                'last_seen_at' => now()->subMinutes(5), 'synced_at' => now(),
+            ]);
+        }
+        $result = TacticalFieldMap::storedUptime($asset->fresh());
+        $this->assertSame('42d', $result['uptime']);
+        $this->assertSame('unverified', $result['uptime_state'], 'Boot time another RMM may have written must not be qualified by Tactical status');
+        $this->assertStringNotContainsString('agent', $result['freshness_note'], 'Non-Tactical boot time must not carry a Tactical mechanism note');
+        $this->assertStringContainsString('last boot time PSA stored', $result['freshness_note']);
+        $this->assertSame($tactical ? 'online' : null, $result['agent_status']);
+    }
+
+    public function test_stored_uptime_without_a_stored_boot_time_claims_none(): void
+    {
+        $asset = $this->asset();
+        $asset->forceFill(['last_boot_at' => null])->save();
+        $results = [
+            TacticalFieldMap::storedUptime($asset->fresh()),
+            (new AssistantToolExecutor(clientId: $asset->client_id))->execute('get_asset', ['asset_id' => $asset->id]),
+            app(AssetController::class)->quickLook($asset->fresh())->getData(true),
+        ];
+        foreach ($results as $result) {
+            $this->assertArrayNotHasKey('error', $result);
+            $this->assertNull($result['uptime']);
+            $this->assertSame('unverified', $result['uptime_state']);
+            $this->assertSame('PSA has no stored boot time for this device.', $result['freshness_note'], 'An asset with no stored boot time must not be described as having one');
+        }
+    }
+
+    public function test_tactical_only_asset_without_a_stored_boot_time_claims_none(): void
+    {
+        $asset = $this->asset();
+        $asset->forceFill(['last_boot_at' => null])->save();
+        TacticalAsset::create([
+            'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
+            'hostname' => $asset->hostname, 'status' => 'online',
+            'last_seen_at' => now()->subMinutes(5), 'synced_at' => now(),
+        ]);
+        $results = [
+            TacticalFieldMap::storedUptime($asset->fresh()),
+            (new AssistantToolExecutor(clientId: $asset->client_id))->execute('get_asset', ['asset_id' => $asset->id]),
+            app(AssetController::class)->quickLook($asset->fresh())->getData(true),
+        ];
+        foreach ($results as $result) {
+            $this->assertArrayNotHasKey('error', $result);
+            $this->assertNull($result['uptime']);
+            $this->assertSame('unverified', $result['uptime_state'], 'A fresh online agent must not qualify an uptime that does not exist');
+            $this->assertSame('PSA has no stored boot time for this device.', $result['freshness_note']);
+            $this->assertSame('online', $result['agent_status']);
+        }
+    }
+
+    public static function missingBootTimes(): array
+    {
+        return [
+            'absent' => [false, null],
+            'null' => [true, null],
+            'zero' => [true, 0],
+        ];
+    }
+
+    #[DataProvider('missingBootTimes')]
+    public function test_live_read_surfaces_without_a_boot_time_claim_no_uptime(bool $present, ?int $bootTime): void
+    {
+        $asset = $this->asset();
+        Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        Setting::setEncrypted('tactical_api_key', 'synthetic');
+        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
+        $agent = ['status' => 'online', 'last_seen' => now()->subMinutes(5)->toIso8601String()];
+        if ($present) {
+            $agent['boot_time'] = $bootTime;
+        }
+        $api = Mockery::mock(TacticalClient::class);
+        $api->shouldReceive('getAgent')->twice()->with('synthetic-agent')->andReturn($agent);
+        $this->app->instance(TacticalClient::class, $api);
+        $ticket = Ticket::factory()->create(['client_id' => $asset->client_id]);
+        $results = [
+            app(TacticalReadOnlyToolset::class)->execute('tactical_get_device', ['hostname' => $asset->hostname], $asset->client_id),
+            (new TriageToolExecutor($ticket))->execute('tactical_get_device', ['hostname' => $asset->hostname]),
+        ];
+        foreach ($results as $result) {
+            $this->assertArrayNotHasKey('error', $result);
+            $this->assertNull($result['uptime']);
+            $this->assertSame('unverified', $result['uptime_state'], 'An online agent must not qualify an uptime it did not report');
+            $this->assertSame('No uptime is available from this read.', $result['freshness_note']);
+            $this->assertSame('online', $result['agent_status']);
+            $this->assertSame($agent['last_seen'], $result['agent_last_seen']);
+        }
+    }
+
+    public function test_provenance_never_qualifies_a_missing_uptime(): void
+    {
+        $lastSeen = '2026-09-24T00:00:00+00:00';
+        $missing = TacticalFieldMap::uptimeProvenance('online', $lastSeen, null);
+        $this->assertSame('unverified', $missing['uptime_state']);
+        $this->assertSame('No uptime is available from this read.', $missing['freshness_note']);
+        $this->assertSame('online', $missing['agent_status']);
+        $present = TacticalFieldMap::uptimeProvenance('online', $lastSeen, '42d');
+        $this->assertSame('vendor_reported', $present['uptime_state']);
+    }
+
+    public function test_insight_snapshot_online_does_not_qualify_uptime(): void
+    {
+        $asset = $this->asset();
+        TacticalAsset::create([
+            'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
+            'hostname' => $asset->hostname, 'status' => 'online',
+            'last_seen_at' => now()->subDays(3), 'synced_at' => now()->subDays(3),
+        ]);
+        $api = Mockery::mock(TacticalClient::class);
+        $api->shouldReceive('getAgent', 'getAgentChecks')->andThrow(new \RuntimeException('synthetic outage'));
+        $this->app->instance(TacticalClient::class, $api);
+        $insight = app(TacticalInsightService::class)->forAsset($asset->fresh(), live: true);
+        $this->assertSame(SignalState::Snapshot, $insight->statusState);
+        $result = (new \ReflectionMethod(TacticalReadOnlyToolset::class, 'mapEndpointInsight'))
+            ->invoke(app(TacticalReadOnlyToolset::class), $insight);
+        $this->assertSame('snapshot', $result['status_state']);
+        $this->assertSame('online', $result['agent_status']);
+        $this->assertSame('unverified', $result['uptime_state'], 'A snapshot insight status must not claim vendor_reported uptime');
+        $this->assertStringNotContainsString('periodic info report', $result['freshness_note']);
+    }
+}

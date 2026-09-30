@@ -29,7 +29,7 @@ class PortalTicketController extends Controller
         $person = $request->attributes->get('portal_person');
         $clientId = $request->attributes->get('portal_client_id');
 
-        $query = Ticket::where('client_id', $clientId);
+        $query = Ticket::portalVisible()->where('client_id', $clientId);
         if (! $person->company_wide_access) {
             $query->where('contact_id', $person->id);
         }
@@ -202,10 +202,10 @@ class PortalTicketController extends Controller
 
     public function uploadAttachment(Request $request, Ticket $ticket, AttachmentService $attachmentService): JsonResponse
     {
-        $clientId = $request->attributes->get('portal_client_id');
-        if ($ticket->client_id !== $clientId) {
-            abort(403);
-        }
+        // Same guard as every sibling (r1 contract-replacement:13): intake containment 404,
+        // client 403, and the contact/company-wide 403 this method previously skipped.
+        $this->authorizePortalAccess($ticket, $request->attributes->get('portal_client_id'),
+            $request->attributes->get('portal_person'));
 
         $request->validate([
             'file' => ['required', 'file', 'max:10240', 'mimetypes:image/png,image/jpeg,image/gif,image/webp'],
@@ -215,7 +215,8 @@ class PortalTicketController extends Controller
         $attachment = $attachmentService->storeUpload($request->file('file'));
 
         $noteId = $request->input('note_id');
-        if ($noteId && $ticket->notes()->where('id', $noteId)->exists()) {
+        // Only a note the portal may see: notes() is withTrashed() and unscoped.
+        if ($noteId && $ticket->notes()->withoutTrashed()->portalVisible()->whereKey($noteId)->exists()) {
             $attachmentService->linkTo($attachment, 'App\\Models\\TicketNote', $noteId);
         } else {
             $attachmentService->linkTo($attachment, 'App\\Models\\Ticket', $ticket->id);
@@ -230,6 +231,8 @@ class PortalTicketController extends Controller
 
     private function authorizePortalAccess(Ticket $ticket, int $clientId, $person): void
     {
+        abort_if($ticket->isUnverifiedContactIntake(), 404);
+
         if ($ticket->client_id !== $clientId) {
             abort(403);
         }

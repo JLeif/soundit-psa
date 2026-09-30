@@ -14,6 +14,7 @@ use App\Services\Cipp\CippClientException;
 use App\Services\Cipp\CippRestWriteClient;
 use App\Services\Cipp\CippToolContract;
 use App\Services\Cipp\CippWriteHttpException;
+use App\Services\Cipp\CippWriteNotSentException;
 use App\Services\Cipp\CippWriteScopeException;
 use App\Services\Cipp\CippWriteScopeResolver;
 use App\Services\Cipp\CippWriteUnconfirmedException;
@@ -48,6 +49,14 @@ class StaffCippWriteToolExecutor
 
     /** Remove answered "No license changes needed": no write was made. Claims nothing about history. */
     private const LICENSE_NO_CHANGE_MESSAGE = 'CIPP reported the user did not hold this licence, so nothing was removed.';
+
+    /**
+     * result_status of the audit row for that answer (#3744): the value the
+     * phone-call services already write for a no-change action. It is not
+     * 'executed', so alreadyExecuted() and executedRunId() do not match it and
+     * do not refuse an identical removal made after it.
+     */
+    private const RESULT_NO_OP = 'no_op';
 
     /** @var array<string, string> */
     private const STAGED_TO_DIRECT = [
@@ -122,6 +131,19 @@ class StaffCippWriteToolExecutor
      */
     private const GROUP_MEMBERSHIP_TOOLS = [
         'cipp_set_group_membership',
+    ];
+
+    /**
+     * Writes whose client method reads the answer body and can report
+     * "sent, not confirmed". Their failures get writeFailureMessage() instead
+     * of the upstream text or the generic sentence.
+     *
+     * @var array<int, string>
+     */
+    private const UNCONFIRMABLE_WRITE_TOOLS = [
+        'cipp_set_group_membership',
+        'cipp_reassign_onedrive',
+        'cipp_edit_user',
     ];
 
     /**
@@ -977,12 +999,22 @@ class StaffCippWriteToolExecutor
                 if ($licenseAction = self::LICENSE_WRITE_ACTIONS[$directTool] ?? null) {
                     return $this->declined($this->licenseWriteFailureMessage($run->action_type, $licenseAction, $e));
                 }
+                if (in_array($directTool, self::UNCONFIRMABLE_WRITE_TOOLS, true)) {
+                    return $this->declined($this->writeFailureMessage($run->action_type, $e, withCause: true));
+                }
+                // The write may have landed (#3709): an HTTP status, like an
+                // unconfirmed answer, comes back only after the POST. The
+                // exception's own text names the endpoint and gives the approver
+                // nothing to verify.
+                if ($e instanceof CippWriteUnconfirmedException || $e instanceof CippWriteHttpException) {
+                    return $this->declined($this->writeFailureMessage($run->action_type, $e));
+                }
 
                 return $this->declined($e->getMessage());
             }
 
             if ($this->isLicenseNoChange($directTool, $upstream)) {
-                $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
+                $this->auditAttempt($run->action_type, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $run->content_hash, "Operator-approved {$run->action_type}: ".self::LICENSE_NO_CHANGE_MESSAGE, $this->approverLabel($approverId), $run->id, $approverId);
                 $run->advanceTo(TechnicianRunState::Done);
 
                 return new TechnicianApprovalResult('executed', message: self::LICENSE_NO_CHANGE_MESSAGE);
@@ -1051,12 +1083,15 @@ class StaffCippWriteToolExecutor
             if ($licenseAction = self::LICENSE_WRITE_ACTIONS[$tool] ?? null) {
                 return ['error' => $this->licenseWriteFailureMessage($tool, $licenseAction, $e)];
             }
+            if (in_array($tool, self::UNCONFIRMABLE_WRITE_TOOLS, true)) {
+                return ['error' => $this->writeFailureMessage($tool, $e)];
+            }
 
             return ['error' => "CIPP write failed for {$tool}; no response body returned."];
         }
 
         if ($this->isLicenseNoChange($tool, $upstream)) {
-            $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
+            $this->auditAttempt($tool, self::RESULT_NO_OP, $client->id, $ticket, $person, $license, $contentHash, "{$tool}: ".self::LICENSE_NO_CHANGE_MESSAGE." Reason: {$reason}", $actorLabel);
 
             return [
                 'success' => true,
@@ -1140,7 +1175,9 @@ class StaffCippWriteToolExecutor
             }
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP password reset failed for {$tool}; no password was returned."];
+            // Only a not-sent refusal says the reset was not applied (#3709): an
+            // HTTP status comes back after ExecResetPass was posted.
+            return ['error' => $this->writeFailureMessage($tool, $e).' No password can be shown.'];
         }
 
         $claims->releaseOnAnswer($claim['id'], $upstream);
@@ -1265,7 +1302,9 @@ class StaffCippWriteToolExecutor
                 $run->releaseClaim();
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $contentHash, $this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
 
-                return $this->declined('CIPP password reset failed; no password was returned. The proposal is still open — retry or deny it.');
+                // Only a not-sent refusal says the reset was not applied (#3709).
+                // Not "password was …": declined() redacts that shape as a credential.
+                return $this->declined($this->writeFailureMessage($run->action_type, $e).' No password can be shown. The proposal is still open.');
             }
 
             $claims->releaseOnAnswer($claim['id'], $upstream);
@@ -1498,6 +1537,27 @@ class StaffCippWriteToolExecutor
             $contentHash = $unspent;
         }
 
+        // A staged licence removal that CIPP answered "No license changes needed"
+        // leaves its run Done under this key while its audit row is RESULT_NO_OP,
+        // which the rail below does not match (#3744). firstOrCreate would then
+        // hand back that Done run and the revive branch would overwrite it, so the
+        // spent key is walked forward as for the recreatable verbs. The rail checks
+        // every key the walk passed, so a removal that executed under a walked key
+        // still answers an identical re-stage as already executed.
+        $railHashes = [$contentHash];
+        if ($tool === 'cipp_stage_remove_user_license') {
+            $unspent = $this->unspentContentHash($tool, $ticket->id, $contentHash);
+
+            if ($unspent === null) {
+                $this->auditAttempt($tool, 'blocked', $client->id, $ticket, $person, $license, $contentHash, "{$tool} re-stage refused; this ticket already holds the maximum number of runs for this exact content.", $actorLabel);
+
+                return ['error' => "{$tool} could not be staged: this ticket already holds the maximum number of runs for this exact content; stage the removal on a new ticket."];
+            }
+
+            $railHashes = $this->walkedContentHashes($contentHash, $unspent);
+            $contentHash = $unspent;
+        }
+
         // The audit log is IMMUTABLE and stays authoritative ONLY for "was this exact
         // content already executed" — an 'executed' row can never go stale the way an
         // 'awaiting_approval' row can (bd psa-k4s0 Root B). Skipped for the verbs whose
@@ -1505,13 +1565,23 @@ class StaffCippWriteToolExecutor
         // (RECREATABLE_TARGET_STAGED_TOOLS): there "identical content" no longer means
         // "the same upstream object", and answering already-executed would report a
         // re-planted inbox rule as removed without reading the mailbox at all.
-        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true) && $this->alreadyExecuted($tool, $client->id, $contentHash)) {
+        $executedHash = null;
+        if (! in_array($tool, self::RECREATABLE_TARGET_STAGED_TOOLS, true)) {
+            foreach ($railHashes as $railHash) {
+                if ($this->alreadyExecuted($tool, $client->id, $railHash)) {
+                    $executedHash = $railHash;
+
+                    break;
+                }
+            }
+        }
+        if ($executedHash !== null) {
             return [
                 'success' => true,
                 'idempotent' => true,
                 'ticket_id' => $ticket->id,
                 'ticket_display_id' => $ticket->display_id,
-                'run_id' => $this->executedRunId($tool, $client->id, $contentHash),
+                'run_id' => $this->executedRunId($tool, $client->id, $executedHash),
                 'message' => 'Already executed identical action recently; no new proposal was staged.',
             ];
         }
@@ -1707,13 +1777,13 @@ class StaffCippWriteToolExecutor
             }
 
             if ($this->quarantineRowReleased($row)) {
-                $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: Message already released upstream; treated as satisfied without an upstream call.", $actorLabel);
+                $this->auditAttempt($tool, 'executed', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: Message already released upstream; no release was sent.", $actorLabel);
 
                 return [
                     'success' => true,
                     'idempotent' => true,
                     'already_released' => true,
-                    'message' => 'Message is already released upstream; no upstream call was made.',
+                    'message' => 'Message is already released upstream.',
                 ];
             }
         }
@@ -1895,7 +1965,7 @@ class StaffCippWriteToolExecutor
      * (tool identity, client, ticket, parameter shape); a quarantine release
      * is additionally re-verified against the LIVE tenant quarantine — a
      * message that has vanished refuses execution, and one already released
-     * upstream satisfies the approved intent without an upstream call.
+     * upstream satisfies the approved intent with no release sent.
      */
     private function approveEmailSecurityStagedRun(TechnicianRun $run, int $approverId): TechnicianApprovalResult
     {
@@ -1953,7 +2023,7 @@ class StaffCippWriteToolExecutor
                 }
 
                 if ($this->quarantineRowReleased($row)) {
-                    $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: Message already released upstream — approved release satisfied without an upstream call.", $this->approverLabel($approverId), $run->id, $approverId);
+                    $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: Message already released upstream — approved release satisfied; no release was sent.", $this->approverLabel($approverId), $run->id, $approverId);
                     $run->advanceTo(TechnicianRunState::Done);
 
                     return new TechnicianApprovalResult('executed');
@@ -1966,7 +2036,14 @@ class StaffCippWriteToolExecutor
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
-                return new TechnicianApprovalResult('gate_declined');
+                // A message-less decline renders the cockpit's generic fallback
+                // (#3901 replaced the old "Could not send … Try again." with
+                // "This action was not confirmed as carried out, and no reason
+                // reached this page."), which still tells the approver nothing
+                // about a write that may have landed (#3709).
+                // Every exception gets writeFailureMessage(), which says "not
+                // applied" only for CippWriteNotSentException.
+                return $this->declined($this->writeFailureMessage($run->action_type, $e));
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed for ".$this->emailSecurityAuditTarget($directTool, $params).'.', $this->approverLabel($approverId), $run->id, $approverId);
@@ -2488,7 +2565,9 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            return ['error' => "CIPP user creation failed for {$tool}; no account was reported created."];
+            // Only a not-sent refusal says no account was created (#3709): an
+            // HTTP status comes back after AddUser was posted.
+            return ['error' => $this->writeFailureMessage($tool, $e).' No password can be shown.'];
         }
 
         $parsed = $this->parseCreateUserResponse($upstream);
@@ -2745,7 +2824,9 @@ class StaffCippWriteToolExecutor
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, null, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
-                return $this->declined($e->getMessage());
+                // Only a not-sent refusal says no account was created (#3709).
+                // Not "password was …": declined() redacts that shape as a credential.
+                return $this->declined($this->writeFailureMessage($run->action_type, $e).' No password can be shown.');
             }
 
             $parsed = $this->parseCreateUserResponse($upstream);
@@ -3095,14 +3176,7 @@ class StaffCippWriteToolExecutor
         } catch (CippClientException $e) {
             $this->auditAttempt($tool, 'error', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($tool, $e), $actorLabel);
 
-            // This catch cannot tell whether the POST left. Some of these throws
-            // are raised before any request is sent: setGroupMembership's input
-            // validation, and send()'s endpointUrl(), safeRequestOptions() and
-            // getToken(). Others are raised after it: send() checks the status only
-            // after posting, and the group endpoint returns HTTP 200 even when it
-            // reports per-member failure. So this string must not claim the
-            // directory was left untouched.
-            return ['error' => "CIPP write failed for {$tool}; the membership change may or may not have applied — verify the group membership in CIPP before retrying."];
+            return ['error' => $this->writeFailureMessage($tool, $e)];
         }
 
         $this->auditAttempt($tool, 'executed', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: {$tool} executed — ".$this->groupMembershipAuditDetail((string) $params['operation'], $group['name'], (string) $params['group_id']).": {$reason}", $actorLabel);
@@ -3360,7 +3434,7 @@ class StaffCippWriteToolExecutor
                 $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: ".$this->safeFailureSummary($run->action_type, $e), $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
 
-                return $this->declined($e->getMessage());
+                return $this->declined($this->writeFailureMessage($run->action_type, $e, withCause: true));
             }
 
             $this->auditAttempt($run->action_type, 'executed', $client->id, $ticket, $person, null, $contentHash, "{$targetKey}: Operator-approved {$run->action_type} executed — ".$this->groupMembershipAuditDetail((string) $params['operation'], $group['name'], (string) $params['group_id']).'.', $this->approverLabel($approverId), $run->id, $approverId);
@@ -6315,6 +6389,11 @@ class StaffCippWriteToolExecutor
         return $keys;
     }
 
+    /**
+     * Matches 'executed' rows only. A licence removal that CIPP answered with
+     * "No license changes needed" is audited RESULT_NO_OP, so this check
+     * does not refuse a later identical removal (#3744).
+     */
     private function alreadyExecuted(string $tool, int $clientId, string $contentHash): bool
     {
         return TechnicianActionLog::query()
@@ -6377,13 +6456,17 @@ class StaffCippWriteToolExecutor
 
     /**
      * A content hash for a re-stage that cannot land on a run this ticket has
-     * already SPENT. Used ONLY by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
-     * executed-content rail stageAction() skips.
+     * already SPENT. Used by RECREATABLE_TARGET_STAGED_TOOLS — the verbs whose
+     * executed-content rail stageAction() skips — and by
+     * cipp_stage_remove_user_license, whose no-op run that rail does not match.
      *
      * Every other staged verb is protected by that rail: identical content that
      * already executed short-circuits before firstOrCreate is ever reached, so the
      * only non-live run its key can return is one that never executed (superseded,
-     * denied, withdrawn) and reviving THAT row in place is correct. With the rail
+     * denied or withdrawn) and reviving THAT row in place is correct. A licence
+     * removal that CIPP answered as a no-op is the exception: its run is Done, but
+     * its audit row is RESULT_NO_OP, which the rail does not match, so without the
+     * walk the revive branch would overwrite that Done run. With the rail
      * skipped the protection is gone, and firstOrCreate on the UNIQUE (ticket_id,
      * action_type, content_hash) key hands back the very run that removed a rule
      * under this name — a terminal Done row the revive branch would flip back to
@@ -6425,6 +6508,24 @@ class StaffCippWriteToolExecutor
         }
 
         return null;
+    }
+
+    /**
+     * Every key unspentContentHash() passed from $contentHash to $unspent, both
+     * included, in walk order. Bounded like that walk.
+     *
+     * @return array<int, string>
+     */
+    private function walkedContentHashes(string $contentHash, string $unspent): array
+    {
+        $hashes = [$contentHash];
+
+        for ($attempt = 0; $contentHash !== $unspent && $attempt < 50; $attempt++) {
+            $contentHash = hash('sha256', $contentHash.'|re-stage');
+            $hashes[] = $contentHash;
+        }
+
+        return $hashes;
     }
 
     /**
@@ -6948,37 +7049,79 @@ class StaffCippWriteToolExecutor
      * safeFailureSummary().
      *
      * Both licence methods send() to api/ExecBulkLicense and read the answer
-     * in CippRestWriteClient::confirmLicenseWrite(). So:
-     *  - CippWriteUnconfirmedException: the request left. NOT_APPLIED means
-     *    CIPP named a reason it made no write; UNKNOWN means it may have.
-     *  - CippWriteHttpException: raised only by send()'s failed() check, after
-     *    ->post(). A 5xx is unknown. A 4xx is "not applied" on this endpoint
-     *    only: in CIPP-API 7c756b0d the script sets BadRequest only in its
-     *    outer catch, reached by the user-lookup throws before any write, and
-     *    a 401/403/429 from the function host or its auth layer is returned
-     *    before the script runs. Do not copy this to another endpoint unchecked.
-     *  - any other CippClientException: raised by endpointUrl(),
-     *    safeRequestOptions() or getToken(), all before ->post(), so nothing
-     *    was sent.
-     * This covers only the types that reach a CippClientException catch. A
-     * ConnectionException is not one and does not reach it (#3712, #3709).
+     * in CippRestWriteClient::confirmLicenseWrite(). "Not applied" is said only
+     * on positive evidence (#3709):
+     *  - CippWriteNotSentException: nothing was sent.
+     *  - CippWriteUnconfirmedException NOT_APPLIED: CIPP named a reason it made
+     *    no write.
+     *  - CippWriteHttpException 4xx: on this endpoint only. In CIPP-API
+     *    7c756b0d the script sets BadRequest only in its outer catch, reached
+     *    by the user-lookup throws before any write, and a 401/403/429 from
+     *    the function host or its auth layer is returned before the script
+     *    runs. Do not copy this to another endpoint unchecked.
+     * Every other exception hedges, including one of a type added later.
      */
     private function licenseWriteFailureMessage(string $tool, string $action, CippClientException $e): string
     {
-        if ($e instanceof CippWriteUnconfirmedException) {
-            if ($e->outcome === CippWriteUnconfirmedException::NOT_APPLIED) {
-                return "CIPP write failed for {$tool}; CIPP reported it could not identify the user and made no licence change, so the licence {$action} was not applied.";
-            }
+        if ($e instanceof CippWriteUnconfirmedException && $e->outcome === CippWriteUnconfirmedException::NOT_APPLIED) {
+            return "CIPP write failed for {$tool}; CIPP reported it could not identify the user and made no licence change, so the licence {$action} was not applied.";
+        }
 
+        if ($e instanceof CippWriteNotSentException
+            || ($e instanceof CippWriteHttpException && $e->status >= 400 && $e->status < 500)) {
+            return "CIPP write failed for {$tool}; the licence {$action} was not applied.";
+        }
+
+        if ($e instanceof CippWriteUnconfirmedException && $e->noAnswer) {
+            return "The licence {$action} for {$tool} got no answer from CIPP; it may or may not have applied — verify the user's licences in CIPP before retrying.";
+        }
+
+        if ($e instanceof CippWriteUnconfirmedException) {
             return "The licence {$action} for {$tool} was sent to CIPP but not confirmed; it may or may not have applied — verify the user's licences in CIPP before retrying."
                 .($e->usageLocationMayHaveChanged ? " CIPP may already have set the user's usage location." : '');
         }
 
-        if ($e instanceof CippWriteHttpException && $e->status >= 500) {
-            return "CIPP write failed for {$tool}; the licence {$action} may or may not have applied — verify the user's licences in CIPP before retrying.";
+        return "CIPP write failed for {$tool}; the licence {$action} may or may not have applied — verify the user's licences in CIPP before retrying.";
+    }
+
+    /**
+     * The operator sentence for a failed non-licence CIPP write. "Not applied"
+     * is said only on CippWriteNotSentException; every other exception,
+     * including one of a type added later, hedges (#3709). An HTTP 4xx hedges
+     * too: these endpoints' 4xx semantics have not been checked at the vendor
+     * source the way ExecBulkLicense's were.
+     *
+     * The password-reset and create-user catches, direct and staged, and the
+     * email-security staged catch call it for every exception. The generic
+     * staged catch calls it for a CippWriteUnconfirmedException or a
+     * CippWriteHttpException, both raised after the POST; its other exceptions
+     * keep their own text.
+     *
+     * @param  bool  $withCause  append a not-sent exception's own message
+     *                           (the staged toast); the direct path keeps it in
+     *                           the audit row only
+     */
+    private function writeFailureMessage(string $tool, CippClientException $e, bool $withCause = false): string
+    {
+        [$change, $where] = match (self::STAGED_TO_DIRECT[$tool] ?? $tool) {
+            'cipp_set_group_membership' => ['the membership change', 'the group membership'],
+            'cipp_reassign_onedrive' => ['the OneDrive permission change', 'the OneDrive permissions'],
+            'cipp_edit_user' => ['the user edit', "the user's current state"],
+            'cipp_reset_user_password' => ['the password reset', 'the user'],
+            'cipp_create_user' => ['the account creation', 'whether the account exists'],
+            default => ['the change', 'the result'],
+        };
+
+        if ($e instanceof CippWriteNotSentException) {
+            return "CIPP write failed for {$tool}; nothing was sent to CIPP, so {$change} was not applied."
+                .($withCause ? ' '.$e->getMessage() : '');
         }
 
-        return "CIPP write failed for {$tool}; the licence {$action} was not applied.";
+        $confirmed = $e instanceof CippWriteUnconfirmedException && $e->confirmedPart !== null
+            ? " CIPP reported the {$e->confirmedPart} applied."
+            : '';
+
+        return "CIPP write failed for {$tool}; {$change} may or may not have applied — verify {$where} in CIPP before retrying.".$confirmed;
     }
 
     /** @param  mixed  $upstream  the licence client method's return */
@@ -6987,9 +7130,35 @@ class StaffCippWriteToolExecutor
         return $tool === 'cipp_remove_user_license' && is_array($upstream) && ($upstream['no_change'] ?? false) === true;
     }
 
+    /**
+     * The audit summary for a caught CippClientException (#3745, #3709).
+     *
+     *  - CippWriteHttpException: the HTTP status, read from the exception's
+     *    status field. Its message says "failed", which a 5xx does not show.
+     *  - CippWriteUnconfirmedException: its own message, which names the
+     *    endpoint and the outcome, (unknown) or (not_applied).
+     *  - CippWriteNotSentException: "failed before completion", the one type
+     *    for which that is known.
+     *  - any other CippClientException: "failed", which says nothing about
+     *    when.
+     */
     private function safeFailureSummary(string $tool, CippClientException $e): string
     {
-        return "{$tool} failed before completion: ".mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+        if ($e instanceof CippWriteHttpException) {
+            return "{$tool}: the CIPP request returned HTTP {$e->status}.";
+        }
+
+        $detail = mb_substr($this->redactor->redactString($e->getMessage()), 0, self::DECLINE_MESSAGE_MAX);
+
+        if ($e instanceof CippWriteUnconfirmedException) {
+            return "{$tool}: {$detail}";
+        }
+
+        if ($e instanceof CippWriteNotSentException) {
+            return "{$tool} failed before completion: {$detail}";
+        }
+
+        return "{$tool} failed: {$detail}";
     }
 
     /**

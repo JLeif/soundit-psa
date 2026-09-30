@@ -392,7 +392,7 @@ These commands execute automatically based on their schedule:
 | `ninja:sync-backup` | Daily at 05:30 | Sync backup storage usage and license counts from NinjaRMM (only if `ninja_enabled=1` and orgs mapped) |
 | `comet:sync-backup` | Daily at 05:40 | Sync backup storage usage and license counts from Comet Backup (only if configured + orgs mapped) |
 | `servosity:sync-licenses` | Daily at 05:45 | Sync backup license counts from Servosity (only if configured + clients mapped) |
-| `appriver:sync-licenses` | Daily at 05:50 | Sync M365 subscription seat counts from AppRiver (only if configured + clients mapped) |
+| `appriver:sync-licenses` | Daily at 05:50 | Sync M365 subscription seat counts from AppRiver (only if connected + clients mapped). If AppRiver was connected but its login has dropped, the run is logged under `[AppRiverSync]` and raises (or refreshes) one Alerts Hub alert instead of skipping silently |
 | `cipp:sync-contacts` | Daily at 05:55 | Sync M365 users as contacts + mailbox/MFA enrichment from CIPP (only if contact sync enabled + tenants mapped) |
 | `cipp:sync-devices` | Daily at 05:59 | Sync Intune devices + Defender state to assets from CIPP (only if device sync enabled + tenants mapped) |
 | `assets:refresh-health` | Daily at 06:30 | Recompute cached asset health scores (0-100) and the AI explanation from the overnight-synced signals (RMM, alerts, backup, patch, M365, tickets). Flags: `--no-ai` (deterministic explanation only), `--client=ID`, `--stale-hours=N`, `--limit=N`. |
@@ -419,7 +419,7 @@ These commands execute automatically based on their schedule:
 | Command | Purpose |
 |---------|---------|
 | `prepay:reconcile` | Recalculate prepay balances from the transaction ledger. Use `--contract=ID` for a specific contract. |
-| `version:refresh` | Refresh cached version info (commit, branch, update count). Runs automatically during deploy. |
+| `version:refresh` | Re-check update availability (how many commits behind `origin/main`) and print the served commit. **The served commit needs no refresh** — it is read from the git plumbing files on every request and is never cached, so a deploy is reflected immediately. It is not scheduled and `scripts/deploy.sh` does not run it; it is a step of the manual update in [§10 Updating](#10-updating), because the update count is cached for an hour and would otherwise keep listing just-deployed commits as available. Run it by hand whenever you want the count re-checked (it fetches from the remote). |
 | `tickets:recalculate-sla` | Recompute ticket SLA deadlines (`response_due_at`, `due_at`) from contract SLA terms. Open tickets only unless `--all`. See "SLA deadline recalculation" below. |
 
 > **Note:** Commands only execute if their respective integration is configured. It's safe to have the cron entry active even before you set up any integrations.
@@ -1038,6 +1038,15 @@ Syncs M365 license counts from CIPP (CyberDrain Improved Partner Portal) for aut
 2. Settings > Integrations > CIPP / Microsoft 365
 3. Enter your **CIPP API URL** (e.g., `https://your-cipp.azurewebsites.net`), **Azure AD Tenant ID**, **Client ID**, **Client Secret**, and optionally **Application ID** (defaults to Client ID)
 4. Optional MCP relay: create a dedicated CIPP API client with MCP Access + Readonly, store its **MCP Client ID** and **MCP Client Secret**, then enable **MCP relay enabled** after a smoke test. The relay uses `POST /api/ExecMCP?tools=...` for the existing `cipp_*` read tools and is disabled by default.
+   **CIPP v11 and later** no longer accept that app-only sign-in at ExecMCP. They take a *delegated* token for the shared **CIPP-MCP** resource app, and the PSA obtains one once through **Connect CIPP MCP**:
+   - Set **MCP backend host** to the CIPP-MCP app's Application ID URI (stored as `cipp_mcp_backend_host`). The sign-in requests `openid profile <that URI>/user_impersonation offline_access` (`openid profile` so Microsoft returns the signed-in account); refreshes request `<that URI>/user_impersonation offline_access`.
+   - On the MCP client app registration (the API client with MCP Access), add the PSA callback `https://<your-psa>/auth/cipp-mcp/callback` as a redirect URI. Whenever an **MCP Client Secret** is saved, the PSA sends it with the sign-in and every refresh. Choose one:
+     - **Public (Mobile/desktop) redirect:** a public client must send no secret, so if one is saved (for example from the pre-v11 app-only setup), an admin ticks **Remove stored MCP client secret** under the MCP Client Secret field and saves **before** clicking Connect. From then on neither the sign-in nor any refresh sends a secret.
+     - **Web redirect:** keep the secret saved and current. It is sent with the sign-in and every refresh.
+   - An admin clicks **Connect CIPP MCP** and signs in as a dedicated CIPP service account holding a Readonly or custom role, never a personal admin. The flow is authorization code + PKCE (S256).
+   - The refresh token is stored encrypted (`cipp_mcp_connector_refresh_token`) and refreshed silently, and a rotated token is saved. The panel shows the signed-in account, when it connected, and the access-token expiry.
+   - If a refresh fails, the panel shows **Refresh failed** with the vendor error code, and ONE operator alert (source CIPP, titled "CIPP MCP sign-in expired: reconnect required") is raised per failure episode. It resolves on the next successful refresh. Reconnect to fix it.
+   - After any failed MCP sign-in, further sign-ins are skipped for 60 seconds, and the curated `cipp_*` reads are answered over the REST API meanwhile.
 5. Click **Test Connection** to verify OAuth2 and tenant list retrieval
 6. Go to Settings > CIPP Tenant Mapping to map CIPP tenants to PSA clients (uses `defaultDomainName` as the tenant filter)
 7. Licenses sync daily at 04:45, or run `php artisan cipp:sync-licenses` manually
@@ -1509,9 +1518,10 @@ Syncs M365 subscription seat counts from AppRiver (reseller-side view). Shows as
 2. Enter your **Client ID** and **Client Secret** (from the OpenText Cloud Management Portal at cp.appriver.com > Integrations > API)
 3. Click **Test Connection** to verify OAuth2 credentials
 4. Go to **Customer Mapping** to map AppRiver customers to local clients (Auto-Match available for exact name matches)
-5. Click **Sync Licenses Now** or wait for the daily 05:50 cron
+5. Click **Sync Licenses Now** or wait for the daily 05:50 cron. The manual sync runs as a detached `php artisan appriver:sync-licenses --manual` process, not on the queue worker, so the worker's `--timeout` does not bound it; its result (success or failure, with the time) shows on the AppRiver card when it finishes
 6. View license utilization on the Licenses page — filter "Waste only" to find unused seats
 7. Click the edit icon next to an AppRiver license quantity to adjust seat counts (pushes to AppRiver API)
+8. If the AppRiver login drops (its refresh token is rejected and the stored tokens are cleared), an **AppRiver** alert opens in the Alerts Hub naming the fix: *Reconnect in Settings > Integrations > AppRiver*. There is one alert per dropped-login episode, and it resolves itself on reconnect. Active AppRiver rows on the Licenses page last synced more than 48 hours ago carry a **Stale** badge (vendor-held Suspended/Pending rows, rows that are no longer active, rows of clients that are not operational (stage other than Active, or inactive), and rows of clients the last sync skipped as CustomerType Referred are not flagged: a healthy sync does not re-stamp them)
 
 **Note:** If you also use CIPP, both integrations coexist — CIPP shows the tenant-side M365 view while AppRiver shows the reseller-side view. They use separate vendor/license type records.
 
@@ -1650,8 +1660,10 @@ php artisan migrate --force
 php artisan config:cache
 php artisan route:cache
 php artisan view:cache
-php artisan version:refresh
 php artisan queue:restart
+
+# Re-check update availability; the cached count otherwise lists the commits just pulled
+php artisan version:refresh
 
 # Bring the site back up
 php artisan up

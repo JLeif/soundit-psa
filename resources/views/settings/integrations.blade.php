@@ -1758,16 +1758,46 @@
 
                     <div class="row">
                         <div class="col-md-6 mb-3">
-                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID</label>
+                            @php
+                                $cippMcpConnectorPresent = ($cippMcpConnector['state'] ?? 'not_connected') !== 'not_connected';
+                            @endphp
+                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID <small class="text-muted">{{ $cippMcpConnectorPresent ? '(MCP client app)' : '(legacy, CIPP < v11)' }}</small></label>
                             <input type="text" class="form-control" id="cipp_mcp_client_id" name="mcp_client_id"
                                    value="{{ $cippMcpClientId ?? '' }}"
                                    placeholder="Readonly MCP Access client ID">
                         </div>
                         <div class="col-md-6 mb-3">
-                            <label for="cipp_mcp_client_secret" class="form-label">MCP Client Secret</label>
+                            <label for="cipp_mcp_client_secret" class="form-label">MCP Client Secret <small class="text-muted">{{ $cippMcpConnectorPresent ? '(only for a Web redirect)' : '(legacy, CIPP < v11)' }}</small></label>
                             <input type="password" class="form-control" id="cipp_mcp_client_secret" name="mcp_client_secret"
                                    value=""
                                    placeholder="{{ ($cippMcpHasSecret ?? false) ? '••••••••' : 'Enter MCP client secret' }}">
+                            @if(($cippMcpHasSecret ?? false) && auth()->user()?->isAdmin())
+                                <div class="form-check mt-2" id="cipp-mcp-remove-secret">
+                                    <input class="form-check-input" type="checkbox" name="remove_mcp_client_secret" value="1" id="cipp_remove_mcp_client_secret">
+                                    <label class="form-check-label small" for="cipp_remove_mcp_client_secret">Remove stored MCP client secret</label>
+                                    <small class="text-muted d-block">Tick this before connecting through a Mobile/desktop (public) redirect, which must send no secret. Keep the secret for a Web redirect. Takes effect when you save.</small>
+                                </div>
+                            @endif
+                        </div>
+                        <div class="col-12 mb-3" id="cipp-mcp-credentials-help">
+                            @if($cippMcpConnectorPresent)
+                                <small class="text-muted">The CIPP API client with MCP Access that the CIPP MCP connection below signs in through. The Client ID is required; it is used with the stored sign-in to refresh access to CIPP MCP.
+                                    @if($cippMcpHasSecret ?? false)
+                                        A secret is stored and is sent with the sign-in and every refresh. Web redirect: keep it. Public (Mobile/desktop) redirect: tick <strong>Remove stored MCP client secret</strong> and save first, because a public redirect must send no secret.
+                                    @else
+                                        No secret is stored, so none is sent: register that app's PSA redirect as a Mobile/desktop (public) redirect, or save the app's secret here and register a Web (confidential) redirect.
+                                    @endif
+                                </small>
+                            @else
+                                <small class="text-muted">Legacy (CIPP &lt; v11). CIPP v11 no longer accepts this app-only MCP sign-in; use <strong>Connect CIPP MCP</strong> below. The curated cipp_* read tools do not need these. Without them, or when the MCP sign-in fails, those tools are answered over the CIPP REST API with the Client ID and secret above.</small>
+                            @endif
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="cipp_mcp_backend_host" class="form-label">MCP backend host <small class="text-muted">(CIPP v11+)</small></label>
+                            <input type="text" class="form-control" id="cipp_mcp_backend_host" name="mcp_backend_host"
+                                   value="{{ $cippMcpBackendHost ?? '' }}"
+                                   placeholder="Application ID URI of the CIPP-MCP app">
+                            <small class="text-muted">The Application ID URI of the shared CIPP-MCP resource app. The connection asks for <code>&lt;this&gt;/user_impersonation offline_access</code>, plus <code>openid profile</code> at sign-in to learn the signed-in account.</small>
                         </div>
                     </div>
 
@@ -1780,6 +1810,52 @@
                     </div>
                     <div id="test-result-cipp" class="alert mt-2" style="display:none;"></div>
                 </form>
+
+                {{-- CIPP MCP delegated connection (CIPP v11+): auth-code + PKCE sign-in, silent refresh. --}}
+                @php
+                    $cippMcpState = $cippMcpConnector['state'] ?? 'not_connected';
+                @endphp
+                <div class="mt-3 pt-3 border-top" id="cipp-mcp-connection" data-state="{{ $cippMcpState }}">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-1">
+                        <strong>CIPP MCP connection</strong>
+                        @if($cippMcpState === 'connected')
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Connected</span>
+                        @elseif($cippMcpState === 'refresh_failed')
+                            <span class="badge bg-danger"><i class="bi bi-exclamation-triangle me-1"></i>Refresh failed</span>
+                        @else
+                            <span class="badge bg-secondary"><i class="bi bi-dash-circle me-1"></i>Not connected</span>
+                        @endif
+                    </div>
+                    @if($cippMcpState === 'not_connected')
+                        <p class="small text-muted mb-2">CIPP v11 accepts only a delegated sign-in for MCP. Until one is connected, the curated cipp_* reads are answered over the REST API and CIPP catalog tools are unavailable.</p>
+                    @else
+                        <p class="small mb-2">
+                            Signed in as <strong>{{ $cippMcpConnector['upn'] ?? 'unknown account' }}</strong>
+                            since {{ $cippMcpConnector['connected_at'] ?? 'unknown' }}.
+                            Access token expires {{ $cippMcpConnector['access_expires_at'] ?? 'unknown' }}; it is refreshed automatically.
+                        </p>
+                        @if($cippMcpState === 'refresh_failed')
+                            <div class="alert alert-danger small py-2 mb-2" role="alert">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                Refresh failed at {{ $cippMcpConnector['failed_at'] ?? 'unknown' }}
+                                (error code: <code>{{ $cippMcpConnector['error_code'] ?? 'unknown' }}</code>).
+                                The stored sign-in no longer works. This is not a CIPP outage. Reconnect to restore MCP.
+                            </div>
+                        @endif
+                    @endif
+                    @if(auth()->user()?->isAdmin())
+                        <a href="{{ route('auth.cipp-mcp') }}" class="btn btn-outline-primary btn-sm" id="cipp-mcp-connect-btn">
+                            <i class="bi bi-box-arrow-in-right me-1"></i>{{ $cippMcpState === 'not_connected' ? 'Connect CIPP MCP' : 'Reconnect CIPP MCP' }}
+                        </a>
+                        <small class="text-muted d-block mt-1">Sign in as the dedicated CIPP service account, not a personal admin. Requires the MCP Client ID and MCP backend host above, and the PSA callback <code>{{ route('auth.cipp-mcp.callback') }}</code> registered on that app
+                            @if($cippMcpHasSecret ?? false)
+                                as a <strong>Web</strong> redirect, because an MCP Client Secret is stored and is sent with the sign-in. For a public (Mobile/desktop) redirect, tick <strong>Remove stored MCP client secret</strong> above and save first.
+                            @else
+                                as a <strong>Mobile/desktop</strong> (public) redirect, or as a Web redirect with the MCP Client Secret saved.
+                            @endif
+                        </small>
+                    @endif
+                </div>
 
                 @if($cippConnected ?? false)
                 <div class="mt-3 pt-3 border-top">
@@ -1887,7 +1963,7 @@
                             <label class="form-check-label" for="cipp_mcp_enabled">
                                 MCP relay enabled
                                 @unless($cippMcpConfigured ?? false)
-                                    <small class="text-muted d-block">Requires MCP Client ID and secret.</small>
+                                    <small class="text-muted d-block">Requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in.</small>
                                 @endunless
                             </label>
                         </div>
@@ -1901,7 +1977,7 @@
                             <label class="form-check-label" for="cipp_mcp_catalog_sync_enabled">
                                 Auto-sync MCP catalog weekly
                                 @unless($cippMcpConfigured ?? false)
-                                    <small class="text-muted d-block">Requires MCP Client ID and secret.</small>
+                                    <small class="text-muted d-block">Requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in.</small>
                                 @endunless
                             </label>
                         </div>
@@ -2576,6 +2652,8 @@
                 </div>
                 @if($appriverConnected ?? false)
                     <span class="badge bg-success">Connected</span>
+                @elseif($appriverLoginDropped ?? false)
+                    <span class="badge bg-danger"><i class="bi bi-exclamation-triangle me-1"></i>Login dropped</span>
                 @elseif($appriverConfigured ?? false)
                     <span class="badge bg-warning text-dark">Not tested</span>
                 @else
@@ -2651,6 +2729,13 @@
                         <small class="text-muted ms-2">Last connected: {{ $appriverConnectedAt }}</small>
                         @endif
                     @else
+                        @if($appriverLoginDropped ?? false)
+                        <div class="alert alert-danger small py-2 mb-2" role="alert" id="appriver-login-dropped">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            The AppRiver login has dropped, so the daily license sync cannot run and seat counts will go stale.
+                            Reconnect below. An alert is open in the Alerts Hub until you do.
+                        </div>
+                        @endif
                         <a href="{{ route('auth.appriver') }}" class="btn btn-primary btn-sm">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Connect to AppRiver
                         </a>
@@ -2658,6 +2743,23 @@
                         <small class="text-muted ms-2">Last connected: {{ $appriverConnectedAt }}</small>
                         @endif
                         <small class="text-muted ms-2">You will be redirected to log in with your AppRiver admin credentials.</small>
+                    @endif
+                    @if(!empty($appriverManualSync))
+                    <div class="small mt-2" id="appriver-manual-sync" data-state="{{ $appriverManualSync['state'] }}">
+                        @if($appriverManualSync['state'] === 'success')
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Last manual sync succeeded</span>
+                            <span class="text-muted ms-1">{{ $appriverManualSync['finished_at'] ?? 'unknown time' }}: {{ $appriverManualSync['summary'] }}</span>
+                        @elseif($appriverManualSync['state'] === 'failed')
+                            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Last manual sync failed</span>
+                            <span class="ms-1">{{ $appriverManualSync['finished_at'] ?? 'unknown time' }}: {{ $appriverManualSync['summary'] }}</span>
+                        @elseif($appriverManualSync['overdue'])
+                            <span class="badge bg-warning text-dark"><i class="bi bi-question-circle me-1"></i>Manual sync reported no result</span>
+                            <span class="ms-1">Started {{ $appriverManualSync['started_at'] ?? 'unknown time' }} and never reported back. Check the log for [AppRiverSync].</span>
+                        @else
+                            <span class="badge bg-info text-dark"><i class="bi bi-arrow-repeat me-1"></i>Manual sync running</span>
+                            <span class="text-muted ms-1">Started {{ $appriverManualSync['started_at'] ?? 'unknown time' }}. Reload for the result.</span>
+                        @endif
+                    </div>
                     @endif
                     <div id="test-result-appriver" class="alert mt-2" style="display:none;"></div>
                 </div>

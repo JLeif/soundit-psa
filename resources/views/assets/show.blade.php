@@ -393,14 +393,10 @@
                             <td>
                                 @if($asset->last_boot_at)
                                     @php
-                                        $diff = $asset->last_boot_at->diff(now());
-                                        $parts = [];
-                                        if ($diff->days > 0) $parts[] = $diff->days . 'd';
-                                        if ($diff->h > 0) $parts[] = $diff->h . 'h';
-                                        if (empty($parts)) $parts[] = $diff->i . 'm';
-                                        $uptimeStr = implode(' ', $parts);
+                                        $uptimeReport = \App\Services\Tactical\TacticalFieldMap::storedUptime($asset);
                                     @endphp
-                                    {{ $uptimeStr }}
+                                    {{ $uptimeReport['uptime'] }} ({{ $uptimeReport['uptime_state'] }})
+                                    <br><small class="text-muted">{{ $uptimeReport['freshness_note'] }}</small>
                                     @if($asset->needs_reboot)
                                         <span class="badge bg-warning text-dark ms-2"><i class="bi bi-arrow-clockwise me-1"></i>Reboot needed</span>
                                     @endif
@@ -789,6 +785,7 @@
                 return match ($status) {
                     'ok' => ['bg-success', 'succeeded'],
                     'offline' => ['bg-warning text-dark', 'no-op (agent unreachable)'],
+                    'outcome_unknown' => ['bg-warning text-dark', 'outcome unknown (may have run)'],
                     'error' => ['bg-danger', 'error'],
                     'rejected', 'denied', 'blocked' => ['bg-secondary', $status],
                     default => ['bg-secondary', $status],
@@ -3281,7 +3278,7 @@ function renderPatches(data) {
             hostname: hostInput.value,
             shell: confirmed.shell,
             cmd: confirmed.cmd,
-            timeout: 60,
+            timeout: 30,
         };
         if (ticketSel && ticketSel.value) body.ticket_id = ticketSel.value;
 

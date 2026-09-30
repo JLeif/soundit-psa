@@ -18,6 +18,12 @@ final class TicketTimeline
 
     public function page(Ticket $ticket, array $input = [], bool $models = false): array
     {
+        if (! $models && $ticket->isUnverifiedContactIntake()) {
+            // InvalidArgumentException is the refusal every caller of page() already handles
+            // (r1 diff:14); a DomainException escaped them as a 500.
+            throw new InvalidArgumentException('This ticket is an unverified web-form intake; its timeline is withheld until staff verify it.');
+        }
+
         $limit = $input['limit'] ?? 20;
         if (! is_int($limit) || $limit < 1 || $limit > 50) {
             throw new InvalidArgumentException('limit must be an integer from 1 to 50');
@@ -78,14 +84,14 @@ final class TicketTimeline
         if ($after) {
             $rows = $rows->reverse()->values();
         }
-        $items = $rows->map(function ($row) use ($ticket, $activity, $models): array {
+        $loaded = $this->hydrate($ticket, $rows, $activity, $models);
+        $items = $rows->map(function ($row) use ($loaded, $activity, $models): array {
             $kind = str_starts_with($row->source, 'tool_') ? 'tool' : $row->source;
             $entry = ['id' => $row->source.':'.$row->id, 'kind' => $kind, 'at' => $row->at,
                 'actor' => 'System', 'summary' => ''];
             $model = null;
             if ($kind === 'tool') {
-                $raw = $activity->query($ticket)->where('id', $row->id)
-                    ->where('source', $row->source === 'tool_call' ? 'call' : 'action')->first();
+                $raw = $loaded[$row->source][$row->id] ?? null;
                 if ($raw) {
                     $safe = $activity->present($raw);
                     $entry = array_merge($entry, array_intersect_key($safe, array_flip(['actor', 'summary', 'tool', 'result_redacted'])));
@@ -95,24 +101,21 @@ final class TicketTimeline
                     $entry['summary'] = 'Activity no longer available; execution not confirmed.';
                 }
             } elseif ($kind === 'note') {
-                $model = $this->noteQuery($models)->with('author', 'attachments', 'contract', 'email')->where('ticket_id', $ticket->id)->find($row->id);
+                $model = $loaded['note'][$row->id] ?? null;
                 $entry['actor'] = $model?->author?->name ?? $model?->author_name ?? 'System';
                 $entry['summary'] = $this->text($model?->body);
             } elseif ($kind === 'call') {
-                $model = PhoneCall::with('answeredBy', 'person')->where('ticket_id', $ticket->id)->where($this->clientFence($ticket))->find($row->id);
+                $model = $loaded['call'][$row->id] ?? null;
                 $entry['actor'] = $model?->answeredBy?->name ?? 'Phone';
                 $entry['summary'] = $this->text($model?->call_summary ?? $model?->notes);
             } elseif ($kind === 'email') {
-                $model = Email::where('ticket_id', $ticket->id)->where($this->clientFence($ticket))->find($row->id);
+                $model = $loaded['email'][$row->id] ?? null;
                 $entry['actor'] = $model?->from_name ?? 'Email';
                 $entry['summary'] = $this->text(($model?->subject ?? '').' — '.($model?->body_preview ?? ''));
                 $entry['direction'] = $model?->direction?->value;
                 $entry['email_id'] = (int) $row->id;
             } else {
-                $model = AssistantConversation::with('user')->where('context_type', 'ticket')->where('context_id', $ticket->id)->find($row->id);
-                if ($models && $model) {
-                    $model->load(['messages' => fn ($q) => $q->whereIn('role', ['user', 'assistant'])]);
-                }
+                $model = $loaded['ai_chat'][$row->id] ?? null;
                 $entry['actor'] = $model?->user?->name ?? 'Assistant';
                 // No assistant message/tool payloads in the API projection.
                 $entry['summary'] = $this->text($model?->title ?? 'AI conversation');
@@ -130,6 +133,48 @@ final class TicketTimeline
     }
 
     /**
+     * One lookup per source kind present on the page (tool rows: one per tool source),
+     * plus that kind's eager loads, keyed by id, instead of one lookup per row. Each
+     * lookup keeps the fence the per-row find() carried, so a row the fence rejects
+     * hydrates as null exactly as before.
+     */
+    private function hydrate(Ticket $ticket, $rows, TicketToolActivity $activity, bool $models): array
+    {
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[$row->source][] = $row->id;
+        }
+        $loaded = [];
+        foreach (['tool_call' => 'call', 'tool_action' => 'action'] as $source => $activitySource) {
+            if (isset($ids[$source])) {
+                $loaded[$source] = $activity->query($ticket)->where('source', $activitySource)
+                    ->whereIn('id', $ids[$source])->get()->keyBy('id')->all();
+            }
+        }
+        if (isset($ids['note'])) {
+            $loaded['note'] = $this->noteQuery($models)->with('author', 'attachments', 'contract', 'email')
+                ->when($models, fn ($q) => $q->with('editor'))
+                ->where('ticket_id', $ticket->id)->whereIn('id', $ids['note'])->get()->keyBy('id')->all();
+        }
+        if (isset($ids['call'])) {
+            $loaded['call'] = PhoneCall::with('answeredBy', 'person')->when($models, fn ($q) => $q->with('client'))->where('ticket_id', $ticket->id)
+                ->where($this->clientFence($ticket))->whereIn('id', $ids['call'])->get()->keyBy('id')->all();
+        }
+        if (isset($ids['email'])) {
+            $loaded['email'] = Email::where('ticket_id', $ticket->id)->where($this->clientFence($ticket))
+                ->whereIn('id', $ids['email'])->get()->keyBy('id')->all();
+        }
+        if (isset($ids['ai_chat'])) {
+            $loaded['ai_chat'] = AssistantConversation::with('user')
+                ->when($models, fn ($q) => $q->with(['messages' => fn ($m) => $m->whereIn('role', ['user', 'assistant'])]))
+                ->where('context_type', 'ticket')->where('context_id', $ticket->id)
+                ->whereIn('id', $ids['ai_chat'])->get()->keyBy('id')->all();
+        }
+
+        return $loaded;
+    }
+
+    /**
      * The staff page composed its notes from Ticket::notes(), which is
      * hasMany(...)->withTrashed(), and show.blade.php renders a soft-deleted note as a
      * "Note deleted" placeholder. A raw TicketNote::query() applies the SoftDeletes
@@ -139,7 +184,7 @@ final class TicketTimeline
      */
     private function noteQuery(bool $models): \Illuminate\Database\Eloquent\Builder
     {
-        return $models ? TicketNote::withTrashed() : TicketNote::query();
+        return $models ? TicketNote::withTrashed() : TicketNote::automationVisible();
     }
 
     /**

@@ -62,6 +62,10 @@ class TriageToolExecutor
      */
     public function execute(string $toolName, array $input): mixed
     {
+        if ($this->ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
+        }
+
         if (str_starts_with($toolName, 'tactical_') && ! TriageToolDefinitions::isTacticalAvailable()) {
             return ['error' => 'Tactical RMM is disabled or not configured'];
         }
@@ -172,7 +176,7 @@ class TriageToolExecutor
         $query = $input['query'] ?? '';
 
         // CLIENT-SCOPED: only search tickets for this client
-        $builder = Ticket::where('client_id', $this->clientId)
+        $builder = Ticket::automationVisible()->where('client_id', $this->clientId)
             ->search($query)
             ->where('id', '!=', $this->ticket->id) // Exclude current ticket
             ->orderByDesc('created_at');
@@ -212,7 +216,7 @@ class TriageToolExecutor
         try {
             $status = $input['status'] ?? 'open';
 
-            $query = Ticket::where('client_id', $this->clientId)
+            $query = Ticket::automationVisible()->where('client_id', $this->clientId)
                 ->where('id', '!=', $this->ticket->id);
 
             // Status map (there is intentionally NO scopePending): open() already includes
@@ -375,7 +379,13 @@ class TriageToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
-        $notes = TicketNote::where('ticket_id', $ticket->id)
+        // G-14: an in-scope held intake ticket is refused as held, never as missing. The lookup
+        // above is client-scoped, so a held ticket under another client never reaches this.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
+        }
+
+        $notes = TicketNote::automationVisible()->where('ticket_id', $ticket->id)
             ->orderBy('noted_at')
             ->limit(20)
             ->get();
@@ -1056,6 +1066,8 @@ class TriageToolExecutor
                 : $agent['logged_in_username'],
             'needs_reboot' => $agent['needs_reboot'] ?? false,
             'uptime' => $uptime,
+            'boot_time' => $agent['boot_time'] ?? null,
+            ...TacticalFieldMap::uptimeProvenance($agent['status'] ?? null, $agent['last_seen'] ?? null, $uptime),
             // psa-0pb9m: coverage answers "is this device actually monitored?"
             // separately from "is it healthy?" — zero checks reads UNMONITORED
             // and verified requires explicit passing evidence.

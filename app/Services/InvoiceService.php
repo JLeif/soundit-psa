@@ -123,17 +123,22 @@ class InvoiceService
         });
     }
 
-    public function updateInvoice(Invoice $invoice, array $validated, User $user): void
+    public function updateInvoice(Invoice $invoice, array $validated, User $user): bool
     {
-        DB::transaction(function () use ($invoice, $validated, $user) {
-            // Update header fields
-            $invoice->update([
+        $locked = DB::transaction(function () use ($invoice, $validated, $user) {
+            $locked = Invoice::whereKey($invoice->getKey())->lockForUpdate()->first();
+
+            if ($locked === null || ! $locked->is_editable) {
+                return null;
+            }
+
+            // Update header fields only after the locked editability check.
+            $locked->update([
                 'invoice_date' => $validated['invoice_date'],
                 'due_date' => $validated['due_date'],
                 'notes' => $validated['notes'] ?? null,
             ]);
 
-            $existingLineIds = $invoice->lines->pluck('id')->toArray();
             $keptLineIds = [];
             $subtotal = 0;
             $totalCost = 0;
@@ -172,7 +177,7 @@ class InvoiceService
                 if (! empty($lineData['id'])) {
                     // Update existing line
                     $line = InvoiceLine::where('id', $lineData['id'])
-                        ->where('invoice_id', $invoice->id)
+                        ->where('invoice_id', $locked->id)
                         ->firstOrFail();
 
                     // Only update quantity_source if values actually changed
@@ -186,7 +191,7 @@ class InvoiceService
                     $keptLineIds[] = $line->id;
                 } else {
                     // New line
-                    $lineAttributes['invoice_id'] = $invoice->id;
+                    $lineAttributes['invoice_id'] = $locked->id;
                     $lineAttributes['quantity_source'] = $editAnnotation;
 
                     // Set qbo_item_ref from SKU if available
@@ -214,30 +219,41 @@ class InvoiceService
                 }
             }
             if (! empty($deleteIds)) {
-                InvoiceLine::where('invoice_id', $invoice->id)
+                InvoiceLine::where('invoice_id', $locked->id)
                     ->whereIn('id', $deleteIds)
                     ->delete();
             }
 
             // Recalculate invoice totals
-            $invoice->update([
+            $locked->update([
                 'subtotal' => $subtotal,
                 'total' => $subtotal,
                 'tax' => 0,
                 'total_cost' => $totalCost,
                 'margin' => round($subtotal - $totalCost, 2),
             ]);
+
+            // QBO uses loadMissing: discard any pre-edit relation snapshot.
+            $locked->unsetRelation('lines');
+
+            return $locked;
         });
 
+        if ($locked === null) {
+            return false;
+        }
+
         // Sync to QBO immediately so tax/total are correct before the redirect
-        if ($invoice->qbo_invoice_id) {
+        if ($locked->qbo_invoice_id) {
             try {
-                app(QboSyncService::class)->pushInvoiceToQbo($invoice);
+                app(QboSyncService::class)->pushInvoiceToQbo($locked);
             } catch (\Throwable $e) {
                 Log::warning("[Invoice] QBO sync failed after edit, will retry on next push: {$e->getMessage()}", [
-                    'invoice_id' => $invoice->id,
+                    'invoice_id' => $locked->id,
                 ]);
             }
         }
+
+        return true;
     }
 }

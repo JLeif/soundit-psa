@@ -40,10 +40,7 @@ use Soundasleep\Html2Text;
 
 class EmailService
 {
-    private const FREE_EMAIL_DOMAINS = [
-        'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'live.com',
-        'icloud.com', 'aol.com', 'protonmail.com', 'me.com', 'msn.com',
-    ];
+    private const FREE_EMAIL_DOMAINS = \App\Support\FreeEmailDomains::ALL;
 
     private const GRAPH_SELECT_FIELDS = 'id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,importance,receivedDateTime,internetMessageHeaders';
 
@@ -706,6 +703,14 @@ PROMPT;
      */
     private function matchToExistingTicket(Email $email): ?Ticket
     {
+        // A held form ticket keeps its thread: a reply lands on it, where the ticket-level guards
+        // keep it contained until staff verify it, rather than falling through to a separate
+        // automation-visible ticket that is never re-threaded (diff:3, context:3).
+        return $this->matchToExistingTicketUnfiltered($email);
+    }
+
+    private function matchToExistingTicketUnfiltered(Email $email): ?Ticket
+    {
         // 1. conversation_id — same Graph conversation thread
         if ($email->conversation_id) {
             $match = Email::where('conversation_id', $email->conversation_id)
@@ -838,7 +843,7 @@ PROMPT;
             // own substance/idempotency logic (Task 10) decides whether to actually draft.
             // afterCommit: creation now runs inside the email-row transaction, and a
             // worker must never pick this job up for a ticket a rollback removed.
-            if (\App\Support\TechnicianConfig::enabled()) {
+            if (\App\Support\TechnicianConfig::enabled() && ! $ticket->isUnverifiedContactIntake()) {
                 \App\Jobs\RunTechnicianLoop::dispatch($ticket->id)->afterCommit();
             }
         }
@@ -921,8 +926,9 @@ PROMPT;
             // GRADUATED auto-attach — only when confident AND the threshold is set.
             if ($decision->isAttach() && $threshold !== null && $decision->confidence >= $threshold) {
                 $ticket = Ticket::find($decision->ticketId);
-                // Re-validate server-side: still the same client + still open (may have changed since route).
-                if ($ticket && $ticket->client_id === $email->client_id && $ticket->status->isOpen()) {
+                // Re-validate server-side: still the same client + still open + not a held form
+                // ticket (context:1) (may have changed since route).
+                if ($ticket && $ticket->client_id === $email->client_id && $ticket->status->isOpen() && ! $ticket->isUnverifiedContactIntake()) {
                     $this->linkEmailToTicket($email, $ticket);
                     $this->recordIntakeRoute($email, $decision, attachedTicketId: $ticket->id, createdTicketId: null);
 
@@ -1023,7 +1029,7 @@ PROMPT;
         // Dedup: vendor notification emails often arrive in bursts for the same issue.
         // If an open ticket with the same subject exists for this client within 2 hours, link instead of creating a duplicate.
         if ($isVendorRequest) {
-            $existing = Ticket::where('client_id', $email->client_id)
+            $existing = Ticket::automationVisible()->where('client_id', $email->client_id)
                 ->where('subject', $email->subject)
                 ->whereNotIn('status', [TicketStatus::Closed, TicketStatus::Resolved])
                 ->where('created_at', '>=', now()->subHours(2))
@@ -1645,6 +1651,10 @@ PROMPT;
      */
     public function sendTicketReplyNote(Ticket $ticket, TicketNote $note, ?string $toEmail = null, array $ccEmails = []): ?Email
     {
+        if ($ticket->fresh()?->isUnverifiedContactIntake() || $note->fresh()?->isUnverifiedContactIntake()) {
+            throw new ContactIntakeContainedException('Unverified contact intake.');
+        }
+
         $mailbox = Setting::getValue('graph_mailbox');
         $toEmail = $toEmail ?: $ticket->contact?->email;
 

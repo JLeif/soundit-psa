@@ -27,6 +27,7 @@ use App\Models\TicketNote;
 use App\Services\Agent\ProposeCloseTool;
 use App\Services\AttachmentService;
 use App\Services\BillingService;
+use App\Services\Cipp\CippMcpAuthException;
 use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Level\LevelClient;
@@ -83,6 +84,10 @@ class AssistantToolExecutor
 
     public function execute(string $toolName, array $input): mixed
     {
+        if ($this->ticket?->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
+        }
+
         $logInput = $input;
         if ($toolName === 'wiki_add_fact' && array_key_exists('statement', $logInput)) {
             $logInput['statement'] = '[wiki fact statement withheld]';
@@ -327,7 +332,29 @@ class AssistantToolExecutor
         // with a confident under-count (psa-6usr). Staff already see every
         // ticket on the web dashboard, so removing it widens no access boundary;
         // the real client-lock lives on the portal executor, which is untouched.
-        return Ticket::query();
+        // A held form ticket (diff:6) is AI context, so no queue tool lists it until verified.
+        // By-id reads that miss go through heldTicketRefusal() below (G-14).
+        return Ticket::query()->automationVisible();
+    }
+
+    /**
+     * G-14: an existing held intake ticket is refused as held, never as "not found". Reached
+     * only after the automation-visible lookup missed, so an ordinary ticket never takes
+     * this path. When $scoped and this executor has a client context, a held ticket under
+     * another client still reads exactly like an unknown id.
+     *
+     * @return array{error: string}|null
+     */
+    private function heldTicketRefusal(mixed $ticketId, bool $scoped = true): ?array
+    {
+        $id = is_int($ticketId) || (is_string($ticketId) && ctype_digit($ticketId)) ? (int) $ticketId : 0;
+        $ticket = $id > 0 ? Ticket::find($id) : null;
+        if (! $ticket?->isUnverifiedContactIntake()
+            || ($scoped && $this->clientId && (int) $ticket->client_id !== (int) $this->clientId)) {
+            return null;
+        }
+
+        return ['error' => 'Unverified contact intake.'];
     }
 
     private function priorityOrderSql(): string
@@ -476,7 +503,7 @@ class AssistantToolExecutor
 
         // categoryNode.parent.parent: the taxonomy tree is depth <= 3, so this
         // loads the whole ancestor chain pathString() walks in one pass.
-        $ticketQuery = Ticket::with(['client:id,name,stage', 'assignee:id,name', 'contact', 'categoryNode.parent.parent', 'assets']);
+        $ticketQuery = Ticket::automationVisible()->with(['client:id,name,stage', 'assignee:id,name', 'contact', 'categoryNode.parent.parent', 'assets']);
 
         // Two branches, and NEITHER is getAsset/getPerson parity — those refuse
         // outright on a null client, which this read cannot do: the unscoped
@@ -509,12 +536,12 @@ class AssistantToolExecutor
         $ticket = $ticketQuery->find($ticketId);
         if (! $ticket) {
             // Existence is never confirmed: out-of-scope reads exactly like unknown.
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
 
-        $notes = TicketNote::where('ticket_id', $ticketId)
+        $notes = TicketNote::automationVisible()->where('ticket_id', $ticketId)
             ->with('attachments')
             ->orderByDesc('noted_at')
             ->limit(10)
@@ -705,9 +732,17 @@ class AssistantToolExecutor
             return ['error' => 'confidence must be a number between 0 and 1'];
         }
 
-        $ticket = Ticket::with('client')->find((int) $ticketId);
+        // Held form ticket (c1:v2:1): the automation-visible lookup misses it, so no close is
+        // proposed against it until staff verify it; it is refused as held (G-14), not as missing.
+        // With a client context the lookup is scoped to that client, as get_ticket_calls is: another
+        // client's ticket, held or ordinary, reads exactly like an unknown id (card 0WPZ4VA5).
+        $ticketQuery = Ticket::automationVisible()->with('client');
+        if ($this->clientId) {
+            $ticketQuery->where('client_id', $this->clientId);
+        }
+        $ticket = $ticketQuery->find((int) $ticketId);
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) $ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         if (! $ticket->client_id || ! $ticket->client) {
@@ -745,7 +780,9 @@ class AssistantToolExecutor
         //   unscoped — the staff board keeps its cross-client read, including
         //              the client_id IS NULL unresolved-intake tickets that
         //              are reachable nowhere else (psa-6usr).
-        $ticketQuery = Ticket::with('client:id,stage');
+        // A held form ticket (c1:v2:2) misses the automation-visible lookup and is refused as
+        // held (G-14) when in scope; out of scope it reads exactly like an unknown id.
+        $ticketQuery = Ticket::automationVisible()->with('client:id,stage');
 
         if ($this->clientId) {
             $ticketQuery->where('client_id', $this->clientId);
@@ -753,7 +790,7 @@ class AssistantToolExecutor
 
         $ticket = $ticketQuery->find($ticketId);
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found'];
         }
 
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
@@ -839,7 +876,7 @@ class AssistantToolExecutor
 
         $query = $input['query'] ?? '';
 
-        $builder = Ticket::where('client_id', $this->clientId)
+        $builder = Ticket::automationVisible()->where('client_id', $this->clientId)
             ->search($query)
             ->orderByDesc('created_at');
 
@@ -881,12 +918,19 @@ class AssistantToolExecutor
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
 
+        // G-14: a held form ticket (diff:6) that resolved in this scope is refused as held, never
+        // as missing; its notes stay unread. Out of scope it never resolves, so it reads exactly
+        // like an unknown id.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
+        }
+
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
 
         // Latest notes, not oldest: fetch the newest 20 then present them
         // chronologically. The old ASC+limit dropped the tail on busy tickets,
         // so "what did the client say last" could be absent entirely (psa-m7re).
-        $query = TicketNote::where('ticket_id', $ticket->id);
+        $query = TicketNote::automationVisible()->where('ticket_id', $ticket->id);
         try {
             $page = \App\Support\HistoryPage::read($query, 'noted_at', 'note',
                 'notes:'.$ticket->id.':'.$this->clientId, $input, 20);
@@ -986,10 +1030,14 @@ class AssistantToolExecutor
             return ['error' => 'attachment_id is required (positive integer)'];
         }
 
-        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused.
+        // CLIENT-SCOPED: cross-client ticket_id resolves to null → refused. A held form
+        // ticket (diff:6) in scope is refused as held (G-14), and no attachment is read.
         $ticket = Ticket::resolveReference($ticketId, $this->clientId);
         if (! $ticket) {
             return ['error' => 'Ticket not found or belongs to a different client'];
+        }
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'Unverified contact intake.'];
         }
 
         \App\Services\Mcp\TicketToolActivityContext::current()?->validated($ticket);
@@ -1065,7 +1113,7 @@ class AssistantToolExecutor
     {
         return match ($attachment->attachable_type) {
             Ticket::class => (int) $attachment->attachable_id === $ticketId,
-            TicketNote::class => TicketNote::where('id', $attachment->attachable_id)
+            TicketNote::class => TicketNote::automationVisible()->where('id', $attachment->attachable_id)
                 ->where('ticket_id', $ticketId)->exists(),
             default => false,
         };
@@ -1124,13 +1172,14 @@ class AssistantToolExecutor
             return ['error' => 'ticket_id and body are required'];
         }
 
-        // CLIENT-SCOPED: verify the ticket belongs to this client
-        $ticket = Ticket::where('id', $ticketId)
+        // CLIENT-SCOPED: verify the ticket belongs to this client (a held form ticket, diff:6,
+        // misses this lookup and is refused as held, G-14)
+        $ticket = Ticket::automationVisible()->where('id', $ticketId)
             ->where('client_id', $this->clientId)
             ->first();
 
         if (! $ticket) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         if (! $this->userId) {
@@ -1359,6 +1408,7 @@ class AssistantToolExecutor
             'warranty_start' => $asset->warranty_start?->toDateString(),
             'warranty_end' => $asset->warranty_end?->toDateString(),
             'last_boot_at' => $asset->last_boot_at?->toDateTimeString(),
+            ...\App\Services\Tactical\TacticalFieldMap::storedUptime($asset),
             'needs_reboot' => $asset->needs_reboot,
             'is_active' => $asset->is_active,
             'ninja_id' => $asset->ninja_id,
@@ -1375,11 +1425,12 @@ class AssistantToolExecutor
                     ->get(['people.id', 'people.first_name', 'people.last_name'])
                     ->map(fn (Person $p) => ['id' => $p->id, 'name' => trim("{$p->first_name} {$p->last_name}")])
                     ->values()->toArray(),
-                'tickets_count' => $asset->tickets()->count(),
+                // Held contact-intake tickets are not automation-visible (contract:7, Jeeves 22:27Z).
+                'tickets_count' => $asset->tickets()->automationVisible()->count(),
                 // halo_id rides along because display_id is an ACCESSOR over it
                 // ("#{halo_id}", else "T-{id}"): a column-restricted select that
                 // omits it silently renders every migrated ticket as T-{id}.
-                'recent_tickets' => $asset->tickets()
+                'recent_tickets' => $asset->tickets()->automationVisible()
                     ->orderByDesc('tickets.created_at')
                     ->limit(5)
                     ->get(['tickets.id', 'tickets.halo_id', 'tickets.subject', 'tickets.status'])
@@ -1393,7 +1444,7 @@ class AssistantToolExecutor
         ];
 
         if (in_array('tickets', $expand, true)) {
-            $out['expanded']['tickets'] = $asset->tickets()
+            $out['expanded']['tickets'] = $asset->tickets()->automationVisible()
                 ->orderByDesc('tickets.created_at')
                 ->limit(20)
                 // halo_id: display_id is an accessor over it, same as above.
@@ -1907,8 +1958,7 @@ class AssistantToolExecutor
     }
 
     /**
-     * get_email_item — full email detail by id, cross-client (by id, with no
-     * client gating of its own). Includes the
+     * get_email_item — full email detail by id. Includes the
      * full body_text; only the by-id read exposes it, never the list.
      *
      * @param  array<string, mixed>  $input
@@ -1917,7 +1967,11 @@ class AssistantToolExecutor
     private function getEmailItem(array $input): array
     {
         $id = (int) ($input['email_id'] ?? 0);
-        $email = $id > 0 ? Email::find($id) : null;
+        $emailQuery = Email::query();
+        if ($this->clientId) {
+            $emailQuery->where('client_id', $this->clientId);
+        }
+        $email = $id > 0 ? $emailQuery->find($id) : null;
         if (! $email) {
             return ['error' => 'Email item not found'];
         }
@@ -1994,6 +2048,13 @@ class AssistantToolExecutor
                 'direction' => $c->direction?->value,
                 'from_number' => $c->from_number,
                 'to_number' => $c->to_number,
+                // The raw pair above is kept byte-for-byte for existing
+                // readers. It is NOT literal from/to: on an outbound row
+                // from_number is the number we dialled and to_number is our
+                // own DID. These two say which number is the other party and
+                // what kind of evidence it is. See PhoneCall::farEndNumber().
+                'far_end_number' => $c->farEndNumber(),
+                'far_end_provenance' => $c->farEndProvenance(),
                 'status' => $c->status?->value,
                 'started_at' => $c->started_at?->toIso8601String(),
                 'duration' => $c->duration,
@@ -2010,7 +2071,7 @@ class AssistantToolExecutor
     }
 
     /**
-     * get_phone_call — full call detail by id, cross-client. Includes the
+     * get_phone_call — full call detail by id. Includes the
      * transcription; only the by-id read exposes it, never the list.
      *
      * @param  array<string, mixed>  $input
@@ -2019,7 +2080,11 @@ class AssistantToolExecutor
     private function getPhoneCall(array $input): array
     {
         $id = (int) ($input['phone_call_id'] ?? 0);
-        $call = $id > 0 ? PhoneCall::find($id) : null;
+        $callQuery = PhoneCall::query();
+        if ($this->clientId) {
+            $callQuery->where('client_id', $this->clientId);
+        }
+        $call = $id > 0 ? $callQuery->find($id) : null;
         if (! $call) {
             return ['error' => 'Phone call not found'];
         }
@@ -2029,6 +2094,10 @@ class AssistantToolExecutor
             'direction' => $call->direction?->value,
             'from_number' => $call->from_number,
             'to_number' => $call->to_number,
+            // Same pair as list_phone_calls, so a list-then-get read does not
+            // lose the field it just relied on. See listPhoneCalls().
+            'far_end_number' => $call->farEndNumber(),
+            'far_end_provenance' => $call->farEndProvenance(),
             'status' => $call->status?->value,
             'started_at' => $call->started_at?->toIso8601String(),
             'duration' => $call->duration,
@@ -2987,8 +3056,9 @@ class AssistantToolExecutor
     //
     // The CIPP tool bodies live in the shared App\Services\Cipp\HandlesCippTools
     // trait. The Assistant sources the tenant filter from $this->client, tags its
-    // CIPP failure logs [Assistant], and overrides cippMcpRelay() below to route
-    // through the CIPP MCP relay before falling back to the direct CippClient path.
+    // CIPP failure logs [Assistant], and overrides cippMcpRelay() below to try the
+    // CIPP MCP relay when it is enabled, falling back to the direct CippClient path
+    // when it is not, or when the relay cannot sign in.
 
     protected function cippTenantDomain(): ?string
     {
@@ -3002,10 +3072,49 @@ class AssistantToolExecutor
 
     protected function cippMcpRelay(string $toolName, array $input): ?array
     {
-        if (! CippConfig::isMcpRelayEnabled()) {
+        // MCP is the primary transport whenever the relay is switched on. Each
+        // `return null` below hands this call to the REST body in HandlesCippTools.
+        // The three taken because MCP was switched on but unusable (settings that
+        // cannot be read, MCP not configured, a failed sign-in) are logged; the
+        // plain relay-off case is not.
+        try {
+            $relayEnabled = CippConfig::isMcpRelayEnabled();
+        } catch (\Throwable $e) {
+            // e.g. cipp_mcp_client_secret no longer decrypts under this APP_KEY.
+            Log::warning('[Assistant] CIPP MCP relay settings could not be read; serving the read over the REST API', [
+                'tool' => $toolName,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
             return null;
         }
 
-        return app(CippMcpToolRelay::class)->execute($toolName, $input, $this->client, $this->clientId);
+        if (! $relayEnabled) {
+            if (CippConfig::isEnabled()
+                && \App\Models\Setting::getValue('cipp_mcp_enabled', '0') === '1'
+                && ! CippConfig::isMcpConfigured()) {
+                Log::warning('[Assistant] CIPP MCP relay is switched on but not configured (MCP client id/secret, API URL or tenant id missing); serving the read over the REST API', [
+                    'tool' => $toolName,
+                ]);
+            }
+
+            return null;
+        }
+
+        try {
+            return app(CippMcpToolRelay::class)->execute($toolName, $input, $this->client, $this->clientId);
+        } catch (CippMcpAuthException $e) {
+            // The MCP transport could not sign in, so CIPP did not run the query. Every
+            // tool the relay maps also has a REST body in HandlesCippTools, and
+            // returning null sends this call there. The upstream sign-in error
+            // (e.g. an AADSTS code) goes to the log, not to the caller: it
+            // describes our credentials, not the tenant's data.
+            Log::warning('[Assistant] CIPP MCP relay could not sign in; serving the read over the REST API', [
+                'tool' => $toolName,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
+            return null;
+        }
     }
 }

@@ -97,6 +97,12 @@ class ProposeCloseTool
         $reason = trim((string) ($input['reason'] ?? ''));
         $confidence = (float) ($input['confidence'] ?? 0.0);
 
+        // A held form ticket is contained as a whole: no close is proposed or recorded on it
+        // until staff verify it (c1:v2:1).
+        if ($ticket->fresh()?->isUnverifiedContactIntake()) {
+            return "Left ticket #{$ticket->id} (an unverified web-form intake awaits staff verification; no close proposed).";
+        }
+
         // Already-closed rejection (psa-y4ft, part 1): a Closed ticket has nothing
         // to propose. Return a clear failure so the caller (Chet) learns and moves
         // on, instead of recording a redundant held proposal a human must later

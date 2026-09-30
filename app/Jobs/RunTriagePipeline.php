@@ -28,10 +28,17 @@ class RunTriagePipeline implements ShouldQueue
     {
         // Use pessimistic locking to prevent concurrent runs on same ticket
         $ticket = DB::transaction(function () {
-            $ticket = Ticket::where('id', $this->ticketId)->lockForUpdate()->first();
+            $ticket = Ticket::automationVisible()->where('id', $this->ticketId)->lockForUpdate()->first();
 
             if (! $ticket) {
                 Log::warning('[Triage] Ticket not found', ['ticket_id' => $this->ticketId]);
+
+                return null;
+            }
+
+            // Held form ticket (diff:5): auto, cron and manual re-triage all wait for staff verification.
+            if ($ticket->isUnverifiedContactIntake()) {
+                Log::debug('[Triage] Skipping — unverified contact intake', ['ticket_id' => $this->ticketId]);
 
                 return null;
             }

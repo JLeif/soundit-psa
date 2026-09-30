@@ -869,9 +869,14 @@ class StaffCalendarToolExecutor
                 return $this->declined("Calendar owner {$upn} is no longer on the allowlist; the staged write was refused. Add it back (or deny and re-stage) if this is still intended.");
             }
 
-            $ticket = Ticket::find((int) ($payload['ticket_id'] ?? 0));
+            $payloadTicketId = (int) ($payload['ticket_id'] ?? 0);
+            $ticket = Ticket::automationVisible()->find($payloadTicketId);
             if ($ticket === null) {
                 $run->releaseClaim();
+
+                if (Ticket::find($payloadTicketId)?->isUnverifiedContactIntake()) {
+                    return $this->declined('The ticket this write traced to is an unverified contact intake held for staff verification; the staged write was refused. Verify the ticket first, or deny this proposal.');
+                }
 
                 return $this->declined('The ticket this write traced to no longer exists; deny this proposal and re-stage it.');
             }
@@ -1099,8 +1104,12 @@ class StaffCalendarToolExecutor
             return ['error' => 'ticket_id is required (the ticket this calendar action traces to) and must be a positive integer.'];
         }
 
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if ($ticket === null) {
+            if (Ticket::find($ticketId)?->isUnverifiedContactIntake()) {
+                return ['error' => "ticket_id {$ticketId} is an unverified contact intake held for staff verification; calendar actions cannot trace to it until it is verified."];
+            }
+
             return ['error' => "ticket_id {$ticketId} does not resolve to an existing ticket."];
         }
 

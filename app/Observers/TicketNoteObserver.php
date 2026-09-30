@@ -15,6 +15,25 @@ class TicketNoteObserver
         private readonly PrepayService $prepayService,
     ) {}
 
+    public function saving(TicketNote $note): void
+    {
+        // An ordinary edit cannot erase source provenance, even after verification.
+        if ($note->exists && $note->getRawOriginal('contact_intake_origin')) {
+            $note->contact_intake_origin = true;
+        }
+        // Provenance is stamped ONLY by the intake writer (SubmissionProcessor), never by
+        // ticket state: a staff, system or inbound-email note on an unverified intake ticket
+        // is not visitor text (r1 diff:2/7/8). Containment applies while unverified; after
+        // staff verification the note behaves like any internal note (ruling 2026-09-24).
+        if ($note->contact_intake_origin && $note->contact_intake_verified_at === null) {
+            $note->is_private = true;
+            $note->is_billable = false;
+            $note->time_minutes = 0;
+            $note->contract_id = null;
+            $note->email_id = null;
+        }
+    }
+
     public function created(TicketNote $note): void
     {
         $this->emitClientReplySignal($note);
@@ -40,7 +59,7 @@ class TicketNoteObserver
 
     private function syncPrepayDebit(TicketNote $note): void
     {
-        if (! $note->time_minutes) {
+        if ($note->isUnverifiedContactIntake() || (! $note->time_minutes && ! $note->wasChanged('time_minutes'))) {
             return;
         }
 
@@ -56,12 +75,14 @@ class TicketNoteObserver
 
     private function emitClientReplySignal(TicketNote $note): void
     {
-        if ($note->note_type !== NoteType::Reply || $note->is_private || $note->who_type !== WhoType::EndUser) {
+        if ($note->isUnverifiedContactIntake() || $note->note_type !== NoteType::Reply || $note->is_private || $note->who_type !== WhoType::EndUser) {
             return;
         }
 
         $ticket = $note->ticket;
-        if ($ticket === null) {
+        // A held form ticket is contained as a whole: a note on it, such as an inbound email
+        // threaded by [T-id], wakes nothing until staff verify the ticket (diff:1).
+        if ($ticket === null || $ticket->isUnverifiedContactIntake()) {
             return;
         }
 

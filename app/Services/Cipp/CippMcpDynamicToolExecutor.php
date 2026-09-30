@@ -100,6 +100,19 @@ class CippMcpDynamicToolExecutor
 
         try {
             $rows = $this->client->callTool($tool->upstream_name, $arguments);
+        } catch (CippMcpAuthException $e) {
+            // Catalog tools exist only over ExecMCP, so unlike the curated cipp_list_*
+            // reads there is no REST body to fail over to. The upstream sign-in error
+            // (e.g. an AADSTS code) is logged, not returned: it describes our
+            // credentials, not the tenant's data.
+            Log::warning('[CippMcpDynamicToolExecutor] CIPP MCP sign-in failed', [
+                'tool' => $toolName,
+                'upstream_tool' => $tool->upstream_name,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
+            return ['error' => 'CIPP catalog tool unavailable: PSA could not sign in to CIPP MCP, so this query was not run. '
+                .'The curated cipp_list_* read tools do not depend on MCP sign-in.'];
         } catch (\Throwable $e) {
             Log::warning('[CippMcpDynamicToolExecutor] CIPP MCP catalog query failed', [
                 'tool' => $toolName,

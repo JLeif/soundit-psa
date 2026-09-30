@@ -46,6 +46,7 @@ Route::middleware([VerifyRmmApiKey::class, 'throttle:60,1'])
         Route::post('alerts', [RmmAlertController::class, 'store']);
         Route::post('alerts/resolve', [RmmAlertController::class, 'resolve']);
     });
+Route::post('/intake/contact-submissions', \App\Http\Controllers\Api\ContactSubmissionController::class);
 
 // NinjaRMM webhooks — no auth available from Ninja's side
 Route::post('webhooks/ninja', [NinjaWebhookController::class, 'handle']);

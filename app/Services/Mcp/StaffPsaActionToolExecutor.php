@@ -389,6 +389,11 @@ class StaffPsaActionToolExecutor
             return $error;
         }
 
+        // Before ticketForClient() and before every write (Jeeves, crRnwaQJ 9/26 18:07 PT).
+        if ($error = $this->refuseUndeclaredCloseArguments('close_ticket', $arguments)) {
+            return $error;
+        }
+
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
             return $ticket;
@@ -485,6 +490,11 @@ class StaffPsaActionToolExecutor
      */
     private function stageClose(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
     {
+        // Before ticketForClient() and before every write (Jeeves, crRnwaQJ 9/26 18:07 PT).
+        if ($error = $this->refuseUndeclaredCloseArguments('stage_close_ticket', $arguments)) {
+            return $error;
+        }
+
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
             return $ticket;
@@ -2098,9 +2108,9 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Email item not found'];
         }
 
-        $ticket = Ticket::find((int) ($arguments['ticket_id'] ?? 0));
+        $ticket = Ticket::automationVisible()->find((int) ($arguments['ticket_id'] ?? 0));
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) ($arguments['ticket_id'] ?? 0), null) ?? ['error' => 'Ticket not found'];
         }
 
         // Mutation + audit atomic (the ticket's client_id is nullable — pass it through
@@ -2257,9 +2267,9 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Phone call not found'];
         }
 
-        $ticket = Ticket::find((int) ($arguments['ticket_id'] ?? 0));
+        $ticket = Ticket::automationVisible()->find((int) ($arguments['ticket_id'] ?? 0));
         if (! $ticket) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal((int) ($arguments['ticket_id'] ?? 0), null) ?? ['error' => 'Ticket not found'];
         }
 
         // A call a technician already followed up on (in particular, marked spam)
@@ -2441,6 +2451,12 @@ class StaffPsaActionToolExecutor
         $ticket = $this->ticketForClient($arguments['ticket_id'] ?? null, $clientId);
         if (is_array($ticket)) {
             return $ticket;
+        }
+
+        // Refuse before the note, responded_at and audit writes (c1:v3:1): EmailService would
+        // refuse the send anyway, and a swallowed refusal after those writes reads as success.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'send_email refused: this ticket is an unverified web-form intake; staff must verify it before any email is sent.'];
         }
 
         try {
@@ -2708,7 +2724,7 @@ class StaffPsaActionToolExecutor
             // (the secondary now carries parent_ticket_id), so this is the ONLY
             // place an exact retry can be recognised — answer it idempotently here
             // instead of as an error.
-            $merged = Ticket::find($primaryId);
+            $merged = Ticket::automationVisible()->find($primaryId);
             if ($merged && (int) $merged->client_id === $clientId
                 && $this->alreadyExecuted('merge_ticket', $merged->id, $this->contentHash('merge_ticket', $merged->id, "{$secondaryId}:{$reason}"))) {
                 return $this->idempotentResult('merge_ticket', $merged);
@@ -2789,9 +2805,9 @@ class StaffPsaActionToolExecutor
         if ($ticketId === null) {
             return ['error' => 'ticket_id is required for asset merges'];
         }
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId, $clientId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         $survivor = Asset::find($survivorId);
@@ -2982,9 +2998,9 @@ class StaffPsaActionToolExecutor
         if ($ticketId === null) {
             return ['error' => 'ticket_id is required for staged asset merges'];
         }
-        $ticket = Ticket::find($ticketId);
+        $ticket = Ticket::automationVisible()->find($ticketId);
         if (! $ticket || (int) $ticket->client_id !== $clientId) {
-            return ['error' => 'Ticket not found or belongs to a different client'];
+            return $this->heldTicketRefusal($ticketId, $clientId) ?? ['error' => 'Ticket not found or belongs to a different client'];
         }
 
         $survivor = Asset::find($survivorId);
@@ -3083,6 +3099,65 @@ class StaffPsaActionToolExecutor
         ];
     }
 
+    /**
+     * Allow-list for close_ticket / stage_close_ticket (card crRnwaQJ). Returns a refusal naming
+     * every key the tool's schema does not declare, or null. Both callers run it before their
+     * ticketForClient() lookup and before any write, so a refused call writes nothing. Because
+     * ticketForClient() is what links the call to its ticket, the mcp_audit_logs row of a
+     * refused call has a null ticket_id column; its arguments still carry ticket_id. Without
+     * this check, a misnamed key such as `resolution` was only caught because
+     * resolution_summary was then missing, and the refusal named the missing key, never the
+     * misnamed one.
+     *
+     * The accepted set is the McpToolRegistry schema's properties for the same tool name,
+     * not a second list here. `staged` is not among them: McpToolModes adds it to the
+     * published schema, and McpStaffController::callTool() unsets it before dispatch on both
+     * routes here (the stage_close_ticket alias and the stageable close_ticket), as it does
+     * client_id and execute_at. The message lists `staged` because the MCP caller may send
+     * it. A `staged` key that does reach this method came from a caller that bypassed that
+     * boundary, so it is refused like any other key and is then left out of the accepted list.
+     *
+     * Only key NAMES are echoed, capped in count and length. Values are never read.
+     *
+     * @param  array<array-key, mixed>  $arguments
+     * @return array{error: string}|null
+     */
+    private function refuseUndeclaredCloseArguments(string $tool, array $arguments): ?array
+    {
+        $definition = $tool === 'stage_close_ticket'
+            ? \App\Support\McpToolRegistry::stageCloseTicketTool()
+            : \App\Support\McpToolRegistry::closeTicketTool();
+        $declared = array_values(array_filter(
+            array_keys((array) ($definition['input_schema']['properties'] ?? [])),
+            'is_string',
+        ));
+
+        $unknown = [];
+        foreach (array_keys($arguments) as $key) {
+            if (! in_array((string) $key, $declared, true)) {
+                $unknown[] = (string) $key;
+            }
+        }
+        if ($unknown === []) {
+            return null;
+        }
+        sort($unknown);
+
+        $maxNames = 10;
+        $maxNameLength = 64;
+        $named = array_map(
+            static fn (string $key): string => mb_substr($key, 0, $maxNameLength),
+            array_slice($unknown, 0, $maxNames),
+        );
+        $more = count($unknown) - count($named);
+
+        $accepted = in_array('staged', $unknown, true) ? $declared : [...$declared, 'staged'];
+
+        return ['error' => 'Unsupported argument(s): '.implode(', ', $named)
+            .($more > 0 ? " (+{$more} more)" : '')
+            .". {$tool} accepts only: ".implode(', ', $accepted).'.'];
+    }
+
     /** @return array<string, string>|null */
     private function guardDirectAction(): ?array
     {
@@ -3131,10 +3206,35 @@ class StaffPsaActionToolExecutor
             : ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
             return ['error' => 'Ticket not found or belongs to a different client'];
         }
+        // G-14: a held intake ticket in THIS scope exists; say so rather than "not found".
+        // Checked only after the client scope, so it reveals nothing across clients. This is
+        // also L1's containment (diff:6): no MCP tool reads or acts on it until staff verify it.
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ['error' => 'This ticket is an unverified web-form intake held for staff verification; staff must verify it before any action on it.'];
+        }
 
         TicketToolActivityContext::current()?->validated($ticket);
 
         return $ticket;
+    }
+
+    /**
+     * G-14: an existing held intake ticket (in $clientId when one is given) is refused as
+     * held, never as "not found". Callers reach this only after the automation-visible
+     * lookup or its client scope failed, so an ordinary ticket never takes this path and
+     * a held ticket under another client still reads not-found.
+     *
+     * @return array{error: string}|null
+     */
+    private function heldTicketRefusal(int $ticketId, ?int $clientId): ?array
+    {
+        $ticket = $ticketId > 0 ? Ticket::find($ticketId) : null;
+        if (! $ticket?->isUnverifiedContactIntake()
+            || ($clientId !== null && ($ticket->client_id === null || (int) $ticket->client_id !== $clientId))) {
+            return null;
+        }
+
+        return ['error' => "Ticket #{$ticket->id} is an unverified web-form intake held for staff verification; staff must verify it before any action on it."];
     }
 
     /** @return array{primary: Ticket, secondary: Ticket}|array{error: string} */
@@ -3144,10 +3244,10 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Cannot merge a ticket into itself'];
         }
 
-        $primary = Ticket::find($primaryId);
-        $secondary = Ticket::find($secondaryId);
+        $primary = Ticket::automationVisible()->find($primaryId);
+        $secondary = Ticket::automationVisible()->find($secondaryId);
         if (! $primary || ! $secondary) {
-            return ['error' => 'Ticket not found'];
+            return $this->heldTicketRefusal($primaryId, $clientId) ?? $this->heldTicketRefusal($secondaryId, $clientId) ?? ['error' => 'Ticket not found'];
         }
 
         if ((int) $primary->client_id !== $clientId || (int) $secondary->client_id !== $clientId) {

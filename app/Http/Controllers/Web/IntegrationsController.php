@@ -242,6 +242,12 @@ class IntegrationsController extends Controller
         $appriverConnected = \App\Services\AppRiver\AppRiverClient::isConnected();
         $appriverConnectedAt = $fmtTs(Setting::getValue('appriver_connected_at'));
         $appriverEnabled = AppRiverConfig::isEnabled();
+        $appriverLoginDropped = \App\Services\AppRiver\AppRiverLoginMonitor::isDropped();
+        $appriverManualSync = \App\Services\AppRiver\AppRiverManualSync::status();
+        if ($appriverManualSync !== null) {
+            $appriverManualSync['started_at'] = $fmtTs($appriverManualSync['started_at']);
+            $appriverManualSync['finished_at'] = $fmtTs($appriverManualSync['finished_at']);
+        }
 
         // Printix
         $printixConfigured = PrintixConfig::isConfigured();
@@ -261,6 +267,11 @@ class IntegrationsController extends Controller
         $cippMcpHasSecret = (bool) Setting::getValue('cipp_mcp_client_secret');
         $cippMcpConfigured = CippConfig::isMcpConfigured();
         $cippConnected = (bool) $fmtTs(Setting::getValue('cipp_connected_at'));
+        $cippMcpBackendHost = CippConfig::get('mcp_backend_host');
+        $cippMcpConnector = app(\App\Services\Cipp\CippMcpConnector::class)->status();
+        foreach (['connected_at', 'access_expires_at', 'failed_at'] as $ts) {
+            $cippMcpConnector[$ts] = $fmtTs($cippMcpConnector[$ts]);
+        }
 
         // Plivo
         $plivoAuthId = Setting::settingOrConfig('plivo_auth_id', 'services.plivo.auth_id');
@@ -581,8 +592,9 @@ class IntegrationsController extends Controller
             'controldOnboardingConfigured', 'controldOnboardingEnabled', 'controldNumericUnusable',
             'zorusConfigured', 'zorusConnected', 'zorusEnabled',
             'appriverConfigured', 'appriverConnected', 'appriverConnectedAt', 'appriverEnabled',
+            'appriverLoginDropped', 'appriverManualSync',
             'printixConfigured', 'printixPartnerId', 'printixHasSecret', 'printixConnected', 'printixEnabled',
-            'cippConfigured', 'cippApiUrl', 'cippTenantId', 'cippClientId', 'cippApplicationId', 'cippHasSecret', 'cippMcpClientId', 'cippMcpHasSecret', 'cippMcpConfigured', 'cippConnected', 'cippEnabled', 'cippMcpEnabled', 'cippContactSyncEnabled', 'cippDeviceSyncEnabled', 'cippMcpCatalogSyncEnabled',
+            'cippConfigured', 'cippApiUrl', 'cippTenantId', 'cippClientId', 'cippApplicationId', 'cippHasSecret', 'cippMcpClientId', 'cippMcpHasSecret', 'cippMcpConfigured', 'cippMcpBackendHost', 'cippMcpConnector', 'cippConnected', 'cippEnabled', 'cippMcpEnabled', 'cippContactSyncEnabled', 'cippDeviceSyncEnabled', 'cippMcpCatalogSyncEnabled',
             'plivoAuthId', 'plivoDidNumber', 'plivoAppId', 'plivoHasToken', 'plivoHasWebhookSecret', 'plivoConnectedAt', 'plivoEnabled',
             'graphMailbox', 'graphConnectedAt', 'graphEmailSignature', 'emailAutoTicket', 'emailTriageUnwatched', 'graphEnabled', 'autoCloseResolvedDays', 'gravatarDefault',
             'calendarEnabled', 'calendarAvailable', 'calendarGraphConfigured', 'calendarAllowedOwnerUpns',
@@ -629,14 +641,14 @@ class IntegrationsController extends Controller
             Setting::setValue('cipp_mcp_enabled', '0');
 
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP relay requires MCP Client ID and secret before it can be enabled.');
+                ->with('error', 'CIPP MCP relay requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in before it can be enabled.');
         }
 
         if ($request->input('integration') === 'cipp_mcp_catalog_sync' && $enabled === '1' && ! CippConfig::isMcpConfigured()) {
             Setting::setValue('cipp_mcp_catalog_sync_enabled', '0');
 
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP catalog auto-sync requires MCP Client ID and secret before it can be enabled.');
+                ->with('error', 'CIPP MCP catalog auto-sync requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in before it can be enabled.');
         }
 
         // The onboarding caller's switch (B4) is explicit and separate from the
@@ -1423,7 +1435,24 @@ class IntegrationsController extends Controller
             'application_id' => 'nullable|string|max:255',
             'mcp_client_id' => 'nullable|string|max:255',
             'mcp_client_secret' => 'nullable|string|min:1|max:500',
+            'mcp_backend_host' => 'nullable|string|max:255',
+            // "Remove stored MCP client secret" (CIPP v11 connector): a public
+            // (Mobile/desktop) redirect must send no secret, and a stored one is
+            // otherwise sent on every sign-in and refresh. Saving a new secret in
+            // the same submit is a contradiction, refused rather than guessed.
+            'remove_mcp_client_secret' => 'nullable|boolean',
         ]);
+
+        $removeMcpSecret = $request->boolean('remove_mcp_client_secret');
+        if ($removeMcpSecret && ! $request->user()?->isAdmin()) {
+            // Gated exactly like Connect CIPP MCP (routes: ->middleware('admin')):
+            // the same 403, before anything in this submit is saved.
+            abort(403, 'Administrator access required.');
+        }
+        if ($removeMcpSecret && ! empty($validated['mcp_client_secret'])) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Nothing was saved: a new MCP Client Secret and "Remove stored MCP client secret" were both given. Choose one.');
+        }
 
         if (! empty($validated['api_url'])) {
             Setting::setValue('cipp_api_url', $validated['api_url']);
@@ -1445,6 +1474,16 @@ class IntegrationsController extends Controller
         }
         if (! empty($validated['mcp_client_secret'])) {
             Setting::setEncrypted('cipp_mcp_client_secret', $validated['mcp_client_secret']);
+        }
+        if (! empty($validated['mcp_backend_host'])) {
+            Setting::setValue('cipp_mcp_backend_host', trim($validated['mcp_backend_host']));
+        }
+        if ($removeMcpSecret) {
+            Setting::where('key', \App\Services\Cipp\CippMcpConnector::CLIENT_SECRET_SETTING)->delete();
+            \Illuminate\Support\Facades\Log::info('[CIPP] Stored MCP client secret removed by an administrator', ['user_id' => $request->user()?->id]);
+
+            return redirect()->route('settings.integrations')
+                ->with('success', 'CIPP credentials saved. The stored MCP client secret was removed; the CIPP MCP sign-in and refreshes now send no secret (Mobile/desktop public redirect).');
         }
 
         return redirect()->route('settings.integrations')
@@ -1510,7 +1549,7 @@ class IntegrationsController extends Controller
     {
         if (! CippConfig::isMcpConfigured()) {
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP is not configured. Save MCP Client ID and secret first.');
+                ->with('error', 'CIPP MCP is not configured. Save the MCP Client ID, then its secret or a Connect CIPP MCP sign-in, first.');
         }
 
         try {
@@ -2343,9 +2382,13 @@ class IntegrationsController extends Controller
             return back()->with('error', 'AppRiver is not connected. Click "Connect to AppRiver" first.');
         }
 
-        \Illuminate\Support\Facades\Artisan::queue('appriver:sync-licenses');
+        // Card 6abc5913: not Artisan::queue() — the prod worker's --timeout=30 killed
+        // every queued run. See AppRiverManualSync for the measured reasoning.
+        if (! (new \App\Services\AppRiver\AppRiverManualSync)->start()) {
+            return back()->with('error', 'An AppRiver license sync is already running. Its result will show on this page when it finishes.');
+        }
 
-        return back()->with('success', 'AppRiver license sync started in the background. Check the Licenses page shortly for results.');
+        return back()->with('success', 'AppRiver license sync started. Its result (success or failure, with the time) will show on this page when it finishes.');
     }
 
     // --- Plivo ---

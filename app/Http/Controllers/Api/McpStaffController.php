@@ -298,6 +298,9 @@ class McpStaffController extends Controller
         // like the pairs above, client_id an optional filter; explicit-grant only so
         // the legacy full-surface token never inherits a fleet-wide cross-client read.
         'list_mislinked_assets',
+        // #3982: the commit this instance serves. Takes no arguments and reads no
+        // client data; explicit-grant only like every entry in this list.
+        'psa_version',
     ];
 
     /**
@@ -337,6 +340,15 @@ class McpStaffController extends Controller
         'list_recurring_profiles',
         'get_recurring_profile',
         'preview_recurring_invoice',
+
+        // #4254: the by-id intake reads. Like get_recurring_profile, neither
+        // publishes client_id in its schema, but the controller lifts it out of the
+        // arguments regardless and the executor now honours it as a real fence
+        // (AssistantToolExecutor::getEmailItem/getPhoneCall). A malformed one would
+        // collapse to null and hand back another client's body_text/transcription.
+        // The entry only ADDS a refusal; an omitted client_id keeps the unscoped read.
+        'get_email_item',
+        'get_phone_call',
     ];
 
     /**
@@ -1235,6 +1247,8 @@ class McpStaffController extends Controller
             if (in_array($name, ['get_ticket_tool_history', 'get_ticket_timeline'], true)) {
                 $tool = $name === 'get_ticket_timeline' ? \App\Services\Mcp\TicketTimelineTool::class : \App\Services\Mcp\TicketToolHistoryTool::class;
                 $result = app($tool)->execute($arguments, $clientId);
+            } elseif ($name === \App\Services\Mcp\PsaVersionTool::NAME) {
+                $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {
@@ -1639,7 +1653,7 @@ class McpStaffController extends Controller
         }
 
         if ($tool === 'close_ticket' || $tool === 'stage_close_ticket') {
-            return $this->auditCloseTicketArguments($args);
+            return $this->auditCloseTicketArguments($tool, $args);
         }
 
         if ($tool === 'assign_ticket') {
@@ -1916,11 +1930,44 @@ class McpStaffController extends Controller
      * (ticket_id, status, confidence) and reduce the free-text resolution_summary / reason
      * to lengths only — they can carry client detail and never belong in the audit body.
      *
+     * Keys the tool's registry schema does not declare are recorded by NAME under
+     * unknown_keys (card crRnwaQJ). Without that, the row for a call refused over a misnamed
+     * key (`resolution` for resolution_summary) showed no sign of the key. Only names are
+     * kept, never values, since a value can carry client text. At most 10 names are kept,
+     * each cut to 64 characters, and unknown_key_count holds the full count. The match is
+     * exact, the same as the executor's allow-list. staged, client_id and execute_at are not
+     * counted: callTool() consumes them itself and unsets them before dispatch, but a row it
+     * refuses before those unsets (Tool not allowed, an execute_at refusal) can still carry
+     * client_id or execute_at. So on a dispatched call the audit names the same keys the
+     * refusal names.
+     *
      * @return array<string, mixed>
      */
-    private function auditCloseTicketArguments(array $arguments): array
+    private function auditCloseTicketArguments(string $tool, array $arguments): array
     {
         $safe = [];
+
+        $definition = $tool === 'stage_close_ticket'
+            ? McpToolRegistry::stageCloseTicketTool()
+            : McpToolRegistry::closeTicketTool();
+        $declared = [
+            ...array_keys((array) ($definition['input_schema']['properties'] ?? [])),
+            'staged', 'client_id', 'execute_at',
+        ];
+        $unknown = [];
+        foreach (array_keys($arguments) as $key) {
+            if (! in_array((string) $key, $declared, true)) {
+                $unknown[] = (string) $key;
+            }
+        }
+        if ($unknown !== []) {
+            sort($unknown);
+            $safe['unknown_keys'] = array_map(
+                static fn (string $key): string => mb_substr($key, 0, 64),
+                array_slice($unknown, 0, 10),
+            );
+            $safe['unknown_key_count'] = count($unknown);
+        }
 
         foreach ($arguments as $key => $value) {
             $normalized = mb_strtolower((string) $key);
