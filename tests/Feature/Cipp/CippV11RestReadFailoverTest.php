@@ -18,6 +18,7 @@ use Illuminate\Contracts\Cache\Repository as CacheInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
@@ -66,6 +67,7 @@ class CippV11RestReadFailoverTest extends TestCase
         Setting::setValue('cipp_mcp_enabled', '1');
         $this->assertFalse(CippConfig::isMcpConfigured());
 
+        Log::spy();
         Http::fake();
         $this->bindRealMcpClient();
         $this->bindRestClient([$this->usersResponse()]);
@@ -79,6 +81,7 @@ class CippV11RestReadFailoverTest extends TestCase
         $this->assertStringContainsString('alex@acme.example', $text);
         $this->assertSame(['/api/ListUsers?TenantFilter=acme.example'], $this->restRequests());
         Http::assertNothingSent();
+        $this->assertFallbackLogged('switched on but not configured');
     }
 
     /**
@@ -88,6 +91,7 @@ class CippV11RestReadFailoverTest extends TestCase
      */
     public function test_mcp_sign_in_rejection_fails_over_to_rest_without_surfacing_the_aadsts_error(): void
     {
+        Log::spy();
         $this->withMcpCredentials();
         $this->fakeMcpSignInRejected();
         $this->bindRealMcpClient();
@@ -107,6 +111,57 @@ class CippV11RestReadFailoverTest extends TestCase
         // The MCP transport really was tried first, and never reached ExecMCP.
         Http::assertSent(fn ($request) => str_contains($request->url(), 'login.microsoftonline.com/tenant-1/'));
         Http::assertNotSent(fn ($request) => str_contains($request->url(), '/api/ExecMCP'));
+        $this->assertFallbackLogged('could not sign in');
+    }
+
+    /**
+     * Relay switched off (the default): REST is simply the transport, not a
+     * fallback, so nothing is logged as one.
+     */
+    public function test_relay_off_serves_rest_without_logging_a_fallback(): void
+    {
+        Log::spy();
+        Http::fake();
+        $this->bindRealMcpClient();
+        $this->bindRestClient([$this->usersResponse()]);
+        $client = Client::factory()->create(['cipp_tenant_domain' => 'acme.example']);
+
+        $response = $this->callStaffTool('cipp_list_users', ['client_id' => $client->id]);
+
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $this->assertSame(['/api/ListUsers?TenantFilter=acme.example'], $this->restRequests());
+        Log::shouldNotHaveReceived('warning', [\Mockery::on(fn ($message): bool => str_contains((string) $message, 'serving the read over the REST API')), \Mockery::any()]);
+    }
+
+    /**
+     * MCP credentials saved but unreadable (e.g. encrypted under another APP_KEY)
+     * with the relay switched on: the read is served over REST and logged, not
+     * thrown out of the tool call.
+     */
+    public function test_unreadable_mcp_settings_fail_over_to_rest(): void
+    {
+        Log::spy();
+        Setting::setValue('cipp_mcp_client_id', 'mcp-client');
+        Setting::setValue('cipp_mcp_client_secret', 'not-a-payload-this-key-can-open');
+        Setting::setValue('cipp_mcp_enabled', '1');
+        Http::fake();
+        $this->bindRestClient([$this->usersResponse()]);
+        $client = Client::factory()->create(['cipp_tenant_domain' => 'acme.example']);
+
+        $result = (new AssistantToolExecutor(null, $client->id, null))->execute('cipp_list_users', []);
+
+        $this->assertArrayNotHasKey('error', $result, json_encode($result));
+        $this->assertSame(['/api/ListUsers?TenantFilter=acme.example'], $this->restRequests());
+        Http::assertNothingSent();
+        $this->assertFallbackLogged('settings could not be read');
+    }
+
+    private function assertFallbackLogged(string $cause): void
+    {
+        Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message): bool => str_contains((string) $message, 'serving the read over the REST API')
+                && str_contains((string) $message, $cause))
+            ->once();
     }
 
     /**

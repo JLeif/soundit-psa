@@ -3072,7 +3072,32 @@ class AssistantToolExecutor
 
     protected function cippMcpRelay(string $toolName, array $input): ?array
     {
-        if (! CippConfig::isMcpRelayEnabled()) {
+        // MCP is the primary transport whenever the relay is switched on. Each
+        // `return null` below hands this call to the REST body in HandlesCippTools.
+        // The three taken because MCP was switched on but unusable (settings that
+        // cannot be read, MCP not configured, a failed sign-in) are logged; the
+        // plain relay-off case is not.
+        try {
+            $relayEnabled = CippConfig::isMcpRelayEnabled();
+        } catch (\Throwable $e) {
+            // e.g. cipp_mcp_client_secret no longer decrypts under this APP_KEY.
+            Log::warning('[Assistant] CIPP MCP relay settings could not be read; serving the read over the REST API', [
+                'tool' => $toolName,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
+            return null;
+        }
+
+        if (! $relayEnabled) {
+            if (CippConfig::isEnabled()
+                && \App\Models\Setting::getValue('cipp_mcp_enabled', '0') === '1'
+                && ! CippConfig::isMcpConfigured()) {
+                Log::warning('[Assistant] CIPP MCP relay is switched on but not configured (MCP client id/secret, API URL or tenant id missing); serving the read over the REST API', [
+                    'tool' => $toolName,
+                ]);
+            }
+
             return null;
         }
 
