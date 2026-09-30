@@ -591,6 +591,11 @@ Route::middleware('auth')->group(function () {
     Route::get('/auth/appriver', [\App\Http\Controllers\Web\AppRiverOAuthController::class, 'redirect'])->name('auth.appriver');
     Route::get('/auth/appriver/callback', [\App\Http\Controllers\Web\AppRiverOAuthController::class, 'callback'])->name('auth.appriver.callback');
 
+    // CIPP MCP delegated connector (auth-code + PKCE, CIPP v11+). Admin-only: it
+    // grants the PSA a standing delegated sign-in to CIPP.
+    Route::get('/auth/cipp-mcp', [\App\Http\Controllers\Web\CippMcpOAuthController::class, 'redirect'])->middleware('admin')->name('auth.cipp-mcp');
+    Route::get('/auth/cipp-mcp/callback', [\App\Http\Controllers\Web\CippMcpOAuthController::class, 'callback'])->middleware('admin')->name('auth.cipp-mcp.callback');
+
     // AJAX endpoints (must be in web.php for session auth, NOT api.php)
     Route::get('/api/qbo/customers', [QboController::class, 'customers'])->name('api.qbo.customers');
     Route::get('/api/ninja/orgs', [NinjaOrgController::class, 'apiOrgs'])->name('api.ninja.orgs');

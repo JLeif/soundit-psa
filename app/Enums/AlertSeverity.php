@@ -67,6 +67,7 @@ enum AlertSeverity: string
                 'low' => self::Warning,
                 default => self::Error,
             },
+            AlertSource::Cipp => self::Error, // the MCP connector's refresh failures
         };
     }
 }

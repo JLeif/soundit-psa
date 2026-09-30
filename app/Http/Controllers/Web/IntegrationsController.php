@@ -261,6 +261,11 @@ class IntegrationsController extends Controller
         $cippMcpHasSecret = (bool) Setting::getValue('cipp_mcp_client_secret');
         $cippMcpConfigured = CippConfig::isMcpConfigured();
         $cippConnected = (bool) $fmtTs(Setting::getValue('cipp_connected_at'));
+        $cippMcpBackendHost = CippConfig::get('mcp_backend_host');
+        $cippMcpConnector = app(\App\Services\Cipp\CippMcpConnector::class)->status();
+        foreach (['connected_at', 'access_expires_at', 'failed_at'] as $ts) {
+            $cippMcpConnector[$ts] = $fmtTs($cippMcpConnector[$ts]);
+        }
 
         // Plivo
         $plivoAuthId = Setting::settingOrConfig('plivo_auth_id', 'services.plivo.auth_id');
@@ -582,7 +587,7 @@ class IntegrationsController extends Controller
             'zorusConfigured', 'zorusConnected', 'zorusEnabled',
             'appriverConfigured', 'appriverConnected', 'appriverConnectedAt', 'appriverEnabled',
             'printixConfigured', 'printixPartnerId', 'printixHasSecret', 'printixConnected', 'printixEnabled',
-            'cippConfigured', 'cippApiUrl', 'cippTenantId', 'cippClientId', 'cippApplicationId', 'cippHasSecret', 'cippMcpClientId', 'cippMcpHasSecret', 'cippMcpConfigured', 'cippConnected', 'cippEnabled', 'cippMcpEnabled', 'cippContactSyncEnabled', 'cippDeviceSyncEnabled', 'cippMcpCatalogSyncEnabled',
+            'cippConfigured', 'cippApiUrl', 'cippTenantId', 'cippClientId', 'cippApplicationId', 'cippHasSecret', 'cippMcpClientId', 'cippMcpHasSecret', 'cippMcpConfigured', 'cippMcpBackendHost', 'cippMcpConnector', 'cippConnected', 'cippEnabled', 'cippMcpEnabled', 'cippContactSyncEnabled', 'cippDeviceSyncEnabled', 'cippMcpCatalogSyncEnabled',
             'plivoAuthId', 'plivoDidNumber', 'plivoAppId', 'plivoHasToken', 'plivoHasWebhookSecret', 'plivoConnectedAt', 'plivoEnabled',
             'graphMailbox', 'graphConnectedAt', 'graphEmailSignature', 'emailAutoTicket', 'emailTriageUnwatched', 'graphEnabled', 'autoCloseResolvedDays', 'gravatarDefault',
             'calendarEnabled', 'calendarAvailable', 'calendarGraphConfigured', 'calendarAllowedOwnerUpns',
@@ -629,14 +634,14 @@ class IntegrationsController extends Controller
             Setting::setValue('cipp_mcp_enabled', '0');
 
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP relay requires MCP Client ID and secret before it can be enabled.');
+                ->with('error', 'CIPP MCP relay requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in before it can be enabled.');
         }
 
         if ($request->input('integration') === 'cipp_mcp_catalog_sync' && $enabled === '1' && ! CippConfig::isMcpConfigured()) {
             Setting::setValue('cipp_mcp_catalog_sync_enabled', '0');
 
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP catalog auto-sync requires MCP Client ID and secret before it can be enabled.');
+                ->with('error', 'CIPP MCP catalog auto-sync requires the MCP Client ID plus its secret or a Connect CIPP MCP sign-in before it can be enabled.');
         }
 
         // The onboarding caller's switch (B4) is explicit and separate from the
@@ -1423,6 +1428,7 @@ class IntegrationsController extends Controller
             'application_id' => 'nullable|string|max:255',
             'mcp_client_id' => 'nullable|string|max:255',
             'mcp_client_secret' => 'nullable|string|min:1|max:500',
+            'mcp_backend_host' => 'nullable|string|max:255',
         ]);
 
         if (! empty($validated['api_url'])) {
@@ -1445,6 +1451,9 @@ class IntegrationsController extends Controller
         }
         if (! empty($validated['mcp_client_secret'])) {
             Setting::setEncrypted('cipp_mcp_client_secret', $validated['mcp_client_secret']);
+        }
+        if (! empty($validated['mcp_backend_host'])) {
+            Setting::setValue('cipp_mcp_backend_host', trim($validated['mcp_backend_host']));
         }
 
         return redirect()->route('settings.integrations')
@@ -1510,7 +1519,7 @@ class IntegrationsController extends Controller
     {
         if (! CippConfig::isMcpConfigured()) {
             return redirect()->route('settings.integrations')
-                ->with('error', 'CIPP MCP is not configured. Save MCP Client ID and secret first.');
+                ->with('error', 'CIPP MCP is not configured. Save the MCP Client ID, then its secret or a Connect CIPP MCP sign-in, first.');
         }
 
         try {
