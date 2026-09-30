@@ -264,11 +264,11 @@ class CippMcpConnectorTest extends TestCase
 
         // The delegated refresh reads the stored secret live (so an admin removal
         // reaches a long-lived client), not the value captured at construction.
-        Setting::setEncrypted('cipp_mcp_client_secret', 'web-secret');
+        Setting::setEncrypted('cipp_mcp_client_secret', self::WEB_MCP_CANARY);
 
-        $this->token($this->mcpClient(true, 'web-secret'));
+        $this->token($this->mcpClient(true, self::WEB_MCP_CANARY));
 
-        $this->assertSame('web-secret', $this->tokenPosts()[0]['client_secret'] ?? null);
+        $this->assertSame(self::WEB_MCP_CANARY, $this->tokenPosts()[0]['client_secret'] ?? null);
     }
 
     public function test_get_token_without_a_connector_keeps_the_client_credentials_grant(): void
@@ -551,7 +551,7 @@ class CippMcpConnectorTest extends TestCase
     public function test_a_stored_mcp_secret_is_sent_on_exchange_and_refresh_and_the_panel_asks_for_a_web_redirect(): void
     {
         // The prod state: the pre-v11 app-only secret is still saved for the MCP client app.
-        Setting::setEncrypted('cipp_mcp_client_secret', 'legacy-mcp-secret');
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
         Http::fake(['login.microsoftonline.com/*' => Http::response([
             'token_type' => 'Bearer',
             'access_token' => self::ACCESS,
@@ -570,9 +570,9 @@ class CippMcpConnectorTest extends TestCase
         $posts = $this->tokenPosts();
         $this->assertCount(2, $posts);
         $this->assertSame('authorization_code', $posts[0]['grant_type']);
-        $this->assertSame('legacy-mcp-secret', $posts[0]['client_secret'] ?? null, 'sent with the sign-in');
+        $this->assertSame(self::LEGACY_MCP_CANARY, $posts[0]['client_secret'] ?? null, 'sent with the sign-in');
         $this->assertSame('refresh_token', $posts[1]['grant_type']);
-        $this->assertSame('legacy-mcp-secret', $posts[1]['client_secret'] ?? null, 'sent with the refresh');
+        $this->assertSame(self::LEGACY_MCP_CANARY, $posts[1]['client_secret'] ?? null, 'sent with the refresh');
 
         $this->assertStringContainsString('as a <strong>Web</strong> redirect, because an MCP Client Secret is stored', $this->panel());
         $help = $this->credentialsHelp();
@@ -633,6 +633,9 @@ class CippMcpConnectorTest extends TestCase
     // --- r2 B: a stored legacy secret, and the admin control that removes it ---
 
     private const LEGACY_MCP_CANARY = 'MCPSECRET-CANARY-legacy-4c1e';
+
+    /** A fake confidential-client (Web redirect) secret; a canary, never a real credential. */
+    private const WEB_MCP_CANARY = 'MCPSECRET-CANARY-web-7b20';
 
     public function test_r2b_removing_the_stored_secret_sends_none_on_the_exchange_or_the_refresh(): void
     {
