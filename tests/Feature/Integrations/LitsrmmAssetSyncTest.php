@@ -212,6 +212,24 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertFalse(Asset::sole()->rmm_online);
     }
 
+    public function test_nobody_signed_in_never_replaces_the_last_real_user(): void
+    {
+        // The vendor's agent reports "(none)" when the machine sits at the
+        // sign-in or lock screen: a fact about NOW, not a user. The asset's
+        // last_user means the last person who used it (Level's
+        // last_logged_in_user), so "(none)" must not overwrite that. Seen on
+        // the rehearsal against real data: Zachary-PC and Ryan PC both read
+        // "(none)" while nobody was signed in.
+        $row = $this->device('1', ['lastUser' => '(none)']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'last_user' => 'zleif']);
+        $this->device('2', ['lastUser' => '(none)']);
+
+        $this->service()->sync();
+
+        $this->assertSame('zleif', $asset->fresh()->last_user);
+        $this->assertNull(Asset::where('hostname', 'WORKSTATION-2')->sole()->last_user, 'a new asset gets no user rather than "(none)"');
+    }
+
     public function test_a_placeholder_serial_is_never_written(): void
     {
         // Level matches on serial_number ESTATE-WIDE. A stored "System Serial

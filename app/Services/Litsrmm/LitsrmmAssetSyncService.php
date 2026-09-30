@@ -50,6 +50,15 @@ use Illuminate\Support\Facades\Log;
  */
 class LitsrmmAssetSyncService
 {
+    /**
+     * What the vendor's agent reports as lastUser when the machine sits at the
+     * sign-in or lock screen (InteractiveUser.NobodySignedIn in their agent).
+     * It is a fact about NOW, not a user, while an asset's last_user means the
+     * last person who used the machine. So it never overwrites a real name and
+     * is never written to a new asset.
+     */
+    public const NOBODY_SIGNED_IN = '(none)';
+
     public function __construct(private readonly LitsrmmClient $litsrmm) {}
 
     /**
@@ -273,7 +282,7 @@ class LitsrmmAssetSyncService
         if ($device->osName !== null) {
             $data['os'] = $device->osName;
         }
-        if ($device->lastUser !== null) {
+        if ($device->lastUser !== null && $device->lastUser !== self::NOBODY_SIGNED_IN) {
             $data['last_user'] = $device->lastUser;
         }
         if ($device->lastSeen !== null) {
