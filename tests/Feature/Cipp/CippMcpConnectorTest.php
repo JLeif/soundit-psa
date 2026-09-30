@@ -632,12 +632,12 @@ class CippMcpConnectorTest extends TestCase
 
     // --- r2 B: a stored legacy secret, and the admin control that removes it ---
 
-    private const LEGACY_SECRET = 'MCPSECRET-CANARY-legacy-4c1e';
+    private const LEGACY_MCP_CANARY = 'MCPSECRET-CANARY-legacy-4c1e';
 
     public function test_r2b_removing_the_stored_secret_sends_none_on_the_exchange_or_the_refresh(): void
     {
         // Prod state: the pre-v11 app-only secret is still stored.
-        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
         // The container's long-lived client is built BEFORE the removal, as a
         // worker's singleton would be.
         $client = app(CippMcpClient::class);
@@ -665,12 +665,12 @@ class CippMcpConnectorTest extends TestCase
 
     public function test_r2b_a_stored_secret_without_the_control_is_sent_on_the_exchange_and_the_refresh(): void
     {
-        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
         $admin = User::factory()->admin()->create();
         // A save WITHOUT the control keeps the secret (the positive control for the test above).
         $this->actingAs($admin)->post(route('settings.integrations.cipp.update'), ['mcp_client_id' => 'mcp-client'])
             ->assertSessionHas('success');
-        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'));
+        $this->assertSame(self::LEGACY_MCP_CANARY, Setting::getEncrypted('cipp_mcp_client_secret'));
 
         Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
         $this->completeConnect($admin);
@@ -678,13 +678,13 @@ class CippMcpConnectorTest extends TestCase
 
         $posts = $this->tokenPosts();
         $this->assertCount(2, $posts);
-        $this->assertSame(self::LEGACY_SECRET, $posts[0]['client_secret'] ?? null, 'Web redirect: sent on the exchange');
-        $this->assertSame(self::LEGACY_SECRET, $posts[1]['client_secret'] ?? null, 'Web redirect: sent on the refresh');
+        $this->assertSame(self::LEGACY_MCP_CANARY, $posts[0]['client_secret'] ?? null, 'Web redirect: sent on the exchange');
+        $this->assertSame(self::LEGACY_MCP_CANARY, $posts[1]['client_secret'] ?? null, 'Web redirect: sent on the refresh');
     }
 
     public function test_r2b_a_non_admin_cannot_remove_the_stored_secret(): void
     {
-        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
         $tech = User::factory()->tech()->create();
 
         $this->actingAs($tech)->post(route('settings.integrations.cipp.update'), [
@@ -692,7 +692,7 @@ class CippMcpConnectorTest extends TestCase
             'mcp_backend_host' => 'api://changed.example.test',
         ])->assertForbidden();
 
-        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'), 'the secret survives');
+        $this->assertSame(self::LEGACY_MCP_CANARY, Setting::getEncrypted('cipp_mcp_client_secret'), 'the secret survives');
         $this->assertSame(self::HOST, Setting::getValue('cipp_mcp_backend_host'), 'nothing in the refused submit was saved');
 
         // Same gate as Connect: the tech is refused there too.
@@ -707,19 +707,19 @@ class CippMcpConnectorTest extends TestCase
 
     public function test_r2b_removing_while_also_saving_a_new_secret_is_refused_and_changes_nothing(): void
     {
-        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
 
         $this->actingAs(User::factory()->admin()->create())->post(route('settings.integrations.cipp.update'), [
             'remove_mcp_client_secret' => '1',
             'mcp_client_secret' => 'a-new-one',
         ])->assertSessionHas('error');
 
-        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'));
+        $this->assertSame(self::LEGACY_MCP_CANARY, Setting::getEncrypted('cipp_mcp_client_secret'));
     }
 
     public function test_r2b_help_text_says_public_redirect_remove_first_and_web_redirect_keep_it(): void
     {
-        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_MCP_CANARY);
         $this->connect();
 
         $help = $this->credentialsHelp();
