@@ -575,6 +575,7 @@ Route::middleware('auth')->group(function () {
 
     // Settings — QBO
     Route::post('/settings/integrations/qbo', [IntegrationsController::class, 'updateQbo'])->name('settings.integrations.qbo.update');
+    Route::post('/settings/integrations/qbo/sales-term', [IntegrationsController::class, 'updateQboSalesTerm'])->middleware('admin')->name('settings.integrations.qbo.sales-term');
     Route::post('/settings/integrations/qbo/disconnect', [QboController::class, 'disconnect'])->name('settings.qbo.disconnect');
     Route::get('/settings/integrations/qbo/clients', [QboClientMatchController::class, 'index'])->name('settings.qbo-clients.index');
     Route::post('/settings/integrations/qbo/clients', [QboClientMatchController::class, 'update'])->name('settings.qbo-clients.update');

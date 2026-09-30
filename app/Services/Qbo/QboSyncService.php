@@ -19,6 +19,13 @@ use Illuminate\Support\Str;
 
 class QboSyncService
 {
+    /**
+     * Setting holding the QBO Term.Id stamped as SalesTermRef on non-recurring
+     * invoices (card revwQxh4). Empty or absent = no term sent, exactly as
+     * before the setting existed.
+     */
+    public const NONRECURRING_SALES_TERM_SETTING = 'qbo_nonrecurring_sales_term_id';
+
     public function __construct(
         private readonly QboClient $qboClient,
     ) {}
@@ -555,6 +562,59 @@ class QboSyncService
             );
 
             return $resp['QueryResponse']['Account'] ?? [];
+        });
+    }
+
+    /**
+     * Active QBO payment terms, READ-ONLY (one `SELECT ... FROM Term` query
+     * through the existing client and its auth). Cached for 6 hours like
+     * listAccounts(); pass true to re-fetch (the settings save does, so the
+     * chosen id is validated against the live list, never a stale one).
+     *
+     * Shape source: Intuit's generated finance/v3 schema, QuickBooks-V3-PHP-SDK
+     * src/Data/IPPTerm.php (Id, Name, Active, Type, DueDays ...), and the query
+     * envelope every other read in this class unwraps: `QueryResponse.Term[]`,
+     * with QueryResponse present but holding no `Term` key when nothing
+     * matches. Fails CLOSED (STANDARDS C-56): a response without a
+     * QueryResponse object, a non-list `Term`, or a row lacking a scalar
+     * Id/Name throws rather than returning a clean empty list, because an
+     * empty dropdown would read as "this company has no terms".
+     *
+     * @return list<array{Id: string, Name: string}>
+     */
+    public function listSalesTerms(bool $refresh = false): array
+    {
+        if ($refresh) {
+            Cache::forget('qbo:terms');
+        }
+
+        return Cache::remember('qbo:terms', now()->addHours(6), function (): array {
+            $resp = $this->qboClient->query(
+                'SELECT Id, Name FROM Term WHERE Active = true ORDERBY Name MAXRESULTS 1000'
+            );
+
+            $queryResponse = $resp['QueryResponse'] ?? null;
+            if (! is_array($queryResponse) || ($queryResponse !== [] && array_is_list($queryResponse))) {
+                throw new QboClientException('QuickBooks returned an unrecognised Terms response (no QueryResponse object).');
+            }
+
+            $rows = $queryResponse['Term'] ?? [];
+            if (! is_array($rows) || ! array_is_list($rows)) {
+                throw new QboClientException('QuickBooks returned an unrecognised Terms response (Term is not a list).');
+            }
+
+            $terms = [];
+            foreach ($rows as $row) {
+                $id = is_array($row) ? ($row['Id'] ?? null) : null;
+                $name = is_array($row) ? ($row['Name'] ?? null) : null;
+                if (! (is_string($id) || is_int($id)) || trim((string) $id) === ''
+                    || ! is_string($name) || trim($name) === '') {
+                    throw new QboClientException('QuickBooks returned an unrecognised Terms response (a term has no Id or Name).');
+                }
+                $terms[] = ['Id' => (string) $id, 'Name' => $name];
+            }
+
+            return $terms;
         });
     }
 
@@ -1347,11 +1407,54 @@ class QboSyncService
             'Line' => $lines,
         ];
 
+        if ($termId = $this->nonRecurringSalesTermId($invoice)) {
+            $qboData['SalesTermRef'] = ['value' => $termId];
+        }
+
         if ($memo = $this->nonRecurringSkipMemo($invoice)) {
             $qboData['CustomerMemo'] = ['value' => $memo];
         }
 
         return $qboData;
+    }
+
+    /**
+     * The QBO payment term (Term.Id) stamped as SalesTermRef on this invoice,
+     * or null when none should be sent. Only NON-recurring invoices
+     * (profile_id null, the same discriminator as the skip memo, #736) get it,
+     * and only while `qbo_nonrecurring_sales_term_id` is set. The operator
+     * switches that term OFF in the payment processor's Invoice Skip Settings >
+     * Payment Terms, so a one-off invoice is excluded from autopay by a
+     * structured field rather than by customer-facing memo prose (card
+     * revwQxh4). Recurring invoices send no SalesTermRef and so keep the
+     * customer's default terms. An empty setting returns null and the payload
+     * is byte-identical to the one sent before this setting existed.
+     *
+     * The value is an id chosen from QBO's live Terms list in Settings >
+     * Integrations (validated against that list when saved); it is read fresh
+     * on every push, never cached.
+     *
+     * DUE DATE WINS OVER THE TERM. buildQboInvoice() keeps sending the PSA's
+     * own DueDate beside the term, so the due date the customer sees on the
+     * invoice does not move when the term is applied. Intuit's schema
+     * annotation for SalesTransaction.DueDate (QuickBooks-V3-PHP-SDK
+     * src/Data/IPPSalesTransaction.php, the generated finance/v3 schema docs,
+     * read 2026-09-30): "If DueDate is not included when creating an invoice,
+     * QuickBooks may determine the due date according to the terms set for this
+     * customer. If the Terms are not provided, the Due Date is set to the
+     * transaction date." The derivation is described only for the case where
+     * DueDate is OMITTED, so an explicit DueDate is the value QBO keeps and the
+     * term serves as the autopay-skip marker without re-dating the invoice.
+     */
+    private function nonRecurringSalesTermId(Invoice $invoice): ?string
+    {
+        if ($invoice->profile_id !== null) {
+            return null;
+        }
+
+        $termId = trim((string) Setting::getValue(self::NONRECURRING_SALES_TERM_SETTING, ''));
+
+        return $termId === '' ? null : $termId;
     }
 
     /**

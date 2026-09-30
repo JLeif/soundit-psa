@@ -103,6 +103,9 @@ class IntegrationsController extends Controller
         $qboDefaultExpenseId = Setting::getValue('qbo_default_expense_account_id');
         $qboIncomeAccounts = [];
         $qboExpenseAccounts = [];
+        $qboNonrecurringTermId = (string) Setting::getValue(\App\Services\Qbo\QboSyncService::NONRECURRING_SALES_TERM_SETTING, '');
+        $qboSalesTerms = [];
+        $qboSalesTermsError = null;
         if ($qboConnected) {
             try {
                 $qboSync = app(\App\Services\Qbo\QboSyncService::class);
@@ -110,6 +113,17 @@ class IntegrationsController extends Controller
                 $qboExpenseAccounts = $qboSync->listExpenseAccounts();
             } catch (\Throwable $e) {
                 \Illuminate\Support\Facades\Log::warning('[Settings] Failed to list QBO accounts', ['error' => $e->getMessage()]);
+            }
+            // Terms are only listed for an admin: only an admin may change the
+            // setting, so nobody else needs the live read. A failed read is
+            // SHOWN, never rendered as an empty dropdown (STANDARDS C-56).
+            if (auth()->user()?->isAdmin()) {
+                try {
+                    $qboSalesTerms = app(\App\Services\Qbo\QboSyncService::class)->listSalesTerms();
+                } catch (\Throwable $e) {
+                    $qboSalesTermsError = 'Could not read payment terms from QuickBooks; the saved term is unchanged.';
+                    \Illuminate\Support\Facades\Log::warning('[Settings] Failed to list QBO terms', ['error' => $e->getMessage()]);
+                }
             }
         }
 
@@ -569,6 +583,7 @@ class IntegrationsController extends Controller
 
         return view('settings.integrations', compact(
             'qboClientId', 'qboHasSecret', 'qboEnvironment', 'qboRealmId', 'qboConnected', 'qboTokenExpiresAt', 'qboAutoPush', 'qboHasWebhookToken', 'qboDefaultIncomeId', 'qboDefaultExpenseId', 'qboIncomeAccounts', 'qboExpenseAccounts',
+            'qboNonrecurringTermId', 'qboSalesTerms', 'qboSalesTermsError',
             'stripeConfigured', 'stripeMode', 'stripeConnected', 'stripeAutoPush', 'stripeEnabled',
             'autoelevateConfigured',
             'autoelevateLastVerifiedAt',
@@ -721,6 +736,54 @@ class IntegrationsController extends Controller
 
         return redirect()->route('settings.integrations')
             ->with('success', 'QuickBooks credentials saved.');
+    }
+
+    /**
+     * Save the QBO payment term stamped on NON-recurring invoices (card
+     * revwQxh4). Admin-only (route middleware). The id must be one of the
+     * ACTIVE terms QBO returns right now: the list is re-fetched, never taken
+     * from the cache or from the form, so a typed or stale id is refused. An
+     * empty value clears the setting, which restores exactly the pre-setting
+     * behaviour (no SalesTermRef). If the live list cannot be read the save is
+     * refused and the stored value is left untouched: validating against an
+     * unreadable list would either accept anything or silently drop the
+     * operator's choice.
+     */
+    public function updateQboSalesTerm(Request $request, \App\Services\Qbo\QboSyncService $qboSync)
+    {
+        $validated = $request->validate([
+            'nonrecurring_sales_term_id' => 'nullable|string|max:50',
+        ]);
+        $termId = trim((string) ($validated['nonrecurring_sales_term_id'] ?? ''));
+        $setting = \App\Services\Qbo\QboSyncService::NONRECURRING_SALES_TERM_SETTING;
+
+        if ($termId === '') {
+            Setting::setValue($setting, '');
+
+            return redirect()->route('settings.integrations')
+                ->with('success', 'Non-recurring invoice payment term cleared. One-off invoices keep the customer\'s default terms.');
+        }
+
+        try {
+            $terms = $qboSync->listSalesTerms(refresh: true);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[Settings] Failed to list QBO terms for validation', ['error' => $e->getMessage()]);
+
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Could not read payment terms from QuickBooks, so the term was not changed. Try again once QuickBooks is reachable.');
+        }
+
+        $match = collect($terms)->firstWhere('Id', $termId);
+        if ($match === null) {
+            return redirect()->route('settings.integrations')
+                ->withErrors(['nonrecurring_sales_term_id' => 'Choose a payment term from the QuickBooks list.'])
+                ->with('error', 'That payment term is not an active term in QuickBooks; nothing was saved.');
+        }
+
+        Setting::setValue($setting, $termId);
+
+        return redirect()->route('settings.integrations')
+            ->with('success', 'Non-recurring invoices will be pushed with the QuickBooks term "'.$match['Name'].'".');
     }
 
     // --- Stripe ---
