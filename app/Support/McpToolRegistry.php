@@ -1253,6 +1253,7 @@ class McpToolRegistry
             self::getStagedActionStatusTool(),
             self::listMislinkedAssetsTool(),
             \App\Services\Mcp\PsaVersionTool::definition(),
+            \App\Services\Mcp\BenjiPaysForecastTool::definition(),
         ];
     }
 

@@ -1083,6 +1083,8 @@ Optional. Lets the client portal's **Pay Online** button open a BenjiPays *appli
 3. On a client-payable invoice with a QuickBooks id, an administrator can click **Preview BenjiPays link** on the invoice page to mint a link and see the amount the vendor presents. Minting takes no payment.
 4. Turn on **Use BenjiPays for portal Pay Online** (admin only; setting `benjipays_pay_online`, default off). Invoices without a QuickBooks id, and every invoice while the switch is off, keep the Stripe link.
 
+**Auto Processing Forecast read (optional).** The staff MCP read tool `benjipays_autopay_forecast` asks BenjiPays whether one QuickBooks invoice will be auto-charged on a run date and why (`GET /v2/autoprocessing-forecast`, read-only). It uses the same stored key, which needs the additional scope `organizations:autoprocessing:read`; without it the tool answers with a plain 403 message naming that scope. Like every PSA read tool it must be granted to a token explicitly. It returns no customer, amount or payment-method details.
+
 No BenjiPays call is made from tests or CI.
 
 ### Tier2Tickets / HelpDesk Buttons
