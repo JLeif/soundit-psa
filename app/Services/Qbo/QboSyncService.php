@@ -1407,7 +1407,11 @@ class QboSyncService
             'Line' => $lines,
         ];
 
-        if ($termId = $this->nonRecurringSalesTermId($invoice)) {
+        // `!== null`, not truthiness: nonRecurringSalesTermId() is the ONE place
+        // an empty setting becomes "send nothing", and a truthiness test here
+        // would also drop a (legal) id of "0".
+        $termId = $this->nonRecurringSalesTermId($invoice);
+        if ($termId !== null) {
             $qboData['SalesTermRef'] = ['value' => $termId];
         }
 
