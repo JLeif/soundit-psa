@@ -14,6 +14,7 @@ final class BenjiPaysException extends RuntimeException
             'forbidden' => 'BenjiPays access was forbidden (403). Check scope, owner mapping permissions, and trial/billing eligibility.',
             'configuration' => 'BenjiPays requires a stored API key without control characters.',
             'invalid_id' => 'A valid accounting invoice ID is required.',
+            'invalid_date' => 'A valid run date (YYYY-MM-DD) is required.',
             'invalid_response' => 'BenjiPays returned an unusable response.',
             'transport' => 'BenjiPays could not be reached. Try again later.',
             default => 'BenjiPays request failed. Check service availability, rate limits and accounting integration configuration.',

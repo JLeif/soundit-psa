@@ -301,6 +301,10 @@ class McpStaffController extends Controller
         // #3982: the commit this instance serves. Takes no arguments and reads no
         // client data; explicit-grant only like every entry in this list.
         'psa_version',
+        // Card revwQxh4: BenjiPays auto-processing forecast for ONE invoice,
+        // read-only and redacted (no customer, amount or payment details).
+        // Explicit-grant only like every entry in this list.
+        'benjipays_autopay_forecast',
     ];
 
     /**
@@ -1249,6 +1253,8 @@ class McpStaffController extends Controller
                 $result = app($tool)->execute($arguments, $clientId);
             } elseif ($name === \App\Services\Mcp\PsaVersionTool::NAME) {
                 $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
+            } elseif ($name === \App\Services\Mcp\BenjiPaysForecastTool::NAME) {
+                $result = app(\App\Services\Mcp\BenjiPaysForecastTool::class)->execute($arguments);
             } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {

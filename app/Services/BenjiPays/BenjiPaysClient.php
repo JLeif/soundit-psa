@@ -10,7 +10,8 @@ use Illuminate\Support\Str;
 /**
  * Merchant API client. No retries, redirects, accounting expansion or charges.
  *
- * Reads: gateways and invoice balance (stage 1). The one write is
+ * Reads: gateways, invoice balance (stage 1) and the auto-processing forecast
+ * for one invoice (card revwQxh4). The one write is
  * createAppliedPaymentLink() (stage 2, #2065): minting a tokenized pay-now
  * link moves no money — the client pays on the vendor's page, if at all.
  */
@@ -58,6 +59,39 @@ class BenjiPaysClient
         ]);
 
         return AppliedPaymentLink::fromResponse($response->json());
+    }
+
+    /**
+     * READ-ONLY auto-processing forecast for ONE accounting (QBO) invoice id:
+     * GET /v2/autoprocessing-forecast?startDate=YYYY-MM-DD&invoiceId=<id>.
+     *
+     * Source: developer.benjipays.com/reference/get_v2-autoprocessing-forecast
+     * (OpenAPI 3.1, operation updatedAt 2026-07-13, read 2026-09-30). Needs
+     * the key scope `organizations:autoprocessing:read`; a missing scope is a
+     * 403 (as is a missing owner mapping permission or a lapsed trial), which
+     * send() turns into the status-only `forbidden` exception like every other
+     * call. `startDate` is the run date the forecast is evaluated against
+     * (required); with `invoiceId` the vendor forecasts that invoice only and
+     * ignores pagination. The vendor forecasts OPEN invoices only, so an
+     * invoice that is paid, voided or unknown to it comes back as an empty
+     * `data` list, reported as not-in-forecast, never as skipped.
+     *
+     * Nothing is sent but the two query parameters: no body, no write, no
+     * settings change. The response is validated and redacted in
+     * AutoprocessingForecast::fromResponse().
+     */
+    public function autoprocessingForecast(string $accountingInvoiceId, string $runDate): AutoprocessingForecast
+    {
+        $this->invoicePathSegment($accountingInvoiceId); // same id guard; throws invalid_id
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/D', $runDate)
+            || ! checkdate((int) substr($runDate, 5, 2), (int) substr($runDate, 8, 2), (int) substr($runDate, 0, 4))) {
+            throw new BenjiPaysException('invalid_date');
+        }
+
+        $query = http_build_query(['startDate' => $runDate, 'invoiceId' => $accountingInvoiceId], '', '&', PHP_QUERY_RFC3986);
+        $response = $this->send('GET', '/v2/autoprocessing-forecast?'.$query);
+
+        return AutoprocessingForecast::fromResponse($response->body(), $accountingInvoiceId);
     }
 
     /** Same id guard for every invoice-addressed path; one rawurlencoded segment. */
