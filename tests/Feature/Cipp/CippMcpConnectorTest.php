@@ -165,16 +165,11 @@ class CippMcpConnectorTest extends TestCase
     public function test_code_exchange_stores_the_refresh_token_encrypted_and_leaks_no_token(): void
     {
         $this->captureLogs();
-        // Entra returns an id_token because the sign-in asks for openid, and
-        // preferred_username in it because it asks for profile.
-        $idJwt = 'eyJhbGciOiJub25lIn0.'.rtrim(strtr(base64_encode(json_encode(['preferred_username' => 'svc-cipp@msp.example'])), '+/', '-_'), '=').'.sig';
-        Http::fake(['login.microsoftonline.com/*' => Http::response([
-            'token_type' => 'Bearer',
-            'access_token' => self::ACCESS,
-            'refresh_token' => self::REFRESH,
-            'id_token' => $idJwt,
-            'expires_in' => 3600,
-        ])]);
+        // Entra returns an id_token only because the sign-in asks for openid, and
+        // preferred_username in it only because it asks for profile: the fake
+        // endpoint applies that rule to the POSTed scope (entraTokenEndpoint).
+        $idJwt = self::idToken(true);
+        Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
         $admin = User::factory()->admin()->create();
         $state = str_repeat('s', 40);
         $verifier = str_repeat('v', 64);
@@ -266,6 +261,10 @@ class CippMcpConnectorTest extends TestCase
     {
         $this->connect();
         Http::fake(['login.microsoftonline.com/*' => $this->refreshOk()]);
+
+        // The delegated refresh reads the stored secret live (so an admin removal
+        // reaches a long-lived client), not the value captured at construction.
+        Setting::setEncrypted('cipp_mcp_client_secret', 'web-secret');
 
         $this->token($this->mcpClient(true, 'web-secret'));
 
@@ -581,7 +580,400 @@ class CippMcpConnectorTest extends TestCase
         $this->assertStringNotContainsString('No secret is stored', $help);
     }
 
+    // --- r2 A: the UPN comes from a real Entra response shape ----------------
+
+    public function test_r2a_authorize_url_asks_for_openid_profile_and_the_refresh_does_not(): void
+    {
+        $location = (string) $this->actingAs(User::factory()->admin()->create())
+            ->get(route('auth.cipp-mcp'))->headers->get('Location');
+        parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
+        $scopes = explode(' ', (string) ($query['scope'] ?? ''));
+        $this->assertContains('openid', $scopes, 'without openid Entra returns no id_token');
+        $this->assertContains('profile', $scopes, 'without profile the id_token has no preferred_username');
+        $this->assertContains(self::HOST.'/user_impersonation', $scopes);
+        $this->assertContains('offline_access', $scopes);
+
+        $this->connect();
+        Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
+        $this->token($this->mcpClient());
+        $this->assertSame(self::HOST.'/user_impersonation offline_access', $this->tokenPosts()[0]['scope'], 'the refresh keeps the ruled scope alone');
+    }
+
+    public function test_r2a_a_real_exchange_stores_the_upn_from_the_id_token_that_openid_earns(): void
+    {
+        Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
+
+        $this->completeConnect();
+
+        $this->assertSame('svc-cipp@msp.example', app(CippMcpConnector::class)->status()['upn']);
+    }
+
+    public function test_r2a_an_exchange_with_no_id_token_stores_no_fabricated_upn(): void
+    {
+        // Entra's token response when openid was not granted: no id_token at all.
+        Http::fake(['login.microsoftonline.com/*' => Http::response([
+            'token_type' => 'Bearer',
+            'scope' => self::HOST.'/user_impersonation',
+            'expires_in' => 4467,
+            'ext_expires_in' => 4467,
+            'access_token' => self::ACCESS,
+            'refresh_token' => self::REFRESH,
+        ])]);
+
+        $this->completeConnect()->assertSessionHas('success');
+
+        $connector = app(CippMcpConnector::class);
+        $this->assertTrue($connector->isConnected());
+        $this->assertNull(Setting::getValue(CippMcpConnector::UPN), 'no id_token, no UPN: nothing invented');
+        $this->assertNull($connector->status()['upn']);
+        $this->assertSame('CIPP MCP connected.', (string) session('success'));
+        $this->assertStringContainsString('Signed in as <strong>unknown account</strong>', $this->panel());
+    }
+
+    // --- r2 B: a stored legacy secret, and the admin control that removes it ---
+
+    private const LEGACY_SECRET = 'MCPSECRET-CANARY-legacy-4c1e';
+
+    public function test_r2b_removing_the_stored_secret_sends_none_on_the_exchange_or_the_refresh(): void
+    {
+        // Prod state: the pre-v11 app-only secret is still stored.
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        // The container's long-lived client is built BEFORE the removal, as a
+        // worker's singleton would be.
+        $client = app(CippMcpClient::class);
+        $admin = User::factory()->admin()->create();
+
+        $this->actingAs($admin)->post(route('settings.integrations.cipp.update'), ['remove_mcp_client_secret' => '1'])
+            ->assertRedirect(route('settings.integrations'))
+            ->assertSessionHas('success');
+        $this->assertNull(Setting::getValue('cipp_mcp_client_secret'), 'the stored secret row is gone');
+        $this->assertSame('mcp-client', Setting::getValue('cipp_mcp_client_id'), 'nothing else is touched');
+        $this->assertNotNull(Setting::getValue('cipp_client_secret'), 'the REST secret is a different setting and stays');
+
+        Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
+        $this->completeConnect($admin)->assertSessionHas('success');
+        $this->assertSame(self::ACCESS, $this->token($client));
+
+        $posts = $this->tokenPosts();
+        $this->assertCount(2, $posts);
+        $this->assertSame('authorization_code', $posts[0]['grant_type']);
+        $this->assertArrayNotHasKey('client_secret', $posts[0], 'no secret on the exchange');
+        $this->assertSame('refresh_token', $posts[1]['grant_type']);
+        $this->assertArrayNotHasKey('client_secret', $posts[1], 'no secret on the refresh');
+        $this->assertSame('mcp-client', $posts[1]['client_id']);
+    }
+
+    public function test_r2b_a_stored_secret_without_the_control_is_sent_on_the_exchange_and_the_refresh(): void
+    {
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        $admin = User::factory()->admin()->create();
+        // A save WITHOUT the control keeps the secret (the positive control for the test above).
+        $this->actingAs($admin)->post(route('settings.integrations.cipp.update'), ['mcp_client_id' => 'mcp-client'])
+            ->assertSessionHas('success');
+        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'));
+
+        Http::fake(['login.microsoftonline.com/*' => $this->entraTokenEndpoint()]);
+        $this->completeConnect($admin);
+        $this->token(app(CippMcpClient::class));
+
+        $posts = $this->tokenPosts();
+        $this->assertCount(2, $posts);
+        $this->assertSame(self::LEGACY_SECRET, $posts[0]['client_secret'] ?? null, 'Web redirect: sent on the exchange');
+        $this->assertSame(self::LEGACY_SECRET, $posts[1]['client_secret'] ?? null, 'Web redirect: sent on the refresh');
+    }
+
+    public function test_r2b_a_non_admin_cannot_remove_the_stored_secret(): void
+    {
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        $tech = User::factory()->tech()->create();
+
+        $this->actingAs($tech)->post(route('settings.integrations.cipp.update'), [
+            'remove_mcp_client_secret' => '1',
+            'mcp_backend_host' => 'api://changed.example.test',
+        ])->assertForbidden();
+
+        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'), 'the secret survives');
+        $this->assertSame(self::HOST, Setting::getValue('cipp_mcp_backend_host'), 'nothing in the refused submit was saved');
+
+        // Same gate as Connect: the tech is refused there too.
+        $this->actingAs($tech)->get(route('auth.cipp-mcp'))->assertForbidden();
+        // And the control is not offered to a tech, while an admin sees it.
+        $html = (string) $this->actingAs($tech)->get(route('settings.integrations'))->getContent();
+        $this->assertStringNotContainsString('name="remove_mcp_client_secret"', $html);
+        $html = (string) $this->actingAs(User::factory()->admin()->create())->get(route('settings.integrations'))->getContent();
+        $this->assertStringContainsString('name="remove_mcp_client_secret"', $html);
+        $this->assertStringContainsString('Remove stored MCP client secret', $html);
+    }
+
+    public function test_r2b_removing_while_also_saving_a_new_secret_is_refused_and_changes_nothing(): void
+    {
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+
+        $this->actingAs(User::factory()->admin()->create())->post(route('settings.integrations.cipp.update'), [
+            'remove_mcp_client_secret' => '1',
+            'mcp_client_secret' => 'a-new-one',
+        ])->assertSessionHas('error');
+
+        $this->assertSame(self::LEGACY_SECRET, Setting::getEncrypted('cipp_mcp_client_secret'));
+    }
+
+    public function test_r2b_help_text_says_public_redirect_remove_first_and_web_redirect_keep_it(): void
+    {
+        Setting::setEncrypted('cipp_mcp_client_secret', self::LEGACY_SECRET);
+        $this->connect();
+
+        $help = $this->credentialsHelp();
+        $this->assertStringContainsString('Web redirect: keep it', $help);
+        $this->assertStringContainsString('Public (Mobile/desktop) redirect: tick <strong>Remove stored MCP client secret</strong> and save first', $help);
+        $this->assertStringNotContainsString('cannot be cleared', $help, 'd5572dc5 wording retired');
+        $this->assertStringContainsString('tick <strong>Remove stored MCP client secret</strong> above and save first', $this->panel());
+
+        $install = (string) file_get_contents(base_path('docs/INSTALL.md'));
+        $this->assertStringContainsString('ticks **Remove stored MCP client secret**', $install);
+        $this->assertStringContainsString('**Web redirect:** keep the secret', $install);
+        $this->assertStringNotContainsString('the panel cannot clear it', $install);
+    }
+
+    // --- r2 C: bookkeeping never escapes getToken() ---------------------------
+
+    /** When true, every INSERT/UPDATE/DELETE on `settings` throws a real QueryException. */
+    private bool $failSettingsWrites = false;
+
+    /** @var array<int, mixed> bindings of the refused writes (they hold the ciphertext) */
+    private array $refusedBindings = [];
+
+    /** Was the minted token already cached when bookkeeping first touched the DB? */
+    private ?bool $cachedAtFirstBookkeeping = null;
+
+    private function failSettingsWrites(): void
+    {
+        $this->failSettingsWrites = true;
+        DB::connection()->beforeExecuting(function (string $query, array $bindings, $connection): void {
+            if (! $this->failSettingsWrites || ! preg_match('/^\s*(insert\s+into|update|delete\s+from)\s+"settings"/i', $query)) {
+                return;
+            }
+            $this->cachedAtFirstBookkeeping ??= Cache::get($this->delegatedCacheKey()) === self::ACCESS;
+            array_push($this->refusedBindings, ...$bindings);
+            // What a real DB outage raises: the message embeds the SQL bindings.
+            throw new \Illuminate\Database\QueryException($connection->getName(), $query, $bindings, new \PDOException('SQLSTATE[HY000]: forced write failure'));
+        });
+    }
+
+    private function delegatedCacheKey(): string
+    {
+        return 'cipp_mcp_oauth_token:delegated:'.sha1('tenant-1|mcp-client|'.app(CippMcpConnector::class)->generation());
+    }
+
+    public function test_r2c_success_arm_a_settings_write_that_throws_still_returns_and_caches_the_token(): void
+    {
+        $this->captureLogs();
+        $this->connect();
+        Setting::setValue(CippMcpConnector::FAILED_AT, now()->toIso8601String());
+        Http::fake(['login.microsoftonline.com/*' => Http::sequence()
+            ->pushResponse($this->refreshOk(['refresh_token' => self::ROTATED]))
+            ->pushResponse($this->refreshRejected())]);
+        $client = $this->mcpClient();
+        $this->failSettingsWrites();
+
+        $this->assertSame(self::ACCESS, $this->token($client), 'the read gets its token');
+        $this->failSettingsWrites = false;
+
+        $this->assertTrue($this->cachedAtFirstBookkeeping, 'the token was cached BEFORE any bookkeeping write');
+        $this->assertSame(self::ACCESS, Cache::get($this->delegatedCacheKey()), 'the cache holds the token');
+        $this->assertSame(self::ACCESS, $this->token($client), 'the next read is served from the cache');
+        $this->assertCount(1, $this->tokenPosts(), 'no second refresh');
+
+        // The rotated-token write really was refused, with the ciphertext in its bindings...
+        $this->assertSame(self::REFRESH, Setting::getEncrypted(CippMcpConnector::REFRESH_TOKEN_SETTING));
+        $cipher = array_values(array_filter($this->refusedBindings, fn ($b) => is_string($b) && rescue(fn () => \Illuminate\Support\Facades\Crypt::decryptString($b), null, false) === self::ROTATED));
+        $this->assertNotEmpty($cipher, 'positive control: a refused write carried the rotated token ciphertext');
+        // ...and the log names the step and class only: no token, no ciphertext, no SQL.
+        $logs = json_encode($this->logs);
+        $this->assertStringContainsString('storeRotatedRefreshToken', $logs);
+        $this->assertStringContainsString('recordAccessExpiry', $logs);
+        $this->assertStringContainsString('QueryException', $logs);
+        $this->assertStringNotContainsString('forced write failure', $logs, 'no exception message');
+        $this->assertStringNotContainsString('settings', $logs, 'no SQL');
+        $this->assertNoTokenLeaked([self::REFRESH, self::ROTATED, self::ACCESS, ...$cipher]);
+    }
+
+    public function test_r2c_success_arm_a_resolve_whose_ticket_note_throws_still_returns_and_caches_the_token(): void
+    {
+        $this->captureLogs();
+        $this->connect();
+        User::factory()->admin()->create();
+        $ticket = \App\Models\Ticket::factory()->create(['status' => \App\Enums\TicketStatus::New->value, 'closed_at' => null]);
+        $alert = Alert::create([
+            'source' => AlertSource::Cipp, 'source_alert_id' => 'cipp-mcp-connector-refresh:x',
+            'severity' => \App\Enums\AlertSeverity::Error, 'status' => AlertStatus::Active,
+            'title' => 'CIPP MCP sign-in expired: reconnect required', 'ticket_id' => $ticket->id, 'fired_at' => now(),
+        ]);
+        Setting::setValue(CippMcpConnector::FAILED_AT, now()->toIso8601String());
+        Setting::setValue(CippMcpConnector::ALERT_ID, (string) $alert->id);
+        $this->mock(\App\Services\TicketService::class, function ($mock): void {
+            $mock->shouldReceive('addNote')->once()->andThrow(new \RuntimeException('note failed near '.self::ACCESS));
+        });
+        Http::fake(['login.microsoftonline.com/*' => $this->refreshOk()]);
+        $client = $this->mcpClient();
+
+        $this->assertSame(self::ACCESS, $this->token($client));
+
+        $this->assertSame(self::ACCESS, Cache::get($this->delegatedCacheKey()), 'the cache holds the token');
+        $this->assertSame(self::ACCESS, $this->token($client));
+        $this->assertCount(1, $this->tokenPosts());
+        $this->assertSame('connected', app(CippMcpConnector::class)->status()['state'], 'the other steps still ran');
+        $logs = json_encode($this->logs);
+        $this->assertStringContainsString('resolveAlert', $logs);
+        $this->assertStringContainsString('RuntimeException', $logs);
+        $this->assertStringNotContainsString('note failed', $logs, 'no exception message');
+        $this->assertNoTokenLeaked([self::REFRESH, self::ACCESS]);
+    }
+
+    public function test_r2c_failure_arm_settings_writes_that_throw_still_raise_the_auth_exception(): void
+    {
+        $this->captureLogs();
+        $this->connect();
+        Http::fake(['login.microsoftonline.com/*' => $this->refreshRejected()]);
+        $client = $this->mcpClient();
+        $this->failSettingsWrites();
+
+        try {
+            $this->token($client);
+            $this->fail('expected CippMcpAuthException');
+        } catch (CippMcpAuthException $e) {
+            $this->assertStringContainsString('invalid_grant / AADSTS70043', $e->getMessage());
+        } finally {
+            $this->failSettingsWrites = false;
+        }
+
+        $this->assertNotEmpty($this->refusedBindings, 'positive control: openEpisode/setValue were attempted and refused');
+        $logs = json_encode($this->logs);
+        $this->assertStringContainsString('openEpisode', $logs);
+        $this->assertStringContainsString('recordFailureCode', $logs);
+        $this->assertStringNotContainsString('forced write failure', $logs);
+        $this->assertNoTokenLeaked([self::REFRESH, self::ACCESS]);
+    }
+
+    /**
+     * The client's invariant must not depend on the connector guarding itself: a
+     * connector whose bookkeeping methods throw outright (whatever the cause) still
+     * yields the token (success arm) or CippMcpAuthException (failure arm).
+     */
+    public function test_r2c_client_invariant_holds_even_when_the_connector_bookkeeping_itself_throws(): void
+    {
+        $this->captureLogs();
+        $this->connect();
+        $throwing = new class extends CippMcpConnector
+        {
+            public function storeRotatedRefreshToken(mixed $refreshToken): void
+            {
+                throw new \LogicException('rotate boom');
+            }
+
+            public function recordAccessExpiry(int $expiresIn): void
+            {
+                throw new \LogicException('expiry boom');
+            }
+
+            public function recordRefreshSuccess(): void
+            {
+                throw new \LogicException('success boom');
+            }
+
+            public function recordRefreshFailure(string $errorCode): void
+            {
+                throw new \LogicException('failure boom');
+            }
+        };
+        $client = new CippMcpClient(['api_url' => 'https://cipp.example.test', 'tenant_id' => 'tenant-1', 'client_id' => 'mcp-client', 'client_secret' => null],
+            app(CacheInterface::class), fn (string $host): array => ['93.184.216.34'], $throwing);
+        Http::fake(['login.microsoftonline.com/*' => Http::sequence()
+            ->pushResponse($this->refreshOk())
+            ->pushResponse($this->refreshRejected())]);
+
+        $this->assertSame(self::ACCESS, $this->token($client), 'success arm: the token');
+        $this->assertSame(self::ACCESS, Cache::get($this->delegatedCacheKey()), 'and it is cached');
+
+        Cache::flush();
+        try {
+            $this->token($client);
+            $this->fail('expected CippMcpAuthException');
+        } catch (CippMcpAuthException $e) {
+            $this->assertStringContainsString('invalid_grant / AADSTS70043', $e->getMessage(), 'failure arm: the auth exception, not the LogicException');
+        }
+
+        $logs = json_encode($this->logs);
+        foreach (['storeRotatedRefreshToken', 'recordAccessExpiry', 'recordRefreshSuccess', 'recordRefreshFailure'] as $step) {
+            $this->assertStringContainsString($step, $logs);
+        }
+        $this->assertStringNotContainsString('boom', $logs, 'class only, never the message');
+    }
+
+    public function test_r2c_failure_arm_an_alert_service_that_throws_still_raises_the_auth_exception(): void
+    {
+        $this->captureLogs();
+        $this->connect();
+        $this->mock(\App\Services\AlertService::class, function ($mock): void {
+            $mock->shouldReceive('upsert')->andThrow(new \RuntimeException('alert failed near '.self::REFRESH));
+        });
+        Http::fake(['login.microsoftonline.com/*' => $this->refreshRejected()]);
+
+        $this->expectException(CippMcpAuthException::class);
+        try {
+            $this->token($this->mcpClient());
+        } finally {
+            $this->assertStringNotContainsString('alert failed', json_encode($this->logs));
+            $this->assertNoTokenLeaked([self::REFRESH, self::ACCESS]);
+        }
+    }
+
     // --- helpers -------------------------------------------------------------
+
+    /**
+     * A token endpoint that follows Entra's documented rule for id_token ("Only
+     * provided if openid scope was requested", v2 auth-code flow, successful
+     * response): it inspects the POSTed scope and adds an id_token, carrying
+     * preferred_username only when profile was asked for too.
+     */
+    private function entraTokenEndpoint(): \Closure
+    {
+        return function (\Illuminate\Http\Client\Request $request) {
+            $scopes = explode(' ', (string) ($request->data()['scope'] ?? ''));
+            $body = [
+                'token_type' => 'Bearer',
+                'scope' => implode(' ', array_diff($scopes, ['openid', 'profile', 'offline_access'])),
+                'expires_in' => 3600,
+                'access_token' => self::ACCESS,
+                'refresh_token' => self::REFRESH,
+            ];
+            if (in_array('openid', $scopes, true)) {
+                $body['id_token'] = self::idToken(in_array('profile', $scopes, true));
+            }
+
+            return Http::response($body);
+        };
+    }
+
+    /** An unsigned test id_token; preferred_username only with the profile scope. */
+    private static function idToken(bool $profile): string
+    {
+        $claims = ['aud' => 'mcp-client', 'tid' => 'tenant-1', 'sub' => 'x'];
+        if ($profile) {
+            $claims['preferred_username'] = 'svc-cipp@msp.example';
+        }
+
+        return 'eyJhbGciOiJub25lIn0.'.rtrim(strtr(base64_encode(json_encode($claims)), '+/', '-_'), '=').'.sig';
+    }
+
+    /** Complete Connect as an admin with a valid state/verifier pair. */
+    private function completeConnect(?User $as = null): \Illuminate\Testing\TestResponse
+    {
+        $state = str_repeat('s', 40);
+
+        return $this->actingAs($as ?? User::factory()->admin()->create())
+            ->withSession(['cipp_mcp_oauth_state' => $state, 'cipp_mcp_oauth_verifier' => str_repeat('v', 64)])
+            ->get(route('auth.cipp-mcp.callback', ['state' => $state, 'code' => self::CODE]));
+    }
 
     private function captureLogs(): void
     {

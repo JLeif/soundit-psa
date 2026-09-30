@@ -191,6 +191,17 @@ class CippMcpClient
      * `<backend host>/user_impersonation offline_access`. A rotated refresh token is
      * persisted; a failure is reported to the connector (one alert per episode)
      * and surfaces as CippMcpAuthException carrying the vendor error CODE only.
+     *
+     * Invariant: this method returns a token or throws CippMcpAuthException, and
+     * nothing else. The connector bookkeeping (rotated refresh token, expiry,
+     * episode open/close, alert resolve and its ticket note) is best-effort: each
+     * step runs in its own guard (bookkeep()), and a step that throws is logged by
+     * exception class only and never rethrown. On success the minted token is
+     * cached BEFORE any bookkeeping, so a failed settings or alert write can
+     * neither lose the token nor force the next read to refresh again.
+     *
+     * The client secret is read live through CippMcpConnector::clientAuthFields():
+     * once an admin removes the stored secret, no refresh sends one.
      */
     private function getDelegatedToken(): string
     {
@@ -219,14 +230,18 @@ class CippMcpClient
         } catch (\Throwable $e) {
             $code = $e instanceof CippMcpAuthException ? 'backend_host_not_configured' : 'stored_token_unreadable';
             $this->rememberSignInFailure($failedKey);
-            $connector->recordRefreshFailure($code);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure($code));
             throw new CippMcpAuthException('CIPP MCP connector refresh could not start: '.$code);
         }
 
-        $fields = ['client_id' => $clientId];
-        $clientSecret = (string) ($this->config['client_secret'] ?? '');
-        if ($clientSecret !== '') {
-            $fields['client_secret'] = $clientSecret;
+        try {
+            $fields = CippMcpConnector::clientAuthFields($clientId);
+        } catch (\Throwable $e) {
+            // The stored secret is unreadable (e.g. APP_KEY rotated): a refresh
+            // cannot be authenticated as configured, so this is a sign-in failure.
+            $this->rememberSignInFailure($failedKey);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure('stored_secret_unreadable'));
+            throw new CippMcpAuthException('CIPP MCP connector refresh could not start: stored_secret_unreadable');
         }
 
         try {
@@ -248,18 +263,45 @@ class CippMcpClient
 
         if ($failure !== null) {
             $this->rememberSignInFailure($failedKey);
-            $connector->recordRefreshFailure($failure);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure($failure));
             Log::error('[CippMcpClient] CIPP MCP connector refresh failed', ['error_code' => $failure]);
             throw new CippMcpAuthException('CIPP MCP connector refresh failed: '.$failure);
         }
 
+        // Cache first: the token is good whatever the bookkeeping below does.
         $expiresIn = (int) ($response->json('expires_in') ?? 3600);
-        $connector->storeRotatedRefreshToken($response->json('refresh_token'));
-        $connector->recordAccessExpiry($expiresIn);
-        $connector->recordRefreshSuccess();
         $this->cache->put($cacheKey, $token, max(60, $expiresIn - 300));
 
+        $rotated = $response->json('refresh_token');
+        $this->bookkeep('storeRotatedRefreshToken', fn () => $connector->storeRotatedRefreshToken($rotated));
+        $this->bookkeep('recordAccessExpiry', fn () => $connector->recordAccessExpiry($expiresIn));
+        $this->bookkeep('recordRefreshSuccess', fn () => $connector->recordRefreshSuccess());
+
         return $token;
+    }
+
+    /**
+     * Run one connector bookkeeping step; never let it escape getToken().
+     *
+     * The log line carries the step name and the exception CLASS only: never its
+     * message, bindings or trace, because a QueryException from
+     * Setting::setEncrypted() embeds the SQL bindings, which hold the encrypted
+     * refresh token.
+     */
+    private function bookkeep(string $step, callable $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            try {
+                Log::error('[CippMcpClient] CIPP MCP connector bookkeeping failed; continuing', [
+                    'step' => $step,
+                    'exception' => class_basename($e),
+                ]);
+            } catch (\Throwable) {
+                // A failing logger must not turn bookkeeping into a failed read either.
+            }
+        }
     }
 
     private function signInFailedKey(string $tenantId, string $clientId, string $mode): string

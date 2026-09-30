@@ -130,16 +130,24 @@ class CippMcpConnector
         return Str::random(64);
     }
 
+    /** The stored MCP client-app secret setting; an admin can remove it (updateCipp). */
+    public const CLIENT_SECRET_SETTING = 'cipp_mcp_client_secret';
+
     /**
      * The token-endpoint body fields that identify the client: always client_id,
      * plus client_secret when one is stored (Web / confidential redirect). A
-     * Mobile/desktop (public) registration has no secret and sends none.
+     * Mobile/desktop (public) registration must send none, so an admin removes the
+     * stored secret first ("Remove stored MCP client secret"); with it removed,
+     * nothing is sent on the code exchange or on any refresh.
+     *
+     * Read live from the settings on every call, never from a value captured when
+     * a long-lived client was built, so a removal takes effect at once.
      *
      * @return array<string, string>
      */
-    public static function clientAuthFields(): array
+    public static function clientAuthFields(?string $clientId = null): array
     {
-        $fields = ['client_id' => (string) CippConfig::get('mcp_client_id')];
+        $fields = ['client_id' => $clientId ?? (string) CippConfig::get('mcp_client_id')];
         $secret = (string) CippConfig::get('mcp_client_secret');
         if ($secret !== '') {
             $fields['client_secret'] = $secret;
@@ -213,19 +221,24 @@ class CippMcpConnector
      */
     public function recordRefreshSuccess(): void
     {
-        if (Setting::getValue(self::FAILED_AT) !== null) {
-            Setting::setValue(self::FAILED_AT, null);
-            Setting::setValue(self::FAILED_CODE, null);
-        }
-
-        $alertId = Setting::getValue(self::ALERT_ID);
-        if ($alertId !== null && $alertId !== '') {
-            $alert = Alert::find((int) $alertId);
-            if ($alert !== null) {
-                app(AlertService::class)->resolve($alert, 'CIPP MCP connector refreshed successfully.');
+        self::guard('clearFailureMarker', function (): void {
+            if (Setting::getValue(self::FAILED_AT) !== null) {
+                Setting::setValue(self::FAILED_AT, null);
+                Setting::setValue(self::FAILED_CODE, null);
             }
-            Setting::setValue(self::ALERT_ID, null);
-        }
+        });
+
+        self::guard('resolveAlert', function (): void {
+            $alertId = Setting::getValue(self::ALERT_ID);
+            if ($alertId !== null && $alertId !== '') {
+                $alert = Alert::find((int) $alertId);
+                if ($alert !== null) {
+                    // resolve() also notes a linked ticket (TicketService::addNote).
+                    app(AlertService::class)->resolve($alert, 'CIPP MCP connector refreshed successfully.');
+                }
+                Setting::setValue(self::ALERT_ID, null);
+            }
+        });
     }
 
     /**
@@ -236,8 +249,11 @@ class CippMcpConnector
     public function recordRefreshFailure(string $errorCode): void
     {
         $errorCode = self::sanitizeCode($errorCode);
-        $opened = $this->openEpisode();
-        Setting::setValue(self::FAILED_CODE, $errorCode);
+        $opened = false;
+        self::guard('openEpisode', function () use (&$opened): void {
+            $opened = $this->openEpisode();
+        });
+        self::guard('recordFailureCode', fn () => Setting::setValue(self::FAILED_CODE, $errorCode));
 
         if (! $opened) {
             return;
@@ -256,6 +272,27 @@ class CippMcpConnector
         } catch (\Throwable $e) {
             // Alerting must never turn a failed sign-in into a failed read.
             Log::error('[CippMcpConnector] Could not raise the refresh-failure alert', ['exception' => class_basename($e)]);
+        }
+    }
+
+    /**
+     * Run one bookkeeping step; a step that throws is logged by exception CLASS
+     * only (never its message: a QueryException carries the SQL bindings, which
+     * may hold an encrypted token) and never rethrown. The token read that
+     * triggered it must still return its token or its CippMcpAuthException.
+     */
+    private static function guard(string $step, callable $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            try {
+                Log::error('[CippMcpConnector] Bookkeeping step failed; continuing', [
+                    'step' => $step,
+                    'exception' => class_basename($e),
+                ]);
+            } catch (\Throwable) {
+            }
         }
     }
 

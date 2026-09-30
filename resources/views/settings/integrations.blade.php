@@ -1771,12 +1771,19 @@
                             <input type="password" class="form-control" id="cipp_mcp_client_secret" name="mcp_client_secret"
                                    value=""
                                    placeholder="{{ ($cippMcpHasSecret ?? false) ? '••••••••' : 'Enter MCP client secret' }}">
+                            @if(($cippMcpHasSecret ?? false) && auth()->user()?->isAdmin())
+                                <div class="form-check mt-2" id="cipp-mcp-remove-secret">
+                                    <input class="form-check-input" type="checkbox" name="remove_mcp_client_secret" value="1" id="cipp_remove_mcp_client_secret">
+                                    <label class="form-check-label small" for="cipp_remove_mcp_client_secret">Remove stored MCP client secret</label>
+                                    <small class="text-muted d-block">Tick this before connecting through a Mobile/desktop (public) redirect, which must send no secret. Keep the secret for a Web redirect. Takes effect when you save.</small>
+                                </div>
+                            @endif
                         </div>
                         <div class="col-12 mb-3" id="cipp-mcp-credentials-help">
                             @if($cippMcpConnectorPresent)
                                 <small class="text-muted">The CIPP API client with MCP Access that the CIPP MCP connection below signs in through. The Client ID is required; it is used with the stored sign-in to refresh access to CIPP MCP.
                                     @if($cippMcpHasSecret ?? false)
-                                        A secret is stored and is sent with the sign-in and every refresh, so that app's PSA redirect must be registered as a Web (confidential) redirect, not a Mobile/desktop (public) one. It cannot be cleared here.
+                                        A secret is stored and is sent with the sign-in and every refresh. Web redirect: keep it. Public (Mobile/desktop) redirect: tick <strong>Remove stored MCP client secret</strong> and save first, because a public redirect must send no secret.
                                     @else
                                         No secret is stored, so none is sent: register that app's PSA redirect as a Mobile/desktop (public) redirect, or save the app's secret here and register a Web (confidential) redirect.
                                     @endif
@@ -1842,7 +1849,7 @@
                         </a>
                         <small class="text-muted d-block mt-1">Sign in as the dedicated CIPP service account, not a personal admin. Requires the MCP Client ID and MCP backend host above, and the PSA callback <code>{{ route('auth.cipp-mcp.callback') }}</code> registered on that app
                             @if($cippMcpHasSecret ?? false)
-                                as a <strong>Web</strong> redirect, because an MCP Client Secret is stored and is sent with the sign-in.
+                                as a <strong>Web</strong> redirect, because an MCP Client Secret is stored and is sent with the sign-in. For a public (Mobile/desktop) redirect, tick <strong>Remove stored MCP client secret</strong> above and save first.
                             @else
                                 as a <strong>Mobile/desktop</strong> (public) redirect, or as a Web redirect with the MCP Client Secret saved.
                             @endif

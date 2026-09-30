@@ -1429,7 +1429,23 @@ class IntegrationsController extends Controller
             'mcp_client_id' => 'nullable|string|max:255',
             'mcp_client_secret' => 'nullable|string|min:1|max:500',
             'mcp_backend_host' => 'nullable|string|max:255',
+            // "Remove stored MCP client secret" (CIPP v11 connector): a public
+            // (Mobile/desktop) redirect must send no secret, and a stored one is
+            // otherwise sent on every sign-in and refresh. Saving a new secret in
+            // the same submit is a contradiction, refused rather than guessed.
+            'remove_mcp_client_secret' => 'nullable|boolean',
         ]);
+
+        $removeMcpSecret = $request->boolean('remove_mcp_client_secret');
+        if ($removeMcpSecret && ! $request->user()?->isAdmin()) {
+            // Gated exactly like Connect CIPP MCP (routes: ->middleware('admin')):
+            // the same 403, before anything in this submit is saved.
+            abort(403, 'Administrator access required.');
+        }
+        if ($removeMcpSecret && ! empty($validated['mcp_client_secret'])) {
+            return redirect()->route('settings.integrations')
+                ->with('error', 'Nothing was saved: a new MCP Client Secret and "Remove stored MCP client secret" were both given. Choose one.');
+        }
 
         if (! empty($validated['api_url'])) {
             Setting::setValue('cipp_api_url', $validated['api_url']);
@@ -1454,6 +1470,13 @@ class IntegrationsController extends Controller
         }
         if (! empty($validated['mcp_backend_host'])) {
             Setting::setValue('cipp_mcp_backend_host', trim($validated['mcp_backend_host']));
+        }
+        if ($removeMcpSecret) {
+            Setting::where('key', \App\Services\Cipp\CippMcpConnector::CLIENT_SECRET_SETTING)->delete();
+            \Illuminate\Support\Facades\Log::info('[CIPP] Stored MCP client secret removed by an administrator', ['user_id' => $request->user()?->id]);
+
+            return redirect()->route('settings.integrations')
+                ->with('success', 'CIPP credentials saved. The stored MCP client secret was removed; the CIPP MCP sign-in and refreshes now send no secret (Mobile/desktop public redirect).');
         }
 
         return redirect()->route('settings.integrations')
