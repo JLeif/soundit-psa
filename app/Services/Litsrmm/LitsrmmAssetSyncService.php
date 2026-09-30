@@ -4,6 +4,8 @@ namespace App\Services\Litsrmm;
 
 use App\Models\Asset;
 use App\Models\Client;
+use App\Models\License;
+use App\Models\LicenseType;
 use App\Services\SyncResult;
 use App\Support\LitsrmmSerial;
 use Carbon\Carbon;
@@ -59,6 +61,9 @@ class LitsrmmAssetSyncService
      */
     public const NOBODY_SIGNED_IN = '(none)';
 
+    /** license_types.vendor for LITSRMM seats; also the registry's licenseVendor. */
+    public const LICENSE_VENDOR = 'litsrmm';
+
     public function __construct(private readonly LitsrmmClient $litsrmm) {}
 
     /**
@@ -76,18 +81,51 @@ class LitsrmmAssetSyncService
         return $short === '' ? null : $short;
     }
 
-    public function sync(): SyncResult
+    /**
+     * One line for an operator after a button press: the counts, then every
+     * error and every refused guess, so a flash message never hides why a
+     * machine was not linked.
+     */
+    public static function describe(SyncResult $result): string
+    {
+        $message = "LITSRMM device sync: {$result->summary()}.";
+
+        if ($result->errorMessages !== []) {
+            $message .= ' Errors: '.implode('; ', $result->errorMessages).'.';
+        }
+
+        if ($result->skippedMessages !== []) {
+            $message .= ' Skipped: '.implode('; ', $result->skippedMessages).'.';
+        }
+
+        return $message;
+    }
+
+    /**
+     * Sync every mapped, operational client, or only $only (the client page's
+     * Sync button). A single-client run writes nothing outside that client:
+     * the estate-wide sweeps (links and seats of clients no longer mapped)
+     * belong to a full run only.
+     */
+    public function sync(?Client $only = null): SyncResult
     {
         $result = new SyncResult;
 
         $clients = Client::query()
             ->whereNotNull('litsrmm_client_id')
             ->operational()
+            ->when($only !== null, fn ($q) => $q->whereKey($only->id))
             ->orderBy('id')
             ->get();
 
+        if ($only !== null && $clients->isEmpty()) {
+            $result->recordError("{$only->name} is not mapped to LITSRMM, or is not an active client; nothing was read.");
+
+            return $result;
+        }
+
         if ($clients->isEmpty()) {
-            $this->clearUnmappedClients([], $result);
+            $this->sweepUnmapped([], $result);
 
             return $result;
         }
@@ -95,7 +133,7 @@ class LitsrmmAssetSyncService
         try {
             $devices = $this->litsrmm->getDevices();
         } catch (LitsrmmClientException $e) {
-            // Nothing is touched: not the links, not the unmapped sweep.
+            // Nothing is touched: not the links, not the seats, not the sweeps.
             Log::warning('[LitsrmmAssetSync] device list read failed', ['error' => $e->getMessage()]);
             $result->recordError("Failed to read LITSRMM devices: {$e->getMessage()}");
 
@@ -111,12 +149,73 @@ class LitsrmmAssetSyncService
             $rows = $byVendorClient[strtolower($client->litsrmm_client_id)] ?? [];
             $hardware = $this->readHardware($rows, $result);
 
-            DB::transaction(fn () => $this->syncClient($client, $rows, $hardware, $result));
+            DB::transaction(function () use ($client, $rows, $hardware, $result) {
+                $this->syncClient($client, $rows, $hardware, $result);
+                $this->syncSeats($client, $rows);
+            });
         }
 
-        $this->clearUnmappedClients($clients->pluck('id')->all(), $result);
+        if ($only === null) {
+            $this->sweepUnmapped($clients->pluck('id')->all(), $result);
+        }
 
         return $result;
+    }
+
+    /**
+     * License seats, the same two SKUs LevelSyncService keeps for Level: one
+     * seat per device the RMM actually MANAGES, which is a device running the
+     * vendor's agent that is not retired (the owner's ruling). The vendor's
+     * list also carries machines known only from Huntress or Control D, and
+     * those are not LITSRMM seats. A half-retired device is not counted
+     * either: nobody has said what it means.
+     *
+     * Keyed on (type, client), not on vendor_ref, so a client re-mapped to
+     * another LITSRMM client updates its one row rather than leaving the old
+     * row billing alongside a new one. The license types are created once and
+     * never renamed, so an operator's name or pricing on them survives.
+     *
+     * @param  list<LitsrmmDevice>  $rows
+     */
+    private function syncSeats(Client $client, array $rows): void
+    {
+        $counts = ['rmm_server' => 0, 'rmm_workstation' => 0];
+
+        foreach ($rows as $device) {
+            if ($device->agentVersion === null || $device->isRetired() || $device->hasSplitRetiredState()) {
+                continue;
+            }
+
+            $isServer = str_contains(mb_strtolower($device->osName ?? ''), 'server');
+            $counts[$isServer ? 'rmm_server' : 'rmm_workstation']++;
+        }
+
+        foreach ($counts as $sku => $quantity) {
+            $type = LicenseType::firstOrCreate(
+                ['vendor' => self::LICENSE_VENDOR, 'vendor_sku_id' => $sku],
+                ['name' => $sku === 'rmm_server' ? 'LITSRMM — Server' : 'LITSRMM — Workstation', 'is_active' => true],
+            );
+
+            License::updateOrCreate(
+                ['license_type_id' => $type->id, 'client_id' => $client->id],
+                [
+                    'vendor_ref' => $client->litsrmm_client_id,
+                    'quantity' => $quantity,
+                    'status' => $quantity > 0 ? 'active' : 'suspended',
+                    'synced_at' => now(),
+                ],
+            );
+        }
+    }
+
+    /**
+     * Full runs only: links on assets, and seats, of clients that are no
+     * longer mapped (or no longer operational, for links).
+     */
+    private function sweepUnmapped(array $mappedClientIds, SyncResult $result): void
+    {
+        $this->clearUnmappedClients($mappedClientIds, $result);
+        $result->deactivated += License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
     }
 
     /**
