@@ -47,6 +47,10 @@ class CippMcpClient
                 ],
             ]);
 
+        if ($response->status() === 401) {
+            throw new CippMcpAuthException("CIPP MCP {$toolName} was refused: HTTP 401 ".mb_substr($response->body(), 0, 500));
+        }
+
         if ($response->failed()) {
             throw new CippClientException("CIPP MCP {$toolName} failed: HTTP {$response->status()} ".mb_substr($response->body(), 0, 500));
         }
@@ -91,7 +95,7 @@ class CippMcpClient
         $clientSecret = (string) ($this->config['client_secret'] ?? '');
 
         if ($tenantId === '' || $clientId === '' || $clientSecret === '') {
-            throw new CippClientException('CIPP MCP client credentials are not configured');
+            throw new CippMcpAuthException('CIPP MCP client credentials are not configured');
         }
 
         $cacheKey = $this->tokenCacheKey($tenantId, $clientId);
@@ -114,15 +118,15 @@ class CippMcpClient
                 ->throw();
         } catch (RequestException $e) {
             Log::error('[CippMcpClient] Token request failed', ['error' => $e->getMessage()]);
-            throw new CippClientException("CIPP MCP OAuth token request failed: {$e->getMessage()}", $e->getCode(), $e);
+            throw new CippMcpAuthException("CIPP MCP OAuth token request failed: {$e->getMessage()}", $e->getCode(), $e);
         } catch (\Throwable $e) {
             Log::error('[CippMcpClient] Token request failed', ['error' => $e->getMessage()]);
-            throw new CippClientException("CIPP MCP OAuth token request failed: {$e->getMessage()}", (int) $e->getCode(), $e);
+            throw new CippMcpAuthException("CIPP MCP OAuth token request failed: {$e->getMessage()}", (int) $e->getCode(), $e);
         }
 
         $token = $response->json('access_token');
         if (! is_string($token) || $token === '') {
-            throw new CippClientException('CIPP MCP OAuth response missing access_token');
+            throw new CippMcpAuthException('CIPP MCP OAuth response missing access_token');
         }
 
         $expiresIn = (int) ($response->json('expires_in') ?? 3600);
