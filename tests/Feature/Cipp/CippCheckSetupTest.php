@@ -315,9 +315,9 @@ class CippCheckSetupTest extends TestCase
         return [
             '500113' => [500113, 'no redirect URI registered', '→ Authentication → Add a platform → Mobile and desktop applications'],
             '50011' => [50011, 'callback URL is not registered', '→ Authentication and add'],
-            '53003' => [53003, 'Conditional Access blocked the token redeem from the PSA server.', 'dedicated CIPP service account excluded from the blocking policy'],
+            '53003' => [53003, 'Conditional Access blocked the ', 'dedicated CIPP service account excluded from the blocking policy'],
             '65001' => [65001, 'has not been granted consent', 'Save to Azure'],
-            '7000218' => [7000218, 'does not allow public client sign-in', 'Allow public client flows to Yes'],
+            '7000218' => [7000218, 'required a client secret for this sign-in and the PSA sent none', 'Allow public client flows to Yes'],
         ];
     }
 
@@ -365,6 +365,58 @@ class CippCheckSetupTest extends TestCase
 
         $this->oauthCallback(['error' => 'access_denied', 'error_description' => 'AADSTS53003: x'])->assertRedirect();
         $this->assertStringContainsString('INSTALL.md', (string) session('error'));
+    }
+
+    public function test_53003_names_what_was_blocked_on_each_callback_arm(): void
+    {
+        // Authorization-error arm: Entra refused the sign-in itself; no code, no redeem.
+        $this->oauthCallback(['error' => 'access_denied', 'error_description' => 'AADSTS53003: '.self::BODY_CANARY])->assertRedirect();
+        $flash = (string) session('error');
+        $this->assertStringContainsString('Conditional Access blocked the interactive sign-in at Microsoft, before any code reached the PSA.', $flash);
+        $this->assertStringNotContainsString('token redeem', $flash);
+        $this->assertNoVendorBody($flash);
+
+        // Code-exchange arm: the PSA server's token redeem was refused.
+        Http::fake(['login.microsoftonline.com/*' => Http::response(['error' => 'invalid_grant', 'error_description' => 'AADSTS53003: '.self::BODY_CANARY, 'error_codes' => [53003]], 400)]);
+        $this->oauthCallback(['code' => self::CODE])->assertRedirect();
+        $flash = (string) session('error');
+        $this->assertStringContainsString('Conditional Access blocked the token redeem from the PSA server.', $flash);
+        $this->assertStringNotContainsString('interactive sign-in', $flash);
+        $this->assertNoVendorBody($flash);
+    }
+
+    public function test_with_a_stored_secret_the_redirect_fixes_say_web_not_mobile_and_desktop(): void
+    {
+        $web = [
+            500113 => 'Add a platform → Web (an MCP Client Secret is stored, so the PSA signs in as a confidential client), add '.$this->callbackUrl(),
+            50011 => 'exactly as shown under Web (an MCP Client Secret is stored, so the PSA signs in as a confidential client), save',
+        ];
+        foreach ($web as $number => $expected) {
+            Setting::where('key', 'cipp_mcp_client_secret')->delete();
+            $this->oauthCallback(['error' => 'invalid_request', 'error_description' => 'AADSTS'.$number.': x'])->assertRedirect();
+            $flash = (string) session('error');
+            $this->assertStringContainsString('Mobile and desktop applications', $flash, 'positive control: no secret stored');
+            $this->assertStringNotContainsString('→ Web', $flash);
+
+            Setting::setEncrypted('cipp_mcp_client_secret', 'MCP-SECRET-CANARY-x2');
+            $this->oauthCallback(['error' => 'invalid_request', 'error_description' => 'AADSTS'.$number.': x'])->assertRedirect();
+            $flash = (string) session('error');
+            $this->assertStringContainsString($expected, $flash);
+            $this->assertStringNotContainsString('Mobile and desktop', $flash);
+            $this->assertStringNotContainsString('MCP-SECRET-CANARY-x2', $flash);
+        }
+    }
+
+    public function test_7000218_names_both_ways_out_of_a_missing_secret(): void
+    {
+        Http::fake(['login.microsoftonline.com/*' => Http::response(['error' => 'invalid_client', 'error_description' => 'AADSTS7000218: '.self::BODY_CANARY, 'error_codes' => [7000218]], 401)]);
+        $this->oauthCallback(['code' => self::CODE])->assertRedirect();
+        $flash = (string) session('error');
+        $this->assertStringContainsString('the PSA sent none', $flash);
+        $this->assertStringContainsString('if '.$this->callbackUrl().' is listed under Web, remove it there and add it under Mobile and desktop applications', $flash);
+        $this->assertStringContainsString("save that app's secret as MCP Client Secret", $flash);
+        $this->assertStringNotContainsString('does not allow public client sign-in', $flash);
+        $this->assertNoVendorBody($flash);
     }
 
     public function test_an_unknown_code_shows_the_code_with_a_generic_line(): void
@@ -426,5 +478,17 @@ class CippCheckSetupTest extends TestCase
         $this->assertNotFalse($start);
         $help = substr($html, $start, 2500);
         $this->assertMatchesRegularExpression('#\(1\).*Expose an API.*\(2\).*Mobile and desktop applications.*Allow public client flows.*\(3\).*AADSTS53003.*dedicated CIPP service account excluded.*\(4\).*Check setup#s', $help);
+    }
+
+    public function test_the_panel_help_step_2_says_web_when_a_secret_is_stored(): void
+    {
+        Setting::setEncrypted('cipp_mcp_client_secret', 'MCP-SECRET-CANARY-x3');
+        $html = (string) $this->actingAs(User::factory()->admin()->create())->get(route('settings.integrations'))->getContent();
+        $start = strpos($html, 'id="cipp-setup-check"');
+        $this->assertNotFalse($start);
+        $help = substr($html, $start, 2500);
+        $this->assertMatchesRegularExpression('#\(2\).*under Web \(an MCP Client Secret is stored, so the PSA signs in as a confidential client; public client flows are not needed\);.*\(3\)#s', $help);
+        $this->assertStringNotContainsString('Mobile and desktop applications and set Allow public client flows', $help);
+        $this->assertStringNotContainsString('MCP-SECRET-CANARY-x3', $html);
     }
 }

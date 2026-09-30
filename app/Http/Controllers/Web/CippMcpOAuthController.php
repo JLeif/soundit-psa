@@ -86,7 +86,7 @@ class CippMcpOAuthController extends Controller
             Log::warning('[CIPP MCP OAuth] Authorization error', ['error' => $code]);
 
             return redirect()->route('settings.integrations')
-                ->with('error', CippMcpSignInErrors::message($code));
+                ->with('error', CippMcpSignInErrors::message($code, atCodeExchange: false));
         }
 
         $code = $request->query('code');
@@ -102,7 +102,7 @@ class CippMcpOAuthController extends Controller
             Log::warning('[CIPP MCP OAuth] Code exchange failed', ['error' => $e->errorCode]);
 
             return redirect()->route('settings.integrations')
-                ->with('error', CippMcpSignInErrors::message($e->errorCode));
+                ->with('error', CippMcpSignInErrors::message($e->errorCode, atCodeExchange: true));
         } catch (CippMcpAuthException $e) {
             // Every other CippMcpAuthException exchangeCode() throws is PSA-authored
             // text (not configured / could not reach Microsoft (<class>) / no refresh

@@ -14,15 +14,22 @@ use App\Support\CippConfig;
  */
 class CippMcpSignInErrors
 {
-    /** AADSTS number => [what happened, how to fix it]. `{client}` / `{callback}` are filled in. */
+    /**
+     * AADSTS number => [what happened, how to fix it]. `{client}`, `{callback}` and
+     * `{platform}` are filled in. `{platform}` is the redirect platform implied by the
+     * stored MCP Client Secret: Web when one is stored (clientAuthFields() sends it),
+     * otherwise Mobile and desktop applications. CippSetupCheck::run() makes the same choice.
+     * The 53003 sentence here covers the code exchange; the authorization-error arm
+     * uses SIGN_IN_BLOCKED_53003.
+     */
     private const MAP = [
         500113 => [
             'Microsoft has no redirect URI registered on the MCP client app, so it had nowhere to send the sign-in back to.',
-            'Open Entra → App registrations → {client} → Authentication → Add a platform → Mobile and desktop applications, add {callback}, save, then click Connect CIPP MCP again.',
+            'Open Entra → App registrations → {client} → Authentication → Add a platform → {platform}, add {callback}, save, then click Connect CIPP MCP again.',
         ],
         50011 => [
             'The PSA callback URL is not registered on the MCP client app, or is registered with different text.',
-            'Open Entra → App registrations → {client} → Authentication and add {callback} exactly as shown (Mobile and desktop applications), save, then click Connect CIPP MCP again.',
+            'Open Entra → App registrations → {client} → Authentication and add {callback} exactly as shown under {platform}, save, then click Connect CIPP MCP again.',
         ],
         53003 => [
             'Conditional Access blocked the token redeem from the PSA server.',
@@ -33,10 +40,13 @@ class CippMcpSignInErrors
             'In CIPP open Integrations → CIPP-API → MCP and click Actions → Save to Azure, or open Entra → App registrations → {client} → API permissions → Grant admin consent, then click Connect CIPP MCP again.',
         ],
         7000218 => [
-            'Microsoft expected a client secret because the MCP client app does not allow public client sign-in.',
-            'Open Entra → App registrations → {client} → Authentication → Advanced settings, set Allow public client flows to Yes, save, then click Connect CIPP MCP again.',
+            'Microsoft required a client secret for this sign-in and the PSA sent none.',
+            'Open Entra → App registrations → {client} → Authentication: if {callback} is listed under Web, remove it there and add it under Mobile and desktop applications (a Web redirect requires a secret) and, under Advanced settings, set Allow public client flows to Yes; or keep the Web redirect and save that app\'s secret as MCP Client Secret on this panel. Save, then click Connect CIPP MCP again.',
         ],
     ];
+
+    /** 53003 on the authorization-error arm: Entra refused the sign-in at /authorize, so no code existed and nothing was redeemed. */
+    private const SIGN_IN_BLOCKED_53003 = 'Conditional Access blocked the interactive sign-in at Microsoft, before any code reached the PSA.';
 
     /** The AADSTS number in a sanitised code string, or null. */
     public static function aadsts(string $code): ?int
@@ -48,16 +58,26 @@ class CippMcpSignInErrors
      * The flash line for a failed sign-in.
      *
      * @param  string  $code  already sanitised (CippMcpConnector::sanitizeCode / errorCode)
+     * @param  bool  $atCodeExchange  true when Microsoft refused the code exchange (the token redeem
+     *                                from the PSA server); false for an authorization error
+     *                                returned to the callback, before any code existed
      */
-    public static function message(string $code): string
+    public static function message(string $code, bool $atCodeExchange = false): string
     {
         $number = self::aadsts($code);
         if ($number !== null && isset(self::MAP[$number])) {
             [$what, $fix] = self::MAP[$number];
+            if ($number === 53003 && ! $atCodeExchange) {
+                $what = self::SIGN_IN_BLOCKED_53003;
+            }
+            $hasSecret = (string) CippConfig::get('mcp_client_secret') !== '';
 
             return "CIPP MCP sign-in failed (AADSTS{$number}): {$what} Fix: ".strtr($fix, [
                 '{client}' => self::clientRef(),
                 '{callback}' => route('auth.cipp-mcp.callback'),
+                '{platform}' => $hasSecret
+                    ? 'Web (an MCP Client Secret is stored, so the PSA signs in as a confidential client)'
+                    : 'Mobile and desktop applications',
             ]);
         }
 
