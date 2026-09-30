@@ -6,6 +6,9 @@ use App\Models\Client;
 use App\Models\License;
 use App\Models\LicenseType;
 use App\Models\User;
+use App\Services\AppRiver\AppRiverClient;
+use App\Services\AppRiver\AppRiverClientException;
+use App\Services\AppRiver\AppRiverLicenseSyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -27,9 +30,9 @@ class AppRiverLicenseStaleFlagTest extends TestCase
         $this->freezeSecond();
     }
 
-    private function license(string $vendor, ?\DateTimeInterface $syncedAt, string $sku): License
+    private function license(string $vendor, ?\DateTimeInterface $syncedAt, string $sku, ?Client $client = null): License
     {
-        $client = Client::factory()->create();
+        $client ??= Client::factory()->create();
         $type = LicenseType::create(['vendor' => $vendor, 'vendor_sku_id' => $sku, 'name' => strtoupper($sku), 'is_active' => true]);
 
         return License::create([
@@ -102,6 +105,46 @@ class AppRiverLicenseStaleFlagTest extends TestCase
         $this->assertStringContainsString('data-stale-license="'.$live->id.'"', $html);
         foreach ([$held, $pending, $suspended] as $license) {
             $this->assertStringNotContainsString('data-stale-license="'.$license->id.'"', $html);
+        }
+    }
+
+    public function test_rows_of_clients_the_sync_never_visits_are_not_flagged(): void
+    {
+        // Driven through the real sync: it loads only operational clients and skips
+        // CustomerType Referred, so those clients' rows are never re-stamped.
+        $clients = [
+            'prospect' => Client::factory()->prospect()->create(['appriver_customer_id' => 'cust-prospect']),
+            'inactive' => Client::factory()->create(['appriver_customer_id' => 'cust-inactive', 'is_active' => false]),
+            'referred' => Client::factory()->create(['appriver_customer_id' => 'cust-referred']),
+            // Positive control: a visited client whose read fails really was not re-stamped.
+            'failing' => Client::factory()->create(['appriver_customer_id' => 'cust-failing']),
+        ];
+        $rows = [];
+        foreach ($clients as $name => $client) {
+            $rows[$name] = $this->license('appriver', now()->subDays(12), $name.'-sku', $client);
+        }
+
+        $mock = $this->createMock(AppRiverClient::class);
+        $mock->method('getCustomers')->willReturn([
+            ['CustomerId' => 'cust-referred', 'CustomerType' => 'Referred'],
+            ['CustomerId' => 'cust-failing', 'CustomerType' => 'Resold'],
+        ]);
+        $mock->expects($this->once())->method('getSubscriptions')->with('cust-failing')
+            ->willThrowException(new AppRiverClientException('vendor unavailable'));
+
+        $result = (new AppRiverLicenseSyncService($mock))->syncLicenses();
+        $this->assertSame(1, $result->errors);
+        $this->assertSame(1, $result->skipped);
+
+        foreach (['prospect', 'inactive', 'referred'] as $name) {
+            $this->assertFalse($rows[$name]->fresh()->sync_stale, "the {$name} client's row is never re-stamped by a healthy sync");
+        }
+        $this->assertTrue($rows['failing']->fresh()->sync_stale, 'a visited client the sync failed to read is still flagged');
+
+        $html = $this->actingAs(User::factory()->create())->get(route('licenses.index'))->assertOk()->getContent();
+        $this->assertStringContainsString('data-stale-license="'.$rows['failing']->id.'"', $html);
+        foreach (['prospect', 'inactive', 'referred'] as $name) {
+            $this->assertStringNotContainsString('data-stale-license="'.$rows[$name]->id.'"', $html);
         }
     }
 }
