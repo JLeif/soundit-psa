@@ -2652,6 +2652,8 @@
                 </div>
                 @if($appriverConnected ?? false)
                     <span class="badge bg-success">Connected</span>
+                @elseif($appriverLoginDropped ?? false)
+                    <span class="badge bg-danger"><i class="bi bi-exclamation-triangle me-1"></i>Login dropped</span>
                 @elseif($appriverConfigured ?? false)
                     <span class="badge bg-warning text-dark">Not tested</span>
                 @else
@@ -2727,6 +2729,13 @@
                         <small class="text-muted ms-2">Last connected: {{ $appriverConnectedAt }}</small>
                         @endif
                     @else
+                        @if($appriverLoginDropped ?? false)
+                        <div class="alert alert-danger small py-2 mb-2" role="alert" id="appriver-login-dropped">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            The AppRiver login has dropped, so the daily license sync cannot run and seat counts will go stale.
+                            Reconnect below. An alert is open in the Alerts Hub until you do.
+                        </div>
+                        @endif
                         <a href="{{ route('auth.appriver') }}" class="btn btn-primary btn-sm">
                             <i class="bi bi-box-arrow-up-right me-1"></i>Connect to AppRiver
                         </a>
@@ -2734,6 +2743,23 @@
                         <small class="text-muted ms-2">Last connected: {{ $appriverConnectedAt }}</small>
                         @endif
                         <small class="text-muted ms-2">You will be redirected to log in with your AppRiver admin credentials.</small>
+                    @endif
+                    @if(!empty($appriverManualSync))
+                    <div class="small mt-2" id="appriver-manual-sync" data-state="{{ $appriverManualSync['state'] }}">
+                        @if($appriverManualSync['state'] === 'success')
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Last manual sync succeeded</span>
+                            <span class="text-muted ms-1">{{ $appriverManualSync['finished_at'] ?? 'unknown time' }}: {{ $appriverManualSync['summary'] }}</span>
+                        @elseif($appriverManualSync['state'] === 'failed')
+                            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Last manual sync failed</span>
+                            <span class="ms-1">{{ $appriverManualSync['finished_at'] ?? 'unknown time' }}: {{ $appriverManualSync['summary'] }}</span>
+                        @elseif($appriverManualSync['overdue'])
+                            <span class="badge bg-warning text-dark"><i class="bi bi-question-circle me-1"></i>Manual sync reported no result</span>
+                            <span class="ms-1">Started {{ $appriverManualSync['started_at'] ?? 'unknown time' }} and never reported back. Check the log for [AppRiverSync].</span>
+                        @else
+                            <span class="badge bg-info text-dark"><i class="bi bi-arrow-repeat me-1"></i>Manual sync running</span>
+                            <span class="text-muted ms-1">Started {{ $appriverManualSync['started_at'] ?? 'unknown time' }}. Reload for the result.</span>
+                        @endif
+                    </div>
                     @endif
                     <div id="test-result-appriver" class="alert mt-2" style="display:none;"></div>
                 </div>

@@ -22,6 +22,13 @@ class License extends Model
      */
     public const VENDOR_HELD_STATUSES = ['Suspended', 'Pending'];
 
+    /**
+     * An AppRiver-sourced row whose last sync is MORE than this many hours old is
+     * flagged stale on the licence view (card 6abc5913): a dropped login stopped the
+     * daily sync for 12 days while these counts fed billing, and nothing showed it.
+     */
+    public const APPRIVER_STALE_AFTER_HOURS = 48;
+
     protected $fillable = [
         'license_type_id',
         'client_id',
@@ -114,6 +121,17 @@ class License extends Model
             && $this->licenseType
             && $this->licenseType->vendor === 'appriver'
             && $this->client?->appriver_customer_id;
+    }
+
+    /**
+     * AppRiver-sourced and last synced more than APPRIVER_STALE_AFTER_HOURS ago.
+     * Manual rows (synced_at null) are never stale: they were never synced.
+     */
+    public function getSyncStaleAttribute(): bool
+    {
+        return $this->synced_at !== null
+            && $this->licenseType?->vendor === 'appriver'
+            && $this->synced_at->lt(now()->subHours(self::APPRIVER_STALE_AFTER_HOURS));
     }
 
     /**

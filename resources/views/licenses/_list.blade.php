@@ -210,6 +210,12 @@
                             @if(!$columns || in_array('synced', $columns))
                             <td class="d-none d-md-table-cell small text-muted">
                                 {{ $license->synced_at?->diffForHumans() ?? 'Manual' }}
+                                @if($license->sync_stale)
+                                    <span class="badge bg-warning text-dark ms-1" data-stale-license="{{ $license->id }}"
+                                          title="AppRiver has not synced this row for more than {{ \App\Models\License::APPRIVER_STALE_AFTER_HOURS }} hours. Check Settings > Integrations > AppRiver.">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>Stale
+                                    </span>
+                                @endif
                             </td>
                             @endif
                             @if(!$columns || in_array('status', $columns))

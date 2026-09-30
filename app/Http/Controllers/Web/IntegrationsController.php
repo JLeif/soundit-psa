@@ -242,6 +242,12 @@ class IntegrationsController extends Controller
         $appriverConnected = \App\Services\AppRiver\AppRiverClient::isConnected();
         $appriverConnectedAt = $fmtTs(Setting::getValue('appriver_connected_at'));
         $appriverEnabled = AppRiverConfig::isEnabled();
+        $appriverLoginDropped = \App\Services\AppRiver\AppRiverLoginMonitor::isDropped();
+        $appriverManualSync = \App\Services\AppRiver\AppRiverManualSync::status();
+        if ($appriverManualSync !== null) {
+            $appriverManualSync['started_at'] = $fmtTs($appriverManualSync['started_at']);
+            $appriverManualSync['finished_at'] = $fmtTs($appriverManualSync['finished_at']);
+        }
 
         // Printix
         $printixConfigured = PrintixConfig::isConfigured();
@@ -586,6 +592,7 @@ class IntegrationsController extends Controller
             'controldOnboardingConfigured', 'controldOnboardingEnabled', 'controldNumericUnusable',
             'zorusConfigured', 'zorusConnected', 'zorusEnabled',
             'appriverConfigured', 'appriverConnected', 'appriverConnectedAt', 'appriverEnabled',
+            'appriverLoginDropped', 'appriverManualSync',
             'printixConfigured', 'printixPartnerId', 'printixHasSecret', 'printixConnected', 'printixEnabled',
             'cippConfigured', 'cippApiUrl', 'cippTenantId', 'cippClientId', 'cippApplicationId', 'cippHasSecret', 'cippMcpClientId', 'cippMcpHasSecret', 'cippMcpConfigured', 'cippMcpBackendHost', 'cippMcpConnector', 'cippConnected', 'cippEnabled', 'cippMcpEnabled', 'cippContactSyncEnabled', 'cippDeviceSyncEnabled', 'cippMcpCatalogSyncEnabled',
             'plivoAuthId', 'plivoDidNumber', 'plivoAppId', 'plivoHasToken', 'plivoHasWebhookSecret', 'plivoConnectedAt', 'plivoEnabled',
@@ -2375,9 +2382,13 @@ class IntegrationsController extends Controller
             return back()->with('error', 'AppRiver is not connected. Click "Connect to AppRiver" first.');
         }
 
-        \Illuminate\Support\Facades\Artisan::queue('appriver:sync-licenses');
+        // Card 6abc5913: not Artisan::queue() — the prod worker's --timeout=30 killed
+        // every queued run. See AppRiverManualSync for the measured reasoning.
+        if (! (new \App\Services\AppRiver\AppRiverManualSync)->start()) {
+            return back()->with('error', 'An AppRiver license sync is already running. Its result will show on this page when it finishes.');
+        }
 
-        return back()->with('success', 'AppRiver license sync started in the background. Check the Licenses page shortly for results.');
+        return back()->with('success', 'AppRiver license sync started. Its result (success or failure, with the time) will show on this page when it finishes.');
     }
 
     // --- Plivo ---
