@@ -96,6 +96,11 @@ class CippMcpToolRelay
 
     /**
      * @return array<int|string, mixed>
+     *
+     * @throws CippMcpAuthException when the MCP transport could not sign in. It is
+     *                              rethrown, not turned into an error row, because
+     *                              CIPP did not run the query and the caller can
+     *                              ask it over REST instead.
      */
     public function execute(string $toolName, array $input, ?Client $client, ?int $clientId): array
     {
@@ -116,6 +121,8 @@ class CippMcpToolRelay
 
         try {
             $rows = $this->client->callTool($prepared['tool'], $prepared['arguments']);
+        } catch (CippMcpAuthException $e) {
+            throw $e;
         } catch (\Throwable $e) {
             Log::warning('[CippMcpToolRelay] CIPP MCP query failed', [
                 'tool' => $toolName,

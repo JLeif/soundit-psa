@@ -37,7 +37,9 @@ trait HandlesCippTools
     /**
      * Give the CIPP MCP relay first refusal on a tool call. Returns null when the
      * relay is not in play (the default — direct CippClient HTTP path). The
-     * Assistant overrides this to delegate to CippMcpToolRelay when enabled.
+     * Assistant overrides this to delegate to CippMcpToolRelay when enabled, and
+     * returns null — so the direct path answers — when the relay cannot sign in
+     * (CippMcpAuthException).
      */
     protected function cippMcpRelay(string $toolName, array $input): ?array
     {

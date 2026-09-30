@@ -27,6 +27,7 @@ use App\Models\TicketNote;
 use App\Services\Agent\ProposeCloseTool;
 use App\Services\AttachmentService;
 use App\Services\BillingService;
+use App\Services\Cipp\CippMcpAuthException;
 use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Level\LevelClient;
@@ -3055,8 +3056,9 @@ class AssistantToolExecutor
     //
     // The CIPP tool bodies live in the shared App\Services\Cipp\HandlesCippTools
     // trait. The Assistant sources the tenant filter from $this->client, tags its
-    // CIPP failure logs [Assistant], and overrides cippMcpRelay() below to route
-    // through the CIPP MCP relay before falling back to the direct CippClient path.
+    // CIPP failure logs [Assistant], and overrides cippMcpRelay() below to try the
+    // CIPP MCP relay when it is enabled, falling back to the direct CippClient path
+    // when it is not, or when the relay cannot sign in.
 
     protected function cippTenantDomain(): ?string
     {
@@ -3070,10 +3072,49 @@ class AssistantToolExecutor
 
     protected function cippMcpRelay(string $toolName, array $input): ?array
     {
-        if (! CippConfig::isMcpRelayEnabled()) {
+        // MCP is the primary transport whenever the relay is switched on. Each
+        // `return null` below hands this call to the REST body in HandlesCippTools.
+        // The three taken because MCP was switched on but unusable (settings that
+        // cannot be read, MCP not configured, a failed sign-in) are logged; the
+        // plain relay-off case is not.
+        try {
+            $relayEnabled = CippConfig::isMcpRelayEnabled();
+        } catch (\Throwable $e) {
+            // e.g. cipp_mcp_client_secret no longer decrypts under this APP_KEY.
+            Log::warning('[Assistant] CIPP MCP relay settings could not be read; serving the read over the REST API', [
+                'tool' => $toolName,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
             return null;
         }
 
-        return app(CippMcpToolRelay::class)->execute($toolName, $input, $this->client, $this->clientId);
+        if (! $relayEnabled) {
+            if (CippConfig::isEnabled()
+                && \App\Models\Setting::getValue('cipp_mcp_enabled', '0') === '1'
+                && ! CippConfig::isMcpConfigured()) {
+                Log::warning('[Assistant] CIPP MCP relay is switched on but not configured (MCP client id/secret, API URL or tenant id missing); serving the read over the REST API', [
+                    'tool' => $toolName,
+                ]);
+            }
+
+            return null;
+        }
+
+        try {
+            return app(CippMcpToolRelay::class)->execute($toolName, $input, $this->client, $this->clientId);
+        } catch (CippMcpAuthException $e) {
+            // The MCP transport could not sign in, so CIPP did not run the query. Every
+            // tool the relay maps also has a REST body in HandlesCippTools, and
+            // returning null sends this call there. The upstream sign-in error
+            // (e.g. an AADSTS code) goes to the log, not to the caller: it
+            // describes our credentials, not the tenant's data.
+            Log::warning('[Assistant] CIPP MCP relay could not sign in; serving the read over the REST API', [
+                'tool' => $toolName,
+                'error' => mb_substr($e->getMessage(), 0, 300),
+            ]);
+
+            return null;
+        }
     }
 }

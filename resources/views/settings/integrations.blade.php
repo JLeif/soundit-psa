@@ -1758,16 +1758,19 @@
 
                     <div class="row">
                         <div class="col-md-6 mb-3">
-                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID</label>
+                            <label for="cipp_mcp_client_id" class="form-label">MCP Client ID <small class="text-muted">(legacy, CIPP &lt; v11)</small></label>
                             <input type="text" class="form-control" id="cipp_mcp_client_id" name="mcp_client_id"
                                    value="{{ $cippMcpClientId ?? '' }}"
                                    placeholder="Readonly MCP Access client ID">
                         </div>
                         <div class="col-md-6 mb-3">
-                            <label for="cipp_mcp_client_secret" class="form-label">MCP Client Secret</label>
+                            <label for="cipp_mcp_client_secret" class="form-label">MCP Client Secret <small class="text-muted">(legacy, CIPP &lt; v11)</small></label>
                             <input type="password" class="form-control" id="cipp_mcp_client_secret" name="mcp_client_secret"
                                    value=""
                                    placeholder="{{ ($cippMcpHasSecret ?? false) ? '••••••••' : 'Enter MCP client secret' }}">
+                        </div>
+                        <div class="col-12 mb-3">
+                            <small class="text-muted">Legacy (CIPP &lt; v11). CIPP v11 no longer accepts this app-only MCP sign-in. The cipp_list_* read tools do not need these: without them, or when the MCP sign-in fails, they are answered over the CIPP REST API with the Client ID and secret above. The MCP relay and catalog sync switches below still read them.</small>
                         </div>
                     </div>
 
