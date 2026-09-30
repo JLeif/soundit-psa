@@ -8,6 +8,7 @@ enum AlertSource: string
     case Ninja = 'ninja';
     case Comet = 'comet';
     case Huntress = 'huntress';
+    case Cipp = 'cipp';
 
     public function label(): string
     {
@@ -16,6 +17,7 @@ enum AlertSource: string
             self::Ninja => 'NinjaRMM',
             self::Comet => 'Comet Backup',
             self::Huntress => 'Huntress',
+            self::Cipp => 'CIPP',
         };
     }
 
@@ -26,6 +28,7 @@ enum AlertSource: string
             self::Ninja => 'bi-hdd-network',
             self::Comet => 'bi-cloud-arrow-up',
             self::Huntress => 'bi-shield-check',
+            self::Cipp => 'bi-microsoft',
         };
     }
 }

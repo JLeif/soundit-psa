@@ -235,6 +235,10 @@ class AppServiceProvider extends ServiceProvider
                     'client_secret' => CippConfig::get('mcp_client_secret'),
                 ],
                 $app->make(\Illuminate\Contracts\Cache\Repository::class),
+                null,
+                // CIPP v11+ delegated sign-in; with no connector stored, getToken()
+                // keeps the pre-v11 client_credentials behaviour.
+                $app->make(\App\Services\Cipp\CippMcpConnector::class),
             );
         });
 

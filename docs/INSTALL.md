@@ -1038,6 +1038,15 @@ Syncs M365 license counts from CIPP (CyberDrain Improved Partner Portal) for aut
 2. Settings > Integrations > CIPP / Microsoft 365
 3. Enter your **CIPP API URL** (e.g., `https://your-cipp.azurewebsites.net`), **Azure AD Tenant ID**, **Client ID**, **Client Secret**, and optionally **Application ID** (defaults to Client ID)
 4. Optional MCP relay: create a dedicated CIPP API client with MCP Access + Readonly, store its **MCP Client ID** and **MCP Client Secret**, then enable **MCP relay enabled** after a smoke test. The relay uses `POST /api/ExecMCP?tools=...` for the existing `cipp_*` read tools and is disabled by default.
+   **CIPP v11 and later** no longer accept that app-only sign-in at ExecMCP. They take a *delegated* token for the shared **CIPP-MCP** resource app, and the PSA obtains one once through **Connect CIPP MCP**:
+   - Set **MCP backend host** to the CIPP-MCP app's Application ID URI (stored as `cipp_mcp_backend_host`). The sign-in requests `openid profile <that URI>/user_impersonation offline_access` (`openid profile` so Microsoft returns the signed-in account); refreshes request `<that URI>/user_impersonation offline_access`.
+   - On the MCP client app registration (the API client with MCP Access), add the PSA callback `https://<your-psa>/auth/cipp-mcp/callback` as a redirect URI. Whenever an **MCP Client Secret** is saved, the PSA sends it with the sign-in and every refresh. Choose one:
+     - **Public (Mobile/desktop) redirect:** a public client must send no secret, so if one is saved (for example from the pre-v11 app-only setup), an admin ticks **Remove stored MCP client secret** under the MCP Client Secret field and saves **before** clicking Connect. From then on neither the sign-in nor any refresh sends a secret.
+     - **Web redirect:** keep the secret saved and current. It is sent with the sign-in and every refresh.
+   - An admin clicks **Connect CIPP MCP** and signs in as a dedicated CIPP service account holding a Readonly or custom role, never a personal admin. The flow is authorization code + PKCE (S256).
+   - The refresh token is stored encrypted (`cipp_mcp_connector_refresh_token`) and refreshed silently, and a rotated token is saved. The panel shows the signed-in account, when it connected, and the access-token expiry.
+   - If a refresh fails, the panel shows **Refresh failed** with the vendor error code, and ONE operator alert (source CIPP, titled "CIPP MCP sign-in expired: reconnect required") is raised per failure episode. It resolves on the next successful refresh. Reconnect to fix it.
+   - After any failed MCP sign-in, further sign-ins are skipped for 60 seconds, and the curated `cipp_*` reads are answered over the REST API meanwhile.
 5. Click **Test Connection** to verify OAuth2 and tenant list retrieval
 6. Go to Settings > CIPP Tenant Mapping to map CIPP tenants to PSA clients (uses `defaultDomainName` as the tenant filter)
 7. Licenses sync daily at 04:45, or run `php artisan cipp:sync-licenses` manually

@@ -12,6 +12,16 @@ class CippMcpClient
 {
     private const TOKEN_CACHE_KEY = 'cipp_mcp_oauth_token';
 
+    private const SIGN_IN_FAILED_CACHE_KEY = 'cipp_mcp_sign_in_failed';
+
+    /**
+     * #4393: after a failed token request, further sign-ins are not attempted for
+     * this many seconds; each read in that window fails over at once instead of
+     * POSTing a token request bound to fail. Short and fixed, so a fixed
+     * credential or a restored Entra is picked up within a minute.
+     */
+    public const SIGN_IN_FAILURE_TTL = 60;
+
     /** @var callable */
     private $resolver;
 
@@ -19,6 +29,7 @@ class CippMcpClient
         private readonly array $config,
         private readonly CacheInterface $cache,
         ?callable $resolver = null,
+        private readonly ?CippMcpConnector $connector = null,
     ) {
         $this->resolver = $resolver ?? 'gethostbynamel';
     }
@@ -88,8 +99,21 @@ class CippMcpClient
         return is_array($tools) ? array_values(array_filter($tools, 'is_array')) : [];
     }
 
+    /**
+     * An access token for ExecMCP.
+     *
+     * With a delegated connector (CIPP v11+; see CippMcpConnector) it is minted from
+     * the stored refresh token. Without one this is the pre-v11 app-only
+     * client_credentials sign-in, unchanged. Either way every failure is a
+     * CippMcpAuthException, which the curated reads fail over to REST on, and a
+     * failed token request is remembered for SIGN_IN_FAILURE_TTL seconds (#4393).
+     */
     private function getToken(): string
     {
+        if ($this->connectorIsConnected()) {
+            return $this->getDelegatedToken();
+        }
+
         $tenantId = (string) ($this->config['tenant_id'] ?? '');
         $clientId = (string) ($this->config['client_id'] ?? '');
         $clientSecret = (string) ($this->config['client_secret'] ?? '');
@@ -104,6 +128,9 @@ class CippMcpClient
             return $cached;
         }
 
+        $failedKey = $this->signInFailedKey($tenantId, $clientId, 'app');
+        $this->refuseIfRecentlyFailed($failedKey);
+
         $tokenUrl = "https://login.microsoftonline.com/{$tenantId}/oauth2/v2.0/token";
 
         try {
@@ -117,15 +144,18 @@ class CippMcpClient
                 ])
                 ->throw();
         } catch (RequestException $e) {
+            $this->rememberSignInFailure($failedKey);
             Log::error('[CippMcpClient] Token request failed', ['error' => $e->getMessage()]);
             throw new CippMcpAuthException("CIPP MCP OAuth token request failed: {$e->getMessage()}", $e->getCode(), $e);
         } catch (\Throwable $e) {
+            $this->rememberSignInFailure($failedKey);
             Log::error('[CippMcpClient] Token request failed', ['error' => $e->getMessage()]);
             throw new CippMcpAuthException("CIPP MCP OAuth token request failed: {$e->getMessage()}", (int) $e->getCode(), $e);
         }
 
         $token = $response->json('access_token');
         if (! is_string($token) || $token === '') {
+            $this->rememberSignInFailure($failedKey);
             throw new CippMcpAuthException('CIPP MCP OAuth response missing access_token');
         }
 
@@ -138,6 +168,157 @@ class CippMcpClient
     private function tokenCacheKey(string $tenantId, string $clientId): string
     {
         return self::TOKEN_CACHE_KEY.':'.sha1($tenantId.'|'.$clientId);
+    }
+
+    private function connectorIsConnected(): bool
+    {
+        if ($this->connector === null) {
+            return false;
+        }
+
+        try {
+            return $this->connector->isConnected();
+        } catch (\Throwable $e) {
+            // Settings unreadable: behave as before the connector existed.
+            Log::warning('[CippMcpClient] Could not read the CIPP MCP connector state', ['exception' => class_basename($e)]);
+
+            return false;
+        }
+    }
+
+    /**
+     * Delegated sign-in: refresh_token grant for
+     * `<backend host>/user_impersonation offline_access`. A rotated refresh token is
+     * persisted; a failure is reported to the connector (one alert per episode)
+     * and surfaces as CippMcpAuthException carrying the vendor error CODE only.
+     *
+     * Invariant: this method returns a token or throws CippMcpAuthException, and
+     * nothing else. The connector bookkeeping (rotated refresh token, expiry,
+     * episode open/close, alert resolve and its ticket note) is best-effort: each
+     * step runs in its own guard (bookkeep()), and a step that throws is logged by
+     * exception class only and never rethrown. On success the minted token is
+     * cached BEFORE any bookkeeping, so a failed settings or alert write can
+     * neither lose the token nor force the next read to refresh again.
+     *
+     * The client secret is read live through CippMcpConnector::clientAuthFields():
+     * once an admin removes the stored secret, no refresh sends one.
+     */
+    private function getDelegatedToken(): string
+    {
+        /** @var CippMcpConnector $connector */
+        $connector = $this->connector;
+        $tenantId = (string) ($this->config['tenant_id'] ?? '');
+        $clientId = (string) ($this->config['client_id'] ?? '');
+
+        if ($tenantId === '' || $clientId === '') {
+            throw new CippMcpAuthException('CIPP MCP connector is present but the tenant id or MCP client id is not configured');
+        }
+
+        $generation = $connector->generation();
+        $cacheKey = self::TOKEN_CACHE_KEY.':delegated:'.sha1($tenantId.'|'.$clientId.'|'.$generation);
+        $cached = $this->cache->get($cacheKey);
+        if ($cached) {
+            return $cached;
+        }
+
+        $failedKey = $this->signInFailedKey($tenantId, $clientId, 'delegated|'.$generation);
+        $this->refuseIfRecentlyFailed($failedKey);
+
+        try {
+            $refreshToken = $connector->refreshToken();
+            $scope = CippMcpConnector::scope();
+        } catch (\Throwable $e) {
+            $code = $e instanceof CippMcpAuthException ? 'backend_host_not_configured' : 'stored_token_unreadable';
+            $this->rememberSignInFailure($failedKey);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure($code));
+            throw new CippMcpAuthException('CIPP MCP connector refresh could not start: '.$code);
+        }
+
+        try {
+            $fields = CippMcpConnector::clientAuthFields($clientId);
+        } catch (\Throwable $e) {
+            // The stored secret is unreadable (e.g. APP_KEY rotated): a refresh
+            // cannot be authenticated as configured, so this is a sign-in failure.
+            $this->rememberSignInFailure($failedKey);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure('stored_secret_unreadable'));
+            throw new CippMcpAuthException('CIPP MCP connector refresh could not start: stored_secret_unreadable');
+        }
+
+        try {
+            $response = Http::asForm()->timeout(15)->post(CippMcpConnector::tokenUrl($tenantId), $fields + [
+                'grant_type' => 'refresh_token',
+                'refresh_token' => (string) $refreshToken,
+                'scope' => $scope,
+            ]);
+            $failure = $response->failed() ? CippMcpConnector::errorCode($response) : null;
+        } catch (\Throwable $e) {
+            $response = null;
+            $failure = 'unreachable ('.class_basename($e).')';
+        }
+
+        $token = $response?->json('access_token');
+        if ($failure === null && (! is_string($token) || $token === '')) {
+            $failure = 'no_access_token';
+        }
+
+        if ($failure !== null) {
+            $this->rememberSignInFailure($failedKey);
+            $this->bookkeep('recordRefreshFailure', fn () => $connector->recordRefreshFailure($failure));
+            Log::error('[CippMcpClient] CIPP MCP connector refresh failed', ['error_code' => $failure]);
+            throw new CippMcpAuthException('CIPP MCP connector refresh failed: '.$failure);
+        }
+
+        // Cache first: the token is good whatever the bookkeeping below does.
+        $expiresIn = (int) ($response->json('expires_in') ?? 3600);
+        $this->cache->put($cacheKey, $token, max(60, $expiresIn - 300));
+
+        $rotated = $response->json('refresh_token');
+        $this->bookkeep('storeRotatedRefreshToken', fn () => $connector->storeRotatedRefreshToken($rotated));
+        $this->bookkeep('recordAccessExpiry', fn () => $connector->recordAccessExpiry($expiresIn));
+        $this->bookkeep('recordRefreshSuccess', fn () => $connector->recordRefreshSuccess());
+
+        return $token;
+    }
+
+    /**
+     * Run one connector bookkeeping step; never let it escape getToken().
+     *
+     * The log line carries the step name and the exception CLASS only: never its
+     * message, bindings or trace, because a QueryException from
+     * Setting::setEncrypted() embeds the SQL bindings, which hold the encrypted
+     * refresh token.
+     */
+    private function bookkeep(string $step, callable $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            try {
+                Log::error('[CippMcpClient] CIPP MCP connector bookkeeping failed; continuing', [
+                    'step' => $step,
+                    'exception' => class_basename($e),
+                ]);
+            } catch (\Throwable) {
+                // A failing logger must not turn bookkeeping into a failed read either.
+            }
+        }
+    }
+
+    private function signInFailedKey(string $tenantId, string $clientId, string $mode): string
+    {
+        return self::SIGN_IN_FAILED_CACHE_KEY.':'.sha1($tenantId.'|'.$clientId.'|'.$mode);
+    }
+
+    private function refuseIfRecentlyFailed(string $failedKey): void
+    {
+        if ($this->cache->has($failedKey)) {
+            throw new CippMcpAuthException('CIPP MCP sign-in failed within the last '.self::SIGN_IN_FAILURE_TTL.'s; not retrying yet');
+        }
+    }
+
+    private function rememberSignInFailure(string $failedKey): void
+    {
+        $this->cache->put($failedKey, true, self::SIGN_IN_FAILURE_TTL);
     }
 
     private function execMcpUrl(): string

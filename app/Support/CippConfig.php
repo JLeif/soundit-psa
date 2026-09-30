@@ -16,6 +16,9 @@ class CippConfig
             'application_id' => Setting::getValue('cipp_application_id'),
             'mcp_client_id' => Setting::getValue('cipp_mcp_client_id'),
             'mcp_client_secret' => Setting::getEncrypted('cipp_mcp_client_secret'),
+            // Application ID URI of the shared CIPP-MCP resource app (CIPP v11+). The
+            // delegated connector asks for <this>/user_impersonation offline_access.
+            'mcp_backend_host' => Setting::getValue('cipp_mcp_backend_host'),
             default => null,
         };
     }
@@ -69,11 +72,19 @@ class CippConfig
             && Setting::getValue('cipp_mcp_catalog_sync_enabled', '0') === '1';
     }
 
+    /**
+     * MCP can be attempted: the API URL, tenant and MCP client app are set, plus
+     * either the app's secret (legacy app-only sign-in, or a confidential client)
+     * or a delegated connector refresh token (CIPP v11+, where the client app may
+     * be registered as a public client with no secret). Presence only: the
+     * connector's token is not decrypted here.
+     */
     public static function isMcpConfigured(): bool
     {
         return ! empty(self::get('api_url'))
             && ! empty(self::get('tenant_id'))
             && ! empty(self::get('mcp_client_id'))
-            && ! empty(self::get('mcp_client_secret'));
+            && (! empty(self::get('mcp_client_secret'))
+                || ! empty(Setting::getValue(\App\Services\Cipp\CippMcpConnector::REFRESH_TOKEN_SETTING)));
     }
 }
