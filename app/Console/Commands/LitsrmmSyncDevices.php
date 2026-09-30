@@ -16,7 +16,7 @@ use Illuminate\Console\Command;
  */
 class LitsrmmSyncDevices extends Command
 {
-    protected $signature = 'litsrmm:sync-devices';
+    protected $signature = 'litsrmm:sync-devices {--client= : Sync devices for one client ID only}';
 
     protected $description = 'Sync devices from LITSRMM into PSA assets for mapped clients';
 
@@ -34,6 +34,19 @@ class LitsrmmSyncDevices extends Command
             return self::FAILURE;
         }
 
+        if ($clientId = $this->option('client')) {
+            $client = Client::find($clientId);
+            if (! $client) {
+                $this->error("Client ID {$clientId} not found.");
+
+                return self::FAILURE;
+            }
+
+            $this->info("Syncing LITSRMM devices for {$client->name}...");
+
+            return $this->report($sync->sync($client));
+        }
+
         $mapped = Client::whereNotNull('litsrmm_client_id')->operational()->count();
 
         if ($mapped === 0) {
@@ -44,8 +57,12 @@ class LitsrmmSyncDevices extends Command
         }
 
         $this->info("Syncing LITSRMM devices for {$mapped} mapped client(s)...");
-        $result = $sync->sync();
 
+        return $this->report($sync->sync());
+    }
+
+    private function report(\App\Services\SyncResult $result): int
+    {
         $this->newLine();
         $this->info("Done: {$result->summary()}");
 

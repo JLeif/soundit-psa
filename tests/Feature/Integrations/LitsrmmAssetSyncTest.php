@@ -5,6 +5,8 @@ namespace Tests\Feature\Integrations;
 use App\Enums\ClientStage;
 use App\Models\Asset;
 use App\Models\Client;
+use App\Models\License;
+use App\Models\LicenseType;
 use App\Models\Setting;
 use App\Services\Litsrmm\LitsrmmAssetSyncService;
 use App\Services\Litsrmm\LitsrmmClient;
@@ -514,5 +516,109 @@ class LitsrmmAssetSyncTest extends TestCase
         foreach ($this->history as $h) {
             $this->assertSame('GET', $h['request']->getMethod());
         }
+    }
+
+    // ---- licenses: one seat per device running the vendor's agent ----
+
+    /** @return array{server: ?License, workstation: ?License} */
+    private function licenses(Client $client): array
+    {
+        $of = fn (string $sku) => License::where('client_id', $client->id)
+            ->whereHas('licenseType', fn ($q) => $q->where('vendor', 'litsrmm')->where('vendor_sku_id', $sku))
+            ->first();
+
+        return ['server' => $of('rmm_server'), 'workstation' => $of('rmm_workstation')];
+    }
+
+    public function test_agent_devices_become_server_and_workstation_seats(): void
+    {
+        $this->device('1');
+        $this->device('2');
+        $this->device('3', ['osName' => 'Windows Server 2022 Standard']);
+
+        $this->service()->sync();
+
+        $seats = $this->licenses($this->client);
+        $this->assertSame(2, $seats['workstation']->quantity);
+        $this->assertSame('active', $seats['workstation']->status);
+        $this->assertSame(1, $seats['server']->quantity);
+        $this->assertSame(self::VENDOR_CLIENT, $seats['server']->vendor_ref);
+        $this->assertNotNull($seats['server']->synced_at);
+        $this->assertSame('LITSRMM — Workstation', LicenseType::where('vendor', 'litsrmm')->where('vendor_sku_id', 'rmm_workstation')->sole()->name);
+    }
+
+    public function test_devices_without_the_agent_and_retired_devices_are_not_seats(): void
+    {
+        // The owner's ruling: only machines the RMM actually manages are billed.
+        // The vendor's list also carries machines known only from Huntress or
+        // Control D.
+        $this->device('1');
+        $this->device('2', ['agentVersion' => null, 'osName' => null, 'lastUser' => null, 'lastSeen' => null, 'availabilityState' => 'offline']);
+        $this->device('3', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $this->device('4', ['enrollmentState' => 'enrolled', 'availabilityState' => 'retired']);
+
+        $this->service()->sync();
+
+        $seats = $this->licenses($this->client);
+        $this->assertSame(1, $seats['workstation']->quantity);
+        $this->assertSame(0, $seats['server']->quantity);
+        $this->assertSame('suspended', $seats['server']->status);
+    }
+
+    public function test_a_failed_read_leaves_the_seats_alone(): void
+    {
+        $this->device('1');
+        $this->service()->sync();
+        $this->listStatus = 500;
+
+        $this->service()->sync();
+
+        $this->assertSame(1, $this->licenses($this->client)['workstation']->quantity);
+    }
+
+    public function test_an_unmapped_client_loses_its_seats(): void
+    {
+        $this->device('1');
+        $this->service()->sync();
+        $this->client->update(['litsrmm_client_id' => null]);
+
+        $this->service()->sync();
+
+        $seat = $this->licenses($this->client)['workstation'];
+        $this->assertSame(0, $seat->quantity);
+        $this->assertSame('suspended', $seat->status);
+    }
+
+    // ---- one client at a time (the client page's Sync button) ----
+
+    public function test_a_single_client_sync_touches_only_that_client(): void
+    {
+        $other = $this->mappedClient(self::OTHER_VENDOR_CLIENT);
+        $otherAsset = Asset::factory()->create(['client_id' => $other->id, 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000050', 'last_user' => 'untouched']);
+        $formerly = $this->mappedClient(null);
+        $orphan = Asset::factory()->create(['client_id' => $formerly->id, 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000060']);
+        $this->device('1');
+        $this->device('50', ['clientId' => self::OTHER_VENDOR_CLIENT, 'lastUser' => 'changed']);
+
+        $result = $this->service()->sync($this->client);
+
+        $this->assertSame(1, $result->created);
+        $this->assertSame(1, Asset::where('client_id', $this->client->id)->count());
+        $this->assertSame('untouched', $otherAsset->fresh()->last_user, 'another client is not written');
+        $this->assertNotNull($orphan->fresh()->litsrmm_device_id, 'the estate-wide unmapped sweep belongs to a full sync');
+        $this->assertNull($this->licenses($other)['workstation'], 'nor are its seats');
+        $this->assertSame(1, $this->detailRequests(),'only this client\'s device is read in detail');
+    }
+
+    public function test_a_single_client_sync_of_an_unmapped_client_is_refused(): void
+    {
+        $unmapped = $this->mappedClient(null);
+        $this->device('1');
+
+        $result = $this->service()->sync($unmapped);
+
+        $this->assertSame(1, $result->errors);
+        $this->assertStringContainsString('not mapped', $result->errorMessages[0]);
+        $this->assertSame(0, count($this->history), 'nothing is read for it');
     }
 }
