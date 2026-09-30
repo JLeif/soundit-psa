@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Services\Cipp\CippMcpAuthException;
+use App\Services\Cipp\CippMcpCodeExchangeException;
 use App\Services\Cipp\CippMcpConnector;
+use App\Services\Cipp\CippMcpSignInErrors;
 use App\Support\CippConfig;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -75,10 +77,16 @@ class CippMcpOAuthController extends Controller
 
         if ($request->query('error')) {
             $code = CippMcpConnector::sanitizeCode((string) $request->query('error'));
+            // Entra puts the AADSTS number only in error_description. Take the
+            // NUMBER from it and nothing else: the description text is never
+            // logged or flashed.
+            if (preg_match('/\bAADSTS\d{4,}\b/', (string) $request->query('error_description'), $m)) {
+                $code = ($code !== 'unknown' ? $code.' / ' : '').$m[0];
+            }
             Log::warning('[CIPP MCP OAuth] Authorization error', ['error' => $code]);
 
             return redirect()->route('settings.integrations')
-                ->with('error', "CIPP MCP sign-in was not completed (error code: {$code}).");
+                ->with('error', CippMcpSignInErrors::message($code, atCodeExchange: false));
         }
 
         $code = $request->query('code');
@@ -89,7 +97,16 @@ class CippMcpOAuthController extends Controller
 
         try {
             $connector->exchangeCode($code, $verifier, route('auth.cipp-mcp.callback'));
+        } catch (CippMcpCodeExchangeException $e) {
+            // Microsoft refused the exchange: a sanitised CODE only, mapped to plain English.
+            Log::warning('[CIPP MCP OAuth] Code exchange failed', ['error' => $e->errorCode]);
+
+            return redirect()->route('settings.integrations')
+                ->with('error', CippMcpSignInErrors::message($e->errorCode, atCodeExchange: true));
         } catch (CippMcpAuthException $e) {
+            // Every other CippMcpAuthException exchangeCode() throws is PSA-authored
+            // text (not configured / could not reach Microsoft (<class>) / no refresh
+            // token); none carries a vendor body or exception message.
             Log::warning('[CIPP MCP OAuth] Code exchange failed', ['error' => $e->getMessage()]);
 
             return redirect()->route('settings.integrations')

@@ -427,6 +427,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/settings/integrations/cipp/tenants', [CippTenantController::class, 'update'])->name('settings.cipp-tenants.update');
     Route::post('/settings/integrations/cipp', [IntegrationsController::class, 'updateCipp'])->name('settings.integrations.cipp.update');
     Route::post('/settings/integrations/cipp/test', [IntegrationsController::class, 'testCipp'])->name('settings.integrations.cipp.test');
+    // Check setup: admin-only, gated like Connect CIPP MCP (auth.cipp-mcp).
+    Route::post('/settings/integrations/cipp/check-setup', [IntegrationsController::class, 'checkCippSetup'])->middleware('admin')->name('settings.integrations.cipp.check-setup');
     Route::post('/settings/integrations/cipp/sync', [IntegrationsController::class, 'syncCipp'])->name('settings.integrations.cipp.sync');
     Route::post('/settings/integrations/cipp/sync-mcp-catalog', [IntegrationsController::class, 'syncCippMcpCatalog'])->name('settings.integrations.cipp.sync-mcp-catalog');
     Route::post('/settings/integrations/cipp/sync-contacts', [IntegrationsController::class, 'syncCippContacts'])->name('settings.integrations.cipp.sync-contacts');

@@ -80,11 +80,13 @@ class CippMcpConnector
     /**
      * `<Application ID URI>/user_impersonation offline_access`. The backend host is
      * a setting (cipp_mcp_backend_host), never hardcoded; a bare host is given the
-     * https:// scheme, an api:// URI is kept as it is.
+     * https:// scheme, an api:// URI is kept as it is. The stored value goes through
+     * normaliseBackendHost() first, so a value saved before save-time normalisation
+     * (e.g. `https://x.azurewebsites.net/api/ExecMcp`) still builds a valid scope.
      */
     public static function scope(): string
     {
-        $host = trim((string) CippConfig::get('mcp_backend_host'));
+        $host = self::normaliseBackendHost((string) CippConfig::get('mcp_backend_host'));
         if ($host === '') {
             throw new CippMcpAuthException('CIPP MCP backend host (the CIPP-MCP Application ID URI) is not configured');
         }
@@ -93,7 +95,36 @@ class CippMcpConnector
             $host = 'https://'.$host;
         }
 
-        return rtrim($host, '/').'/user_impersonation offline_access';
+        return $host.'/user_impersonation offline_access';
+    }
+
+    /**
+     * The bare backend host: whitespace trimmed, and everything from the first `/`
+     * after the host (a path such as `/api/ExecMcp`, a trailing slash), `?` or `#`
+     * dropped. `api://host` and `https://host` keep their scheme; a bare `host`
+     * stays bare (scope() adds https://). Card jOWYaBuZ: the MCP connector URL
+     * `https://<cipp>/api/ExecMCP` was pasted here and built a scope Entra refused.
+     *
+     * Note: Entra also permits Application ID URIs WITH a path (e.g.
+     * `api://<tenantId>/<string>`, learn.microsoft.com identifier-uri-restrictions).
+     * CIPP's docs name the CIPP-MCP URI as the backend `…azurewebsites.net` host,
+     * which has none, so the card's rule (strip any path) is applied as asked.
+     */
+    public static function normaliseBackendHost(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        $scheme = '';
+        if (preg_match('#^([a-z][a-z0-9+.-]*://)(.*)$#is', $value, $m)) {
+            [$scheme, $value] = [$m[1], $m[2]];
+        }
+
+        $authority = trim((string) preg_split('#[/?\#]#', $value, 2)[0]);
+
+        return $authority === '' ? '' : $scheme.$authority;
     }
 
     /**
@@ -185,7 +216,9 @@ class CippMcpConnector
         }
 
         if ($response->failed()) {
-            throw new CippMcpAuthException('CIPP MCP code exchange was refused: '.self::errorCode($response));
+            // Code only (errorCode() never returns the body); the callback maps it
+            // to plain English through CippMcpSignInErrors.
+            throw new CippMcpCodeExchangeException(self::errorCode($response));
         }
 
         $refresh = $response->json('refresh_token');
