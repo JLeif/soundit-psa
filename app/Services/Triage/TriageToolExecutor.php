@@ -18,7 +18,7 @@ use App\Services\Comet\CometJobService;
 use App\Services\ControlD\ControlDAnalyticsClient;
 use App\Services\ControlD\ControlDClient;
 use App\Services\Level\LevelClient;
-use App\Services\Mesh\MeshClient;
+use App\Services\Mesh\MeshReadTools;
 use App\Services\Ninja\NinjaClient;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalFieldMap;
@@ -775,73 +775,17 @@ class TriageToolExecutor
 
     // ── Mesh Tools ──
 
+    // Card 6abdcac2: both Mesh reads live in App\Services\Mesh\MeshReadTools, shared
+    // with the staff Assistant and staff MCP, so the client binding cannot drift between surfaces.
+
     private function meshSearchLogs(array $input): array
     {
-        $size = min($input['size'] ?? 20, 50);
-
-        $client = $this->ticket->client;
-        $meshCustomerId = $client?->mesh_customer_id;
-
-        if (! $meshCustomerId) {
-            return ['error' => 'Client has no Mesh customer mapping'];
-        }
-
-        // Date range is required — Mesh returns empty without it
-        $end = gmdate('Y-m-d\TH:i:s');
-        $start = gmdate('Y-m-d\TH:i:s', strtotime('-7 days'));
-
-        $params = [
-            '_from' => 0,
-            '_size' => $size,
-            'start' => $start,
-            'end' => $end,
-        ];
-
-        // Add optional filters
-        foreach (['from', 'to', 'subject', 'status'] as $field) {
-            if (! empty($input[$field])) {
-                $params[$field] = $input[$field];
-            }
-        }
-
-        try {
-            $result = app(MeshClient::class)->get('api/emaillogs/', $params);
-        } catch (\Throwable $e) {
-            Log::warning('[Triage] Mesh log search failed', ['error' => $e->getMessage()]);
-
-            return ['error' => 'Mesh query failed: '.mb_substr($e->getMessage(), 0, 200)];
-        }
-
-        // Filter to this client's customer ID (API returns all customers)
-        $logs = $result['list'] ?? [];
-        $logs = array_values(array_filter($logs, function ($entry) use ($meshCustomerId) {
-            $ids = $entry['Customer-ID'] ?? [$entry['Customer Id'] ?? null];
-
-            return in_array($meshCustomerId, (array) $ids);
-        }));
-
-        return [
-            'total' => count($logs),
-            'emails' => array_slice($logs, 0, $size),
-        ];
+        return app(MeshReadTools::class)->search($this->ticket->client, $this->clientId, $input, '[Triage]');
     }
 
     private function meshGetEvents(array $input): array
     {
-        $queueId = $input['queue_id'] ?? null;
-        if (! $queueId) {
-            return ['error' => 'queue_id is required'];
-        }
-
-        try {
-            return app(MeshClient::class)->get('api/emaillogs/events', [
-                'queue_id' => $queueId,
-            ]);
-        } catch (\Throwable $e) {
-            Log::warning('[Triage] Mesh events query failed', ['queue_id' => $queueId, 'error' => $e->getMessage()]);
-
-            return ['error' => 'Mesh query failed: '.mb_substr($e->getMessage(), 0, 200)];
-        }
+        return app(MeshReadTools::class)->events($this->ticket->client, $this->clientId, $input, '[Triage]');
     }
 
     // ── CIPP Tools ──
