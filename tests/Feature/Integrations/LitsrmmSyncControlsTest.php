@@ -3,6 +3,7 @@
 namespace Tests\Feature\Integrations;
 
 use App\Enums\ClientStage;
+use App\Models\Asset;
 use App\Models\Client;
 use App\Models\License;
 use App\Models\LicenseType;
@@ -212,6 +213,67 @@ class LitsrmmSyncControlsTest extends TestCase
         Setting::setValue('litsrmm_enabled', '0');
         $this->actingAs($admin)->get(route('settings.integrations'))
             ->assertOk()->assertDontSee(route('settings.integrations.litsrmm.sync-devices'));
+    }
+
+    // ---- the asset page's RMM and Last Synced rows ----
+
+    private function assetPage(Asset $asset): string
+    {
+        return $this->actingAs(User::factory()->tech()->create())
+            ->get(route('assets.show', $asset))
+            ->assertOk()
+            ->getContent();
+    }
+
+    /** Text of the details-table cell under $heading, tags stripped and whitespace collapsed. */
+    private static function cell(string $html, string $heading): string
+    {
+        $found = preg_match('#<th class="text-muted">'.preg_quote($heading, '#').'</th>\s*<td>(.*?)</td>#s', $html, $m);
+        self::assertSame(1, $found, "the asset page has a {$heading} row");
+
+        return trim(preg_replace('/\s+/', ' ', strip_tags($m[1])));
+    }
+
+    public function test_a_litsrmm_asset_names_its_rmm_and_when_it_last_synced(): void
+    {
+        // Seen live 2026-10-01: #31, #32 and #35 read "-" under RMM and "Never"
+        // under Last Synced, because both rows only knew Ninja, Level,
+        // ScreenConnect and Tactical.
+        $asset = Asset::factory()->create([
+            'client_id' => $this->mapped()->id,
+            'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000001',
+            'litsrmm_synced_at' => now()->subMinutes(5),
+        ]);
+
+        $html = $this->assetPage($asset);
+
+        $this->assertSame('LITSRMM', self::cell($html, 'RMM'));
+        $this->assertSame('5 minutes ago', self::cell($html, 'Last Synced'));
+    }
+
+    public function test_an_asset_mid_handover_names_both_rmms(): void
+    {
+        $asset = Asset::factory()->create([
+            'client_id' => $this->mapped()->id,
+            'level_id' => 'lvl-1',
+            'level_synced_at' => now()->subHours(3),
+            'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000001',
+            'litsrmm_synced_at' => now()->subMinutes(5),
+        ]);
+
+        $html = $this->assetPage($asset);
+
+        $this->assertSame('Level | LITSRMM', self::cell($html, 'RMM'));
+    }
+
+    public function test_an_asset_with_no_rmm_still_reads_a_dash_and_never(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->mapped()->id]);
+
+        $html = $this->assetPage($asset);
+
+        $this->assertSame('-', self::cell($html, 'RMM'));
+        $this->assertSame('Never', self::cell($html, 'Last Synced'));
     }
 
     // ---- the command ----
