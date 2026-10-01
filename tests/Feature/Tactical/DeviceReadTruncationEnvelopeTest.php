@@ -5,7 +5,6 @@ namespace Tests\Feature\Tactical;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Setting;
-use App\Models\TacticalAsset;
 use App\Models\Ticket;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalFieldMap;
@@ -14,6 +13,7 @@ use App\Services\Triage\TriageToolDefinitions;
 use App\Services\Triage\TriageToolExecutor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Mockery;
+use Tests\Support\CreatesMappedTacticalAgents;
 use Tests\TestCase;
 
 /**
@@ -41,6 +41,7 @@ use Tests\TestCase;
  */
 class DeviceReadTruncationEnvelopeTest extends TestCase
 {
+    use CreatesMappedTacticalAgents;
     use RefreshDatabase;
 
     private function configureTactical(): void
@@ -56,7 +57,7 @@ class DeviceReadTruncationEnvelopeTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',

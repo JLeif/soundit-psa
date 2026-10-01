@@ -6,7 +6,6 @@ use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Setting;
 use App\Models\TacticalActionLog;
-use App\Models\TacticalAsset;
 use App\Models\TacticalScript;
 use App\Models\TechnicianActionLog;
 use App\Services\Tactical\TacticalClient;
@@ -15,10 +14,12 @@ use App\Support\McpToolRegistry;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use Mockery;
+use Tests\Support\CreatesMappedTacticalAgents;
 use Tests\TestCase;
 
 class TacticalReadToolsPhase1Test extends TestCase
 {
+    use CreatesMappedTacticalAgents;
     use RefreshDatabase;
 
     private const PHASE_ONE_TOOLS = [
@@ -115,7 +116,7 @@ class TacticalReadToolsPhase1Test extends TestCase
         $otherClient = Client::factory()->create(['name' => 'Other']);
 
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'PC-01']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -128,7 +129,7 @@ class TacticalReadToolsPhase1Test extends TestCase
         ]);
 
         $otherAsset = Asset::factory()->create(['client_id' => $otherClient->id, 'hostname' => 'PC-02']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $otherAsset->id,
             'agent_id' => 'agent-2',
             'hostname' => 'PC-02',
@@ -231,7 +232,7 @@ class TacticalReadToolsPhase1Test extends TestCase
 
         $client = Client::factory()->create();
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'PC-01']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
