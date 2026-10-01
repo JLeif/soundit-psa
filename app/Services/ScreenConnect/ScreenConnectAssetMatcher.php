@@ -29,6 +29,10 @@ use Illuminate\Support\Facades\Log;
  * silently would attach a session — and its online state and activity — to a device
  * that may not be it. The match fails closed (null) and a non-PII reason is logged
  * (client id and candidate count; no hostnames).
+ *
+ * The read tools use both rules' queries (exactQuery(), firstLabelQuery()) but settle
+ * ambiguity themselves (ScreenConnectReadOnlyToolset::preferLinked): two or more
+ * ScreenConnect-linked candidates fail closed with their asset ids.
  */
 final class ScreenConnectAssetMatcher
 {
@@ -47,6 +51,20 @@ final class ScreenConnectAssetMatcher
     }
 
     /**
+     * Rule 2 client-scoped match query: the stored hostname's first DNS label equals
+     * $short (non-empty), with LIKE metacharacters in $short escaped. Callers choose
+     * ordering and limits.
+     */
+    public static function firstLabelQuery(int $clientId, string $short): Builder
+    {
+        return Asset::where('client_id', $clientId)
+            ->whereRaw(
+                "LOWER(hostname) LIKE ? ESCAPE '".self::LIKE_ESCAPE."'",
+                [self::escapeLike(mb_strtolower($short)).'.%'],
+            );
+    }
+
+    /**
      * Rule 2: the unique client asset whose stored hostname's first label equals
      * $short, or null when there is none or more than one (see the ambiguity rule).
      */
@@ -56,11 +74,7 @@ final class ScreenConnectAssetMatcher
             return null;
         }
 
-        $candidates = Asset::where('client_id', $clientId)
-            ->whereRaw(
-                "LOWER(hostname) LIKE ? ESCAPE '".self::LIKE_ESCAPE."'",
-                [self::escapeLike(mb_strtolower($short)).'.%'],
-            )
+        $candidates = self::firstLabelQuery($clientId, $short)
             ->orderBy('id')
             ->limit(2)
             ->get();

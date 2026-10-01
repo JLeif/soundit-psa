@@ -171,7 +171,9 @@ class ScreenConnectFirstLabelLinkTest extends TestCase
         $result = $this->readTool()->execute('screenconnect_get_session_state', ['hostname' => 'Test-MBP'], $client->id);
 
         $this->assertArrayHasKey('error', $result);
-        $this->assertStringContainsString('was not found', $result['error']);
+        $this->assertStringContainsString('more than one ScreenConnect-linked device', $result['error']);
+        $this->assertCount(2, $result['candidates']);
+        $this->assertArrayNotHasKey('session_id', $result);
     }
 
     public function test_the_read_tool_never_finds_another_clients_fqdn_asset(): void

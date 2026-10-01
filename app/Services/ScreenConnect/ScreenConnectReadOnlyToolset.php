@@ -412,8 +412,9 @@ class ScreenConnectReadOnlyToolset
         // be stored short). The reverse also happens: the asset may be stored fully
         // qualified ("test-mbp.lan", e.g. from an RMM) while the caller passes the short
         // name. That is the same first-label rule the webhook ingest uses, shared via
-        // ScreenConnectAssetMatcher — exact first, then a UNIQUE first-label match;
-        // ambiguous first-label matches resolve to "not found", never a guess.
+        // ScreenConnectAssetMatcher — exact first, then the first-label match. Both pick
+        // through preferLinked(): two or more linked candidates fail closed naming them,
+        // never a guess.
         $short = ScreenConnectAssetMatcher::firstLabel($hostname);
         if ($short !== '' && mb_strtolower($short) !== mb_strtolower($hostname)) {
             $asset = $this->assetByName($short, $clientId);
@@ -422,21 +423,53 @@ class ScreenConnectReadOnlyToolset
             }
         }
 
-        return ScreenConnectAssetMatcher::uniqueFirstLabelMatch($clientId, $short, 'read_tool');
+        return $this->assetByFirstLabel($short, $clientId);
     }
 
     /**
-     * Exact (rule 1) match within the client. A duplicate hostname is common (an
-     * unlinked stale row beside the linked one), so the single ScreenConnect-linked
-     * candidate is preferred. Two or more LINKED candidates are ambiguous: the call
-     * fails closed naming this client's candidate asset ids, never picking the most
-     * recently synced (card 6abdcac2).
+     * Exact (rule 1) match within the client, picked by preferLinked().
      *
      * @return Asset|array{error: string, candidates: array<int, array<string, mixed>>}|null
      */
     private function assetByName(string $name, int $clientId): Asset|array|null
     {
-        $linked = ScreenConnectAssetMatcher::exactQuery($clientId, $name)
+        return $this->preferLinked(
+            fn (): Builder => ScreenConnectAssetMatcher::exactQuery($clientId, $name),
+            "Hostname '{$name}' matches more than one ScreenConnect-linked device for this client, so none was picked. Re-issue with asset_id.",
+        );
+    }
+
+    /**
+     * First-label (rule 2) match within the client: a stored hostname whose first DNS
+     * label is $short, picked by the same preferLinked() rule as the exact match.
+     *
+     * @return Asset|array{error: string, candidates: array<int, array<string, mixed>>}|null
+     */
+    private function assetByFirstLabel(string $short, int $clientId): Asset|array|null
+    {
+        if ($short === '') {
+            return null;
+        }
+
+        return $this->preferLinked(
+            fn (): Builder => ScreenConnectAssetMatcher::firstLabelQuery($clientId, $short),
+            "Hostname '{$short}' is the first label of more than one ScreenConnect-linked device's hostname for this client, so none was picked. Re-issue with asset_id.",
+        );
+    }
+
+    /**
+     * A duplicate is common (an unlinked stale row beside the linked one), so the
+     * single ScreenConnect-linked candidate is preferred. Two or more LINKED candidates
+     * are ambiguous: the call fails closed naming this client's candidate asset ids
+     * (at most 11), never picking the most recently synced (card 6abdcac2). With no
+     * linked candidate, the lowest-id match (or null) is returned.
+     *
+     * @param  callable(): Builder  $matches  a fresh client-scoped match query per call
+     * @return Asset|array{error: string, candidates: array<int, array<string, mixed>>}|null
+     */
+    private function preferLinked(callable $matches, string $ambiguous): Asset|array|null
+    {
+        $linked = $matches()
             ->where(function (Builder $query) {
                 $query->whereNotNull('screenconnect_session_id')
                     ->orWhereNotNull('screenconnect_synced_at');
@@ -447,7 +480,7 @@ class ScreenConnectReadOnlyToolset
 
         if ($linked->count() > 1) {
             return [
-                'error' => "Hostname '{$name}' matches more than one ScreenConnect-linked device for this client, so none was picked. Re-issue with asset_id.",
+                'error' => $ambiguous,
                 'candidates' => $linked->map(fn (Asset $asset): array => [
                     'asset_id' => $asset->id,
                     'hostname' => $asset->hostname,
@@ -456,8 +489,7 @@ class ScreenConnectReadOnlyToolset
             ];
         }
 
-        return $linked->first()
-            ?? ScreenConnectAssetMatcher::exactQuery($clientId, $name)->orderBy('id')->first();
+        return $linked->first() ?? $matches()->orderBy('id')->first();
     }
 
     private function isLinked(Asset $asset): bool

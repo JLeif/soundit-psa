@@ -288,6 +288,44 @@ class ScreenConnectClientIdResolutionTest extends TestCase
         $this->assertCount(2, $result['candidates']);
     }
 
+    public function test_a_short_name_that_is_the_first_label_of_two_linked_devices_fails_closed_naming_only_this_clients_candidates(): void
+    {
+        $corp = $this->linked($this->alpha, 'pc1.corp.local', 'aaaaaaaa-0000-0000-0000-000000000040');
+        $home = $this->linked($this->alpha, 'pc1.home.lan', 'aaaaaaaa-0000-0000-0000-000000000041');
+        $this->linked($this->bravo, 'pc1.bravo.lan', 'bbbbbbbb-0000-0000-0000-000000000042');
+
+        foreach (['pc1', 'PC1.other.lan'] as $typed) {
+            $response = $this->mcp('screenconnect_get_session_state', [
+                'client_id' => $this->alpha->id,
+                'hostname' => $typed,
+            ]);
+            $result = $this->decoded($response);
+            $body = $this->text($response);
+
+            $this->assertTrue((bool) $response->json('result.isError'), "'{$typed}' is ambiguous by first label and must not pick a device");
+            $this->assertStringContainsString('more than one ScreenConnect-linked device', $result['error'] ?? '');
+            $this->assertStringNotContainsString('was not found', $body, 'a device that exists twice is not "not found"');
+            $this->assertSame([$corp->id, $home->id], array_column($result['candidates'] ?? [], 'asset_id'));
+            $this->assertArrayNotHasKey('session_id', $result);
+            $this->assertStringNotContainsString('bbbbbbbb-0000-0000-0000-000000000042', $body);
+            $this->assertStringNotContainsString('pc1.bravo.lan', $body);
+        }
+    }
+
+    public function test_a_first_label_match_prefers_the_one_linked_device_over_an_unlinked_stale_row(): void
+    {
+        $this->linked($this->alpha, 'pc2.old.lan', null);
+        $live = $this->linked($this->alpha, 'pc2.corp.local', 'aaaaaaaa-0000-0000-0000-000000000043');
+
+        $result = app(ScreenConnectReadOnlyToolset::class)->execute(
+            'screenconnect_get_session_state',
+            ['hostname' => 'pc2'],
+            $this->alpha->id,
+        );
+
+        $this->assertSame($live->id, $result['asset_id'] ?? null, 'an unlinked stale first-label row is not a second candidate');
+    }
+
     public function test_one_linked_device_is_still_preferred_over_an_unlinked_duplicate(): void
     {
         $this->linked($this->alpha, 'Stale-PC', null);
