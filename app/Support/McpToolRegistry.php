@@ -217,7 +217,14 @@ class McpToolRegistry
                 if (isset($sensitiveMap[$key])) {
                     [$integration, $tierKey, $tierLabel, $order] = $sensitiveMap[$key];
                     foreach ($group['tools'] as $tool) {
-                        $push($integration, $tierKey, $tierLabel, true, $order, $tool);
+                        // The BenjiPays reads are registered in psa_read (same grant
+                        // gate and sensitive Reads tier) but render under their own
+                        // BenjiPays card, not PSA Core. Display only: grants are by
+                        // tool name. Without this, the prefix arm in
+                        // integrationForToolName() would never be consulted for them.
+                        $target = $integration === 'psa' && self::integrationForToolName((string) $tool['name']) === 'benjipays'
+                            ? 'benjipays' : $integration;
+                        $push($target, $tierKey, $tierLabel, true, $order, $tool);
                     }
 
                     continue;
@@ -292,6 +299,7 @@ class McpToolRegistry
             'calendar' => ['label' => 'Calendar & Scheduling', 'blurb' => 'Staff calendar reads & scheduling (Microsoft Graph)', 'icon' => 'bi-calendar-event', 'accent' => '#6d28d9'],
             'controld' => ['label' => 'Control D', 'blurb' => 'DNS filtering: device reads & staged client onboarding', 'icon' => 'bi-shield-lock', 'accent' => '#0f766e'],
             'other' => ['label' => 'Other integrations', 'blurb' => 'Level · Mailprotector · Comet · Servosity · Zorus · DNS', 'icon' => 'bi-plugin', 'accent' => '#7c3aed'],
+            'benjipays' => ['label' => 'BenjiPays', 'blurb' => 'Payments, invoices & autopay (read-only)', 'icon' => 'bi-credit-card', 'accent' => '#15803d'],
             'wiki' => ['label' => 'Wiki & runbooks', 'blurb' => 'Client wiki & internal SOP / runbook store', 'icon' => 'bi-journal-text', 'accent' => '#b45309'],
         ];
     }
@@ -304,6 +312,7 @@ class McpToolRegistry
     public static function integrationForToolName(string $name): string
     {
         return match (true) {
+            str_starts_with($name, 'benjipays_') => 'benjipays',
             str_starts_with($name, 'cipp_') => 'cipp',
             str_starts_with($name, 'tactical_') => 'tactical',
             str_starts_with($name, 'ninja_') => 'ninja',

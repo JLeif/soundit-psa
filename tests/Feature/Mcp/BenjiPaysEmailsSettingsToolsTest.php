@@ -502,6 +502,31 @@ class BenjiPaysEmailsSettingsToolsTest extends TestCase
         Http::assertNothingSent();
     }
 
+    /**
+     * The BenjiPays card is display only: a grant stored by tool name before
+     * the tools moved off PSA Core still renders checked on the BenjiPays card
+     * and still authorizes the call. Nothing about the grant is rewritten.
+     */
+    public function test_an_existing_grant_by_name_carries_over_to_the_benjipays_card(): void
+    {
+        McpConfig::rotateStaffToken(allowedTools: ['benjipays_list_transactions', 'benjipays_get_settings'], label: 'chet');
+        $token = \App\Models\McpToken::where('label', 'chet')->firstOrFail();
+        $stored = $token->tools;
+
+        $html = (string) $this->actingAs(\App\Models\User::factory()->create())
+            ->get(route('settings.mcp-tokens.show', $token))->assertOk()->getContent();
+
+        $start = strpos($html, 'data-integration="benjipays"');
+        $this->assertNotFalse($start, 'the token page must render a BenjiPays card');
+        $next = strpos($html, 'data-integration="', $start + 1);
+        $card = substr($html, $start, $next === false ? null : $next - $start);
+        foreach (['benjipays_list_transactions', 'benjipays_get_settings'] as $granted) {
+            $this->assertMatchesRegularExpression('/data-tool="'.$granted.'" checked/', $card, "{$granted} renders granted on the BenjiPays card");
+        }
+        $this->assertMatchesRegularExpression('/data-tool="benjipays_list_sent_emails"\s+aria-label/', $card, 'an ungranted tool renders on the card, unchecked');
+        $this->assertSame($stored, $token->fresh()->tools, 'rendering the page does not rewrite grants');
+    }
+
     #[DataProvider('tools')]
     public function test_each_tool_is_a_psa_read_that_needs_an_explicit_grant(string $tool, string $scope, bool $client): void
     {

@@ -200,6 +200,51 @@ class McpToolRegistryTest extends TestCase
         $this->assertArrayHasKey('huntress', McpToolRegistry::integrationGroups(), 'Huntress reads must render under their own card');
     }
 
+    /**
+     * Card 6abec4f9 (Charlie's ruling, 2026-10-01): the BenjiPays reads render
+     * under their own BenjiPays card on the token page, not PSA Core. They stay
+     * in psa_read (grant gate and sensitive Reads tier unchanged); the card is
+     * display only, since grants are stored and checked by tool name.
+     */
+    public function test_benjipays_reads_render_under_a_benjipays_card_not_psa_core(): void
+    {
+        $benjipays = [
+            'benjipays_autopay_forecast',
+            'benjipays_list_transactions',
+            'benjipays_get_invoice',
+            'benjipays_get_customer_payment_methods',
+            'benjipays_list_sent_emails',
+            'benjipays_get_settings',
+        ];
+
+        $groups = McpToolRegistry::integrationGroups();
+        $this->assertArrayHasKey('benjipays', McpToolRegistry::integrationMeta(), 'a BenjiPays card must exist on the token page');
+        $this->assertArrayHasKey('benjipays', $groups, 'BenjiPays reads must render under their own card');
+        $this->assertSame('BenjiPays', $groups['benjipays']['label']);
+
+        $onCard = [];
+        foreach ($groups['benjipays']['tiers'] as $tier) {
+            foreach ($tier['tools'] as $tool) {
+                $onCard[$tool['name']] = $tier;
+            }
+        }
+        $psaNames = [];
+        foreach ($groups['psa']['tiers'] as $tier) {
+            $psaNames = [...$psaNames, ...array_column($tier['tools'], 'name')];
+        }
+
+        $psaRead = array_column(McpToolRegistry::groups()['psa_read']['tools'], 'name');
+        foreach ($benjipays as $tool) {
+            $this->assertSame('benjipays', McpToolRegistry::integrationForToolName($tool), "{$tool} must route to the benjipays integration");
+            $this->assertArrayHasKey($tool, $onCard, "{$tool} must render on the BenjiPays card");
+            $this->assertNotContains($tool, $psaNames, "{$tool} must not render under PSA Core");
+            $this->assertSame(['read', 'Reads', true], [$onCard[$tool]['key'], $onCard[$tool]['label'], $onCard[$tool]['sensitive']], "{$tool} keeps the sensitive Reads tier");
+            $this->assertContains($tool, $psaRead, "{$tool} stays grant-gated in psa_read");
+        }
+        $this->assertSame(count($benjipays), $groups['benjipays']['total']);
+        $this->assertSame('psa', McpToolRegistry::integrationForToolName('list_invoices'), 'PSA-native invoice reads stay under PSA Core');
+    }
+
     public function test_screenconnect_reads_are_registry_backed_and_mapped_to_a_screenconnect_card(): void
     {
         $screenconnectReads = [
