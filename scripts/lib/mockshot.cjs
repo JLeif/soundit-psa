@@ -188,7 +188,7 @@ async function main() {
         for (const u of unique) process.stderr.write(`  ${u}\n`);
     }
     const { size } = fs.statSync(opts.output);
-    // Contract (parity with the CT 111 reference): stdout carries exactly the
+    // Contract (parity with the reference mockshot): stdout carries exactly the
     // output path, one line, so callers can capture it. Details go to stderr.
     process.stderr.write(`mockshot: ${opts.viewport.width}x${opts.viewport.height} @${SCALE}x${opts.full ? ', full page' : ''}, ${size} bytes\n`);
     process.stdout.write(`${opts.output}\n`);
