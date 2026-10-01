@@ -12,7 +12,8 @@ use Illuminate\Support\Str;
  *
  * Reads: gateways, invoice balance (stage 1), the auto-processing forecast
  * for one invoice (card revwQxh4), and one customer's transactions and saved
- * payment methods (card 6abec4f9; GET only). The one write is
+ * payment methods, its sent-email history and the organization settings
+ * (card 6abec4f9; GET only). The one write is
  * createAppliedPaymentLink() (stage 2, #2065): minting a tokenized pay-now
  * link moves no money — the client pays on the vendor's page, if at all.
  */
@@ -134,6 +135,54 @@ class BenjiPaysClient
         return $this->listRead('/v2/payment-methods', $accountingCustomerId, [
             'customerId' => $accountingCustomerId, 'limit' => $limit, 'offset' => 0,
         ]);
+    }
+
+    /**
+     * READ-ONLY sent-email history for ONE accounting (QBO) customer:
+     * GET /v2/emails?customerId= (scope organizations:emails:read).
+     *
+     * Source: developer.benjipays.com/reference/get_v2-emails (OpenAPI 3.1,
+     * operation updatedAt 2026-07-01, read 2026-10-02). `type` and `status`
+     * are the documented query enums and are only passed when the caller
+     * gave one (the tool validates them first); newest first by sentDate.
+     * Returns the raw envelope for BenjiPaysReadProjection to validate and
+     * redact.
+     *
+     * @return array{data: list<mixed>, pagination: array<string, mixed>}
+     */
+    public function emails(string $accountingCustomerId, ?string $type, ?string $status, int $limit): array
+    {
+        $query = ['customerId' => $accountingCustomerId];
+        if ($type !== null) {
+            $query['type'] = $type;
+        }
+        if ($status !== null) {
+            $query['status'] = $status;
+        }
+
+        return $this->listRead('/v2/emails', $accountingCustomerId, $query + [
+            'sort' => 'sentDate', 'order' => 'desc', 'limit' => $limit, 'offset' => 0,
+        ]);
+    }
+
+    /**
+     * READ-ONLY organization settings: GET /v2/settings (scope
+     * organizations:settings:read). Organization-wide, so there is no
+     * customer to fence on. Source: developer.benjipays.com/reference/
+     * get_v2-settings (OpenAPI 3.1, read 2026-10-02). Returns the raw `data`
+     * object for BenjiPaysReadProjection::settings() to validate and reduce to
+     * non-secret flags.
+     *
+     * @return array<string, mixed>
+     */
+    public function settings(): array
+    {
+        $data = $this->get('/v2/settings');
+        if (! is_array($data) || array_is_list($data)) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return $data;
     }
 
     /**

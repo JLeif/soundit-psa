@@ -179,6 +179,219 @@ final class BenjiPaysReadProjection
         ];
     }
 
+    /** The documented `type` enum of GET /v2/emails (merchant-facing types only). */
+    public const EMAIL_TYPES = ['invoice', 'receipt', 'cardrequest', 'emailreminder', 'generalemail', 'logininvite',
+        'installment', 'security', 'nightlyresults', 'benjiinvoice', 'other', 'invoicepaid', 'emailverify'];
+
+    /** The documented `status` enum of GET /v2/emails. */
+    public const EMAIL_STATUSES = ['sent', 'queued', 'error'];
+
+    private const MAX_RECIPIENTS = 10;
+
+    /**
+     * GET /v2/emails item (EmailSummary; required: id, type, status, subject,
+     * from, to, cc, bcc, sentDate, opened, lastOpened, bounced, delivered,
+     * customerId, invoiceIds, sentBy, reminderRule, hasAttachments). KEPT, as
+     * ruled by Jeeves 2026-10-01: sentDate, type (documented enum only),
+     * status (documented enum only) and each `to` recipient MASKED to the first
+     *
+     * character of the local part + `***@` + the full domain, at most
+     * MAX_RECIPIENTS of them (recipient_count is the full count and
+     * recipients_truncated says when some were left out). DROPPED: id,
+     * subject, from, cc, bcc, sentBy, reminderRule, invoiceIds, the
+     * opened/lastOpened/bounced/delivered flags, hasAttachments.
+     *
+     * Every row must carry customerId equal to the customer the read was
+     * filtered to; a row for another or no customer fails the whole read. A
+     * recipient that is not a plain address, or a type/status outside the
+     * documented enums, fails the whole read too (never guessed).
+     *
+     * @param  array{data: list<mixed>, pagination: array<string, mixed>}  $envelope
+     * @return array{rows: list<array<string, mixed>>, has_more: bool, total: int|float|null}
+     */
+    public static function emails(array $envelope, string $customerId): array
+    {
+        $rows = [];
+        foreach ($envelope['data'] as $row) {
+            if (! is_array($row) || array_is_list($row) || ! is_string($row['id'] ?? null)
+                || ($row['customerId'] ?? null) !== $customerId
+                || ! is_array($row['to'] ?? null) || ! array_is_list($row['to'])
+                || ! array_key_exists('type', $row) || ! array_key_exists('status', $row) || ! array_key_exists('sentDate', $row)
+                || ($row['type'] !== null && ! in_array($row['type'], self::EMAIL_TYPES, true))
+                || ($row['status'] !== null && ! in_array($row['status'], self::EMAIL_STATUSES, true))) {
+                throw new BenjiPaysException('invalid_response');
+            }
+            $recipients = [];
+            foreach (array_slice($row['to'], 0, self::MAX_RECIPIENTS) as $address) {
+                $recipients[] = self::maskEmail($address);
+            }
+            $rows[] = [
+                'date' => self::isoDate($row, 'sentDate'),
+                'type' => $row['type'],
+                'status' => $row['status'],
+                'recipients' => $recipients,
+                'recipient_count' => count($row['to']),
+                'recipients_truncated' => count($row['to']) > self::MAX_RECIPIENTS,
+            ];
+        }
+
+        return ['rows' => $rows] + self::page($envelope['pagination']);
+    }
+
+    /**
+     * `j***@example.com`: the first character of the local part, `***`, and
+     * the full domain (Jeeves's ruling, card 6abec4f9, 2026-10-01). Anything
+     * that is not one plain ASCII address (a display name, two `@`, an empty
+     * local part, a domain without a dot) fails closed.
+     */
+    public static function maskEmail(mixed $address): string
+    {
+        if (! is_string($address) || strlen($address) > 254
+            || ! preg_match('/^([A-Za-z0-9!#$%&\'*+\/=?^_`{|}~.-])[A-Za-z0-9!#$%&\'*+\/=?^_`{|}~.-]{0,63}@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$/D', $address, $m)) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return $m[1].'***@'.$m[2];
+    }
+
+    /** Every key GET /v2/settings documents under autoProcessing and its skips (additionalProperties: false). */
+    private const AUTO_PROCESSING_KEYS = ['enabled', 'runHour', 'delayDays', 'startDate', 'processCreditMemos', 'useParentProfiles', 'skips'];
+
+    private const SKIP_KEYS = ['noTermsDisabled', 'skipDueDateNotMet', 'memoSkip', 'skipSurcharge', 'autoProcessAmountSkip', 'invoicePrefixSkip'];
+
+    /**
+     * GET /v2/settings `data` (OrganizationSettingsResponse; required blocks
+     * accountingSystem, autoProcessing, customerPortal, email, security). Only
+     * the non-secret configuration that explains autopay, skip and surcharge
+     * behaviour is KEPT: every autoProcessing flag, number and skip rule; the
+     * accountingSystem auto-enable flags; the customerPortal payment and
+     * autopay flags; the two receipt flags of `email`. The free text of a
+     * rule is never copied out: memoSkip.text becomes `text_set` plus the
+     * caller-supplied comparison, and invoicePrefixSkip.prefixes becomes
+     * `prefix_count`. DROPPED: every address list (invoice/receipt cc/bcc),
+     * portal url, customDomain, name, theme and pre-authorization agreement
+     * texts, showInvoicesAfterDate, the security block and useSmtp.
+     *
+     * FAIL CLOSED: a missing block, a kept key missing or of another type, or
+     * ANY key in autoProcessing or its skips that the documentation does not
+     * list throws `invalid_response`. An undocumented skip rule would make the
+     * reported skip list incomplete, which would read as "nothing else skips".
+     *
+     * @param  ?string  $psaMemo  the PSA's configured skip memo, already folded and trimmed; null when none
+     * @return array<string, mixed>
+     */
+    public static function settings(array $data, ?string $psaMemo): array
+    {
+        foreach (['accountingSystem', 'autoProcessing', 'customerPortal', 'email', 'security'] as $block) {
+            if (! is_array($data[$block] ?? null) || array_is_list($data[$block])) {
+                throw new BenjiPaysException('invalid_response');
+            }
+        }
+        $ap = self::exactKeys($data['autoProcessing'], self::AUTO_PROCESSING_KEYS);
+        $skips = self::exactKeys($ap['skips'], self::SKIP_KEYS);
+        $memo = $skips['memoSkip'] === null ? null : self::exactKeys($skips['memoSkip'], ['text', 'action']);
+        // Compared, never copied out, so a multi-line wording is accepted here
+        // (the PSA's own wording may span lines); bounded and UTF-8 only.
+        $memoText = $memo['text'] ?? null;
+        if ($memoText !== null && (! is_string($memoText) || strlen($memoText) > 5000 || ! mb_check_encoding($memoText, 'UTF-8'))) {
+            throw new BenjiPaysException('invalid_response');
+        }
+        $prefix = self::exactKeys($skips['invoicePrefixSkip'], ['enabled', 'prefixes', 'action']);
+        if (! is_array($prefix['prefixes']) || ! array_is_list($prefix['prefixes'])) {
+            throw new BenjiPaysException('invalid_response');
+        }
+        $portal = $data['customerPortal'];
+        $acct = $data['accountingSystem'];
+        $email = $data['email'];
+
+        return [
+            'auto_processing' => [
+                'enabled' => self::bool($ap, 'enabled'),
+                'run_hour' => self::number($ap, 'runHour'),
+                'delay_days' => self::number($ap, 'delayDays'),
+                'start_date' => self::isoDate($ap, 'startDate'),
+                'process_credit_memos' => self::bool($ap, 'processCreditMemos'),
+                'use_parent_profiles' => self::bool($ap, 'useParentProfiles'),
+            ],
+            'skips' => [
+                'no_terms_disabled' => self::bool($skips, 'noTermsDisabled'),
+                'skip_due_date_not_met' => self::bool($skips, 'skipDueDateNotMet'),
+                'memo_skip' => $memo === null ? null : [
+                    'text_set' => $memoText !== null && trim($memoText) !== '',
+                    'text_equals_psa_skip_memo' => $psaMemo === null || $memoText === null ? null : trim($memoText) === $psaMemo,
+                    'action' => self::word($memo, 'action'),
+                ],
+                'skip_surcharge' => self::range($skips['skipSurcharge']),
+                'amount_skip' => self::range($skips['autoProcessAmountSkip']),
+                'invoice_prefix_skip' => [
+                    'enabled' => self::bool($prefix, 'enabled'),
+                    'prefix_count' => count($prefix['prefixes']),
+                    'action' => self::word($prefix, 'action'),
+                ],
+            ],
+            'accounting_system' => [
+                'surcharge_auto_enable' => self::bool($acct, 'surchargeAutoEnable'),
+                'auto_enable_new_customers' => self::bool($acct, 'autoEnableNewCustomers'),
+                'email_auto_enable' => self::bool($acct, 'emailAutoEnable'),
+            ],
+            'customer_portal' => [
+                'enabled' => self::bool($portal, 'enabled'),
+                'allow_portal_change_autopay' => self::bool($portal, 'allowPortalChangeAutoPay'),
+                'auto_enable_profiles' => self::bool($portal, 'autoEnableProfiles'),
+                'force_save_cards' => self::bool($portal, 'forceSaveCards'),
+                'disable_save_cards' => self::bool($portal, 'disableSaveCards'),
+                'disable_partial_payments' => self::bool($portal, 'disablePartialPayments'),
+            ],
+            'email' => [
+                'send_receipts' => self::bool($email, 'sendReceipts'),
+                'autopay_send_receipts_invoice_emails' => self::bool($email, 'autoPaySendReceiptsInvoiceEmails'),
+            ],
+        ];
+    }
+
+    /** An object holding exactly the documented keys, no more and no fewer. */
+    private static function exactKeys(mixed $value, array $keys): array
+    {
+        if (! is_array($value) || ($value !== [] && array_is_list($value))) {
+            throw new BenjiPaysException('invalid_response');
+        }
+        $have = array_keys($value);
+        sort($have);
+        sort($keys);
+        if ($have !== $keys) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return $value;
+    }
+
+    /** @return array{enabled: bool, min: int|float|null, max: int|float|null} */
+    private static function range(mixed $value): array
+    {
+        $value = self::exactKeys($value, ['enabled', 'min', 'max']);
+
+        return ['enabled' => self::bool($value, 'enabled'), 'min' => self::nullableNumber($value, 'min'), 'max' => self::nullableNumber($value, 'max')];
+    }
+
+    private static function bool(array $row, string $key): bool
+    {
+        if (! is_bool($row[$key] ?? null)) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return $row[$key];
+    }
+
+    private static function number(array $row, string $key): int|float
+    {
+        $value = self::nullableNumber($row, $key);
+        if ($value === null) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return $value;
+    }
+
     /** @return array{has_more: bool, total: int|float|null} */
     private static function page(array $pagination): array
     {
@@ -201,15 +414,19 @@ final class BenjiPaysReadProjection
         };
     }
 
-    /** Only the last four digits of an already-masked number; never the masked string. */
+    /**
+     * The TRAILING four visible digits of an already-masked number; never the
+     * masked string. A mask that does not end in four digits gives null (fail
+     * closed, #4739): digits anywhere else in a mask may be BIN or routing
+     * digits, and must never be reported as the last four.
+     */
     private static function last4(?string $masked): ?string
     {
-        if ($masked === null) {
+        if ($masked === null || ! preg_match('/(\d{4})$/D', $masked, $m)) {
             return null;
         }
-        $digits = (string) preg_replace('/\D+/', '', $masked);
 
-        return strlen($digits) >= 4 ? substr($digits, -4) : null;
+        return $m[1];
     }
 
     private static function brand(array $row): ?string

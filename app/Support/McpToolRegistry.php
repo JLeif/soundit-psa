@@ -1257,6 +1257,8 @@ class McpToolRegistry
             \App\Services\Mcp\BenjiPaysTransactionsTool::definition(),
             \App\Services\Mcp\BenjiPaysInvoiceTool::definition(),
             \App\Services\Mcp\BenjiPaysPaymentMethodsTool::definition(),
+            \App\Services\Mcp\BenjiPaysSentEmailsTool::definition(),
+            \App\Services\Mcp\BenjiPaysSettingsTool::definition(),
         ];
     }
 
