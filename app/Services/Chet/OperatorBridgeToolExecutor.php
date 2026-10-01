@@ -9,6 +9,7 @@ use App\Models\SignalInboxEntry;
 use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Agent\Escalation\OperatorDelivery;
+use App\Services\Teams\TeamsBotClient;
 use App\Services\Technician\Notify\TeamsText;
 use App\Services\Technician\PromptFence;
 use App\Support\TeamsBotConfig;
@@ -16,6 +17,7 @@ use App\Support\TeamsPersonaConfig;
 use App\Support\TechnicianConfig;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class OperatorBridgeToolExecutor
 {
@@ -32,6 +34,7 @@ class OperatorBridgeToolExecutor
             'find_staff' => $this->findStaff($input),
             'get_staff' => $this->getStaff($input),
             'post_to_operator' => $this->postToOperator($input, $tokenLabel),
+            'teams_post_message' => $this->teamsPostMessage($input, $tokenLabel),
             'poll_operator_messages' => $this->pollOperatorMessages($input, $tokenLabel),
             'poll_signals' => $this->pollSignals($input, $tokenLabel),
             default => ['error' => "Unknown tool: {$name}"],
@@ -166,6 +169,111 @@ class OperatorBridgeToolExecutor
             'posted' => $result->posted,
             'remote_message_id' => $result->remoteMessageId,
             ...$result->scanReceipt(),
+        ];
+    }
+
+    /**
+     * teams_post_message (card 5sALzgSC): a teammate's message, not an alarm.
+     *
+     * Differs from postToOperator() in exactly the ways the card asks, and no
+     * other: no TeamsText::escape over the body (markdown survives), no email
+     * (this path never calls OperatorDelivery::send(), whose trailing sendNew()
+     * is the email), no category prefix and no subject, and an @mention only
+     * when mention === true. What it KEEPS from postToOperator(): the persona is
+     * derived from the authenticated token label, never from input; the output
+     * scan withholds the whole body on a hit; untrusted ticket fields are
+     * escaped at their interpolation point; unverified contact intake is refused.
+     *
+     * The target is a closed allowlist (TeamsPostTargets) and an unknown or
+     * unconfigured target is refused before anything is sent. There is no
+     * webhook fallback: a post that cannot reach the bot reports posted:false.
+     *
+     * @return array<string, mixed>
+     */
+    private function teamsPostMessage(array $input, ?string $tokenLabel = null): array
+    {
+        $trimmedLabel = trim((string) $tokenLabel);
+        $persona = $trimmedLabel !== '' ? TeamsPersonaConfig::byTokenLabel($trimmedLabel) : null;
+
+        $requested = is_scalar($input['chat_or_channel'] ?? null) ? (string) $input['chat_or_channel'] : '';
+        $target = TeamsPostTargets::resolve($requested, $persona);
+        if ($target === null) {
+            return ['error' => 'chat_or_channel is not an allowed Teams target. Allowed: '.implode(', ', TeamsPostTargets::keys($persona)).'. Nothing was posted.'];
+        }
+        if ($target['service_url'] === null) {
+            return ['error' => "Teams target '{$target['key']}' has no service URL configured. Nothing was posted."];
+        }
+        if ($persona === null && ! TeamsBotConfig::enabled() && ! TeamsBotConfig::chetRoutingEnabled()) {
+            return ['error' => 'No Teams bot lane is enabled. Nothing was posted.'];
+        }
+
+        $rawBody = is_string($input['body'] ?? null) ? $input['body'] : '';
+        if (trim($rawBody) === '') {
+            return ['error' => 'body is required'];
+        }
+        if (mb_strlen($rawBody) > OperatorDelivery::TEAMS_SAFE_TEXT_LIMIT) {
+            return ['error' => 'body exceeds '.OperatorDelivery::TEAMS_SAFE_TEXT_LIMIT.' characters; split it into several posts. Nothing was posted.'];
+        }
+
+        $mentionRequested = ($input['mention'] ?? false) === true;
+
+        $ticket = null;
+        if (isset($input['ticket_id']) && is_numeric($input['ticket_id']) && (int) $input['ticket_id'] > 0) {
+            $ticket = Ticket::with('client')->find((int) $input['ticket_id']);
+            if ($ticket === null) {
+                return ['error' => 'Ticket not found. Nothing was posted.'];
+            }
+            if ($ticket->isUnverifiedContactIntake()) {
+                return ['error' => 'Contact intake requires staff verification.'];
+            }
+        }
+
+        // Trim only the ends: interior blank lines and indentation are the
+        // agent's formatting and must reach Teams intact.
+        $actorName = $persona?->display_name ?? TechnicianConfig::aiActorName();
+        $scanned = $this->delivery->scanMessageWithMeta(
+            $this->stripTrailingPersonaSignatures(trim($rawBody), $actorName),
+        );
+        $policy = TeamsMarkdownPolicy::apply($scanned['text']);
+        $text = $policy['text'];
+
+        if ($ticket !== null) {
+            $client = TeamsText::escape($ticket->client?->name ?? '');
+            $subject = TeamsText::escape($ticket->subject ?? '');
+            $text .= "\n\nTicket #{$ticket->id} ({$client} - {$subject})";
+        }
+
+        $bot = $persona !== null ? app(TeamsBotClient::class)->forPersona($persona) : app(TeamsBotClient::class);
+
+        $mentions = [];
+        if ($mentionRequested) {
+            $recipientId = TechnicianConfig::operatorRecipientFor(OperatorMessageCategory::Escalation);
+            $recipient = $recipientId ? User::find($recipientId) : null;
+            if ($recipient?->microsoft_id !== null) {
+                $member = $bot->getConversationMember($target['service_url'], $target['conversation_id'], $recipient->microsoft_id);
+                if ($member !== null && isset($member['id'])) {
+                    $name = TeamsText::escape($recipient->name);
+                    $name = $name !== '' ? $name : 'operator';
+                    $mentions = [['mentionId' => (string) $member['id'], 'name' => $name]];
+                    $text = "<at>{$name}</at> ".$text;
+                }
+            }
+        }
+
+        try {
+            $sent = $bot->postMarkdownMessage($target['service_url'], $target['conversation_id'], $text, $mentions);
+        } catch (\Throwable $e) {
+            Log::warning('[OperatorBridge] teams_post_message send failed', ['target' => $target['key'], 'error' => $e->getMessage()]);
+            $sent = ['posted' => false, 'id' => null];
+        }
+
+        return [
+            'posted' => $sent['posted'],
+            'remote_message_id' => $sent['id'],
+            'target' => $target['key'],
+            'mentioned' => $mentions !== [],
+            'markdown_neutralized' => $policy['neutralized'],
+            ...$scanned['meta']->toArray(),
         ];
     }
 

@@ -16,7 +16,16 @@ class TeamsChatReadToolset
         'list_teams_chats',
         'get_teams_chat_members',
         'get_teams_chat_history',
+        'teams_search_channel',
     ];
+
+    /** Graph's page size for chat messages is capped at 50. */
+    private const SEARCH_PAGE_SIZE = 50;
+
+    /** Bounded page walk: at most this many pages (250 messages) per search. */
+    public const SEARCH_MAX_PAGES = 5;
+
+    private const SEARCH_MAX_RESULTS = 25;
 
     public function __construct(
         private readonly ChetDataSurfaceTextSanitizer $textSanitizer,
@@ -60,6 +69,19 @@ class TeamsChatReadToolset
                     'required' => ['chat_id'],
                 ],
             ],
+            [
+                'name' => 'teams_search_channel',
+                'description' => 'Search recent messages in a known Teams chat (the same history get_teams_chat_history reads, including your own posts) for a case-insensitive substring. Read-only: no ack, no cursor, nothing is marked read. chat_or_channel is "operator", "escalation", or a chat id get_teams_chat_history accepts. The walk is bounded to the newest '.(self::SEARCH_PAGE_SIZE * self::SEARCH_MAX_PAGES).' messages: history_exhausted false means older messages exist that were NOT searched, so no match is not proof the text was never posted. Matching runs on the same redacted plain text that is returned. Returns {chat_id, query, scanned, history_exhausted, count, messages}, newest first.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'chat_or_channel' => ['type' => 'string', 'description' => '"operator", "escalation", or a known Microsoft Graph chat ID.'],
+                        'query' => ['type' => 'string', 'description' => 'Substring to find (case-insensitive, at least 2 characters).'],
+                        'limit' => ['type' => 'integer', 'description' => 'Maximum matches to return (default 10, max '.self::SEARCH_MAX_RESULTS.').'],
+                    ],
+                    'required' => ['chat_or_channel', 'query'],
+                ],
+            ],
         ];
     }
 
@@ -74,6 +96,7 @@ class TeamsChatReadToolset
             'list_teams_chats' => $this->listChats($input),
             'get_teams_chat_members' => $this->getMembers($input),
             'get_teams_chat_history' => $this->getHistory($input),
+            'teams_search_channel' => $this->searchChannel($input),
             default => ['error' => "Unknown tool: {$toolName}"],
         };
     }
@@ -181,6 +204,76 @@ class TeamsChatReadToolset
             'chat_id' => $chatId,
             'count' => count($messages),
             'messages' => array_map(fn ($message) => $this->sanitizeMessage($message), $messages),
+        ];
+    }
+
+    /**
+     * teams_search_channel (card 5sALzgSC). Same gate and same sanitizer as
+     * getHistory(); the only differences are a bounded multi-page walk and a
+     * substring filter. Strictly a read: no OperatorInbox/ack/cursor writes.
+     */
+    private function searchChannel(array $input): array
+    {
+        $requested = is_scalar($input['chat_or_channel'] ?? null) ? trim((string) $input['chat_or_channel']) : '';
+        $chatId = match (strtolower($requested)) {
+            'operator' => $this->normalizeChatId(TeamsBotConfig::chetConversationId()),
+            'escalation' => $this->normalizeChatId(TeamsBotConfig::escalationConversationId()),
+            default => $this->normalizeChatId($requested),
+        };
+        if ($chatId === null) {
+            return ['error' => 'chat_or_channel is required and must name a configured or known Teams chat'];
+        }
+
+        if (! $this->isKnownConversation($chatId)) {
+            return ['error' => "Teams chat '{$chatId}' denied: not a known Teams conversation"];
+        }
+
+        $query = is_scalar($input['query'] ?? null) ? trim((string) $input['query']) : '';
+        if (mb_strlen($query) < 2) {
+            return ['error' => 'query must be at least 2 characters'];
+        }
+        $limit = is_numeric($input['limit'] ?? null)
+            ? min(max(1, (int) $input['limit']), self::SEARCH_MAX_RESULTS)
+            : 10;
+
+        try {
+            $messages = app(GraphClient::class)->getAllPages(
+                "chats/{$chatId}/messages",
+                ['$top' => self::SEARCH_PAGE_SIZE, '$orderby' => 'createdDateTime desc'],
+                self::SEARCH_MAX_PAGES,
+            );
+        } catch (\Throwable $e) {
+            Log::warning('[ChetDataSurface] Teams chat search query failed', ['chat_id' => $chatId, 'error' => $e->getMessage()]);
+
+            return ['error' => 'Teams chat query failed: '.mb_substr($e->getMessage(), 0, 200)];
+        }
+
+        $cap = self::SEARCH_PAGE_SIZE * self::SEARCH_MAX_PAGES;
+        $messages = array_slice($messages, 0, $cap);
+        $needle = mb_strtolower($query);
+        $matches = [];
+
+        foreach ($messages as $message) {
+            if (count($matches) >= $limit) {
+                break;
+            }
+            if (! is_array($message)) {
+                continue;
+            }
+            $haystack = $this->textSanitizer->sanitizedText($this->plainText($message['body']['content'] ?? ''), 4000);
+            if (str_contains(mb_strtolower($haystack), $needle)) {
+                $matches[] = $this->sanitizeMessage($message);
+            }
+        }
+
+        return [
+            'chat_id' => $chatId,
+            'query' => $query,
+            'scanned' => count($messages),
+            // A full final page means older history may exist beyond the cap.
+            'history_exhausted' => count($messages) < $cap,
+            'count' => count($matches),
+            'messages' => $matches,
         ];
     }
 

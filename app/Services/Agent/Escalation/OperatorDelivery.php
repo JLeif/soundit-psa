@@ -51,8 +51,25 @@ class OperatorDelivery
         return $this->scanAndEscape($message, $placeholder, 'Message', mb_strlen($message));
     }
 
+    /**
+     * The SAME output scan as sanitizeMessageWithMeta(), WITHOUT TeamsText::escape
+     * (teams_post_message, card 5sALzgSC). The agent's own message is not untrusted
+     * interpolated data: escaping it stripped its markdown, parentheses and blank
+     * lines (TeamsText's docblock says it belongs at interpolation points, never
+     * across a whole body). The credential/injection scan still runs and still
+     * replaces the whole body with the placeholder on a hit. Markdown hardening
+     * (no forged mentions, no raw HTML, plain links only) is the caller's job —
+     * see TeamsMarkdownPolicy — and runs on the result of this scan.
+     *
+     * @return array{text: string, meta: OperatorScanMetadata}
+     */
+    public function scanMessageWithMeta(string $message, string $placeholder = '[message detail withheld - see the cockpit]'): array
+    {
+        return $this->scanAndEscape($message, $placeholder, 'Message', mb_strlen($message), escape: false);
+    }
+
     /** @return array{text: string, meta: OperatorScanMetadata} */
-    private function scanAndEscape(string $text, string $placeholder, string $label, int $totalChars): array
+    private function scanAndEscape(string $text, string $placeholder, string $label, int $totalChars, bool $escape = true): array
     {
         $violations = $this->redactor->scan($text);
         $withheld = $violations !== [];
@@ -60,8 +77,10 @@ class OperatorDelivery
             Log::warning("[OperatorDelivery] {$label} failed output scan - detail withheld");
         }
 
+        $out = $withheld ? $placeholder : $text;
+
         return [
-            'text' => TeamsText::escape($withheld ? $placeholder : $text),
+            'text' => $escape ? TeamsText::escape($out) : $out,
             'meta' => new OperatorScanMetadata(
                 $withheld,
                 ! $withheld && $totalChars > mb_strlen($text),

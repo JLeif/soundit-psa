@@ -4,6 +4,7 @@ namespace App\Services\Teams;
 
 use App\Models\TeamsPersona;
 use App\Support\TeamsBotConfig;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -161,6 +162,44 @@ class TeamsBotClient
         return $this->sendActivity($serviceUrl, $conversationId, $activity);
     }
 
+    /**
+     * Post a plain MARKDOWN message and return the remote activity id
+     * (teams_post_message). Unlike sendMessageWithMentions() this reports the
+     * id Bot Framework assigned: SendToConversation answers 200/201/202 with a
+     * ResourceResponse `{id}` (botbuilder-dotnet libraries/Swagger/
+     * ConnectorAPI.json, Conversations_SendToConversation + definitions/
+     * ResourceResponse). A success without an id is reported as posted with a
+     * null id, never as a failure.
+     *
+     * The activity carries ONLY type/text/textFormat and, when the caller built
+     * them server-side, mention entities. It never carries attachments or
+     * channelData, so no caller text can become a card or adaptive payload.
+     *
+     * @param  array<int, array{mentionId: string, name: string}>  $mentions
+     * @return array{posted: bool, id: ?string}
+     */
+    public function postMarkdownMessage(string $serviceUrl, string $conversationId, string $text, array $mentions = []): array
+    {
+        $activity = ['type' => 'message', 'text' => $text, 'textFormat' => 'markdown'];
+
+        if ($mentions !== []) {
+            $activity['entities'] = array_map(fn (array $m): array => [
+                'type' => 'mention',
+                'mentioned' => ['id' => $m['mentionId'], 'name' => $m['name']],
+                'text' => '<at>'.$m['name'].'</at>',
+            ], array_values($mentions));
+        }
+
+        $response = $this->sendActivityResponse($serviceUrl, $conversationId, $activity);
+        if ($response === null || ! $response->successful()) {
+            return ['posted' => false, 'id' => null];
+        }
+
+        $id = $response->json('id');
+
+        return ['posted' => true, 'id' => is_string($id) && $id !== '' ? $id : null];
+    }
+
     public function sendTyping(string $serviceUrl, string $conversationId): void
     {
         // Best-effort: a failed typing indicator must never break the actual reply.
@@ -173,22 +212,27 @@ class TeamsBotClient
 
     private function sendActivity(string $serviceUrl, string $conversationId, array $activity): bool
     {
+        return $this->sendActivityResponse($serviceUrl, $conversationId, $activity)?->successful() ?? false;
+    }
+
+    /** Null when refused before any request (untrusted serviceUrl, no token). */
+    private function sendActivityResponse(string $serviceUrl, string $conversationId, array $activity): ?Response
+    {
         // FAIL-CLOSED, before any network call: never send to an untrusted serviceUrl.
         if (! $this->isTrustedServiceUrl($serviceUrl)) {
             Log::warning('[Teams Bot] Refusing to send to an untrusted serviceUrl', ['service_url' => $serviceUrl]);
 
-            return false;
+            return null;
         }
 
         $token = $this->token();
         if ($token === null) {
-            return false;
+            return null;
         }
 
         $url = rtrim($serviceUrl, '/').'/v3/conversations/'.rawurlencode($conversationId).'/activities';
-        $response = Http::withToken($token)->asJson()->post($url, $activity);
 
-        return $response->successful();
+        return Http::withToken($token)->asJson()->post($url, $activity);
     }
 
     /**
