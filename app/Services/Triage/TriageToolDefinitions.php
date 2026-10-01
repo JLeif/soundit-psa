@@ -3,6 +3,7 @@
 namespace App\Services\Triage;
 
 use App\Services\Cipp\CippTenantScope;
+use App\Services\Mesh\MeshReadTools;
 use App\Support\CippConfig;
 use App\Support\CometConfig;
 use App\Support\ControlDConfig;
@@ -549,7 +550,7 @@ class TriageToolDefinitions
         return [
             [
                 'name' => 'mesh_search_email_logs',
-                'description' => 'Search inbound email logs in Mesh. Useful for email delivery issues, spam complaints, or security incidents. Returns sender, recipient, subject, status, verdict, and queue_id for each message.',
+                'description' => 'Search inbound email logs in Mesh for ONE PSA client. Useful for email delivery issues, spam complaints, or security incidents. Returns sender, recipient, subject, status, verdict, and queue_id for each message. from, to, subject and status only narrow this client\'s own mail; they never select another customer. '.MeshReadTools::KEY_NOTE.' Mesh has no customer filter, so PSA reads one partner-wide page and withholds every row that is not this client\'s; when rows were withheld the answer carries withheld_other_customers and a scope_note, and a short or empty list is then not proof that no such mail exists.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -564,11 +565,11 @@ class TriageToolDefinitions
             ],
             [
                 'name' => 'mesh_get_email_events',
-                'description' => 'Get processing events for a specific email in Mesh (delivery path, filtering decisions). Use the queue_id from mesh_search_email_logs results.',
+                'description' => 'Get processing events for a specific email in Mesh (delivery path, filtering decisions), for ONE PSA client. '.MeshReadTools::EVENTS_NOTE.' '.MeshReadTools::KEY_NOTE,
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'queue_id' => ['type' => 'integer', 'description' => 'Queue ID of the email (from search results)'],
+                        'queue_id' => ['type' => 'string', 'description' => 'Queue ID of the email, exactly as mesh_search_email_logs returned it for this client (Mesh queue ids are UUID strings).'],
                     ],
                     'required' => ['queue_id'],
                 ],
