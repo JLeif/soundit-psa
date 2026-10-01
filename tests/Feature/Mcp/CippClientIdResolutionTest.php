@@ -72,14 +72,22 @@ class CippClientIdResolutionTest extends TestCase
     }
 
     /**
-     * Record-only fakes for BOTH transports; $rows is what CIPP "answers". The REST
-     * ListTenants read the resolver makes for its alias check answers $tenantList and
-     * is kept out of $sent: it carries no tenant.
+     * Record-only fakes for BOTH transports; $rows is what CIPP "answers". The
+     * ListTenants read the resolver makes for its alias check (REST, or MCP when the
+     * REST read fails and the relay is on) answers $tenantList and is kept out of
+     * $sent: it carries no tenant.
      */
     private function fakeTransports(array $rows = [['id' => 'row-1', 'displayName' => 'Row']]): void
     {
         $mcp = Mockery::mock(CippMcpClient::class);
         $mcp->shouldReceive('callTool')->andReturnUsing(function (string $tool, array $args) use ($rows): array {
+            if ($tool === 'ListTenants' && $args === []) {
+                if ($this->tenantList === null) {
+                    throw new \RuntimeException('CIPP MCP ListTenants failed: synthetic outage');
+                }
+
+                return $this->tenantList;
+            }
             $this->sent[] = [$tool, $args];
 
             return $rows;

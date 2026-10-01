@@ -29,7 +29,12 @@ use Illuminate\Support\Facades\Log;
  *     defaultDomainName, initialDomainName: the keys Get-Tenants matches), checked
  *     against CIPP's tenant list whenever any other PSA client is mapped;
  *   - that tenant list unreadable, or not naming the client's tenant exactly once,
+ *     or naming it on a row without customerId and defaultDomainName values,
  *     because then the alias check above could not be made.
+ *
+ * Only the client's OWN row has to be a well-formed tenant (#4581). Another tenant's
+ * malformed row does not block this client, but its aliases still count when it
+ * shares one with the client's row (sameTenantAliases()).
  */
 final class CippTenantScope
 {
@@ -142,47 +147,157 @@ final class CippTenantScope
             return null;
         }
 
-        $unreadable = "PSA could not read a usable CIPP tenant list, so it cannot check PSA client {$clientId}'s CIPP tenant's other domains against other PSA clients' mappings, and this read was not run.";
         $cached = self::cachedTenantList();
-        $tenants = $cached ?? self::readTenantList();
+        [$tenants, $failure] = $cached !== null ? [$cached, null] : self::readTenantList();
         if ($tenants === null) {
-            return $unreadable;
+            return self::unreadableMessage($clientId, $failure);
         }
 
-        $matches = self::rowsMatching($tenants, $tenant);
-        if (count($matches) !== 1 && $cached !== null) {
+        $match = self::matchTenantRow($tenants, $tenant, $clientId);
+        if (in_array($match['status'], ['unusable', 'none', 'many', 'malformed'], true) && $cached !== null) {
             // Settings > CIPP Tenants maps a client from CIPP's live list, so a tenant
-            // added since this copy was cached is missing from it. Re-read before the
-            // mapping is reported as wrong or ambiguous.
-            $tenants = self::readTenantList();
+            // added (or finished onboarding) since this copy was cached is missing or
+            // incomplete in it. Re-read before the mapping is reported as wrong.
+            [$tenants, $failure] = self::readTenantList();
             if ($tenants === null) {
-                return $unreadable;
+                return self::unreadableMessage($clientId, $failure);
             }
-            $matches = self::rowsMatching($tenants, $tenant);
+            $match = self::matchTenantRow($tenants, $tenant, $clientId);
         }
 
-        if (count($matches) !== 1) {
-            return count($matches) === 0
-                ? "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping, so its other domains cannot be checked against other PSA clients' mappings and this read was not run. Check the mapping in Settings > CIPP Tenants."
-                : "CIPP's tenant list has more than one tenant matching PSA client {$clientId}'s CIPP mapping, so it is ambiguous and this read was not run. Fix the mapping in Settings > CIPP Tenants.";
-        }
-
-        if (self::mappedToAnotherClient(self::tenantAliases($matches[0]), $clientId)) {
-            return "PSA client {$clientId}'s CIPP tenant is also mapped, under another of its domains, to another PSA client, so its data cannot be attributed to one client. Fix the duplicate mapping in Settings > CIPP Tenants.";
-        }
-
-        return null;
+        return match ($match['status']) {
+            'ok' => null,
+            'unusable' => self::unreadableMessage($clientId, null),
+            'none' => "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping, so its other domains cannot be checked against other PSA clients' mappings and this read was not run. Check the mapping in Settings > CIPP Tenants.",
+            'many' => "CIPP's tenant list has more than one tenant matching PSA client {$clientId}'s CIPP mapping, so it is ambiguous and this read was not run. Fix the mapping in Settings > CIPP Tenants.",
+            'malformed' => "CIPP's tenant list row for PSA client {$clientId}'s CIPP mapping has no customerId or defaultDomainName value (CIPP may still be onboarding that tenant), so its other domains cannot be checked against other PSA clients' mappings and this read was not run.",
+            default => "PSA client {$clientId}'s CIPP tenant is also mapped, under another of its domains, to another PSA client, so its data cannot be attributed to one client. Fix the duplicate mapping in Settings > CIPP Tenants.",
+        };
     }
 
     /**
-     * @param  array<int, array<string, mixed>>  $tenants
-     * @return array<int, array<string, mixed>>
+     * Pick the client's own row out of CIPP's tenant list and say whether it may be
+     * served. The one implementation behind the resolver's alias check and the
+     * cipp_list_tenants narrowing (CippMcpDynamicToolExecutor::clientTenantRow()).
+     *
+     * Status:
+     *   - unusable: not a list of tenants at all. Empty, not a list, no well-formed
+     *     tenant row, or a row carrying CIPP's own failure marker (Invoke-ListTenants.ps1
+     *     catch block: {Results: 'Failed to retrieve tenants…', customerId: '',
+     *     defaultDomainName: ''}). That is a whole-list failure, never one bad row.
+     *   - none / many: not exactly one row carries the mapping among its aliases.
+     *     Every array row is matched, well-formed or not, so a malformed row that
+     *     carries the mapping makes it ambiguous rather than being ignored.
+     *   - malformed: the one matching row has no customerId or defaultDomainName.
+     *   - shared: the row, or a row that shares an alias with it, also carries
+     *     another PSA client's mapping.
+     *   - ok: the row, which is returned.
+     *
+     * A malformed row that matches nothing is skipped (#4581): it is another tenant's
+     * problem and blocks no one else, unless it shares an alias with this client's row.
+     *
+     * @param  array<int|string, mixed>  $rows
+     * @return array{status: 'unusable'|'none'|'many'|'malformed'|'shared'|'ok', row?: array<string, mixed>}
      */
-    private static function rowsMatching(array $tenants, string $tenant): array
+    public static function matchTenantRow(array $rows, string $tenant, int $clientId): array
     {
-        $wanted = mb_strtolower($tenant);
+        if (! self::isUsableTenantList($rows)) {
+            return ['status' => 'unusable'];
+        }
 
-        return array_values(array_filter($tenants, fn (array $row): bool => in_array($wanted, self::tenantAliases($row), true)));
+        $arrays = array_values(array_filter($rows, 'is_array'));
+        $wanted = mb_strtolower(trim($tenant));
+        $matches = array_values(array_filter($arrays, fn (array $row): bool => in_array($wanted, self::tenantAliases($row), true)));
+
+        if (count($matches) !== 1) {
+            return ['status' => count($matches) === 0 ? 'none' : 'many'];
+        }
+
+        if (! self::isTenantRow($matches[0])) {
+            return ['status' => 'malformed'];
+        }
+
+        if (self::mappedToAnotherClient(self::sameTenantAliases($arrays, $matches[0]), $clientId)) {
+            return ['status' => 'shared'];
+        }
+
+        return ['status' => 'ok', 'row' => $matches[0]];
+    }
+
+    /**
+     * Whether CIPP's ListTenants answer is a list of tenants at all: a non-empty list
+     * with at least one well-formed tenant row and no row carrying CIPP's failure
+     * marker (a string Results on a row that is not a tenant; Invoke-ListTenants.ps1).
+     * Other malformed rows do not make the whole list unusable (#4581).
+     *
+     * @param  array<int|string, mixed>  $rows
+     */
+    public static function isUsableTenantList(array $rows): bool
+    {
+        if ($rows === [] || ! array_is_list($rows)) {
+            return false;
+        }
+
+        $tenantRows = 0;
+        foreach ($rows as $row) {
+            if (self::isTenantRow($row)) {
+                $tenantRows++;
+            } elseif (is_array($row) && is_string($row['Results'] ?? null)) {
+                return false;
+            }
+        }
+
+        return $tenantRows > 0;
+    }
+
+    /**
+     * The aliases of $row plus those of every row that shares an alias with it,
+     * transitively, whatever shape that row is. Get-Tenants matches a tenantFilter on
+     * any of these keys, so a row sharing one with the client's row is the same
+     * tenant to CIPP; if it also carries another PSA client's mapping, that client
+     * can read this tenant. Malformed rows count here: a missing customerId does
+     * not make their domains any less matchable.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<string, mixed>  $row
+     * @return array<int, string>
+     */
+    private static function sameTenantAliases(array $rows, array $row): array
+    {
+        $aliases = self::tenantAliases($row);
+        do {
+            $grew = false;
+            foreach ($rows as $other) {
+                $otherAliases = self::tenantAliases($other);
+                if (array_intersect($otherAliases, $aliases) !== [] && array_diff($otherAliases, $aliases) !== []) {
+                    $aliases = array_values(array_unique(array_merge($aliases, $otherAliases)));
+                    $grew = true;
+                }
+            }
+        } while ($grew);
+
+        return $aliases;
+    }
+
+    /**
+     * The refusal when no usable tenant list could be read, naming the cause when
+     * one is known. The cause is PSA-authored, never the upstream exception text.
+     *
+     * @param  array{cause: string, signIn: bool}|null  $failure
+     */
+    private static function unreadableMessage(int $clientId, ?array $failure): string
+    {
+        $message = 'PSA could not read a usable CIPP tenant list';
+        if ($failure !== null && $failure['cause'] !== '') {
+            $message .= " ({$failure['cause']})";
+        }
+        $message .= ", so it cannot check PSA client {$clientId}'s CIPP tenant's other domains against other PSA clients' mappings, and this read was not run.";
+
+        if ($failure !== null && $failure['signIn']) {
+            $message .= ' CIPP sign-in failed: this is a problem with PSA\'s CIPP credentials, not with the client\'s mapping. Check the CIPP connection in Settings.';
+        }
+
+        return $message;
     }
 
     /**
@@ -198,48 +313,121 @@ final class CippTenantScope
     }
 
     /**
-     * CIPP's tenant rows read now, or null when they could not be read as tenants.
-     * Cached only when usable, so a failed read is retried on the next call.
+     * CIPP's tenant rows read now, or null with the cause when no usable list could
+     * be read.
      *
-     * @return array<int, array<string, mixed>>|null
+     * Transport: REST when its credentials are set, else ExecMCP, which can run on
+     * its own credentials (isMcpRelayEnabled() does not need the REST ones). When the
+     * REST read throws (CippClient throws CippClientException for a failed sign-in
+     * and for an HTTP or transport error), or its settings cannot be read (a
+     * cipp_client_secret that no longer decrypts), and the relay is enabled,
+     * ListTenants is asked over MCP instead (#4580). That is the failover
+     * HandlesCippTools::cippDispatch() already makes for the curated reads, in the
+     * other direction (AssistantToolExecutor::cippMcpRelay(): MCP could not sign in,
+     * so REST answers): a transport that did not get CIPP's answer hands over to the
+     * one that can. An answer CIPP DID give is not re-asked elsewhere: its failure
+     * object (REST get() unwraps the string Results, which the array return type
+     * refuses) and a list that is not usable both fail closed here, as before.
+     *
+     * Caching: a usable list is cached as read, malformed rows included. A foreign
+     * malformed row blocks no other client (matchTenantRow() skips it), and its
+     * aliases must stay in the copy for sameTenantAliases() to count them; dropping
+     * the row before caching would hide them. A client whose OWN row is malformed
+     * is refused, and that refusal re-reads past the cached copy
+     * (aliasSharedWithAnotherClient()), so a tenant that finishes onboarding is seen
+     * on the next call rather than after the TTL. A list that is not usable is never
+     * cached, so a failed read is retried on the next call.
+     *
+     * @return array{0: array<int, array<string, mixed>>|null, 1: array{cause: string, signIn: bool}|null}
      */
-    private static function readTenantList(): ?array
+    private static function readTenantList(): array
     {
+        $causes = [];
+        $signIn = false;
+        $rows = null;
+
+        $restConfigured = false;
         try {
-            // Over the transport this deployment has: REST when its credentials are set,
-            // else ExecMCP, which can run on its own credentials (isMcpRelayEnabled()
-            // does not need the REST ones). CIPP's failure object is refused either
-            // way: REST get() unwraps its string Results, which the array return type
-            // refuses; over MCP it arrives as an answer that is not a list of tenants,
-            // refused below.
-            if (CippConfig::isConfigured()) {
-                $rows = app(CippClient::class)->get('api/ListTenants', []);
-            } elseif (CippConfig::isMcpRelayEnabled()) {
-                $rows = app(CippMcpClient::class)->callTool('ListTenants', []);
-            } else {
-                throw new \RuntimeException('neither the CIPP REST API nor CIPP MCP is configured');
-            }
+            $restConfigured = CippConfig::isConfigured();
         } catch (\Throwable $e) {
-            Log::warning('[CippTenantScope] CIPP tenant list could not be read for the alias check', [
-                'error' => mb_substr($e->getMessage(), 0, 300),
-            ]);
-
-            return null;
+            // e.g. cipp_client_secret no longer decrypts under this APP_KEY: CIPP was
+            // not asked, so MCP may be.
+            self::logReadFailure('REST settings', $e);
+            $causes[] = 'PSA could not read its CIPP REST API settings';
         }
 
-        if ($rows === [] || ! array_is_list($rows)) {
-            return null;
-        }
+        if ($restConfigured) {
+            try {
+                $rows = app(CippClient::class)->get('api/ListTenants', []);
+            } catch (\TypeError $e) {
+                // get() returned CIPP's unwrapped string Results: CIPP answered, with
+                // its failure object. Not re-asked over MCP.
+                self::logReadFailure('REST', $e);
 
-        foreach ($rows as $row) {
-            if (! self::isTenantRow($row)) {
-                return null;
+                return [null, ['cause' => 'CIPP answered ListTenants with something other than a tenant list', 'signIn' => false]];
+            } catch (\Throwable $e) {
+                self::logReadFailure('REST', $e);
+                $signIn = self::isSignInFailure($e);
+                $causes[] = $signIn ? 'CIPP REST API sign-in failed' : 'the CIPP REST API request failed';
             }
+        }
+
+        if ($rows === null) {
+            $mcpEnabled = false;
+            try {
+                $mcpEnabled = CippConfig::isMcpRelayEnabled();
+            } catch (\Throwable $e) {
+                // e.g. cipp_mcp_client_secret no longer decrypts under this APP_KEY.
+                self::logReadFailure('MCP settings', $e);
+            }
+
+            if ($mcpEnabled) {
+                try {
+                    $rows = app(CippMcpClient::class)->callTool('ListTenants', []);
+                } catch (CippMcpAuthException $e) {
+                    self::logReadFailure('MCP', $e);
+                    $signIn = true;
+                    $causes[] = 'CIPP MCP sign-in failed';
+                } catch (\Throwable $e) {
+                    self::logReadFailure('MCP', $e);
+                    $causes[] = 'the CIPP MCP request failed';
+                }
+            } elseif ($causes === []) {
+                $causes[] = 'neither the CIPP REST API nor CIPP MCP is configured';
+            }
+        }
+
+        if ($rows === null) {
+            return [null, ['cause' => implode('; ', $causes), 'signIn' => $signIn]];
+        }
+
+        if (! self::isUsableTenantList($rows)) {
+            return [null, ['cause' => 'CIPP answered ListTenants with something other than a tenant list', 'signIn' => false]];
         }
 
         Cache::put(self::TENANT_LIST_CACHE_KEY, $rows, self::TENANT_LIST_TTL_SECONDS);
 
-        return $rows;
+        return [$rows, null];
+    }
+
+    /**
+     * A failed CIPP sign-in rather than a failed request: MCP's own auth exception,
+     * an HTTP 401/403, or CippClient::getToken()'s OAuth failure.
+     */
+    private static function isSignInFailure(\Throwable $e): bool
+    {
+        return $e instanceof CippMcpAuthException
+            || in_array((int) $e->getCode(), [401, 403], true)
+            || str_starts_with($e->getMessage(), 'CIPP OAuth ');
+    }
+
+    /** The upstream text goes to the log only: it can describe our credentials. */
+    private static function logReadFailure(string $transport, \Throwable $e): void
+    {
+        Log::warning("[CippTenantScope] CIPP tenant list could not be read over {$transport} for the alias check", [
+            'exception' => $e::class,
+            'error' => mb_substr($e->getMessage(), 0, 300),
+        ]);
     }
 
     /**

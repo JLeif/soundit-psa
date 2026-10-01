@@ -992,12 +992,21 @@ class CippDirectPathFailLoudTest extends TestCase
      * investigation context, strictly worse than the false negative being fixed.
      *
      * Here the only person who could bridge alice@contoso.com lives in another client.
-     * Scoped correctly there is no bridge, so the question is refused.
+     * Scoped correctly there is no bridge, so the question is refused — by the bridge
+     * itself. The stranger client is a second mapped client, which arms
+     * CippTenantScope's alias check; the tenant list is seeded with the two tenants
+     * distinct, as mallory() does, so that check passes and cannot be what refuses.
+     * Without the seed the alias check refused on an unreadable tenant list and this
+     * test stayed green with the bridge unscoped (#4599).
      */
     public function test_per_user_sign_ins_never_bridge_through_another_clients_person(): void
     {
         $strangerObjectId = '99999999-9999-9999-9999-999999999999';
         $stranger = Client::factory()->create(['cipp_tenant_domain' => 'evil.onmicrosoft.com']);
+        Cache::put('cipp-tenant-scope:tenant-list', [
+            ['customerId' => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'defaultDomainName' => 'contoso.onmicrosoft.com', 'initialDomainName' => 'contoso.onmicrosoft.com', 'displayName' => 'Contoso'],
+            ['customerId' => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'defaultDomainName' => 'evil.onmicrosoft.com', 'initialDomainName' => 'evil.onmicrosoft.com', 'displayName' => 'Evil'],
+        ]);
         Person::create([
             'client_id' => $stranger->id,
             'person_type' => PersonType::User,
@@ -1017,6 +1026,10 @@ class CippDirectPathFailLoudTest extends TestCase
 
             $this->assertSame(0, $calls, "{$label} bridged through another client's person and called CIPP");
             $this->assertArrayHasKey('error', $result, "{$label} did not refuse an identity it could not bridge within its own client");
+            // The bridge's own refusal (CippToolContract::requireObjectId()), not the
+            // tenant scope's or any other guard's.
+            $this->assertStringContainsString('Sign-in activity CANNOT be looked up for alice@contoso.com', $result['error'], "{$label} was refused by something other than the identity bridge");
+            $this->assertStringNotContainsString('tenant list', $result['error'], "{$label} was refused by the tenant scope, not the bridge");
             $this->assertStringNotContainsString($strangerObjectId, (string) json_encode($result), "{$label} leaked another client's object ID");
         }
     }
