@@ -1520,6 +1520,10 @@ ScreenConnect call is made:
 **Notes:**
 - **OFF=OFF.** Switching the integration off withdraws the tools from the AI surface
   entirely — the local snapshot stops answering too.
+- **client_id is required.** Devices are read only from that client's assets; another
+  client's hostname, asset or session id is "not found". For one device, `asset_id` is
+  the primary key and `hostname` a fallback; a hostname matching more than one of the
+  client's ScreenConnect-linked devices is an error naming the candidate asset ids.
 - **State is event-driven.** Online/offline reflects the last Connected/Disconnected
   webhook, not a live poll; every answer pairs the flag with its report timestamp, and
   an online flag older than 24h carries an explicit staleness warning.

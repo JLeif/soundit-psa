@@ -33,6 +33,12 @@ use Illuminate\Database\Eloquent\Builder;
  * DATA BOUNDARY: client-scoped. Assets resolve strictly WHERE client_id = the
  * caller's client — a hostname that exists under another client is "not found",
  * never a leak — and events join through the resolved asset only.
+ *
+ * DEVICE KEY (card 6abdcac2): ScreenConnect has no client-level vendor key; the
+ * binding IS assets.client_id. asset_id is the primary device key and resolves only
+ * within client_id. hostname is a fallback: a hostname that names more than one of
+ * the client's ScreenConnect-linked devices is ambiguous and fails closed (pass
+ * asset_id), never a silent pick of the most recently synced row.
  */
 class ScreenConnectReadOnlyToolset
 {
@@ -40,6 +46,9 @@ class ScreenConnectReadOnlyToolset
         'screenconnect_get_session_state',
         'screenconnect_list_devices',
     ];
+
+    /** Agent-facing key rule, appended to both tool descriptions (card 6abdcac2). */
+    public const DEVICE_KEY_NOTE = 'client_id is required and is the only client key: devices are read only from that PSA client\'s assets, and another client\'s hostname, asset or session id is "not found", never a cross-client search. For one device, asset_id (this client\'s PSA asset ID) is the primary key; hostname is a fallback, and a hostname that matches more than one of the client\'s ScreenConnect-linked devices is an error (pass asset_id), never a guess.';
 
     /** An `online = true` report older than this is flagged stale rather than trusted. */
     private const STALE_ONLINE_AFTER_HOURS = 24;
@@ -66,19 +75,20 @@ class ScreenConnectReadOnlyToolset
         return [
             [
                 'name' => 'screenconnect_get_session_state',
-                'description' => "Get ScreenConnect session state for one of a PSA client's devices, from the local webhook-fed snapshot (no live ScreenConnect call): online/offline as of the last connect/disconnect event, when that state was reported, last webhook activity, session id, and recent session events. Use this to tell an IDLE machine (agent connected, nobody on it) from a DEAD one (agent gone) before escalating an unreachable device.",
+                'description' => "Get ScreenConnect session state for one of a PSA client's devices, from the local webhook-fed snapshot (no live ScreenConnect call): online/offline as of the last connect/disconnect event, when that state was reported, last webhook activity, session id, and recent session events. Use this to tell an IDLE machine (agent connected, nobody on it) from a DEAD one (agent gone) before escalating an unreachable device. Pass asset_id or hostname. ".self::DEVICE_KEY_NOTE,
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'hostname' => ['type' => 'string', 'description' => 'Device hostname or asset name (case-insensitive; a fully-qualified name also matches by its short host part).'],
+                        'asset_id' => ['type' => 'integer', 'description' => 'PSA asset ID (preferred): resolved only within client_id. Another client\'s asset is "not found".'],
+                        'hostname' => ['type' => 'string', 'description' => 'Device hostname or asset name: a FALLBACK when asset_id is not known (case-insensitive; a fully-qualified name also matches by its short host part). Matched only within client_id\'s assets; more than one ScreenConnect-linked match is an error, never a guess. With asset_id, it must name that asset.'],
                         'events_limit' => ['type' => 'integer', 'description' => 'Max recent session events to include (default 5, max 25).'],
                     ],
-                    'required' => ['hostname'],
+                    'required' => [],
                 ],
             ],
             [
                 'name' => 'screenconnect_list_devices',
-                'description' => "List a PSA client's ScreenConnect-linked devices from the local webhook-fed snapshot (no live ScreenConnect call), each pairing its online/offline flag with when that state was reported, plus fleet totals by state. Use this to see ScreenConnect coverage and which machines are reported online, offline, or unknown.",
+                'description' => "List a PSA client's ScreenConnect-linked devices from the local webhook-fed snapshot (no live ScreenConnect call), each pairing its online/offline flag with when that state was reported, plus fleet totals by state. Use this to see ScreenConnect coverage and which machines are reported online, offline, or unknown. ".self::DEVICE_KEY_NOTE,
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -138,15 +148,11 @@ class ScreenConnectReadOnlyToolset
      */
     private function getSessionState(array $input, Client $client): array
     {
-        $hostname = trim((string) ($input['hostname'] ?? ''));
-        if ($hostname === '') {
-            return ['error' => 'hostname is required'];
+        $resolved = $this->resolveDevice($input, $client);
+        if (is_array($resolved)) {
+            return $resolved;
         }
-
-        $asset = $this->findAsset($hostname, $client->id);
-        if ($asset === null) {
-            return ['error' => "Device '{$hostname}' was not found in {$client->name}. screenconnect_list_devices shows this client's ScreenConnect-linked devices."];
-        }
+        $asset = $resolved;
 
         if (! $this->isLinked($asset)) {
             $label = $asset->hostname ?? $asset->name;
@@ -324,7 +330,78 @@ class ScreenConnectReadOnlyToolset
 
     // ── scoping helpers ────────────────────────────────────────────────────────
 
-    private function findAsset(string $hostname, int $clientId): ?Asset
+    /**
+     * Resolve the one device a session-state read is about (card 6abdcac2):
+     *   1. asset_id: this client's PSA asset by primary key — another client's id is
+     *      "not found", exactly like an unknown one;
+     *   2. hostname (fallback): this client's assets only, via findAsset().
+     * Both given: the hostname must name the asset_id's device, or the call is refused.
+     *
+     * @param  array<string, mixed>  $input
+     * @return Asset|array{error: string}
+     */
+    private function resolveDevice(array $input, Client $client): Asset|array
+    {
+        $hostname = trim((string) ($input['hostname'] ?? ''));
+        $rawAssetId = $input['asset_id'] ?? null;
+
+        if ($rawAssetId !== null && $rawAssetId !== '') {
+            $assetId = $this->positiveInt($rawAssetId);
+            if ($assetId === null) {
+                return ['error' => 'asset_id must be a positive integer PSA asset ID.'];
+            }
+
+            $asset = Asset::whereKey($assetId)->where('client_id', $client->id)->first();
+            if ($asset === null) {
+                return ['error' => "Asset {$assetId} was not found in {$client->name} (it does not exist or belongs to a different client). screenconnect_list_devices shows this client's ScreenConnect-linked devices."];
+            }
+
+            if ($hostname !== '' && ! $this->namesAsset($hostname, $asset)) {
+                return ['error' => "hostname '{$hostname}' is not asset {$assetId}'s hostname or name. Pass one or the other."];
+            }
+
+            return $asset;
+        }
+
+        if ($hostname === '') {
+            return ['error' => 'asset_id or hostname is required'];
+        }
+
+        $asset = $this->findAsset($hostname, $client->id);
+        if (is_array($asset)) {
+            return $asset;
+        }
+        if ($asset === null) {
+            return ['error' => "Device '{$hostname}' was not found in {$client->name}. screenconnect_list_devices shows this client's ScreenConnect-linked devices."];
+        }
+
+        return $asset;
+    }
+
+    /** The same name rules findAsset() applies, checked against one known asset. */
+    private function namesAsset(string $hostname, Asset $asset): bool
+    {
+        $wanted = array_unique(array_filter([
+            mb_strtolower($hostname),
+            mb_strtolower(ScreenConnectAssetMatcher::firstLabel($hostname)),
+        ], fn (string $v): bool => $v !== ''));
+
+        foreach ([$asset->hostname, $asset->name] as $stored) {
+            $stored = mb_strtolower(trim((string) $stored));
+            if ($stored === '') {
+                continue;
+            }
+            if (in_array($stored, $wanted, true)
+                || in_array(mb_strtolower(ScreenConnectAssetMatcher::firstLabel($stored)), $wanted, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return Asset|array{error: string}|null */
+    private function findAsset(string $hostname, int $clientId): Asset|array|null
     {
         $asset = $this->assetByName($hostname, $clientId);
         if ($asset !== null) {
@@ -348,14 +425,39 @@ class ScreenConnectReadOnlyToolset
         return ScreenConnectAssetMatcher::uniqueFirstLabelMatch($clientId, $short, 'read_tool');
     }
 
-    private function assetByName(string $name, int $clientId): ?Asset
+    /**
+     * Exact (rule 1) match within the client. A duplicate hostname is common (an
+     * unlinked stale row beside the linked one), so the single ScreenConnect-linked
+     * candidate is preferred. Two or more LINKED candidates are ambiguous: the call
+     * fails closed naming this client's candidate asset ids, never picking the most
+     * recently synced (card 6abdcac2).
+     *
+     * @return Asset|array{error: string, candidates: array<int, array<string, mixed>>}|null
+     */
+    private function assetByName(string $name, int $clientId): Asset|array|null
     {
-        return ScreenConnectAssetMatcher::exactQuery($clientId, $name)
-            // Prefer the ScreenConnect-linked row when a hostname is duplicated
-            // (NULL synced_at sorts last on DESC in both MariaDB and SQLite).
-            ->orderByDesc('screenconnect_synced_at')
+        $linked = ScreenConnectAssetMatcher::exactQuery($clientId, $name)
+            ->where(function (Builder $query) {
+                $query->whereNotNull('screenconnect_session_id')
+                    ->orWhereNotNull('screenconnect_synced_at');
+            })
             ->orderBy('id')
-            ->first();
+            ->limit(11)
+            ->get();
+
+        if ($linked->count() > 1) {
+            return [
+                'error' => "Hostname '{$name}' matches more than one ScreenConnect-linked device for this client, so none was picked. Re-issue with asset_id.",
+                'candidates' => $linked->map(fn (Asset $asset): array => [
+                    'asset_id' => $asset->id,
+                    'hostname' => $asset->hostname,
+                    'asset_name' => $asset->name,
+                ])->all(),
+            ];
+        }
+
+        return $linked->first()
+            ?? ScreenConnectAssetMatcher::exactQuery($clientId, $name)->orderBy('id')->first();
     }
 
     private function isLinked(Asset $asset): bool
