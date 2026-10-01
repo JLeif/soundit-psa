@@ -212,6 +212,10 @@ class TeamsPostMessageToolTest extends TestCase
             ['![1]', '[1]', [0, 1, 0]],
             ['![a [b] c](https://example.test/p.png)', '[a [b] c](https://example.test/p.png)', [0, 1, 0]],
             ["![a\nb](https://example.test/p.png)", "[a\nb](https://example.test/p.png)", [0, 1, 0]],
+            // Review round 1: a run of '!' is dropped whole, so removing one cannot expose another.
+            ['!![s](https://example.test/p.png)', '[s](https://example.test/p.png)', [0, 1, 0]],
+            ["!!![x][1]\n\n[1]: https://example.test/p.png", "[x][1]\n\n[1]: https://example.test/p.png", [0, 1, 0]],
+            ['Done!! [ok](https://example.test/)', 'Done!! [ok](https://example.test/)', [0, 0, 0]],
             ['[a [b] c](file://host.example/share)', "[a [b] c]{$lp}file://host.example/share)", [0, 0, 1]],
             ['[a\\]b](msteams:/l/chat/0/0?users=x)', "[a\\]b]{$lp}msteams:/l/chat/0/0?users=x)", [0, 0, 1]],
             ["[click\nhere](tel:+15550100)", "[click\nhere]{$lp}tel:+15550100)", [0, 0, 1]],

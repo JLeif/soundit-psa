@@ -7,8 +7,9 @@ namespace App\Services\Chet;
  * LONGER run through TeamsText::escape (teams_post_message, card 5sALzgSC).
  *
  * Markdown survives: lists, emphasis, code, blank lines, headings, quotes and
- * ordinary `[text](https://...)` links. Each rule below swaps or drops a single
- * character and keeps everything around it, so none of the agent's text is
+ * ordinary `[text](https://...)` links. Each rule below swaps or drops only
+ * the syntax character(s) it names and keeps everything around it, so none of
+ * the agent's text is
  * lost. No rule tries to decide whether a match really is a tag, image or link,
  * so the rules do not depend on parsing markdown the way the renderer does.
  * The cost is that they apply everywhere in the body, including inside code
@@ -22,8 +23,10 @@ namespace App\Services\Chet;
  *     the mention ENTITY itself is only ever built server-side. Any other `<`
  *     (`a < b`, `<= 5`) is left alone.
  *  2. Images. Every markdown image (inline, reference-style or shortcut) starts
- *     with `![`. That `!` is dropped, so what remains is at most a plain link
- *     and a body cannot embed a remote image (a read beacon) in the operator chat.
+ *     with `![`. Every `!` directly before a `[` is dropped, the whole run in
+ *     one match (`!![` loses both, so no `![` is left behind), so what remains
+ *     is at most a plain link and a body cannot embed a remote image (a read
+ *     beacon) in the operator chat. Each dropped run counts as one image.
  *  3. Non-web link targets. An inline link's target always follows `](`, and a
  *     reference definition's target always follows `]:`, whatever the link
  *     text, label or surrounding container. Unless what follows (after optional
@@ -62,7 +65,7 @@ final class TeamsMarkdownPolicy
 
         $images = 0;
         $text = (string) preg_replace_callback(
-            '/!(?=\[)/u',
+            '/!+(?=\[)/u',
             function () use (&$images): string {
                 $images++;
 
