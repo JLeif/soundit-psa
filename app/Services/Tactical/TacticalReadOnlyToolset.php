@@ -372,9 +372,14 @@ class TacticalReadOnlyToolset
             return ['error' => "PSA client {$clientId} is not mapped to Tactical (it has no Tactical site). Map it in Settings > Tactical Sites; this read does not search other clients' devices."];
         }
 
-        // Compared trimmed: $site is the trimmed key the site check uses, so a
-        // space-padded copy of another client's key is that same key.
-        if (Client::whereKeyNot($clientId)->whereRaw('TRIM(tactical_site_id) = ?', [$site])->exists()) {
+        // Compared with the same PHP trim() that produced $site (SQL TRIM() strips only
+        // spaces), so a copy of another client's key padded with any whitespace trim()
+        // removes is that same key.
+        $shared = Client::whereKeyNot($clientId)
+            ->whereNotNull('tactical_site_id')
+            ->pluck('tactical_site_id')
+            ->contains(fn (mixed $other): bool => trim((string) $other) === $site);
+        if ($shared) {
             return ['error' => "PSA client {$clientId}'s Tactical site is also mapped to another PSA client, so its devices cannot be attributed. Fix the duplicate mapping in Settings > Tactical Sites."];
         }
 

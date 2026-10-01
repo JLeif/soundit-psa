@@ -231,6 +231,38 @@ class TacticalClientIdResolutionTest extends TestCase
         $this->assertSame([], $this->agentReads);
     }
 
+    public function test_a_tab_or_newline_padded_copy_of_another_clients_site_is_still_ambiguous(): void
+    {
+        // The key is PHP trim()'s output, so the shared-site check must strip the same
+        // characters, on both sides: SQL TRIM() strips only spaces and misses these.
+        $pairs = [
+            ['Bravo|HQ', "Bravo|HQ\n"],
+            [' Bravo|HQ', "\tBravo|HQ"],
+            ["Bravo|HQ\r\n", 'Bravo|HQ'],
+        ];
+        $this->fakeTactical();
+
+        foreach ($pairs as $i => [$firstKey, $secondKey]) {
+            // Only this pair carries the site, so each pair is refused on its own merits.
+            Client::query()->update(['tactical_site_id' => null]);
+            $first = Client::factory()->create(['name' => 'First '.$i, 'tactical_site_id' => $firstKey]);
+            $second = Client::factory()->create(['name' => 'Second '.$i, 'tactical_site_id' => $secondKey]);
+
+            foreach ([$first, $second] as $j => $client) {
+                $asset = $this->linkedDevice($client, "Test-{$i}-{$j}.lan", "agent-{$i}-{$j}", 'Bravo|HQ');
+                $label = json_encode([$i, $client->tactical_site_id]);
+
+                $out = $this->toolset()->execute('tactical_get_device', ['asset_id' => $asset->id], $client->id);
+                $this->assertStringContainsString('also mapped to another PSA client', $out['error'] ?? '', $label.json_encode($out));
+
+                $list = $this->toolset()->execute('tactical_list_devices', [], $client->id);
+                $this->assertStringContainsString('also mapped to another PSA client', $list['error'] ?? '', $label.json_encode($list));
+            }
+        }
+
+        $this->assertSame([], $this->agentReads);
+    }
+
     // ── another client's agent fails closed ──────────────────────────────────
 
     public function test_another_clients_asset_id_or_hostname_fails_closed(): void
