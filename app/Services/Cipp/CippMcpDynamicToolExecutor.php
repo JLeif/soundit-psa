@@ -196,48 +196,28 @@ class CippMcpDynamicToolExecutor
      * arguments in the BODY, and Invoke-ListTenants.ps1:87 reads tenantFilter from the
      * QUERY only — so the tenantFilter we send is ignored and CIPP answers with every
      * managed tenant. The row is matched on the aliases Get-Tenants itself matches
-     * (customerId, defaultDomainName, initialDomainName). Not exactly one row, a row
-     * that is also another PSA client's mapping, or a row without customerId and
-     * defaultDomainName values (CIPP's own "Failed to retrieve tenants" row): an error.
+     * (customerId, defaultDomainName, initialDomainName), by the same
+     * CippTenantScope::matchTenantRow() the resolver's alias check uses. Not exactly
+     * one row, a matched row without customerId and defaultDomainName values, a row
+     * that is also another PSA client's mapping, or CIPP's own "Failed to retrieve
+     * tenants" answer: an error. Another tenant's malformed row is skipped rather
+     * than refusing this client (#4581).
      *
      * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, array<string, mixed>>|array{error: string}
      */
     private function clientTenantRow(array $rows, string $tenantDomain, int $clientId): array
     {
-        $wanted = mb_strtolower($tenantDomain);
-        $matches = [];
+        $match = CippTenantScope::matchTenantRow($rows, $tenantDomain, $clientId);
 
-        foreach ($rows as $row) {
-            if (! CippTenantScope::isTenantRow($row)) {
-                return ['error' => 'CIPP ListTenants answered with a row that is not a tenant (no customerId or defaultDomainName value; CIPP answers that way when it could not retrieve its tenants), so the client\'s tenant could not be picked out. This is not a mapping problem. Nothing is returned rather than every tenant.'];
-            }
-
-            if (in_array($wanted, self::tenantAliases($row), true)) {
-                $matches[] = $row;
-            }
-        }
-
-        if (count($matches) !== 1) {
-            return ['error' => count($matches) === 0
-                ? "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping. Check the mapping in Settings > CIPP Tenants. Other tenants are not returned."
-                : "CIPP's tenant list has more than one tenant matching PSA client {$clientId}'s CIPP mapping, so it is ambiguous. Nothing is returned."];
-        }
-
-        if (CippTenantScope::mappedToAnotherClient(self::tenantAliases($matches[0]), $clientId)) {
-            return ['error' => "The CIPP tenant mapped to PSA client {$clientId} is also mapped, under another of its domains, to a different PSA client, so it cannot be attributed. Fix the duplicate mapping in Settings > CIPP Tenants."];
-        }
-
-        return $matches;
-    }
-
-    /**
-     * @param  array<string, mixed>  $row
-     * @return array<int, string>
-     */
-    private static function tenantAliases(array $row): array
-    {
-        return CippTenantScope::tenantAliases($row);
+        return match ($match['status']) {
+            'ok' => [$match['row']],
+            'unusable' => ['error' => 'CIPP ListTenants answered with a row that is not a tenant (no customerId or defaultDomainName value; CIPP answers that way when it could not retrieve its tenants), so the client\'s tenant could not be picked out. This is not a mapping problem. Nothing is returned rather than every tenant.'],
+            'none' => ['error' => "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping. Check the mapping in Settings > CIPP Tenants. Other tenants are not returned."],
+            'many' => ['error' => "CIPP's tenant list has more than one tenant matching PSA client {$clientId}'s CIPP mapping, so it is ambiguous. Nothing is returned."],
+            'malformed' => ['error' => "CIPP's tenant list row for PSA client {$clientId}'s CIPP mapping has no customerId or defaultDomainName value (CIPP may still be onboarding that tenant), so it cannot be attributed. Nothing is returned."],
+            default => ['error' => "The CIPP tenant mapped to PSA client {$clientId} is also mapped, under another of its domains, to a different PSA client, so it cannot be attributed. Fix the duplicate mapping in Settings > CIPP Tenants."],
+        };
     }
 
     /** @return array<int, string> */
