@@ -1359,9 +1359,11 @@ class TriageToolExecutor
                 'job_state' => 'unavailable',
                 'job_state_note' => $jobData['job_state_note'],
                 'jobs_checked_at' => $jobData['jobs_checked_at'],
-                'error' => $jobData['unavailable_reason'] === 'no_synced_username'
-                    ? 'Job history cannot be looked up — the asset has no synced Comet username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.'
-                    : 'Backup job history unavailable — the Comet server could not be reached. Backup state is UNKNOWN, not passing. Retry, or verify in the Comet console.',
+                'error' => match ($jobData['unavailable_reason']) {
+                    'no_synced_username' => 'Job history cannot be looked up — the asset has no synced Comet username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.',
+                    'no_device_id' => 'Job history cannot be looked up — the asset has no Comet device id, so its jobs cannot be told apart from other devices under the same username. Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.',
+                    default => 'Backup job history unavailable — the Comet server could not be reached. Backup state is UNKNOWN, not passing. Retry, or verify in the Comet console.',
+                },
             ];
         }
 

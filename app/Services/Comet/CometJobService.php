@@ -27,9 +27,17 @@ use Illuminate\Support\Facades\Log;
  *   backup-classification jobs for this device at all (other job types may
  *   appear in `jobs`). Backups may never have run; unknown is not passing.
  * - 'unavailable' — the history could not be read; `unavailable_reason` says
- *   why: 'lookup_failed' (live read failed) or 'no_synced_username' (the
+ *   why: 'lookup_failed' (live read failed), 'no_synced_username' (the
  *   asset carries no Comet username, so nothing could be asked — the same
- *   condition CometReadOnlyToolset reports as unavailable, psa-enpew.12).
+ *   condition CometReadOnlyToolset reports as unavailable, psa-enpew.12), or
+ *   'no_device_id' (no Comet device id, so this device's jobs cannot be told
+ *   apart from the rest of the username's — refused before any vendor call;
+ *   card 6abdcac2).
+ *
+ * CLIENT FENCE: the admin API is server-wide and a username can span devices
+ * (and clients), so jobs are kept only when their DeviceID equals this asset's
+ * comet_device_id. That filter is unconditional; a blank id is refused above
+ * rather than disabling it.
  *
  * `job_state` — the device's backup POSTURE, in comet_get_backup_posture's
  * vocabulary verbatim (CometReadOnlyToolset::devicePosture, psa-z30dv), so
@@ -71,6 +79,21 @@ class CometJobService
             );
         }
 
+        // The device id is the ONLY client fence on this read (card 6abdcac2): the
+        // admin API returns every device under a username, and a username can be
+        // shared across clients. Without an id there is nothing to filter on, so
+        // refuse before asking the vendor rather than serve the username's whole
+        // job set (which would include other devices, possibly other clients').
+        $deviceId = (string) $asset->comet_device_id;
+        if (trim($deviceId) === '') {
+            return $this->unavailable(
+                'no_device_id',
+                'This asset carries no Comet device id, so its jobs cannot be told apart from other devices under the same Comet username. '
+                .'Re-run the Comet backup sync. Backup state is UNKNOWN, not passing.',
+                jobsCheckedAt: null,
+            );
+        }
+
         try {
             $allJobs = $this->client->getJobsForUser($asset->comet_username);
         } catch (CometClientException $e) {
@@ -85,7 +108,6 @@ class CometJobService
         }
 
         $cutoff = now()->subDays($days)->timestamp;
-        $deviceId = $asset->comet_device_id;
 
         $jobs = [];
         $lastBackup = null;
@@ -98,7 +120,7 @@ class CometJobService
             $jobDeviceId = $job->DeviceID ?? null;
             $startTime = $job->StartTime ?? 0;
 
-            if ($deviceId && $jobDeviceId !== $deviceId) {
+            if ($jobDeviceId !== $deviceId) {
                 continue;
             }
 
