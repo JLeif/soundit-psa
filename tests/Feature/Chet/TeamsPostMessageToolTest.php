@@ -6,6 +6,8 @@ use App\Models\Client;
 use App\Models\Setting;
 use App\Models\Ticket;
 use App\Models\User;
+use App\Services\Agent\Escalation\OperatorDelivery;
+use App\Services\Chet\TeamsMarkdownPolicy;
 use App\Services\EmailService;
 use App\Services\Technician\Notify\TeamsNotifier;
 use App\Support\McpConfig;
@@ -159,13 +161,79 @@ class TeamsPostMessageToolTest extends TestCase
 
     public function test_secret_scan_still_withholds_the_whole_body(): void
     {
-        $out = $this->decoded($this->postTool(['chat_or_channel' => 'operator', 'body' => "Status:\n\npassword: synthetic-fixture-value"]));
+        $out = $this->decoded($this->postTool(['chat_or_channel' => 'operator', 'body' => "Status: <b>down</b>\n\npassword: synthetic-fixture-value"]));
 
         $this->assertTrue($out['text_withheld']);
         $this->assertContains('credential', $out['scan_classes']);
         $text = $this->onlyActivity()['text'];
         $this->assertStringNotContainsString('synthetic-fixture-value', $text);
         $this->assertSame('[message detail withheld - see the cockpit]', $text);
+        // Withheld: none of the body's markdown was posted, so nothing counts as neutralized.
+        $this->assertSame(['html_tags' => 0, 'images' => 0, 'links' => 0], $out['markdown_neutralized']);
+    }
+
+    public function test_the_scan_also_covers_the_neutralized_text_that_is_sent(): void
+    {
+        $delivery = app(OperatorDelivery::class);
+
+        $hit = $delivery->scanMessageWithMeta('Plain synthetic update.', sent: 'password: synthetic-fixture-value');
+        $this->assertTrue($hit['meta']->withheld);
+        $this->assertSame('[message detail withheld - see the cockpit]', $hit['text']);
+
+        $clean = $delivery->scanMessageWithMeta('a <b>', sent: "a \u{FF1C}b>");
+        $this->assertFalse($clean['meta']->withheld);
+        $this->assertSame("a \u{FF1C}b>", $clean['text']);
+    }
+
+    public function test_neutralization_never_reassembles_text_the_scan_passed(): void
+    {
+        $out = $this->decoded($this->postTool(['chat_or_channel' => 'operator', 'body' => 'password[](ftp:x): synthetic-fixture-value']));
+
+        $this->assertFalse($out['text_withheld']);
+        $this->assertSame("password[]\u{FF08}ftp:x): synthetic-fixture-value", $this->onlyActivity()['text']);
+        $this->assertSame(1, $out['markdown_neutralized']['links']);
+    }
+
+    /**
+     * Review round 1: link text with nested/escaped brackets or a line break,
+     * reference and shortcut images, definitions inside containers or with the
+     * target on the next line, and prose that only looks like a definition.
+     * The expected text is exact: only the one neutralized character changes.
+     */
+    public function test_policy_neutralizes_every_link_and_image_form_without_losing_text(): void
+    {
+        $lt = TeamsMarkdownPolicy::FULLWIDTH_LT;
+        $lp = TeamsMarkdownPolicy::FULLWIDTH_LPAREN;
+        $colon = TeamsMarkdownPolicy::FULLWIDTH_COLON;
+        // Kept: http(s) targets, including after one line break, and bare comparisons.
+        $kept = "[ok](\nhttps://example.test/) [up]( HTTPS://example.test/a 't')\n\n[2]: https://example.test/b if x<5 or a < b";
+        $cases = [
+            ["![s][1]\n\n[1]: https://example.test/p.png", "[s][1]\n\n[1]: https://example.test/p.png", [0, 1, 0]],
+            ['![1]', '[1]', [0, 1, 0]],
+            ['![a [b] c](https://example.test/p.png)', '[a [b] c](https://example.test/p.png)', [0, 1, 0]],
+            ["![a\nb](https://example.test/p.png)", "[a\nb](https://example.test/p.png)", [0, 1, 0]],
+            ['[a [b] c](file://host.example/share)', "[a [b] c]{$lp}file://host.example/share)", [0, 0, 1]],
+            ['[a\\]b](msteams:/l/chat/0/0?users=x)', "[a\\]b]{$lp}msteams:/l/chat/0/0?users=x)", [0, 0, 1]],
+            ["[click\nhere](tel:+15550100)", "[click\nhere]{$lp}tel:+15550100)", [0, 0, 1]],
+            ["[x](javascript:y 't\nu')", "[x]{$lp}javascript:y 't\nu')", [0, 0, 1]],
+            ["See [doc][1]\n\n> [1]: file://host.example/x", "See [doc][1]\n\n> [1]{$colon} file://host.example/x", [0, 0, 1]],
+            ['- [1]: javascript:alert(1)', "- [1]{$colon} javascript:alert(1)", [0, 0, 1]],
+            ["[1]:\n   javascript:alert(1)", "[1]{$colon}\n   javascript:alert(1)", [0, 0, 1]],
+            ['[a\\]b]: data:text/html,x', "[a\\]b]{$colon} data:text/html,x", [0, 0, 1]],
+            ['[Status]: done, rebooted the spooler', "[Status]{$colon} done, rebooted the spooler", [0, 0, 1]],
+            ['[note](see below)', "[note]{$lp}see below)", [0, 0, 1]],
+            ["[two](\n\nhttps://example.test/)", "[two]{$lp}\n\nhttps://example.test/)", [0, 0, 1]],
+            ["\nGet-Content <path>\n", "\nGet-Content {$lt}path>\n", [1, 0, 0]],
+            [$kept, $kept, [0, 0, 0]],
+        ];
+
+        foreach ($cases as $i => [$body, $expected, [$tags, $images, $links]]) {
+            $this->assertSame(
+                ['text' => $expected, 'neutralized' => ['html_tags' => $tags, 'images' => $images, 'links' => $links]],
+                TeamsMarkdownPolicy::apply($body),
+                "case {$i}",
+            );
+        }
     }
 
     public function test_unknown_target_is_refused_and_nothing_is_sent(): void
@@ -206,7 +274,8 @@ class TeamsPostMessageToolTest extends TestCase
         $this->assertStringNotContainsString('</at>', $text);
         $this->assertStringNotContainsString('<img', $text);
         $this->assertStringNotContainsString('![', $text);
-        $this->assertStringNotContainsString('javascript:', $text);
+        $this->assertStringNotContainsString('](javascript:', $text);
+        $this->assertStringContainsString("[x]\u{FF08}javascript:alert(1))", $text);
         $this->assertStringContainsString('[ok](https://example.test/)', $text);
         $this->assertStringContainsString('a < b', $text);
         $this->assertSame(['html_tags' => 3, 'images' => 1, 'links' => 1], $out['markdown_neutralized']);
@@ -220,8 +289,8 @@ class TeamsPostMessageToolTest extends TestCase
 
         $text = $this->onlyActivity()['text'];
         $this->assertStringContainsString('[1]: https://example.test/doc', $text);
-        $this->assertStringNotContainsString('javascript:', $text);
-        $this->assertStringContainsString('[2]: [link removed]', $text);
+        $this->assertStringNotContainsString('[2]: ', $text);
+        $this->assertStringContainsString("[2]\u{FF1A} javascript:alert(1)", $text);
         $this->assertSame(1, $out['markdown_neutralized']['links']);
     }
 

@@ -231,11 +231,16 @@ class OperatorBridgeToolExecutor
         // Trim only the ends: interior blank lines and indentation are the
         // agent's formatting and must reach Teams intact.
         $actorName = $persona?->display_name ?? TechnicianConfig::aiActorName();
-        $scanned = $this->delivery->scanMessageWithMeta(
-            $this->stripTrailingPersonaSignatures(trim($rawBody), $actorName),
-        );
-        $policy = TeamsMarkdownPolicy::apply($scanned['text']);
-        $text = $policy['text'];
+        $message = $this->stripTrailingPersonaSignatures(trim($rawBody), $actorName);
+        // The policy runs first and its output is scanned too (as $sent), so a
+        // neutralization can never assemble a string the scan did not see.
+        $policy = TeamsMarkdownPolicy::apply($message);
+        $scanned = $this->delivery->scanMessageWithMeta($message, sent: $policy['text']);
+        $text = $scanned['text'];
+        // Withheld: none of the body's markdown is posted, so nothing counts.
+        $neutralized = $scanned['meta']->withheld
+            ? array_fill_keys(array_keys($policy['neutralized']), 0)
+            : $policy['neutralized'];
 
         if ($ticket !== null) {
             $client = TeamsText::escape($ticket->client?->name ?? '');
@@ -272,7 +277,7 @@ class OperatorBridgeToolExecutor
             'remote_message_id' => $sent['id'],
             'target' => $target['key'],
             'mentioned' => $mentions !== [],
-            'markdown_neutralized' => $policy['neutralized'],
+            'markdown_neutralized' => $neutralized,
             ...$scanned['meta']->toArray(),
         ];
     }

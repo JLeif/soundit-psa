@@ -58,26 +58,33 @@ class OperatorDelivery
      * lines (TeamsText's docblock says it belongs at interpolation points, never
      * across a whole body). The credential/injection scan still runs and still
      * replaces the whole body with the placeholder on a hit. Markdown hardening
-     * (no forged mentions, no raw HTML, plain links only) is the caller's job —
-     * see TeamsMarkdownPolicy — and runs on the result of this scan.
+     * is the caller's job (TeamsMarkdownPolicy). The caller runs it first and
+     * passes its result as $sent, and $sent is scanned as well, so the hardening
+     * can never assemble a string that the scan of $message did not see. A hit in
+     * either withholds the whole body. Otherwise the returned text is $sent, or
+     * $message when no $sent is given. text_total_chars and text_truncated
+     * describe $message.
      *
      * @return array{text: string, meta: OperatorScanMetadata}
      */
-    public function scanMessageWithMeta(string $message, string $placeholder = '[message detail withheld - see the cockpit]'): array
+    public function scanMessageWithMeta(string $message, string $placeholder = '[message detail withheld - see the cockpit]', ?string $sent = null): array
     {
-        return $this->scanAndEscape($message, $placeholder, 'Message', mb_strlen($message), escape: false);
+        return $this->scanAndEscape($message, $placeholder, 'Message', mb_strlen($message), escape: false, sent: $sent);
     }
 
     /** @return array{text: string, meta: OperatorScanMetadata} */
-    private function scanAndEscape(string $text, string $placeholder, string $label, int $totalChars, bool $escape = true): array
+    private function scanAndEscape(string $text, string $placeholder, string $label, int $totalChars, bool $escape = true, ?string $sent = null): array
     {
         $violations = $this->redactor->scan($text);
+        if ($violations === [] && $sent !== null && $sent !== $text) {
+            $violations = $this->redactor->scan($sent);
+        }
         $withheld = $violations !== [];
         if ($withheld) {
             Log::warning("[OperatorDelivery] {$label} failed output scan - detail withheld");
         }
 
-        $out = $withheld ? $placeholder : $text;
+        $out = $withheld ? $placeholder : ($sent ?? $text);
 
         return [
             'text' => $escape ? TeamsText::escape($out) : $out,

@@ -7,19 +7,30 @@ namespace App\Services\Chet;
  * LONGER run through TeamsText::escape (teams_post_message, card 5sALzgSC).
  *
  * Markdown survives: lists, emphasis, code, blank lines, headings, quotes and
- * ordinary `[text](https://...)` links. Three things do not:
+ * ordinary `[text](https://...)` links. Each rule below swaps or drops a single
+ * character and keeps everything around it, so none of the agent's text is
+ * lost. No rule tries to decide whether a match really is a tag, image or link,
+ * so the rules do not depend on parsing markdown the way the renderer does.
+ * The cost is that they apply everywhere in the body, including inside code
+ * spans and code blocks, and to prose that only looks like the syntax
+ * (`[Status]: done` posts as `[Status]： done`).
  *
- *  1. Tag-shaped HTML. Any `<` that opens a tag, closing tag, comment or
- *     autolink (`<at>`, `</at>`, `<img`, `<!--`, `<https://`) becomes U+FF1C
- *     FULLWIDTH LESS-THAN SIGN, so the text stays legible and nothing can be
- *     parsed as a tag. This is what stops a body forging a Teams `<at>` mention
- *     marker; the mention ENTITY itself is only ever built server-side.
- *     A bare comparison (`a < b`, `<= 5`) is left alone.
- *  2. Images. `![alt](url)` loses its `!` and becomes a plain link, so a body
- *     cannot embed a remote image (a read beacon) in the operator chat.
- *  3. Non-web link targets. A link whose target is not http(s) (javascript:,
- *     data:, file:, a relative path, ...) keeps its text and loses its target;
- *     a reference-style definition (`[1]: target`) is held to the same rule.
+ *  1. Tag-shaped HTML. A `<` followed by a letter, `/`, `!` or `?` (`<at>`,
+ *     `</at>`, `<img`, `<!--`, `<https://`) becomes U+FF1C FULLWIDTH LESS-THAN
+ *     SIGN. The text stays legible and nothing can be parsed as a tag or
+ *     autolink. This is what stops a body forging a Teams `<at>` mention marker;
+ *     the mention ENTITY itself is only ever built server-side. Any other `<`
+ *     (`a < b`, `<= 5`) is left alone.
+ *  2. Images. Every markdown image (inline, reference-style or shortcut) starts
+ *     with `![`. That `!` is dropped, so what remains is at most a plain link
+ *     and a body cannot embed a remote image (a read beacon) in the operator chat.
+ *  3. Non-web link targets. An inline link's target always follows `](`, and a
+ *     reference definition's target always follows `]:`, whatever the link
+ *     text, label or surrounding container. Unless what follows (after optional
+ *     spaces or tabs and at most one line break) starts with http:// or
+ *     https://, that `(` becomes U+FF08 or that `:` becomes U+FF1A. Link syntax
+ *     therefore cannot point at javascript:, data:, file:, a relative path, ...
+ *     The target stays visible as plain text.
  *
  * Cards and adaptive payloads are not this class's concern: the activity is
  * built in TeamsBotClient::postMarkdownMessage() from type/text/textFormat and
@@ -28,6 +39,10 @@ namespace App\Services\Chet;
 final class TeamsMarkdownPolicy
 {
     public const FULLWIDTH_LT = "\u{FF1C}";
+
+    public const FULLWIDTH_LPAREN = "\u{FF08}";
+
+    public const FULLWIDTH_COLON = "\u{FF1A}";
 
     /**
      * @return array{text: string, neutralized: array{html_tags: int, images: int, links: int}}
@@ -47,7 +62,7 @@ final class TeamsMarkdownPolicy
 
         $images = 0;
         $text = (string) preg_replace_callback(
-            '/!(?=\[[^\]\n]*\]\()/u',
+            '/!(?=\[)/u',
             function () use (&$images): string {
                 $images++;
 
@@ -58,29 +73,11 @@ final class TeamsMarkdownPolicy
 
         $links = 0;
         $text = (string) preg_replace_callback(
-            '/\[([^\]\n]*)\]\(\s*([^)\s]*)[^)\n]*\)/u',
+            '/\]([(:])(?![ \t]*(?:\r\n|\n|\r)?[ \t]*https?:\/\/[^\s\/])/iu',
             function (array $m) use (&$links): string {
-                if (preg_match('#^https?://[^\s/]#i', $m[2]) === 1) {
-                    return $m[0];
-                }
                 $links++;
 
-                return $m[1];
-            },
-            $text,
-        );
-
-        // Reference-style definitions (`[1]: target`) carry a link target too;
-        // a non-http(s) one loses its target exactly like an inline link.
-        $text = (string) preg_replace_callback(
-            '/^( {0,3}\[[^\]\n]+\]:)[ \t]*(\S+)(.*)$/mu',
-            function (array $m) use (&$links): string {
-                if (preg_match('#^<?https?://[^\s/]#i', $m[2]) === 1) {
-                    return $m[0];
-                }
-                $links++;
-
-                return $m[1].' [link removed]';
+                return ']'.($m[1] === '(' ? self::FULLWIDTH_LPAREN : self::FULLWIDTH_COLON);
             },
             $text,
         );
