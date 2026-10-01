@@ -15,7 +15,9 @@ use Illuminate\Database\Eloquent\Model;
  * Every foreign-key and external-integration id column on the row is emitted
  * here, and a column holding NULL is emitted as an explicit null meaning
  * "not mapped" — never omitted, so an agent can tell "not mapped" from
- * "this tool does not say".
+ * "this tool does not say". The one exception is tickets.parent_ticket_id,
+ * which is also null when the parent sits outside the ticket's client fence
+ * (see forTicket).
  *
  * The column lists are hand-maintained ON PURPOSE and pinned by
  * tests/Feature/Assistant/LinkedIdsContractTest, which reads the live schema:
@@ -151,7 +153,15 @@ final class LinkedIds
     {
         $ids = fn ($query, string $col) => $query->orderBy($col)->pluck($col)->map(fn ($v) => (int) $v)->values()->all();
 
-        return self::columns($ticket, self::TICKET_COLUMNS) + [
+        $out = self::columns($ticket, self::TICKET_COLUMNS);
+        // The mirror of the child_ticket_ids fence: a parent link is not
+        // re-checked when a ticket moves client, so the raw column can name
+        // another client's ticket. Named only when it passes the same fence.
+        $parent = $out['parent_ticket_id'] === null ? null
+            : Ticket::automationVisible()->whereKey($out['parent_ticket_id'])->where('client_id', $ticket->client_id)->value('tickets.id');
+        $out['parent_ticket_id'] = $parent === null ? null : (int) $parent;
+
+        return $out + [
             'asset_ids' => $ids($ticket->assets()->toBase(), 'assets.id'),
             'primary_asset_id' => ($p = $ticket->assets()->wherePivot('is_primary', true)->orderBy('assets.id')->first(['assets.id'])) ? (int) $p->id : null,
             'phone_call_ids' => $ids(\App\Models\PhoneCall::where('ticket_id', $ticket->id), 'id'),

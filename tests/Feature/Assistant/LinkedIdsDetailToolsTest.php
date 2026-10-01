@@ -219,4 +219,25 @@ class LinkedIdsDetailToolsTest extends TestCase
         $this->assertSame([$ownChild->id], $ids['child_ticket_ids']);
         $this->assertNotContains($foreignChild->id, $ids['child_ticket_ids']);
     }
+
+    public function test_scoped_ticket_detail_does_not_name_a_foreign_parent_ticket(): void
+    {
+        $mine = Client::factory()->create();
+        $theirs = Client::factory()->create();
+        $parent = Ticket::factory()->create(['client_id' => $mine->id]);
+        $ownChild = Ticket::factory()->create(['client_id' => $mine->id, 'parent_ticket_id' => $parent->id]);
+        $foreignChild = Ticket::factory()->create(['client_id' => $theirs->id, 'parent_ticket_id' => $parent->id]);
+
+        // Positive control: a same-client parent is named.
+        $own = (new AssistantToolExecutor(clientId: $mine->id))
+            ->execute('get_ticket_detail', ['ticket_id' => $ownChild->id])['linked_ids'];
+        $this->assertSame($parent->id, $own['parent_ticket_id']);
+
+        // The reverse of the foreign-child fixture: the other client's read
+        // must not name client A's ticket, even as a bare id.
+        $foreign = (new AssistantToolExecutor(clientId: $theirs->id))
+            ->execute('get_ticket_detail', ['ticket_id' => $foreignChild->id])['linked_ids'];
+        $this->assertArrayHasKey('parent_ticket_id', $foreign);
+        $this->assertNull($foreign['parent_ticket_id']);
+    }
 }
