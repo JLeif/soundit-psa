@@ -209,6 +209,28 @@ class TacticalClientIdResolutionTest extends TestCase
         $this->assertSame([], $this->agentReads);
     }
 
+    public function test_a_space_padded_copy_of_another_clients_site_is_still_ambiguous(): void
+    {
+        // Trimmed, the padded key IS Bravo's key, so the two clients share a site.
+        $padded = Client::factory()->create(['name' => 'Alpha', 'tactical_site_id' => ' Bravo|HQ']);
+        $bravo = $this->mappedClient('Bravo');
+        // The padded client's PSA asset links an agent on Bravo's site.
+        $asset = $this->linkedDevice($padded, 'Test-MBP.lan', 'agent-bravo-site', 'Bravo|HQ');
+        $bravoAsset = $this->linkedDevice($bravo, 'Test-Bravo.lan', 'agent-bravo');
+        $this->fakeTactical();
+
+        $out = $this->toolset()->execute('tactical_get_device', ['asset_id' => $asset->id], $padded->id);
+        $this->assertStringContainsString('also mapped to another PSA client', $out['error'] ?? '', json_encode($out));
+
+        $list = $this->toolset()->execute('tactical_list_devices', [], $padded->id);
+        $this->assertStringContainsString('also mapped to another PSA client', $list['error'] ?? '', json_encode($list));
+
+        $bravoOut = $this->toolset()->execute('tactical_get_device', ['asset_id' => $bravoAsset->id], $bravo->id);
+        $this->assertStringContainsString('also mapped to another PSA client', $bravoOut['error'] ?? '', json_encode($bravoOut));
+
+        $this->assertSame([], $this->agentReads);
+    }
+
     // ── another client's agent fails closed ──────────────────────────────────
 
     public function test_another_clients_asset_id_or_hostname_fails_closed(): void
@@ -403,6 +425,23 @@ class TacticalClientIdResolutionTest extends TestCase
 
         $this->assertSame(1, $this->toolset()->execute('tactical_get_device_patches', ['asset_id' => $asset->id], $alpha->id)['count'] ?? null);
         $this->assertSame(1, $this->toolset()->execute('tactical_get_device_tasks', ['asset_id' => $asset->id], $alpha->id)['count'] ?? null);
+    }
+
+    public function test_diagnose_carries_an_unknown_patch_or_task_envelope_as_an_error_not_zero_rows(): void
+    {
+        $alpha = $this->mappedClient('Alpha');
+        $asset = $this->linkedDevice($alpha, 'Test-MBP.lan', 'agent-a');
+        $wrapped = ['results' => [['id' => 1, 'kb' => 'KB5000001']]];
+        $this->fakeTactical(patches: $wrapped, tasks: $wrapped);
+
+        $out = $this->toolset()->execute('tactical_diagnose_device', ['asset_id' => $asset->id], $alpha->id);
+
+        $this->assertArrayNotHasKey('error', $out, json_encode($out));
+        $this->assertStringContainsString('unrecognised shape', $out['patches']['error'] ?? '', json_encode($out['patches']));
+        $this->assertSame(0, $out['patches']['count']);
+        $this->assertStringContainsString('unrecognised shape', $out['tasks']['error'] ?? '', json_encode($out['tasks']));
+        $this->assertSame(0, $out['tasks']['count']);
+        $this->assertArrayNotHasKey('error', $out['recent_actions']);
     }
 
     // ── descriptions and the MCP boundary ────────────────────────────────────

@@ -372,7 +372,9 @@ class TacticalReadOnlyToolset
             return ['error' => "PSA client {$clientId} is not mapped to Tactical (it has no Tactical site). Map it in Settings > Tactical Sites; this read does not search other clients' devices."];
         }
 
-        if (Client::whereKeyNot($clientId)->where('tactical_site_id', $client->tactical_site_id)->exists()) {
+        // Compared trimmed: $site is the trimmed key the site check uses, so a
+        // space-padded copy of another client's key is that same key.
+        if (Client::whereKeyNot($clientId)->whereRaw('TRIM(tactical_site_id) = ?', [$site])->exists()) {
             return ['error' => "PSA client {$clientId}'s Tactical site is also mapped to another PSA client, so its devices cannot be attributed. Fix the duplicate mapping in Settings > Tactical Sites."];
         }
 
@@ -987,18 +989,20 @@ class TacticalReadOnlyToolset
             'insight' => $this->mapEndpointInsight(
                 app(TacticalInsightService::class)->forAsset($resolved['asset'], live: true),
             ),
+            // A failed sub-read keeps its error beside the empty list, so it never
+            // reads as a clean 0 rows (C-56).
             'patches' => [
                 'count' => $patches['count'] ?? 0,
                 'patches' => $patches['patches'] ?? [],
-            ],
+            ] + (isset($patches['error']) ? ['error' => $patches['error']] : []),
             'tasks' => [
                 'count' => $tasks['count'] ?? 0,
                 'tasks' => $tasks['tasks'] ?? [],
-            ],
+            ] + (isset($tasks['error']) ? ['error' => $tasks['error']] : []),
             'recent_actions' => [
                 'count' => $recentActions['count'] ?? 0,
                 'actions' => $recentActions['actions'] ?? [],
-            ],
+            ] + (isset($recentActions['error']) ? ['error' => $recentActions['error']] : []),
         ];
     }
 
