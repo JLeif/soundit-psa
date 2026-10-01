@@ -305,6 +305,12 @@ class McpStaffController extends Controller
         // read-only and redacted (no customer, amount or payment details).
         // Explicit-grant only like every entry in this list.
         'benjipays_autopay_forecast',
+        // Card 6abec4f9 stage 1: read-only BenjiPays reads for ONE PSA client,
+        // fenced through its QuickBooks mapping and redacted (method type and
+        // last four only). GET only. Explicit-grant only like every entry here.
+        'benjipays_list_transactions',
+        'benjipays_get_invoice',
+        'benjipays_get_customer_payment_methods',
     ];
 
     /**
@@ -1270,6 +1276,16 @@ class McpStaffController extends Controller
                 $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === \App\Services\Mcp\BenjiPaysForecastTool::NAME) {
                 $result = app(\App\Services\Mcp\BenjiPaysForecastTool::class)->execute($arguments);
+            } elseif (in_array($name, [\App\Services\Mcp\BenjiPaysTransactionsTool::NAME, \App\Services\Mcp\BenjiPaysInvoiceTool::NAME, \App\Services\Mcp\BenjiPaysPaymentMethodsTool::NAME], true)) {
+                // client_id was lifted out of $arguments above; hand the fence both the
+                // parsed id and whether one was supplied, so a malformed id is refused
+                // rather than collapsing to "no client".
+                $tool = match ($name) {
+                    \App\Services\Mcp\BenjiPaysTransactionsTool::NAME => \App\Services\Mcp\BenjiPaysTransactionsTool::class,
+                    \App\Services\Mcp\BenjiPaysInvoiceTool::NAME => \App\Services\Mcp\BenjiPaysInvoiceTool::class,
+                    default => \App\Services\Mcp\BenjiPaysPaymentMethodsTool::class,
+                };
+                $result = app($tool)->execute($arguments, $clientId, $hasClientIdArgument);
             } elseif ($name === self::WHOAMI_TOOL) {
                 $result = $this->whoami($request);
             } elseif ($name === self::TOOL_SURFACE_TOOL) {
