@@ -69,10 +69,10 @@ use Illuminate\Support\Facades\Log;
  * Excluded lifecycle states are counted loudly, never silently dropped:
  * inactive_assets_excluded (is_active=false, not deleted) and
  * retired_assets_excluded (soft-deleted, whatever its is_active flag — an
- * asset that is both counts once, as retired). The lifecycle-unfiltered
- * deviceQuery() remains the seam for the hostname drill-down and the
- * leftover-data check, where refusing an out-of-service asset would mint a
- * false "no such device".
+ * asset that is both counts once, as retired). The hostname drill-down and the
+ * leftover-data check stay lifecycle-unfiltered, where refusing an
+ * out-of-service asset would mint a false "no such device"; both now live in
+ * CometClientScope, shared with triage (card 6abe578e).
  *
  * DATA BOUNDARY: the Comet admin API is server-wide (AdminGetJobsForUser has
  * no per-client scoping), so OUR scoping IS the boundary — usernames are taken
@@ -340,10 +340,13 @@ class CometReadOnlyToolset
 
         $days = min($this->positiveInt($input['days'] ?? null) ?? 7, 90);
 
-        $asset = $this->deviceQuery($client)
-            ->whereNotNull('comet_device_id')
-            ->whereRaw('LOWER(hostname) = ?', [mb_strtolower($hostname)])
-            ->first();
+        // C-1 (card 6abe578e): one rule with triage. Two or more Comet-linked
+        // rows of this client sharing the hostname fail closed, listing this
+        // client's candidate asset ids; nothing is picked.
+        $asset = CometClientScope::linkedAssetByHostname($client->id, $hostname);
+        if (is_array($asset)) {
+            return $asset;
+        }
 
         if (! $asset) {
             return ['error' => $this->hostnameMissError($client, $hostname)];
@@ -681,34 +684,14 @@ class CometReadOnlyToolset
             return ['error' => "PSA client {$id} was not found."];
         }
 
-        if (empty($client->comet_group_id)) {
-            $error = "{$client->name} is not mapped to a Comet organization, so Comet backup state cannot be read for this client. "
-                .'Map the client in Settings, or treat this client as not covered by Comet Backup.';
-
-            // An unmapped client drops out of the sync loop, so leftover comet
-            // columns stop being refreshed forever. Refuse rather than serve rot.
-            if ($this->deviceQuery($client)->exists()) {
-                $error .= ' Note: this client still carries leftover Comet backup data from a previous mapping; it is ignored because it is no longer being refreshed.';
-            }
-
-            return ['error' => $error];
+        // One rule for both Comet surfaces (card 6abe578e, C-2): triage calls
+        // the same CometClientScope::unmappedError().
+        $unmapped = CometClientScope::unmappedError($client);
+        if ($unmapped !== null) {
+            return ['error' => $unmapped];
         }
 
         return $client;
-    }
-
-    /**
-     * Every asset carrying Comet backup state for this client, ANY lifecycle
-     * state. This seam serves the hostname drill-down (listBackupJobs) and
-     * the unmapped-client leftover check, where a lifecycle filter would mint
-     * a false "no such device" or hide real leftover rot. The POSTURE payload
-     * reads eligibleDeviceQuery() instead.
-     *
-     * @return \Illuminate\Database\Eloquent\Builder<Asset>
-     */
-    private function deviceQuery(Client $client): \Illuminate\Database\Eloquent\Builder
-    {
-        return $this->withCometBackupState(Asset::where('client_id', $client->id));
     }
 
     /**
@@ -749,10 +732,7 @@ class CometReadOnlyToolset
      */
     private function withCometBackupState(\Illuminate\Database\Eloquent\Builder $query): \Illuminate\Database\Eloquent\Builder
     {
-        return $query->where(function ($query) {
-            $query->whereNotNull('comet_device_id')
-                ->orWhere('comet_backup_enabled', true);
-        });
+        return CometClientScope::withCometBackupState($query);
     }
 
     /**

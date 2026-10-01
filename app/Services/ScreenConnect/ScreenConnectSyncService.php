@@ -5,6 +5,7 @@ namespace App\Services\ScreenConnect;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\ScreenConnectEvent;
+use Illuminate\Support\Facades\Log;
 
 class ScreenConnectSyncService
 {
@@ -100,7 +101,31 @@ class ScreenConnectSyncService
         $asset = $this->resolveAsset($sessionId, $hostname, $client);
 
         if (! $asset) {
-            return "No matching asset for session {$sessionId} (host: {$hostname}, company: {$company})";
+            // Ids only (card 6abe578e): an ambiguous company resolves to no client and lands
+            // here, so neither the company string nor the guest hostname is echoed into this
+            // result, which the job logs and stores on the webhook row.
+            return "No matching asset for session {$sessionId}";
+        }
+
+        // W1 (card 6abe578e): fail closed on a contradicted attribution. The session id
+        // is linked to an asset of client B, but this webhook's company resolves to a
+        // different client A. Either the original link is wrong or the device moved
+        // between clients; we cannot tell which, so nothing is attached — no event row,
+        // no asset field — and the webhook is marked skipped (the "Skipped" prefix is
+        // what ProcessScreenConnectWebhook keys on). The payload stays on the webhook
+        // row, and MislinkedAssetFinder's ScreenConnect rule surfaces the asset for a
+        // human. A company that is missing, unresolved or ambiguous resolves to no
+        // client, and then the session link stays authoritative, as before. Ids only in
+        // the log and the result: no client names, hostnames or company strings.
+        if ($client !== null && $asset->client_id !== null && (int) $asset->client_id !== (int) $client->id) {
+            Log::warning('[ScreenConnect] Webhook company contradicts the session-linked asset\'s client; nothing attached', [
+                'asset_id' => $asset->id,
+                'linked_client_id' => (int) $asset->client_id,
+                'resolved_client_id' => (int) $client->id,
+                'session_id' => $sessionId,
+            ]);
+
+            return "Skipped: session {$sessionId} is linked to asset #{$asset->id} of client #{$asset->client_id}, but the webhook company resolves to client #{$client->id}; nothing attached";
         }
 
         if (! $asset->screenconnect_session_id) {
@@ -123,11 +148,42 @@ class ScreenConnectSyncService
 
     private function resolveClient(?string $company): ?Client
     {
+        return self::resolveCompanyClient($company);
+    }
+
+    /**
+     * The ONE company → PSA client rule, shared by the webhook ingest and
+     * MislinkedAssetFinder's ScreenConnect rule: an exact, case-insensitive match on
+     * clients.name.
+     *
+     * W3 (card 6abe578e): two or more clients carrying the name are ambiguous, and an
+     * ambiguous company resolves to NO client rather than to the lowest id. Soft-deleted
+     * clients take no part (Client uses SoftDeletes, so the default scope excludes
+     * them). Inactive clients DO take part — there is deliberately no is_active filter —
+     * so a churned client sharing a live client's name makes the name ambiguous instead
+     * of being silently out-voted. The log carries the count only.
+     */
+    public static function resolveCompanyClient(?string $company, bool $log = true): ?Client
+    {
         if (! $company) {
             return null;
         }
 
-        return Client::whereRaw('LOWER(name) = ?', [mb_strtolower($company)])->first();
+        $matches = Client::whereRaw('LOWER(name) = ?', [mb_strtolower($company)])
+            ->orderBy('id')
+            ->get();
+
+        if ($matches->count() > 1) {
+            if ($log) {
+                Log::info('[ScreenConnect] Webhook company matches more than one client by name; resolved to no client', [
+                    'match_count' => $matches->count(),
+                ]);
+            }
+
+            return null;
+        }
+
+        return $matches->first();
     }
 
     /**

@@ -29,7 +29,9 @@ class TriageCometToolExecutorTest extends TestCase
 
     private function ticketWithCometAsset(array $assetOverrides = []): Ticket
     {
-        $client = Client::factory()->create();
+        // Comet-mapped: since card 6abe578e (C-2) triage refuses an unmapped
+        // client exactly as the staff MCP toolset does.
+        $client = Client::factory()->create(['comet_group_id' => 'grp-acme']);
         Asset::factory()->create(array_merge([
             'client_id' => $client->id,
             'hostname' => 'ACME-SRV-01',
