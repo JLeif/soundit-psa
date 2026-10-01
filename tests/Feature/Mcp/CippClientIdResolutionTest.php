@@ -247,10 +247,33 @@ class CippClientIdResolutionTest extends TestCase
         $this->assertSame([], $this->sent);
 
         // The resolver is bound to the client_id, not to whichever Client object it is
-        // handed: Bravo's record under Alpha's id is another client's tenant.
+        // handed. A record that is not client_id's client is refused even when its
+        // tenant is mapped to nobody else (so the shared-mapping check cannot be what
+        // refuses it), and Bravo's record under Alpha's id is refused too.
         $this->assertSame('alpha.example', CippTenantScope::resolve($this->alpha, $this->alpha->id));
+        $stray = new Client(['name' => 'Stray', 'cipp_tenant_domain' => 'zulu.example']);
+        $this->assertSame("PSA client {$this->alpha->id} was not found.", CippTenantScope::resolve($stray, $this->alpha->id)['error'] ?? null);
         $this->assertArrayHasKey('error', (array) CippTenantScope::resolve($this->bravo, $this->alpha->id));
         $this->assertArrayHasKey('error', (array) CippTenantScope::resolve($this->alpha, null));
+    }
+
+    /**
+     * The relay re-resolves through the same CippTenantScope rather than trusting its
+     * caller (defence in depth: the MCP surface reaches it only after cippDispatch()
+     * already resolved, so this is asserted on the relay directly).
+     */
+    public function test_the_mcp_relay_itself_refuses_an_unmapped_or_shared_client_without_calling_cipp(): void
+    {
+        $mcp = Mockery::mock(CippMcpClient::class);
+        $mcp->shouldNotReceive('callTool');
+        $relay = new \App\Services\Cipp\CippMcpToolRelay($mcp, app(\App\Services\Chet\ChetDataSurfaceTextSanitizer::class));
+
+        $unmapped = $relay->execute('cipp_list_users', [], $this->unmapped, $this->unmapped->id);
+        $this->assertStringContainsString('is not mapped to CIPP', (string) ($unmapped['error'] ?? ''));
+
+        Client::factory()->create(['name' => 'Delta', 'cipp_tenant_domain' => 'Alpha.Example']);
+        $shared = $relay->execute('cipp_list_users', [], $this->alpha, $this->alpha->id);
+        $this->assertStringContainsString('also mapped to another PSA client', (string) ($shared['error'] ?? ''));
     }
 
     public function test_every_curated_cipp_read_describes_client_id_as_the_key_with_no_name_fallback(): void
