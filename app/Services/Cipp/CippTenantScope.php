@@ -319,7 +319,8 @@ final class CippTenantScope
      * Transport: REST when its credentials are set, else ExecMCP, which can run on
      * its own credentials (isMcpRelayEnabled() does not need the REST ones). When the
      * REST read throws (CippClient throws CippClientException for a failed sign-in
-     * and for an HTTP or transport error) and the relay is enabled,
+     * and for an HTTP or transport error), or its settings cannot be read (a
+     * cipp_client_secret that no longer decrypts), and the relay is enabled,
      * ListTenants is asked over MCP instead (#4580). That is the failover
      * HandlesCippTools::cippDispatch() already makes for the curated reads, in the
      * other direction (AssistantToolExecutor::cippMcpRelay(): MCP could not sign in,
@@ -345,7 +346,17 @@ final class CippTenantScope
         $signIn = false;
         $rows = null;
 
-        if (CippConfig::isConfigured()) {
+        $restConfigured = false;
+        try {
+            $restConfigured = CippConfig::isConfigured();
+        } catch (\Throwable $e) {
+            // e.g. cipp_client_secret no longer decrypts under this APP_KEY: CIPP was
+            // not asked, so MCP may be.
+            self::logReadFailure('REST settings', $e);
+            $causes[] = 'PSA could not read its CIPP REST API settings';
+        }
+
+        if ($restConfigured) {
             try {
                 $rows = app(CippClient::class)->get('api/ListTenants', []);
             } catch (\TypeError $e) {

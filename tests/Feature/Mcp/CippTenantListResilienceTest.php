@@ -42,7 +42,7 @@ class CippTenantListResilienceTest extends TestCase
 
     private const FABRIKAM_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-    private const SECRET = 'rest-secret-must-not-leak';
+    private const REST_CLIENT_CANARY = 'rest-canary-must-not-leak';
 
     /** @var array<int, array{0: string, 1: array<string, mixed>}> tenant reads that reached a transport */
     private array $sent = [];
@@ -87,7 +87,7 @@ class CippTenantListResilienceTest extends TestCase
         Setting::setValue('cipp_tenant_id', 'tenant-1');
         if ($rest) {
             Setting::setValue('cipp_client_id', 'rest-client');
-            Setting::setEncrypted('cipp_client_secret', self::SECRET);
+            Setting::setEncrypted('cipp_client_secret', self::REST_CLIENT_CANARY);
         }
         Setting::setValue('cipp_mcp_client_id', 'mcp-client');
         Setting::setEncrypted('cipp_mcp_client_secret', 'mcp-secret');
@@ -291,7 +291,7 @@ class CippTenantListResilienceTest extends TestCase
 
         $this->assertStringContainsString('could not read a usable CIPP tenant list (CIPP REST API sign-in failed)', $error);
         $this->assertStringContainsString('CIPP sign-in failed', $error);
-        $this->assertStringNotContainsString(self::SECRET, $error);
+        $this->assertStringNotContainsString(self::REST_CLIENT_CANARY, $error);
         $this->assertStringNotContainsString('test-token', $error);
         $this->assertStringNotContainsString('invalid_token', $error);
     }
@@ -505,5 +505,34 @@ class CippTenantListResilienceTest extends TestCase
 
         $this->assertServed($this->mcpCall('cipp_list_users', ['client_id' => $this->contoso->id]), 'contoso.onmicrosoft.com');
         $this->assertSame(['rest'], $this->listReads);
+    }
+
+    /**
+     * REST settings that cannot be read (cipp_client_secret no longer decrypts under
+     * this APP_KEY) do not throw out of the resolver: CIPP was not asked, so the
+     * alias check falls back to MCP when the relay is on, and is refused with the
+     * cause named when it is not. The resolver is driven directly because the staff
+     * surface's own tool listing reads the same REST settings.
+     */
+    public function test_unreadable_rest_settings_fall_back_to_mcp_or_are_refused(): void
+    {
+        $this->configure(rest: true, relay: true);
+        Setting::setValue('cipp_client_secret', 'not-an-encrypted-payload');
+        $this->fakeTransports(new \RuntimeException('REST must not be asked'), [self::contosoRow(), self::fabrikamRow()]);
+
+        $this->assertSame('contoso.onmicrosoft.com', CippTenantScope::resolve($this->contoso, $this->contoso->id));
+        $this->assertSame(['mcp'], $this->listReads);
+
+        Cache::forget('cipp-tenant-scope:tenant-list');
+        Setting::setValue('cipp_mcp_enabled', '0');
+        $this->listReads = [];
+
+        $result = CippTenantScope::resolve($this->contoso, $this->contoso->id);
+        $error = (string) ($result['error'] ?? '');
+        $this->assertStringContainsString('could not read a usable CIPP tenant list (PSA could not read its CIPP REST API settings)', $error);
+        $this->assertStringNotContainsString('sign-in', $error);
+        $this->assertStringNotContainsString('payload', $error, 'upstream text goes to the log, not the agent');
+        $this->assertSame([], $this->listReads);
+        $this->assertNull(Cache::get('cipp-tenant-scope:tenant-list'));
     }
 }
