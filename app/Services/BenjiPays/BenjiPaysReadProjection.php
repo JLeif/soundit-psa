@@ -24,7 +24,10 @@ final class BenjiPaysReadProjection
      * amount, currency, surchargeAmount, surchargeRate, paymentType mapped to
      * card/bank, the last four digits of details.maskedPan (card) or
      * details.account (bank), and the invoice refs (invoiceId, invoiceNumber,
-     * paymentsToMake[].invoiceId/invoiceNumber/amount). DROPPED: customerName,
+     * paymentsToMake[].invoiceId/invoiceNumber/amount, at most MAX_APPLIED of
+     * them; applied_to_count is the vendor's full paymentsToMake count and
+     * applied_to_truncated is true when entries were left out, so a long list
+     * is never silently cut). DROPPED: customerName,
      * details.message/receiptNumber/paymentRef/cardType, the masked numbers
      * themselves, result (raw gateway string), gateway and settlement fields,
      * accounting payment and journal ids, integrationData, void/refund blocks.
@@ -51,11 +54,13 @@ final class BenjiPaysReadProjection
                 default => null,
             };
             $applied = [];
+            $appliedTotal = 0;
             $toMake = $row['paymentsToMake'] ?? null;
             if ($toMake !== null) {
                 if (! is_array($toMake) || ! array_is_list($toMake)) {
                     throw new BenjiPaysException('invalid_response');
                 }
+                $appliedTotal = count($toMake);
                 foreach (array_slice($toMake, 0, self::MAX_APPLIED) as $p) {
                     if (! is_array($p)) {
                         throw new BenjiPaysException('invalid_response');
@@ -81,6 +86,8 @@ final class BenjiPaysReadProjection
                 'invoice_id' => self::nullableString($row, 'invoiceId'),
                 'invoice_number' => self::nullableString($row, 'invoiceNumber'),
                 'applied_to' => $applied,
+                'applied_to_count' => $appliedTotal,
+                'applied_to_truncated' => $appliedTotal > self::MAX_APPLIED,
             ];
         }
 

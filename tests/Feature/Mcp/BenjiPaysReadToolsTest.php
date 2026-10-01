@@ -193,6 +193,7 @@ class BenjiPaysReadToolsTest extends TestCase
             'amount' => 312.5, 'currency' => 'USD', 'surcharge_amount' => 9.1, 'surcharge_rate' => 3,
             'method_type' => 'card', 'last4' => '1111', 'invoice_id' => '1042', 'invoice_number' => '22867',
             'applied_to' => [['invoice_id' => '1042', 'invoice_number' => '22867', 'amount' => 312.5]],
+            'applied_to_count' => 1, 'applied_to_truncated' => false,
         ], $answer['transactions'][0]);
         $this->assertSame(['declined', false, 'bank', '6789', null], [
             $answer['transactions'][1]['status'], $answer['transactions'][1]['approved'], $answer['transactions'][1]['method_type'],
@@ -225,7 +226,7 @@ class BenjiPaysReadToolsTest extends TestCase
             $this->assertStringNotContainsString($needle, $body, "transactions output leaked {$needle}");
         }
         $this->assertSame(['date', 'type', 'status', 'approved', 'amount', 'currency', 'surcharge_amount', 'surcharge_rate',
-            'method_type', 'last4', 'invoice_id', 'invoice_number', 'applied_to'], array_keys($answer['transactions'][0]));
+            'method_type', 'last4', 'invoice_id', 'invoice_number', 'applied_to', 'applied_to_count', 'applied_to_truncated'], array_keys($answer['transactions'][0]));
     }
 
     public function test_transactions_limit_is_capped_at_the_max(): void
@@ -235,6 +236,26 @@ class BenjiPaysReadToolsTest extends TestCase
         $this->answer($this->mcp(BenjiPaysTransactionsTool::NAME, ['client_id' => $this->client->id, 'limit' => 1000]));
 
         Http::assertSent(fn (HttpRequest $r) => str_contains($r->url(), '&limit=50&'));
+        $this->assertOnlyGets(1);
+    }
+
+    public function test_transactions_applied_to_past_the_cap_is_flagged_not_silently_dropped(): void
+    {
+        $toMake = fn (int $n) => array_map(fn (int $i) => ['invoiceId' => (string) (5000 + $i), 'amount' => 10, 'invoiceNumber' => (string) (60000 + $i)], range(1, $n));
+        Http::fake(['https://api.benjipays.com/*' => Http::response(self::page([
+            self::txn(['paymentsToMake' => $toMake(26)]),
+            self::txn(['paymentsToMake' => $toMake(20)]),
+            self::txn(['paymentsToMake' => null]),
+        ]))]);
+
+        $rows = $this->answer($this->mcp(BenjiPaysTransactionsTool::NAME, ['client_id' => $this->client->id]))['transactions'];
+
+        $this->assertCount(20, $rows[0]['applied_to']);
+        $this->assertSame('5020', $rows[0]['applied_to'][19]['invoice_id']);
+        $this->assertSame([26, true], [$rows[0]['applied_to_count'], $rows[0]['applied_to_truncated']]);
+        $this->assertCount(20, $rows[1]['applied_to']);
+        $this->assertSame([20, false], [$rows[1]['applied_to_count'], $rows[1]['applied_to_truncated']]);
+        $this->assertSame([[], 0, false], [$rows[2]['applied_to'], $rows[2]['applied_to_count'], $rows[2]['applied_to_truncated']]);
         $this->assertOnlyGets(1);
     }
 
