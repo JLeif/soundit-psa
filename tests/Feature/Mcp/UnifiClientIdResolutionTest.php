@@ -31,8 +31,9 @@ use Tests\TestCase;
  * unifi_list_sites is account-wide METADATA by design and is pinned here as such.
  *
  * Reads call the vendor live, so every test binds a real UnifiClient over a Guzzle
- * MockHandler and records each request: an empty queue plus a zero history count is
- * the proof that a refusal spent no request.
+ * MockHandler and records each request. A refusal queues one sentinel response and
+ * asserts it is still queued with a zero history count: that is the proof it spent
+ * no request.
  *
  * Synthetic data only: "Alpha Synthetic"/"Bravo Synthetic", placeholder hex site ids
  * and console ids, device names such as Test-MBP-AP.
@@ -64,6 +65,8 @@ class UnifiClientIdResolutionTest extends TestCase
     /** @var array<int, array{request: RequestInterface}> */
     private array $history = [];
 
+    private MockHandler $mock;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -85,7 +88,8 @@ class UnifiClientIdResolutionTest extends TestCase
             fn (array $p) => new Response(200, ['Content-Type' => 'application/json'], json_encode($p)),
             $payloads,
         );
-        $stack = HandlerStack::create(new MockHandler($queue));
+        $this->mock = new MockHandler($queue);
+        $stack = HandlerStack::create($this->mock);
         $this->history = [];
         $stack->push(Middleware::history($this->history));
 
@@ -98,6 +102,21 @@ class UnifiClientIdResolutionTest extends TestCase
     private function requestCount(): int
     {
         return count($this->history);
+    }
+
+    /**
+     * Queue one sentinel response for a path that must not reach the vendor. An empty
+     * queue cannot prove that: MockHandler throws before history records the request.
+     */
+    private function vendorMustNotBeCalled(): void
+    {
+        $this->vendorReturns([['data' => [], 'httpStatusCode' => 200]]);
+    }
+
+    private function assertNoVendorRequest(): void
+    {
+        $this->assertSame(0, $this->requestCount(), 'no request reached the vendor');
+        $this->assertSame(1, $this->mock->count(), 'the sentinel response is still queued');
     }
 
     private function request(int $i): RequestInterface
@@ -299,14 +318,14 @@ class UnifiClientIdResolutionTest extends TestCase
     {
         ClientUnifiSite::where('client_id', $this->alpha->id)->update(['unifi_host_id' => self::SHARED_HOST]);
         ClientUnifiSite::where('client_id', $this->bravo->id)->update(['unifi_host_id' => self::SHARED_HOST]);
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach ([$this->alpha, $this->bravo] as $client) {
             $raw = $this->refusal($this->mcp('unifi_list_devices', ['client_id' => $client->id]));
             $this->assertStringContainsString('shared with another PSA client', $raw);
             $this->assertStringNotContainsString('"devices"', $raw);
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     public function test_a_console_that_also_serves_an_unmapped_foreign_site_fails_closed_without_a_device_read(): void
@@ -347,7 +366,7 @@ class UnifiClientIdResolutionTest extends TestCase
 
     public function test_another_clients_site_or_console_id_typed_as_input_is_refused_with_no_request(): void
     {
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach (self::CLIENT_TOOLS as $tool) {
             foreach (['site_id' => self::B_SITE, 'host_id' => self::B_HOST, 'unifi_site_id' => self::B_SITE] as $key => $value) {
@@ -356,14 +375,14 @@ class UnifiClientIdResolutionTest extends TestCase
                 $this->assertStringContainsString('REFUSED, not ignored', $raw);
             }
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     // ── missing, malformed, unknown and unmapped client_id fail closed ───────────
 
     public function test_a_missing_or_malformed_client_id_is_refused_at_the_boundary_with_no_request(): void
     {
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach (self::CLIENT_TOOLS as $tool) {
             foreach ([null, 'abc', '0', 0, -1, '07x', 1.5] as $bad) {
@@ -372,13 +391,13 @@ class UnifiClientIdResolutionTest extends TestCase
                 $this->assertSame("client_id is required for {$tool}.", $raw, "{$tool} client_id=".json_encode($bad));
             }
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     public function test_unknown_and_unmapped_client_ids_fail_closed_with_no_request(): void
     {
         $unmapped = Client::factory()->create(['name' => 'Unmapped Synthetic']);
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach (self::CLIENT_TOOLS as $tool) {
             $raw = $this->refusal($this->mcp($tool, ['client_id' => 999999]));
@@ -388,29 +407,29 @@ class UnifiClientIdResolutionTest extends TestCase
             $this->assertStringContainsString('Unmapped Synthetic is not mapped to a UniFi site', $raw, $tool);
             $this->assertNoBravo($raw, "{$tool} unmapped");
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     public function test_the_executor_refuses_a_null_client_with_its_exact_message(): void
     {
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach (self::CLIENT_TOOLS as $tool) {
             $result = app(ChetDataSurfaceToolExecutor::class)->execute($tool, ['client_id' => $this->bravo->id], null);
             $this->assertSame(['error' => "client_id is required for {$tool}."], $result, $tool);
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     public function test_the_toolset_refuses_a_null_client_too(): void
     {
-        $this->vendorReturns([]);
+        $this->vendorMustNotBeCalled();
 
         foreach (self::CLIENT_TOOLS as $tool) {
             $result = app(UnifiReadOnlyToolset::class)->execute($tool, [], null);
             $this->assertSame(['error' => 'client_id is required'], $result, $tool);
         }
-        $this->assertSame(0, $this->requestCount());
+        $this->assertNoVendorRequest();
     }
 
     public function test_the_bound_client_wins_over_an_agent_typed_client_id(): void
