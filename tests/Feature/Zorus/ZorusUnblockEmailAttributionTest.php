@@ -89,6 +89,21 @@ class ZorusUnblockEmailAttributionTest extends TestCase
         $this->assertSame(0, $ticket->assets()->count(), 'ambiguous hostname: no asset may be attached to the ticket');
     }
 
+    public function test_a_hostname_column_match_beside_a_name_column_match_attaches_no_asset_to_the_created_ticket(): void
+    {
+        $alpha = Client::factory()->create(['name' => 'Alpha Co', 'zorus_customer_id' => 'zc-alpha']);
+        // One device, two rows: A matches on the hostname column only and B on the name
+        // column only. The intake matcher must count both, as the Zorus link does, and
+        // not pick A because it searched the hostname column first.
+        Asset::factory()->create(['client_id' => $alpha->id, 'name' => 'Alpha Laptop', 'hostname' => 'Test-MBP']);
+        Asset::factory()->create(['client_id' => $alpha->id, 'name' => 'Test-MBP', 'hostname' => 'TEST-MBP-OLD']);
+
+        $ticket = $this->ticketFor($this->resolve($this->unblockEmail()));
+
+        $this->assertSame($alpha->id, $ticket->client_id, 'the client attribution stands');
+        $this->assertSame([], $ticket->assets()->pluck('assets.id')->all(), 'a hostname hit beside a name hit is ambiguous: no asset may be attached to the ticket');
+    }
+
     public function test_one_matching_asset_inside_the_client_is_attached_to_the_created_ticket(): void
     {
         $alpha = Client::factory()->create(['name' => 'Alpha Co', 'zorus_customer_id' => 'zc-alpha']);
