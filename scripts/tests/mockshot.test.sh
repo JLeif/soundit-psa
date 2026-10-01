@@ -92,6 +92,91 @@ else
     sed 's/^/    err: /' "$TMP/search.err"
 fi
 
+# --- render path against a stub playwright-core (no browser) --------------------
+# The stub records what mockshot asked for and writes a fake PNG, so the output
+# contract, viewport presets and the external-request block are tested in CI.
+STUB="$TMP/stub-playwright-core"
+mkdir -p "$STUB"
+cat >"$STUB/index.js" <<'JS'
+const fs = require('fs');
+const log = (o) => fs.appendFileSync(process.env.STUB_LOG, JSON.stringify(o) + '\n');
+exports.chromium = {
+  launch: async () => ({
+    newContext: async (ctx) => {
+      log({ ctx });
+      return {
+        newPage: async () => {
+          let handler = null;
+          return {
+            route: async (_p, h) => { handler = h; },
+            on: () => {},
+            goto: async (url) => {
+              log({ goto: url });
+              for (const u of ['https://cdn.example.invalid/x.css', url, 'data:,x']) {
+                await handler({ request: () => ({ url: () => u }),
+                  continue: async () => log({ cont: u }), abort: async (r) => log({ abort: u, r }) });
+              }
+            },
+            evaluate: async () => true,
+            waitForLoadState: async () => {},
+            screenshot: async (o) => { log({ shot: o }); fs.writeFileSync(o.path, 'PNG'); },
+          };
+        },
+      };
+    },
+    close: async () => {},
+  }),
+};
+JS
+mkdir -p "$TMP/r"
+printf '<!doctype html><p>r</p>\n' >"$TMP/r/screen.html"
+
+# stub <name> <args...>: run against the stub, rc in $TMP/<name>.rc
+stub() {
+    local name="$1"; shift
+    local rc=0
+    STUB_LOG="$TMP/$name.log" MOCKSHOT_PLAYWRIGHT_CORE="$STUB" "$MOCKSHOT" "$@" \
+        >"$TMP/$name.out" 2>"$TMP/$name.err" || rc=$?
+    echo "$rc" >"$TMP/$name.rc"
+}
+check() { # check <name> <label> <command...>
+    local name="$1" label="$2"; shift 2
+    if "$@"; then PASS=$((PASS + 1)); else
+        FAIL=$((FAIL + 1)); echo "FAIL [$name] $label"
+        sed 's/^/    out: /' "$TMP/$name.out"; sed 's/^/    err: /' "$TMP/$name.err"
+        sed 's/^/    log: /' "$TMP/$name.log" 2>/dev/null
+    fi
+}
+
+stub st-default "$TMP/r/screen.html"
+check st-default "exit 0" grep -qx 0 "$TMP/st-default.rc"
+check st-default "stdout is exactly the default output path" \
+    test "$(cat "$TMP/st-default.out")" = "$TMP/r/screen.png"
+check st-default "png written next to the html" test -s "$TMP/r/screen.png"
+check st-default "desktop 1440x900 at 2x" \
+    grep -qF '"viewport":{"width":1440,"height":900},"deviceScaleFactor":2' "$TMP/st-default.log"
+check st-default "viewport-only by default" grep -qF '"fullPage":false' "$TMP/st-default.log"
+check st-default "loaded via file://" grep -qF "\"goto\":\"file://$TMP/r/screen.html\"" "$TMP/st-default.log"
+check st-default "external request aborted" \
+    grep -qF '"abort":"https://cdn.example.invalid/x.css"' "$TMP/st-default.log"
+check st-default "file request allowed" grep -qF "\"cont\":\"file://$TMP/r/screen.html\"" "$TMP/st-default.log"
+check st-default "data: request allowed" grep -qF '"cont":"data:,x"' "$TMP/st-default.log"
+check st-default "blocked URL warned on stderr" \
+    grep -qF '  https://cdn.example.invalid/x.css' "$TMP/st-default.err"
+
+stub st-phone "$TMP/r/screen.html" "$TMP/r/out-phone.png" --device phone --full
+check st-phone "stdout is exactly the explicit output path" \
+    test "$(cat "$TMP/st-phone.out")" = "$TMP/r/out-phone.png"
+check st-phone "phone 390x844 at 2x" \
+    grep -qF '"viewport":{"width":390,"height":844},"deviceScaleFactor":2' "$TMP/st-phone.log"
+check st-phone "--full honoured" grep -qF '"fullPage":true' "$TMP/st-phone.log"
+
+stub st-tablet "$TMP/r/screen.html" "$TMP/r/out-tablet.png" --device=tablet
+check st-tablet "tablet 820x1180" grep -qF '"viewport":{"width":820,"height":1180}' "$TMP/st-tablet.log"
+
+stub st-size "$TMP/r/screen.html" "$TMP/r/out-size.png" --size 1280x800
+check st-size "--size 1280x800" grep -qF '"viewport":{"width":1280,"height":800}' "$TMP/st-size.log"
+
 # No PNG may be written by any refused run.
 if ls "$TMP"/*.png >/dev/null 2>&1 || [ -e "${P%.html}.png" ]; then
     FAIL=$((FAIL + 1))

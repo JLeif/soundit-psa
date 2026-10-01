@@ -20,6 +20,9 @@
 // The page is loaded from a file:// URL and every non-file request is aborted,
 // so a CDN reference cannot load. Blocked URLs are listed on stderr.
 //
+// On success stdout is exactly the absolute output path (one line); details go
+// to stderr.
+//
 // Exit codes: 0 ok · 1 usage error · 2 playwright-core not found · 3 render failed
 'use strict';
 
@@ -185,7 +188,10 @@ async function main() {
         for (const u of unique) process.stderr.write(`  ${u}\n`);
     }
     const { size } = fs.statSync(opts.output);
-    process.stdout.write(`${opts.output} (${opts.viewport.width}x${opts.viewport.height} @${SCALE}x${opts.full ? ', full page' : ''}, ${size} bytes)\n`);
+    // Contract (parity with the CT 111 reference): stdout carries exactly the
+    // output path, one line, so callers can capture it. Details go to stderr.
+    process.stderr.write(`mockshot: ${opts.viewport.width}x${opts.viewport.height} @${SCALE}x${opts.full ? ', full page' : ''}, ${size} bytes\n`);
+    process.stdout.write(`${opts.output}\n`);
 }
 
 main().catch((e) => {

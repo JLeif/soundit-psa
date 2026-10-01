@@ -9,9 +9,9 @@ use Symfony\Component\Process\Process;
 /**
  * Runs scripts/tests/mockshot.test.sh inside the suite so CI executes it.
  *
- * That script covers scripts/mockshot's argument parsing (exit 1) and its
- * playwright-core resolution failure (exit 2 with the install hint). It never
- * launches Chromium, so it needs node but no browser. Skipped, not passed,
+ * That script covers scripts/mockshot's argument parsing (exit 1), its
+ * playwright-core resolution failure (exit 2 with the install hint) and the
+ * render path against a stub playwright-core. It never launches Chromium, so it needs node but no browser. Skipped, not passed,
  * where node is absent.
  */
 class MockshotScriptTest extends TestCase

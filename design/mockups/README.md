@@ -60,6 +60,9 @@ scripts/mockshot <file.html> [out.png] [--device phone|tablet|desktop | --size W
 `--size WxH` sets a custom viewport (also 2x). `--full` captures the whole scrollable page.
 `out.png` defaults to the input path with `.png` in place of `.html`.
 
+On success, stdout is exactly the absolute path of the PNG written (one line, safe to capture);
+viewport and size details and any blocked-request warning go to stderr.
+
 Exit codes: `0` written; `1` usage error; `2` playwright-core not found; `3` render failed
 (including a browser that will not start); `127` node not installed.
 
@@ -94,8 +97,9 @@ MOCKSHOT_PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core \
 
 ### Tests
 
-`scripts/tests/mockshot.test.sh` covers argument parsing and the missing-playwright-core path
-without launching a browser. It runs in the PHPUnit suite through
+`scripts/tests/mockshot.test.sh` covers argument parsing, the missing-playwright-core path, and
+the render path against a stub playwright-core (device presets, 2x scale, `--full`, the stdout
+contract, file:// loading and the external-request block) without launching a browser. It runs in the PHPUnit suite through
 `tests/Unit/MockshotScriptTest.php`. CI has no Chromium, so a live render is a manual check.
 `tests/Unit/DesignMockupTokensTest.php` fails if `_tokens.css` drifts from the DESIGN.md
 front-matter.
