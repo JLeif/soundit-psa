@@ -362,6 +362,12 @@ class McpStaffController extends Controller
         'huntress_list_escalations',
         'huntress_list_organizations',
         'huntress_get_organization',
+
+        // Card 6abdcac2: tactical_list_clients_sites gained an OPTIONAL client_id that
+        // resolves through clients.tactical_site_id. Omitted, it lists every client's
+        // mapping, so a malformed client_id collapsing to null would widen exactly as
+        // above. The device reads already require client_id. Only ADDS a refusal.
+        'tactical_list_clients_sites',
     ];
 
     /**

@@ -34,6 +34,18 @@ class TacticalReadOnlyToolset
         'tactical_diagnose_device',
     ];
 
+    /** The client-scoped tools that resolve ONE device (card 6abdcac2). */
+    private const DEVICE_TOOL_NAMES = [
+        ...self::LEGACY_CLIENT_TOOL_NAMES,
+        'tactical_get_device_patches',
+        'tactical_get_device_tasks',
+        'tactical_get_endpoint_insight',
+        'tactical_list_recent_actions',
+        'tactical_diagnose_device',
+    ];
+
+    public const DEVICE_KEY_NOTE = 'Device lookup: client_id is the primary key: it resolves through the client\'s stored Tactical site (clients.tactical_site_id), and asset_id through the asset\'s stored Tactical link. hostname is a fallback for when asset_id is not known. A client not mapped to Tactical, an ambiguous hostname, or an agent on another client\'s Tactical site is an error, never a cross-client search.';
+
     private const GENERAL_TOOL_NAMES = [
         'tactical_list_scripts',
         'tactical_get_script',
@@ -128,7 +140,7 @@ class TacticalReadOnlyToolset
             'tactical_list_scripts' => $this->listScripts($input),
             'tactical_get_script' => $this->getScript($input),
             'tactical_list_recent_actions' => $this->listRecentActions($input, (int) $clientId),
-            'tactical_list_clients_sites' => $this->listClientsSites($input),
+            'tactical_list_clients_sites' => $this->listClientsSites($input, $clientId),
             'tactical_list_policies' => $this->listPolicies($input),
             'tactical_list_url_actions' => $this->listUrlActions($input),
             'tactical_list_alert_templates' => $this->listAlertTemplates($input),
@@ -147,7 +159,39 @@ class TacticalReadOnlyToolset
             fn (array $tool): bool => in_array((string) ($tool['name'] ?? ''), self::LEGACY_CLIENT_TOOL_NAMES, true),
         ));
 
-        return array_merge($legacy, self::phaseOneDefinitions());
+        return array_map(
+            fn (array $tool): array => in_array((string) $tool['name'], self::DEVICE_TOOL_NAMES, true)
+                ? self::withDeviceKeys($tool)
+                : $tool,
+            array_merge($legacy, self::phaseOneDefinitions()),
+        );
+    }
+
+    /**
+     * Card 6abdcac2: every device read resolves through the stored keys first. The
+     * legacy six definitions are shared with the triage loop (TriageToolDefinitions),
+     * whose own executor takes hostname only, so asset_id is added HERE, for this
+     * surface, never there.
+     *
+     * @param  array<string, mixed>  $tool
+     * @return array<string, mixed>
+     */
+    private static function withDeviceKeys(array $tool): array
+    {
+        $optional = $tool['name'] === 'tactical_list_recent_actions';
+        $schema = $tool['input_schema'];
+        $properties = (array) $schema['properties'];
+        $properties = [
+            'asset_id' => ['type' => 'integer', 'description' => 'PSA asset ID (preferred): the device is resolved through the asset\'s stored Tactical link (tactical_asset_id), within client_id.'],
+            ...$properties,
+            'hostname' => ['type' => 'string', 'description' => 'Device hostname: a FALLBACK when asset_id is not known. Matched only within client_id\'s devices, through the stored Tactical link first; an ambiguous or unlinked match is an error, never a guess.'.($optional ? ' Optional: omit both to read the whole client.' : '')],
+        ];
+        $schema['properties'] = $properties;
+        $schema['required'] = array_values(array_diff($schema['required'] ?? [], ['hostname']));
+        $tool['input_schema'] = $schema;
+        $tool['description'] = rtrim((string) $tool['description']).' '.self::DEVICE_KEY_NOTE;
+
+        return $tool;
     }
 
     /** @return array<int, array<string, mixed>> */
@@ -156,11 +200,11 @@ class TacticalReadOnlyToolset
         return [
             [
                 'name' => 'tactical_list_devices',
-                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. No live Tactical call is made; the payload carries data_as_of/data_stale/freshness_note and each row carries synced_at + stale. Each device carries platform plus checks_coverage (verified/unverified/none/unknown) and the payload carries coverage_summary + coverage_note: "none" = zero checks, the device is UNMONITORED; "unverified" = checks exist but NONE currently passes (all failing or none reporting — coverage cannot be demonstrated); only "verified" (an explicitly passing check) is coverage — never read a clean-looking count as healthy. "Is it monitored?" (checks_coverage) and "is it healthy?" (checks_failing) are separate questions.',
+                'description' => 'List Tactical-linked devices for a PSA client from the local snapshot. client_id is the primary key: it resolves through the client\'s stored Tactical site (clients.tactical_site_id); a client not mapped to Tactical is an error, not an empty list, and a linked device whose agent reports another site is withheld (withheld_off_site). query only narrows this client\'s devices by hostname. No live Tactical call is made; the payload carries data_as_of/data_stale/freshness_note and each row carries synced_at + stale. Each device carries platform plus checks_coverage (verified/unverified/none/unknown) and the payload carries coverage_summary + coverage_note: "none" = zero checks, the device is UNMONITORED; "unverified" = checks exist but NONE currently passes (all failing or none reporting — coverage cannot be demonstrated); only "verified" (an explicitly passing check) is coverage — never read a clean-looking count as healthy. "Is it monitored?" (checks_coverage) and "is it healthy?" (checks_failing) are separate questions.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'query' => ['type' => 'string', 'description' => 'Optional hostname or asset search term.'],
+                        'query' => ['type' => 'string', 'description' => 'Optional hostname substring, applied within client_id\'s devices only (never a cross-client search).'],
                         'status' => ['type' => 'string', 'description' => 'Optional Tactical status filter such as online, offline, or overdue.'],
                         'limit' => ['type' => 'integer', 'description' => 'Max devices to return (default 25, max 100).'],
                     ],
@@ -169,7 +213,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_get_device_patches',
-                'description' => 'Read Windows update/patch status for a Tactical-linked device resolved by hostname within the PSA client.',
+                'description' => 'Read Windows update/patch status for one Tactical-linked device of the PSA client.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -181,7 +225,7 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_get_device_tasks',
-                'description' => 'Read task history/status for a Tactical-linked device resolved by hostname within the PSA client.',
+                'description' => 'Read task history/status for one Tactical-linked device of the PSA client.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -240,10 +284,11 @@ class TacticalReadOnlyToolset
             ],
             [
                 'name' => 'tactical_list_clients_sites',
-                'description' => 'List local PSA client to Tactical site mappings. Does not create or modify Tactical clients.',
+                'description' => 'List local PSA client to Tactical site mappings. Pass client_id to get that client\'s mapping (a client not mapped to Tactical, or a site shared with another client, is an error, not an empty list); omit it to list every mapping. Does not create or modify Tactical clients.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID: returns only that client\'s Tactical site mapping. Omit to list all mappings.'],
                         'limit' => ['type' => 'integer', 'description' => 'Max mappings to return (default 50, max 100).'],
                     ],
                     'required' => [],
@@ -307,40 +352,186 @@ class TacticalReadOnlyToolset
     }
 
     /**
-     * @return array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset}|null
+     * The client's Tactical site key (clients.tactical_site_id, the "ClientName|SiteName"
+     * pair the device sync maps agents by), or an error payload. Card 6abdcac2, Huntress
+     * pattern (#4486): client_id resolves through the stored integration key, never a
+     * cross-client search. Unmapped is an explicit refusal; a key another client also
+     * carries is ambiguous and refused (the same rule TacticalEvidence applies).
+     *
+     * @return string|array{error: string}
      */
-    private function resolveAgent(string $hostname, int $clientId): ?array
+    private function clientSiteKey(int $clientId): string|array
     {
-        $tacticalAsset = TacticalAsset::with('asset')
-            ->whereRaw('LOWER(hostname) = ?', [mb_strtolower($hostname)])
-            ->whereHas('asset', fn (Builder $query) => $query->where('client_id', $clientId))
-            ->first();
+        $client = Client::find($clientId);
+        if ($client === null) {
+            return ['error' => "PSA client {$clientId} was not found."];
+        }
 
-        if (! $tacticalAsset || ! $tacticalAsset->asset) {
+        $site = trim((string) $client->tactical_site_id);
+        if ($site === '') {
+            return ['error' => "PSA client {$clientId} is not mapped to Tactical (it has no Tactical site). Map it in Settings > Tactical Sites; this read does not search other clients' devices."];
+        }
+
+        if (Client::whereKeyNot($clientId)->where('tactical_site_id', $client->tactical_site_id)->exists()) {
+            return ['error' => "PSA client {$clientId}'s Tactical site is also mapped to another PSA client, so its devices cannot be attributed. Fix the duplicate mapping in Settings > Tactical Sites."];
+        }
+
+        return $site;
+    }
+
+    /** The snapshot row's own Tactical site, as the sync keys it, or null when not recorded. */
+    private function agentSiteKey(TacticalAsset $tacticalAsset): ?string
+    {
+        if ($tacticalAsset->client_name === null || $tacticalAsset->site_name === null) {
             return null;
+        }
+
+        return $tacticalAsset->client_name.'|'.$tacticalAsset->site_name;
+    }
+
+    /**
+     * Resolve one device for a client-scoped read. Order (card 6abdcac2):
+     *   1. asset_id: the PSA asset (this client's) and its tactical_asset_id key.
+     *   2. hostname: the agent a PSA asset of this client links by tactical_asset_id,
+     *      matched on the agent's or the asset's hostname.
+     *   3. hostname fallback, ONLY for agent rows no PSA asset links by key: the old
+     *      tactical_assets.hostname match within the client's assets.
+     * Every path then requires the agent's recorded site to be this client's site.
+     * Not found, ambiguous, inconsistent or off-site: an error, never a guess.
+     *
+     * @return array{error: string}|array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset, match: string}
+     */
+    private function resolvedFromInput(array $input, int $clientId): array
+    {
+        $site = $this->clientSiteKey($clientId);
+        if (is_array($site)) {
+            return $site;
+        }
+
+        $hostname = trim((string) ($input['hostname'] ?? ''));
+        $hasAssetId = array_key_exists('asset_id', $input) && $input['asset_id'] !== null && $input['asset_id'] !== '';
+
+        if ($hasAssetId) {
+            $assetId = $this->positiveInt($input['asset_id']);
+            if ($assetId === null) {
+                return ['error' => 'asset_id must be a positive integer PSA asset ID.'];
+            }
+            $resolved = $this->resolveByAssetId($assetId, $clientId);
+            if (! isset($resolved['error']) && $hostname !== '' && ! $this->hostnameMatches($resolved, $hostname)) {
+                return ['error' => "hostname '{$hostname}' is not the device linked to asset {$assetId}. Pass one or the other."];
+            }
+        } elseif ($hostname !== '') {
+            $resolved = $this->resolveByHostname($hostname, $clientId);
+        } else {
+            return ['error' => 'asset_id or hostname is required'];
+        }
+
+        if (isset($resolved['error'])) {
+            return $resolved;
+        }
+
+        $agentSite = $this->agentSiteKey($resolved['tactical_asset']);
+        if ($agentSite === null) {
+            return ['error' => 'The Tactical agent linked to this device has no recorded site, so it cannot be confirmed as this client\'s. Run the Tactical device sync, then retry.'];
+        }
+        if ($agentSite !== $site) {
+            return ['error' => 'The Tactical agent linked to this device is on a Tactical site that is not mapped to this client, so it was not read. Review the device link (list_mislinked_assets).'];
+        }
+
+        // Asset::tacticalAsset is a HasOne on the reverse pointer; pin it to the agent
+        // resolved here so a downstream reader (TacticalInsightService::forAsset) cannot
+        // pick a stale sibling row.
+        $resolved['asset']->setRelation('tacticalAsset', $resolved['tactical_asset']);
+
+        return $resolved;
+    }
+
+    /** @return array{error: string}|array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset, match: string} */
+    private function resolveByAssetId(int $assetId, int $clientId): array
+    {
+        $asset = Asset::whereKey($assetId)->where('client_id', $clientId)->first();
+        if ($asset === null) {
+            return ['error' => "Asset {$assetId} not found or belongs to a different client"];
+        }
+        if ($asset->tactical_asset_id === null) {
+            return ['error' => "Asset {$assetId} is not linked to a Tactical agent."];
+        }
+
+        return $this->linkedAgent($asset, 'asset_id');
+    }
+
+    /** @return array{error: string}|array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset, match: string} */
+    private function resolveByHostname(string $hostname, int $clientId): array
+    {
+        $needle = mb_strtolower($hostname);
+
+        // Keyed: this client's assets that link an agent by tactical_asset_id.
+        $keyed = Asset::where('client_id', $clientId)
+            ->whereNotNull('tactical_asset_id')
+            ->where(function (Builder $query) use ($needle) {
+                $query->whereRaw('LOWER(hostname) = ?', [$needle])
+                    ->orWhereIn('tactical_asset_id', TacticalAsset::query()
+                        ->whereRaw('LOWER(hostname) = ?', [$needle])
+                        ->select('id'));
+            })
+            ->get();
+
+        if ($keyed->count() > 1) {
+            return ['error' => "Hostname '{$hostname}' matches more than one linked device for this client. Pass asset_id."];
+        }
+        if ($keyed->count() === 1) {
+            return $this->linkedAgent($keyed->first(), 'tactical_asset_id');
+        }
+
+        // Fallback for UNMAPPED rows only: an agent row no PSA asset links by key, on
+        // an asset of this client that links no agent itself.
+        $unkeyed = TacticalAsset::with('asset')
+            ->whereRaw('LOWER(hostname) = ?', [$needle])
+            ->whereHas('asset', fn (Builder $query) => $query->where('client_id', $clientId)->whereNull('tactical_asset_id'))
+            ->whereNotIn('id', Asset::withTrashed()->whereNotNull('tactical_asset_id')->select('tactical_asset_id'))
+            ->get();
+
+        if ($unkeyed->count() > 1) {
+            return ['error' => "Hostname '{$hostname}' matches more than one unlinked Tactical agent for this client. Link the device, then pass asset_id."];
+        }
+        $tacticalAsset = $unkeyed->first();
+        if ($tacticalAsset === null || $tacticalAsset->asset === null) {
+            return ['error' => "Device '{$hostname}' not found or belongs to a different client"];
         }
 
         return [
             'agent_id' => (string) $tacticalAsset->agent_id,
             'tactical_asset' => $tacticalAsset,
             'asset' => $tacticalAsset->asset,
+            'match' => 'hostname_fallback_unlinked',
         ];
     }
 
-    /** @return array{error: string}|array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset} */
-    private function resolvedFromInput(array $input, int $clientId): array
+    /** @return array{error: string}|array{agent_id: string, tactical_asset: TacticalAsset, asset: Asset, match: string} */
+    private function linkedAgent(Asset $asset, string $match): array
     {
-        $hostname = trim((string) ($input['hostname'] ?? ''));
-        if ($hostname === '') {
-            return ['error' => 'hostname is required'];
+        $tacticalAsset = TacticalAsset::find($asset->tactical_asset_id);
+        if ($tacticalAsset === null || (int) $tacticalAsset->asset_id !== (int) $asset->id
+            || ! is_string($tacticalAsset->agent_id) || $tacticalAsset->agent_id === '') {
+            return ['error' => "Asset {$asset->id}'s Tactical link is missing or inconsistent, so it was not read. Reconcile the device link first."];
         }
+        $tacticalAsset->setRelation('asset', $asset);
 
-        $resolved = $this->resolveAgent($hostname, $clientId);
-        if (! $resolved) {
-            return ['error' => "Device '{$hostname}' not found or belongs to a different client"];
-        }
+        return [
+            'agent_id' => $tacticalAsset->agent_id,
+            'tactical_asset' => $tacticalAsset,
+            'asset' => $asset,
+            'match' => $match,
+        ];
+    }
 
-        return $resolved;
+    /** @param  array{tactical_asset: TacticalAsset, asset: Asset}  $resolved */
+    private function hostnameMatches(array $resolved, string $hostname): bool
+    {
+        $needle = mb_strtolower($hostname);
+
+        return mb_strtolower((string) $resolved['tactical_asset']->hostname) === $needle
+            || mb_strtolower((string) $resolved['asset']->hostname) === $needle;
     }
 
     private function listDevices(array $input, int $clientId): array
@@ -348,6 +539,13 @@ class TacticalReadOnlyToolset
         $limit = $this->limit($input, default: 25, max: 100);
         $queryText = trim((string) ($input['query'] ?? ''));
         $status = trim((string) ($input['status'] ?? ''));
+
+        // Card 6abdcac2: the client must map to a Tactical site; unmapped is an error,
+        // never an answer built from leftover rows.
+        $site = $this->clientSiteKey($clientId);
+        if (is_array($site)) {
+            return $site;
+        }
 
         $query = TacticalAsset::with('asset')
             ->whereHas('asset', fn (Builder $assetQuery) => $assetQuery->where('client_id', $clientId));
@@ -365,11 +563,27 @@ class TacticalReadOnlyToolset
             $query->whereRaw('LOWER(status) = ?', [mb_strtolower($status)]);
         }
 
+        // An agent whose recorded site is ANOTHER site is not this client's device, even
+        // when a PSA asset of this client points at it (a mislink): withheld and counted,
+        // never listed. Partitioned before the limit so the cut counts only listed rows.
+        $withheldOffSite = 0;
         $devices = $query
             ->orderByRaw('LOWER(COALESCE(hostname, ""))')
-            ->limit($limit)
             ->get()
-            ->map(fn (TacticalAsset $asset): array => $this->mapDeviceSnapshot($asset))
+            ->filter(function (TacticalAsset $asset) use ($site, &$withheldOffSite): bool {
+                $agentSite = $this->agentSiteKey($asset);
+                if ($agentSite !== null && $agentSite !== $site) {
+                    $withheldOffSite++;
+
+                    return false;
+                }
+
+                return true;
+            })
+            ->take($limit)
+            ->map(fn (TacticalAsset $asset): array => $this->mapDeviceSnapshot($asset) + [
+                'site_verified' => $this->agentSiteKey($asset) === $site,
+            ])
             ->values()
             ->all();
 
@@ -419,6 +633,11 @@ class TacticalReadOnlyToolset
             'data_as_of' => $oldestSync,
             'data_stale' => $anyStale,
             'freshness_note' => self::SNAPSHOT_FRESHNESS_NOTE,
+            'tactical_site_id' => $site,
+            'withheld_off_site' => $withheldOffSite,
+            'site_note' => $withheldOffSite > 0
+                ? $withheldOffSite.' linked device(s) report a Tactical site that is not this client\'s and were withheld. Review them with list_mislinked_assets.'
+                : null,
         ];
     }
 
@@ -442,9 +661,16 @@ class TacticalReadOnlyToolset
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
+        $rows = $this->strictList($patches);
+        if ($rows === null) {
+            Log::warning('[ChetDataSurface] Tactical patches returned an unrecognised shape');
+
+            return ['error' => 'Tactical returned the patch list in an unrecognised shape, so it could not be read. This is not a "no patches" answer.'];
+        }
+
         $mapped = array_map(
             fn (array $patch): array => $this->redactSensitiveKeys($patch),
-            array_slice($this->listPayload($patches), 0, $limit),
+            array_slice($rows, 0, $limit),
         );
 
         return [
@@ -474,9 +700,16 @@ class TacticalReadOnlyToolset
             return ['error' => 'Tactical query failed: '.mb_substr($e->getMessage(), 0, 200)];
         }
 
+        $rows = $this->strictList($tasks);
+        if ($rows === null) {
+            Log::warning('[ChetDataSurface] Tactical tasks returned an unrecognised shape');
+
+            return ['error' => 'Tactical returned the task list in an unrecognised shape, so it could not be read. This is not a "no tasks" answer.'];
+        }
+
         $mapped = array_map(
             fn (array $task): array => $this->redactSensitiveKeys($task),
-            array_slice($this->listPayload($tasks), 0, $limit),
+            array_slice($rows, 0, $limit),
         );
 
         return [
@@ -565,10 +798,13 @@ class TacticalReadOnlyToolset
 
         $query = TacticalActionLog::query();
 
-        if ($hostname !== '') {
-            $resolved = $this->resolveAgent($hostname, $clientId);
-            if (! $resolved) {
-                return ['error' => "Device '{$hostname}' not found or belongs to a different client"];
+        // No device named: PSA-local audit rows on this client's assets (no vendor read,
+        // so no Tactical mapping is needed). A device named: the same resolver as every
+        // device read, mapping and site checks included.
+        if ($hostname !== '' || ($input['asset_id'] ?? null) !== null) {
+            $resolved = $this->resolvedFromInput($input, $clientId);
+            if (isset($resolved['error'])) {
+                return $resolved;
             }
 
             $query->where('asset_id', $resolved['asset']->id);
@@ -592,9 +828,28 @@ class TacticalReadOnlyToolset
         ];
     }
 
-    private function listClientsSites(array $input): array
+    private function listClientsSites(array $input, ?int $clientId = null): array
     {
         $limit = $this->limit($input, default: 50, max: 100);
+
+        // Card 6abdcac2: a client_id is a filter, never ignored. Unmapped or ambiguous
+        // is an error, not an empty list.
+        if ($clientId !== null) {
+            $site = $this->clientSiteKey($clientId);
+            if (is_array($site)) {
+                return $site;
+            }
+
+            return [
+                'count' => 1,
+                'mappings' => [[
+                    'client_id' => $clientId,
+                    'client_name' => Client::whereKey($clientId)->value('name'),
+                    'tactical_site_id' => $site,
+                ]],
+                'match' => 'psa_client_mapping',
+            ];
+        }
 
         $mappings = Client::whereNotNull('tactical_site_id')
             ->where('tactical_site_id', '!=', '')
@@ -769,6 +1024,30 @@ class TacticalReadOnlyToolset
         }
 
         return null;
+    }
+
+    /**
+     * Strict read of a per-agent list endpoint (C-56). Both producers return a bare
+     * serializer list (tacticalrmm@1e786d37: winupdate/views.py GetWinUpdates.get ->
+     * WinUpdateSerializer(many=True).data; autotasks/views.py GetAddAutoTasks.get ->
+     * TaskSerializer(many=True).data). Anything else (an object, a wrapped envelope, a
+     * non-object row) is null, which the caller reports as an error, never as [].
+     *
+     * @param  array<mixed>  $payload
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function strictList(array $payload): ?array
+    {
+        if (! array_is_list($payload)) {
+            return null;
+        }
+        foreach ($payload as $row) {
+            if (! is_array($row) || ($row !== [] && array_is_list($row))) {
+                return null;
+            }
+        }
+
+        return $payload;
     }
 
     /**

@@ -6,7 +6,6 @@ use App\Http\Controllers\Web\AssetController;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Setting;
-use App\Models\TacticalAsset;
 use App\Models\Ticket;
 use App\Services\AssetHealthService;
 use App\Services\Assistant\AssistantToolExecutor;
@@ -19,10 +18,12 @@ use App\Services\Triage\TriageToolExecutor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Support\CreatesMappedTacticalAgents;
 use Tests\TestCase;
 
 class UptimeProvenanceTest extends TestCase
 {
+    use CreatesMappedTacticalAgents;
     use RefreshDatabase;
 
     public static function statuses(): array
@@ -56,7 +57,7 @@ class UptimeProvenanceTest extends TestCase
         $asset = $this->asset();
         Setting::setValue('tactical_api_url', 'https://tactical.example.test');
         Setting::setEncrypted('tactical_api_key', 'synthetic');
-        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
+        $this->createMappedTacticalAgent(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
         // Field projection from AgentSerializer / AgentTableSerializer at
         // tacticalrmm e56ebd3e48e99de59f34d4bd7600c127a6f02cf2,
         // api/tacticalrmm/agents/serializers.py: status, last_seen, boot_time.
@@ -100,7 +101,7 @@ class UptimeProvenanceTest extends TestCase
     {
         $asset = $this->asset();
         if ($status !== null) {
-            TacticalAsset::create([
+            $this->createMappedTacticalAgent([
                 'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
                 'hostname' => $asset->hostname, 'status' => $status,
                 'last_seen_at' => now()->subHours(2),
@@ -147,7 +148,7 @@ class UptimeProvenanceTest extends TestCase
         $asset = $this->asset();
         $asset->forceFill($links)->save();
         if ($tactical) {
-            TacticalAsset::create([
+            $this->createMappedTacticalAgent([
                 'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
                 'hostname' => $asset->hostname, 'status' => 'online',
                 'last_seen_at' => now()->subMinutes(5), 'synced_at' => now(),
@@ -182,7 +183,7 @@ class UptimeProvenanceTest extends TestCase
     {
         $asset = $this->asset();
         $asset->forceFill(['last_boot_at' => null])->save();
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
             'hostname' => $asset->hostname, 'status' => 'online',
             'last_seen_at' => now()->subMinutes(5), 'synced_at' => now(),
@@ -216,7 +217,7 @@ class UptimeProvenanceTest extends TestCase
         $asset = $this->asset();
         Setting::setValue('tactical_api_url', 'https://tactical.example.test');
         Setting::setEncrypted('tactical_api_key', 'synthetic');
-        TacticalAsset::create(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
+        $this->createMappedTacticalAgent(['asset_id' => $asset->id, 'agent_id' => 'synthetic-agent', 'hostname' => $asset->hostname]);
         $agent = ['status' => 'online', 'last_seen' => now()->subMinutes(5)->toIso8601String()];
         if ($present) {
             $agent['boot_time'] = $bootTime;
@@ -253,7 +254,7 @@ class UptimeProvenanceTest extends TestCase
     public function test_insight_snapshot_online_does_not_qualify_uptime(): void
     {
         $asset = $this->asset();
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id, 'agent_id' => 'synthetic-agent',
             'hostname' => $asset->hostname, 'status' => 'online',
             'last_seen_at' => now()->subDays(3), 'synced_at' => now()->subDays(3),

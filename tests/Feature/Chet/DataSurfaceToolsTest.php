@@ -7,7 +7,6 @@ use App\Models\Client;
 use App\Models\McpAuditLog;
 use App\Models\OperatorInbox;
 use App\Models\Setting;
-use App\Models\TacticalAsset;
 use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Services\Chet\TeamsChatReadToolset;
 use App\Services\Cipp\CippClient;
@@ -19,10 +18,12 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use Mockery;
 use ReflectionMethod;
+use Tests\Support\CreatesMappedTacticalAgents;
 use Tests\TestCase;
 
 class DataSurfaceToolsTest extends TestCase
 {
+    use CreatesMappedTacticalAgents;
     use RefreshDatabase;
 
     private function chetToken(array $tools): string
@@ -178,7 +179,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -239,7 +240,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $otherClient->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $otherAsset->id,
             'agent_id' => 'agent-other',
             'hostname' => 'PC-01',
@@ -249,7 +250,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $requestingClient->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $requestedAsset->id,
             'agent_id' => 'agent-requested',
             'hostname' => 'PC-01',
@@ -284,13 +285,15 @@ class DataSurfaceToolsTest extends TestCase
     {
         $this->configureTactical();
 
-        $requestingClient = Client::factory()->create();
+        // The requesting client is MAPPED (card 6abdcac2), so the refusal below is the
+        // cross-client hostname refusal, not the earlier "not mapped" one.
+        $requestingClient = Client::factory()->create(['tactical_site_id' => 'Requesting Client|Main']);
         $otherClient = Client::factory()->create();
         $otherAsset = Asset::factory()->create([
             'client_id' => $otherClient->id,
             'hostname' => 'PC-02',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $otherAsset->id,
             'agent_id' => 'agent-2',
             'hostname' => 'PC-02',
@@ -320,7 +323,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -373,7 +376,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -416,7 +419,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -466,7 +469,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',
@@ -524,7 +527,7 @@ class DataSurfaceToolsTest extends TestCase
             'client_id' => $client->id,
             'hostname' => 'PC-01',
         ]);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-1',
             'hostname' => 'PC-01',

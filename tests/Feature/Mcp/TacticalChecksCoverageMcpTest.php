@@ -5,13 +5,13 @@ namespace Tests\Feature\Mcp;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Setting;
-use App\Models\TacticalAsset;
 use App\Models\TacticalScript;
 use App\Services\Tactical\TacticalClient;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use Mockery;
+use Tests\Support\CreatesMappedTacticalAgents;
 use Tests\TestCase;
 
 /**
@@ -27,6 +27,7 @@ use Tests\TestCase;
  */
 class TacticalChecksCoverageMcpTest extends TestCase
 {
+    use CreatesMappedTacticalAgents;
     use RefreshDatabase;
 
     private function configureTactical(): void
@@ -78,7 +79,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         foreach ($shapes as $i => $shape) {
             $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => $shape['hostname']]);
-            TacticalAsset::create([
+            $this->createMappedTacticalAgent([
                 'asset_id' => $asset->id,
                 'agent_id' => 'agent-'.($i + 1),
                 'hostname' => $shape['hostname'],
@@ -175,7 +176,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
         $client = Client::factory()->create(['name' => 'Acme']);
         foreach ([['PC-10', now()->subHours(2)], ['PC-11', now()->subHours(4)]] as [$host, $syncedAt]) {
             $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => $host]);
-            TacticalAsset::create([
+            $this->createMappedTacticalAgent([
                 'asset_id' => $asset->id, 'agent_id' => 'agent-'.$host, 'hostname' => $host,
                 'os' => 'Windows 11 Pro', 'plat' => 'windows', 'status' => 'online',
                 'checks_total' => 2, 'checks_failing' => 0, 'synced_at' => $syncedAt,
@@ -206,7 +207,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-01']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac',
             'hostname' => 'MAC-01',
@@ -276,7 +277,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-05']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac5',
             'hostname' => 'MAC-05',
@@ -337,7 +338,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-07']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac7',
             'hostname' => 'MAC-07',
@@ -392,7 +393,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-03']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac3',
             'hostname' => 'MAC-03',
@@ -456,7 +457,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-01']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac',
             'hostname' => 'MAC-01',
@@ -525,7 +526,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-01']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac',
             'hostname' => 'MAC-01',
@@ -572,7 +573,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'MAC-08']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-mac8',
             'hostname' => 'MAC-08',
@@ -689,7 +690,7 @@ class TacticalChecksCoverageMcpTest extends TestCase
 
         $client = Client::factory()->create(['name' => 'Acme']);
         $asset = Asset::factory()->create(['client_id' => $client->id, 'hostname' => 'PC-07']);
-        TacticalAsset::create([
+        $this->createMappedTacticalAgent([
             'asset_id' => $asset->id,
             'agent_id' => 'agent-pc7',
             'hostname' => 'PC-07',
