@@ -212,6 +212,19 @@ class TeamsPostMessageToolTest extends TestCase
         $this->assertSame(['html_tags' => 3, 'images' => 1, 'links' => 1], $out['markdown_neutralized']);
     }
 
+    public function test_reference_style_link_definitions_obey_the_same_target_rule(): void
+    {
+        $body = "See [the doc][1] and [bad][2].\n\n[1]: https://example.test/doc\n[2]: javascript:alert(1)";
+
+        $out = $this->decoded($this->postTool(['chat_or_channel' => 'operator', 'body' => $body]));
+
+        $text = $this->onlyActivity()['text'];
+        $this->assertStringContainsString('[1]: https://example.test/doc', $text);
+        $this->assertStringNotContainsString('javascript:', $text);
+        $this->assertStringContainsString('[2]: [link removed]', $text);
+        $this->assertSame(1, $out['markdown_neutralized']['links']);
+    }
+
     public function test_ticket_fields_are_escaped_but_the_body_is_not(): void
     {
         $client = Client::factory()->create(['name' => 'Acme [x](https://evil.test)']);

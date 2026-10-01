@@ -18,7 +18,8 @@ namespace App\Services\Chet;
  *  2. Images. `![alt](url)` loses its `!` and becomes a plain link, so a body
  *     cannot embed a remote image (a read beacon) in the operator chat.
  *  3. Non-web link targets. A link whose target is not http(s) (javascript:,
- *     data:, file:, a relative path, ...) keeps its text and loses its target.
+ *     data:, file:, a relative path, ...) keeps its text and loses its target;
+ *     a reference-style definition (`[1]: target`) is held to the same rule.
  *
  * Cards and adaptive payloads are not this class's concern: the activity is
  * built in TeamsBotClient::postMarkdownMessage() from type/text/textFormat and
@@ -65,6 +66,21 @@ final class TeamsMarkdownPolicy
                 $links++;
 
                 return $m[1];
+            },
+            $text,
+        );
+
+        // Reference-style definitions (`[1]: target`) carry a link target too;
+        // a non-http(s) one loses its target exactly like an inline link.
+        $text = (string) preg_replace_callback(
+            '/^( {0,3}\[[^\]\n]+\]:)[ \t]*(\S+)(.*)$/mu',
+            function (array $m) use (&$links): string {
+                if (preg_match('#^<?https?://[^\s/]#i', $m[2]) === 1) {
+                    return $m[0];
+                }
+                $links++;
+
+                return $m[1].' [link removed]';
             },
             $text,
         );
