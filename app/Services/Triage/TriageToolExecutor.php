@@ -14,6 +14,7 @@ use App\Models\TicketCategoryChangeLog;
 use App\Models\TicketNote;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Comet\CometClient;
+use App\Services\Comet\CometClientScope;
 use App\Services\Comet\CometJobService;
 use App\Services\ControlD\ControlDAnalyticsClient;
 use App\Services\ControlD\ControlDClient;
@@ -1270,12 +1271,31 @@ class TriageToolExecutor
 
     // ── Comet Backup Tools ──
 
-    private function resolveCometAsset(string $hostname): ?\App\Models\Asset
+    /**
+     * The bound client's Comet-linked asset for a hostname, through the SAME
+     * CometClientScope rule the staff MCP toolset uses (card 6abe578e):
+     *  - C-2: an unmapped client (no comet_group_id) is refused, never served
+     *    from leftover rows;
+     *  - C-1: two or more matching linked rows fail closed, listing this
+     *    client's candidate asset ids.
+     * Returns the asset, or an error array to hand straight back to the agent.
+     *
+     * @return \App\Models\Asset|array<string, mixed>
+     */
+    private function resolveCometAsset(string $hostname): \App\Models\Asset|array
     {
-        return \App\Models\Asset::where('client_id', $this->clientId)
-            ->whereNotNull('comet_device_id')
-            ->whereRaw('LOWER(hostname) = ?', [strtolower($hostname)])
-            ->first();
+        $client = \App\Models\Client::find($this->clientId);
+        if ($client === null) {
+            return ['error' => "PSA client {$this->clientId} was not found."];
+        }
+
+        $unmapped = CometClientScope::unmappedError($client);
+        if ($unmapped !== null) {
+            return ['error' => $unmapped];
+        }
+
+        return CometClientScope::linkedAssetByHostname($client->id, $hostname)
+            ?? ['error' => "No Comet-linked asset found for hostname '{$hostname}' in this client"];
     }
 
     private function executeCometGetBackupStatus(array $input): array
@@ -1286,8 +1306,8 @@ class TriageToolExecutor
         }
 
         $asset = $this->resolveCometAsset($hostname);
-        if (! $asset) {
-            return ['error' => "No Comet-linked asset found for hostname '{$hostname}' in this client"];
+        if (is_array($asset)) {
+            return $asset;
         }
 
         $jobService = new CometJobService(app(CometClient::class));
@@ -1336,8 +1356,8 @@ class TriageToolExecutor
         }
 
         $asset = $this->resolveCometAsset($hostname);
-        if (! $asset) {
-            return ['error' => "No Comet-linked asset found for hostname '{$hostname}' in this client"];
+        if (is_array($asset)) {
+            return $asset;
         }
 
         $days = $input['days'] ?? 7;

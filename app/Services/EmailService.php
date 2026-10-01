@@ -1319,16 +1319,33 @@ PROMPT;
             }
         }
 
-        // Strategy 2: hostname → asset → client (fallback if API lookup fails)
+        // Strategy 2: hostname → asset → client (fallback if API lookup fails).
+        // Fail closed (card 6abe578e, Z-S2): a hostname matching assets of MORE than
+        // one Zorus-mapped client is not attributable, so the email stays unattributed
+        // and only the count is logged. Within the one matching client, more than one
+        // matching asset means no asset link; the client attribution stands.
         if (! $client && $hostname) {
-            $asset = \App\Models\Asset::where(fn ($q) => $q
+            $matches = \App\Models\Asset::where(fn ($q) => $q
                 ->whereRaw('LOWER(hostname) = ?', [strtolower($hostname)])
                 ->orWhereRaw('LOWER(name) = ?', [strtolower($hostname)]))
                 ->whereHas('client', fn ($q) => $q->whereNotNull('zorus_customer_id'))
-                ->first();
+                ->orderBy('id')
+                ->get(['id', 'client_id']);
 
-            if ($asset) {
-                $client = $asset->client;
+            $clientIds = $matches->pluck('client_id')->unique()->values();
+
+            if ($clientIds->count() > 1) {
+                Log::info('[EmailService] Zorus unblock request: hostname matches assets of more than one client; left unattributed', [
+                    'email_id' => $email->id,
+                    'matching_client_count' => $clientIds->count(),
+                ]);
+
+                return $email;
+            }
+
+            if ($clientIds->count() === 1) {
+                $client = Client::find($clientIds->first());
+                $asset = $matches->count() === 1 ? \App\Models\Asset::find($matches->first()->id) : null;
                 $resolvedVia = 'hostname';
             }
         }
@@ -1345,12 +1362,24 @@ PROMPT;
 
         $updates = ['client_id' => $client->id];
 
-        // Find the asset within this client if we didn't already
+        // Find the asset within this client if we didn't already. More than one
+        // match is ambiguous: no asset link (Z-S2), the client attribution stands.
         if (! $asset && $hostname) {
-            $asset = \App\Models\Asset::where('client_id', $client->id)
+            $assetMatches = \App\Models\Asset::where('client_id', $client->id)
                 ->where(fn ($q) => $q->whereRaw('LOWER(hostname) = ?', [strtolower($hostname)])
                     ->orWhereRaw('LOWER(name) = ?', [strtolower($hostname)]))
-                ->first();
+                ->orderBy('id')
+                ->limit(2)
+                ->get();
+
+            $asset = $assetMatches->count() === 1 ? $assetMatches->first() : null;
+
+            if ($assetMatches->count() > 1) {
+                Log::info('[EmailService] Zorus unblock request: hostname matches more than one asset in the client; no asset link', [
+                    'email_id' => $email->id,
+                    'client_id' => $client->id,
+                ]);
+            }
         }
 
         // Resolve person: try name match first, then contract-based

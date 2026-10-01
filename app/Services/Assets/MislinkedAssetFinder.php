@@ -5,8 +5,10 @@ namespace App\Services\Assets;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Person;
+use App\Models\ScreenConnectWebhook;
 use App\Models\TacticalAsset;
 use App\Services\Chet\ChetDataSurfaceTextSanitizer;
+use App\Services\ScreenConnect\ScreenConnectSyncService;
 use Illuminate\Support\Collection;
 
 /**
@@ -30,6 +32,14 @@ use Illuminate\Support\Collection;
  *     3. duplicate_hostname_cross_client — same hostname under 2+ clients,
  *        deduped against rule 2 and SUPPRESSED when the colliding rows' serials
  *        are both present and differ (generic names collide honestly).
+ *     7. screenconnect_company_contradiction — the asset carries a ScreenConnect
+ *        session id, and the company on the NEWEST screenconnect_webhooks row for
+ *        that session resolves (through ScreenConnectSyncService::
+ *        resolveCompanyClient, the same rule the ingest uses) to a DIFFERENT PSA
+ *        client than the asset's own client_id. The asset persists no ScreenConnect
+ *        company, so the stored webhook payload is the only local evidence; a
+ *        session that never sent a webhook, or whose newest company is missing,
+ *        unresolved or ambiguous, yields no finding (card 6abe578e).
  *
  *   Tier B — suspect, human-eyes (never merged into A):
  *     4. last_user_foreign_contact    — last_user resolves, on local part AND
@@ -205,7 +215,11 @@ class MislinkedAssetFinder
         'own_serial' => 'Asset serial number',
         'tactical_agent_id' => 'Tactical agent id',
         'tactical_site_key' => 'Tactical client site key',
+        'screenconnect_session_id' => 'ScreenConnect session id',
     ];
+
+    /** Session ids per whereIn() batch when reading the newest ScreenConnect webhook per session (rule 7). */
+    private const SC_SESSION_CHUNK = 500;
 
     public function __construct(
         private readonly ChetDataSurfaceTextSanitizer $textSanitizer,
@@ -251,6 +265,8 @@ class MislinkedAssetFinder
             ? $universe
             : $universe->where('client_id', $clientId)->values();
 
+        $scCompanyBySession = $this->screenConnectCompanyClients($subjects);
+
         $tierA = [];
         $tierB = [];
 
@@ -272,6 +288,9 @@ class MislinkedAssetFinder
 
             // Rule 6 — hostname carries another client's learned dominant prefix.
             $this->evaluateForeignPrefix($asset, $prefixOwner, $clientDominantPrefixes, $clients, $tierB);
+
+            // Rule 7 — the newest ScreenConnect webhook company contradicts the PSA row.
+            $this->evaluateScreenConnectContradiction($asset, $scCompanyBySession, $clients, $tierA);
         }
 
         $tierATruncated = count($tierA) > $limit;
@@ -282,8 +301,8 @@ class MislinkedAssetFinder
             'client_id' => $clientId,
             'include_inactive' => $includeInactive,
             'limit' => $limit,
-            'caveat' => 'Absence of a Tier A hit is not proof a client is clean — it only proves no contradicting source exists; an asset with no RMM id has nothing to contradict.',
-            'rmm_authority_note' => 'Rule 1 (RMM contradicts the PSA row) is resolved locally only for Tactical, whose agent client|site is persisted per asset and maps to clients.tactical_site_id. Ninja and Level persist only the device id, not the device\'s org/group, so their agent→PSA-client authority cannot be reconstructed from local data — no Ninja/Level rule-1 hit is computed here, and that absence is not proof those links are correct.',
+            'caveat' => 'Absence of a Tier A hit is not proof a client is clean — it only proves no contradicting source exists; an asset with no RMM id or ScreenConnect session id has nothing to contradict, and a ScreenConnect session whose newest webhook carries no company that resolves to exactly one client is not evidence either way.',
+            'rmm_authority_note' => 'Rule 1 (RMM contradicts the PSA row) is resolved locally only for Tactical, whose agent client|site is persisted per asset and maps to clients.tactical_site_id. Ninja and Level persist only the device id, not the device\'s org/group, so their agent→PSA-client authority cannot be reconstructed from local data — no Ninja/Level rule-1 hit is computed here, and that absence is not proof those links are correct. ScreenConnect (screenconnect_company_contradiction) persists no company on the asset either; its evidence is the company on the newest stored webhook for the asset\'s session id, resolved by the same exact, case-insensitive, unambiguous client-name rule the webhook ingest uses. A session that has never sent a webhook, or whose company is missing, unresolved or matches more than one client, yields no hit, and that absence is not proof the link is correct.',
             'tier_a_count' => count($tierA),
             'tier_b_count' => count($tierB),
             'tier_a_truncated' => $tierATruncated,
@@ -306,6 +325,7 @@ class MislinkedAssetFinder
                 'id', 'client_id', 'name', 'hostname', 'serial_number',
                 'ip_address', 'last_user', 'is_active',
                 'ninja_id', 'level_id', 'tactical_asset_id',
+                'screenconnect_session_id',
             ]);
     }
 
@@ -571,6 +591,96 @@ class MislinkedAssetFinder
                 'tactical_agent_id' => $ta->agent_id,
                 'tactical_site_key' => $siteKey,
                 'authority' => 'clients.tactical_site_id',
+            ]);
+    }
+
+    /**
+     * Rule 7 evidence: for each SUBJECT asset's ScreenConnect session id, the PSA
+     * client that the company on that session's NEWEST screenconnect_webhooks row
+     * resolves to, through the ingest's own rule
+     * (ScreenConnectSyncService::resolveCompanyClient: exact, case-insensitive,
+     * null when ambiguous). Sessions whose newest company resolves to no client are
+     * omitted, so they yield no finding.
+     *
+     * Bounded read: MAX(id) per session over the subjects' session ids only (the
+     * session_id column is indexed), in chunks, then just those rows. This is never
+     * a full-table PHP load. screenconnect_webhooks rows are not pruned
+     * (integrations:prune-webhooks covers tactical/ninja only), but a session that
+     * never sent a webhook has no evidence here.
+     *
+     * @param  Collection<int, Asset>  $subjects
+     * @return array<string, int> session id → resolved PSA client id
+     */
+    private function screenConnectCompanyClients(Collection $subjects): array
+    {
+        $sessionIds = $subjects->pluck('screenconnect_session_id')
+            ->filter(fn ($id) => is_string($id) && $id !== '')
+            ->unique()->values();
+
+        $resolved = [];
+        $byCompany = [];
+
+        foreach ($sessionIds->chunk(self::SC_SESSION_CHUNK) as $chunk) {
+            $latestIds = ScreenConnectWebhook::query()
+                ->whereIn('session_id', $chunk->all())
+                ->groupBy('session_id')
+                ->selectRaw('MAX(id) as latest_id')
+                ->pluck('latest_id');
+
+            if ($latestIds->isEmpty()) {
+                continue;
+            }
+
+            $rows = ScreenConnectWebhook::query()
+                ->whereIn('id', $latestIds->all())
+                ->get(['id', 'session_id', 'payload']);
+
+            foreach ($rows as $row) {
+                $payload = is_array($row->payload) ? ScreenConnectSyncService::normalizePayload($row->payload) : [];
+                $company = $payload['company'] ?? null;
+                if (! is_string($company) || trim($company) === '') {
+                    continue;
+                }
+
+                $key = mb_strtolower($company);
+                if (! array_key_exists($key, $byCompany)) {
+                    $byCompany[$key] = ScreenConnectSyncService::resolveCompanyClient($company, false)?->id;
+                }
+
+                if ($byCompany[$key] !== null) {
+                    $resolved[(string) $row->session_id] = (int) $byCompany[$key];
+                }
+            }
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param  array<string, int>  $scCompanyBySession
+     * @param  array<int, array{name: string, is_active: bool}>  $clients
+     * @param  array<int, array<string, mixed>>  $tierA
+     */
+    private function evaluateScreenConnectContradiction(Asset $asset, array $scCompanyBySession, array $clients, array &$tierA): void
+    {
+        $sessionId = $asset->screenconnect_session_id;
+        if (! is_string($sessionId) || $sessionId === '' || $asset->client_id === null) {
+            return;
+        }
+
+        $companyClientId = $scCompanyBySession[$sessionId] ?? null;
+
+        // No resolvable company → nothing to contradict (absence is not a hit).
+        if ($companyClientId === null || $companyClientId === (int) $asset->client_id) {
+            return;
+        }
+
+        $tierA[] = $this->finding($asset, 'screenconnect_company_contradiction',
+            'Newest ScreenConnect webhook for this asset\'s session names a company that resolves to a different PSA client than the asset row',
+            $companyClientId, $clients, [
+                'source' => 'screenconnect',
+                'screenconnect_session_id' => $sessionId,
+                'authority' => 'screenconnect_webhooks newest company → clients.name (exact, unambiguous)',
             ]);
     }
 
