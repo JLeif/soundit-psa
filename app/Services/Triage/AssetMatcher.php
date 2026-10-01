@@ -73,21 +73,28 @@ class AssetMatcher
         }
 
         // === Strategy 4: Hostname from ticket text ===
+        // Fail closed (card 6abe578e): a hostname matching two or more of the client's
+        // assets is ambiguous, so it links nothing and the next candidate is tried.
         $summaryText = ($ticket->subject ?? '')."\n".($ticket->description ?? '');
         $hostnames = HostnameExtractor::extractHostnames($summaryText);
         if ($hostnames) {
             foreach ($hostnames as $hostname) {
-                $asset = Asset::where('client_id', $clientId)
+                $matches = Asset::where('client_id', $clientId)
                     ->whereRaw('UPPER(hostname) = ?', [strtoupper($hostname)])
-                    ->first();
+                    ->orderBy('id')
+                    ->limit(2)
+                    ->get();
 
-                if (! $asset) {
-                    $asset = Asset::where('client_id', $clientId)
+                if ($matches->isEmpty()) {
+                    $matches = Asset::where('client_id', $clientId)
                         ->whereRaw('UPPER(name) = ?', [strtoupper($hostname)])
-                        ->first();
+                        ->orderBy('id')
+                        ->limit(2)
+                        ->get();
                 }
 
-                if ($asset) {
+                if ($matches->count() === 1) {
+                    $asset = $matches->first();
                     self::linkAsset($ticket, $asset, 'hostname_in_text');
 
                     return $asset;

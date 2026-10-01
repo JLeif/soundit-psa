@@ -101,7 +101,10 @@ class ScreenConnectSyncService
         $asset = $this->resolveAsset($sessionId, $hostname, $client);
 
         if (! $asset) {
-            return "No matching asset for session {$sessionId} (host: {$hostname}, company: {$company})";
+            // Ids only (card 6abe578e): an ambiguous company resolves to no client and lands
+            // here, so neither the company string nor the guest hostname is echoed into this
+            // result, which the job logs and stores on the webhook row.
+            return "No matching asset for session {$sessionId}";
         }
 
         // W1 (card 6abe578e): fail closed on a contradicted attribution. The session id

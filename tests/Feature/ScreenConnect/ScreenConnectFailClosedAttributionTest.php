@@ -169,6 +169,10 @@ class ScreenConnectFailClosedAttributionTest extends TestCase
 
         $this->assertSame('skipped', $webhook->status, 'an ambiguous company must not resolve, so no hostname link is made');
         $this->assertNull($asset->fresh()->screenconnect_session_id);
+        // Ids only: the ambiguous company string and the hostname never reach webhook.error.
+        $this->assertStringContainsString(self::SESSION, (string) $webhook->error);
+        $this->assertStringNotContainsStringIgnoringCase('Alpha Co', (string) $webhook->error);
+        $this->assertStringNotContainsStringIgnoringCase('Test-MBP', (string) $webhook->error);
     }
 
     public function test_w3_a_soft_deleted_namesake_takes_no_part_and_an_inactive_one_does(): void

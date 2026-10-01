@@ -1076,13 +1076,21 @@ PROMPT;
             if ($parsed) {
                 $ticketData['description'] = ZorusEmailParser::buildDescription($parsed);
 
-                // Link the asset by hostname so the ticket has the device attached
+                // Link the asset by hostname so the ticket has the device attached. Fail closed
+                // (card 6abe578e, Z-S2): two or more of the client's assets matching the
+                // hostname are ambiguous, so none is attached.
                 $zorusHostname = $parsed['hostname'] ? html_entity_decode($parsed['hostname']) : null;
                 if ($zorusHostname && $email->client_id) {
-                    $zorusAsset = \App\Models\Asset::where('client_id', $email->client_id)
+                    $zorusMatches = \App\Models\Asset::where('client_id', $email->client_id)
                         ->where(fn ($q) => $q->whereRaw('LOWER(hostname) = ?', [strtolower($zorusHostname)])
                             ->orWhereRaw('LOWER(name) = ?', [strtolower($zorusHostname)]))
-                        ->first();
+                        ->orderBy('id')
+                        ->limit(2)
+                        ->get();
+
+                    if ($zorusMatches->count() === 1) {
+                        $zorusAsset = $zorusMatches->first();
+                    }
                 }
             }
         } else {
