@@ -201,6 +201,68 @@ class ZorusClientIdResolutionTest extends TestCase
         $this->assertNoBravo(json_encode($wild), 'wildcard hostname');
     }
 
+    public function test_the_filtering_enabled_filter_and_its_miss_note_stay_inside_the_client(): void
+    {
+        $alphaOff = $this->linked($this->alpha, 'Alpha-OFF', 'aaaaaaaa-0000-0000-0000-000000000008', ['zorus_filtering_enabled' => false])->id;
+        $this->linked($this->bravo, 'Bravo-OFF', 'bbbbbbbb-0000-0000-0000-000000000009', ['zorus_filtering_enabled' => false, 'zorus_group_name' => self::BRAVO_GROUP]);
+
+        // Bravo has a linked row on each side of the filter, so a filter that escaped
+        // the client scope would add one of Bravo's rows to either answer.
+        $on = $this->ok($this->mcp('zorus_list_endpoints', ['client_id' => $this->alpha->id, 'filtering_enabled' => true]));
+        $this->assertSame($this->alphaIds, $this->ids($on['endpoints']));
+        $this->assertNoBravo(json_encode($on), 'filtering_enabled true');
+
+        $off = $this->ok($this->mcp('zorus_list_endpoints', ['client_id' => $this->alpha->id, 'filtering_enabled' => false]));
+        $this->assertSame([$alphaOff], $this->ids($off['endpoints']));
+        $this->assertNoBravo(json_encode($off), 'filtering_enabled false');
+
+        // Positive control: the miss note's filter-interaction count is reached, and
+        // reports a hostname match inside the client that the filter excluded.
+        $own = $this->ok($this->mcp('zorus_list_endpoints', ['client_id' => $this->alpha->id, 'hostname' => 'Alpha-OFF', 'filtering_enabled' => true]));
+        $this->assertSame([], $own['endpoints']);
+        $this->assertStringContainsString("1 Zorus-linked endpoint(s) matched hostname 'Alpha-OFF'", $own['no_match_note']);
+
+        // That count must never see another client's endpoint: a Bravo hostname under
+        // either filter value is a plain miss, not a filtered-out match.
+        foreach (['Bravo-WS', 'Bravo-OFF'] as $host) {
+            foreach ([true, false] as $filter) {
+                $label = "{$host} filtering_enabled=".json_encode($filter);
+                $result = $this->ok($this->mcp('zorus_list_endpoints', ['client_id' => $this->alpha->id, 'hostname' => $host, 'filtering_enabled' => $filter]));
+
+                $this->assertSame(0, $result['count'], $label);
+                $this->assertSame($this->alpha->id, $result['psa_client_id'], $label);
+                $this->assertStringNotContainsString('Zorus-linked endpoint(s) matched', $result['no_match_note'], $label);
+                $this->assertStringContainsString('No PSA asset for this client matches', $result['no_match_note'], $label);
+                $this->assertNoBravo(str_replace($host, '<query>', json_encode($result, JSON_UNESCAPED_SLASHES)), $label);
+            }
+        }
+    }
+
+    public function test_fleet_coverage_lifecycle_exclusions_count_only_the_clients_own_assets(): void
+    {
+        // Distinct per-client counts, so an exclusion count that dropped its client
+        // scope would report the cross-client sum. Retired = soft-deleted with
+        // is_active left true, the shape AssetService::deleteAsset leaves.
+        Asset::factory()->create(['client_id' => $this->alpha->id, 'hostname' => 'Alpha-INACTIVE', 'name' => 'Alpha-INACTIVE', 'is_active' => false]);
+        Asset::factory()->create(['client_id' => $this->alpha->id, 'hostname' => 'Alpha-RETIRED', 'name' => 'Alpha-RETIRED'])->delete();
+        foreach (['Bravo-INACTIVE-1', 'Bravo-INACTIVE-2'] as $host) {
+            Asset::factory()->create(['client_id' => $this->bravo->id, 'hostname' => $host, 'name' => $host, 'is_active' => false]);
+        }
+        foreach (['Bravo-RETIRED-1', 'Bravo-RETIRED-2', 'Bravo-RETIRED-3'] as $host) {
+            Asset::factory()->create(['client_id' => $this->bravo->id, 'hostname' => $host, 'name' => $host])->delete();
+        }
+
+        $alpha = $this->ok($this->mcp('zorus_get_filtering_status', ['client_id' => $this->alpha->id]));
+        $this->assertSame(2, $alpha['fleet_coverage']['active_total']);
+        $this->assertSame(1, $alpha['fleet_coverage']['inactive_assets_excluded']);
+        $this->assertSame(1, $alpha['fleet_coverage']['retired_assets_excluded']);
+        $this->assertNoBravo(json_encode($alpha), 'alpha lifecycle exclusions');
+
+        $bravo = $this->ok($this->mcp('zorus_get_filtering_status', ['client_id' => $this->bravo->id]));
+        $this->assertSame(2, $bravo['fleet_coverage']['inactive_assets_excluded']);
+        $this->assertSame(3, $bravo['fleet_coverage']['retired_assets_excluded']);
+    }
+
     public function test_undeclared_device_or_customer_keys_are_refused_not_honoured(): void
     {
         $cases = [
