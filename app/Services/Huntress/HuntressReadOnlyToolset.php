@@ -31,6 +31,15 @@ use Illuminate\Support\Facades\Log;
  */
 class HuntressReadOnlyToolset
 {
+    /** Max rows per organizations page this tool requests (pageParams max; the API allows 500). */
+    private const ORG_LIST_MAX_LIMIT = 100;
+
+    /**
+     * Page cap for the PSA-side name scan: at most 20 pages x 100 = 2,000 organizations
+     * per call, i.e. at most 20 requests against the 60 req/min account limit.
+     */
+    private const NAME_SCAN_MAX_PAGES = 20;
+
     private const GENERAL_TOOL_NAMES = [
         'huntress_list_incident_reports',
         'huntress_get_incident_report',
@@ -54,6 +63,7 @@ class HuntressReadOnlyToolset
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID: resolves the Huntress organization through the PSA mapping (preferred over organization_id). An unmapped client is an error, not an empty list.'],
                         'organization_id' => ['type' => 'integer', 'description' => 'Huntress organization ID (must map to a PSA client). Omit to page across all mapped organizations.'],
                         'status' => ['type' => 'string', 'description' => 'Filter by status: sent, closed, dismissed, auto_remediating, deleting, partner_dismissed.'],
                         'severity' => ['type' => 'string', 'description' => 'Filter by severity: low, high, critical.'],
@@ -83,6 +93,7 @@ class HuntressReadOnlyToolset
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID: resolves the Huntress organization through the PSA mapping (preferred over organization_id). An unmapped client is an error, not an empty list.'],
                         'organization_id' => ['type' => 'integer', 'description' => 'Huntress organization ID (must map to a PSA client). Omit to page across mapped + account-level escalations.'],
                         'status' => ['type' => 'string', 'description' => 'Filter by escalation status.'],
                         'severity' => ['type' => 'string', 'description' => 'Filter by severity.'],
@@ -106,12 +117,13 @@ class HuntressReadOnlyToolset
             ],
             [
                 'name' => 'huntress_list_organizations',
-                'description' => 'List Huntress organizations, each annotated with its mapped PSA client (or null when unmapped). Use this to resolve a PSA client to its Huntress organization_id and to discover organizations that still need mapping. Filter by name or key.',
+                'description' => 'List Huntress organizations, each annotated with its mapped PSA client (or null when unmapped). For a PSA client, pass client_id: the organization is resolved through the PSA mapping (a foreign key), not by name. Use name only to find organizations that are NOT mapped yet: it is a case-insensitive substring match done in the PSA over the account\'s organization list (scan capped at 2,000 organizations). Zero results for a name means no organization name contains that text; it does NOT mean a client is unmapped.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'name' => ['type' => 'string', 'description' => 'Filter by organization name.'],
-                        'key' => ['type' => 'string', 'description' => 'Filter by organization key.'],
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID: returns the Huntress organization mapped to it (an unmapped client is an error, not an empty list). Do not combine with name/key/page_token.'],
+                        'name' => ['type' => 'string', 'description' => 'Case-insensitive substring of the organization name, matched in the PSA (e.g. "dent" matches "Example Dental Group"). For unmapped organizations; returns all matches up to limit in one answer, no paging.'],
+                        'key' => ['type' => 'string', 'description' => 'Filter by organization key (exact, applied by Huntress).'],
                         'limit' => ['type' => 'integer', 'description' => 'Max organizations to return (default 50, max 100).'],
                         'page_token' => ['type' => 'string', 'description' => 'Opaque cursor from a previous response next_page_token.'],
                     ],
@@ -120,13 +132,14 @@ class HuntressReadOnlyToolset
             ],
             [
                 'name' => 'huntress_get_organization',
-                'description' => 'Get one Huntress organization by ID, annotated with its mapped PSA client (or null when unmapped), including agent, identity, and incident counts.',
+                'description' => 'Get one Huntress organization, annotated with its mapped PSA client (or null when unmapped), including agent, identity, and incident counts. Pass client_id to get the organization mapped to a PSA client, or organization_id for a specific organization.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
+                        'client_id' => ['type' => 'integer', 'description' => 'PSA client ID: resolves the organization through the PSA mapping. An unmapped client is an error.'],
                         'organization_id' => ['type' => 'integer', 'description' => 'Huntress organization ID.'],
                     ],
-                    'required' => ['organization_id'],
+                    'required' => [],
                 ],
             ],
         ];
@@ -165,19 +178,19 @@ class HuntressReadOnlyToolset
         }
 
         return match ($toolName) {
-            'huntress_list_incident_reports' => $this->listIncidentReports($input),
+            'huntress_list_incident_reports' => $this->listIncidentReports($input, $clientId),
             'huntress_get_incident_report' => $this->getIncidentReport($input),
-            'huntress_list_escalations' => $this->listEscalations($input),
+            'huntress_list_escalations' => $this->listEscalations($input, $clientId),
             'huntress_get_escalation' => $this->getEscalation($input),
-            'huntress_list_organizations' => $this->listOrganizations($input),
-            'huntress_get_organization' => $this->getOrganization($input),
+            'huntress_list_organizations' => $this->listOrganizations($input, $clientId),
+            'huntress_get_organization' => $this->getOrganization($input, $clientId),
             default => ['error' => "Unknown tool: {$toolName}"],
         };
     }
 
     // ── incident reports ───────────────────────────────────────────────────────
 
-    private function listIncidentReports(array $input): array
+    private function listIncidentReports(array $input, ?int $clientId): array
     {
         $mapped = $this->mappedClientsByOrgId();
         $params = $this->pageParams($input, default: 25, max: 100);
@@ -194,7 +207,10 @@ class HuntressReadOnlyToolset
             $params['agent_id'] = $agentId;
         }
 
-        $orgId = $this->positiveInt($input['organization_id'] ?? null);
+        $orgId = $this->scopedOrgId($input, $clientId);
+        if (is_array($orgId)) {
+            return $orgId;
+        }
         if ($orgId !== null) {
             if (! $mapped->has($orgId)) {
                 return ['error' => "Organization {$orgId} is not mapped to a PSA client."];
@@ -252,7 +268,7 @@ class HuntressReadOnlyToolset
 
     // ── escalations ────────────────────────────────────────────────────────────
 
-    private function listEscalations(array $input): array
+    private function listEscalations(array $input, ?int $clientId): array
     {
         $mapped = $this->mappedClientsByOrgId();
         $params = $this->pageParams($input, default: 25, max: 100);
@@ -264,7 +280,10 @@ class HuntressReadOnlyToolset
             }
         }
 
-        $orgId = $this->positiveInt($input['organization_id'] ?? null);
+        $orgId = $this->scopedOrgId($input, $clientId);
+        if (is_array($orgId)) {
+            return $orgId;
+        }
         if ($orgId !== null) {
             if (! $mapped->has($orgId)) {
                 return ['error' => "Organization {$orgId} is not mapped to a PSA client."];
@@ -320,16 +339,44 @@ class HuntressReadOnlyToolset
 
     // ── organizations (account-wide mapping helper) ─────────────────────────────
 
-    private function listOrganizations(array $input): array
+    private function listOrganizations(array $input, ?int $clientId): array
     {
-        $mapped = $this->mappedClientsByOrgId();
-        $params = $this->pageParams($input, default: 50, max: 100);
+        $name = trim((string) ($input['name'] ?? ''));
+        $key = trim((string) ($input['key'] ?? ''));
 
-        foreach (['name', 'key'] as $filter) {
-            $value = trim((string) ($input[$filter] ?? ''));
-            if ($value !== '') {
-                $params[$filter] = $value;
+        // The client link is a foreign key (clients.huntress_organization_id), so a
+        // client-scoped lookup goes through it, never through a name search (Charlie
+        // 10/01, Jeeves ruling on card tIP4JoIG). name/key are for UNMAPPED orgs.
+        if ($clientId !== null) {
+            if ($name !== '' || $key !== '' || trim((string) ($input['page_token'] ?? '')) !== '') {
+                return ['error' => 'client_id resolves the Huntress organization through the PSA mapping; do not combine it with name, key or page_token. Use name/key only to find organizations that are not mapped to a PSA client.'];
             }
+            $orgId = $this->orgIdForClient($clientId);
+            if (is_array($orgId)) {
+                return $orgId;
+            }
+            $org = $this->fetchOrganization($orgId);
+            if (isset($org['error'])) {
+                return $org;
+            }
+
+            return [
+                'count' => 1,
+                'organizations' => [$org],
+                'next_page_token' => null,
+                'match' => 'psa_client_mapping',
+            ];
+        }
+
+        $mapped = $this->mappedClientsByOrgId();
+
+        if ($name !== '') {
+            return $this->listOrganizationsByNameSubstring($input, $name, $key, $mapped);
+        }
+
+        $params = $this->pageParams($input, default: 50, max: self::ORG_LIST_MAX_LIMIT);
+        if ($key !== '') {
+            $params['key'] = $key;
         }
 
         try {
@@ -350,13 +397,202 @@ class HuntressReadOnlyToolset
         ];
     }
 
-    private function getOrganization(array $input): array
+    /**
+     * name is a case-insensitive SUBSTRING filter applied PSA-side. Huntress's own
+     * `name` query parameter matches the whole name exactly (observed: a partial
+     * name returns 0 where the full name returns 1), so it is never sent upstream.
+     * Instead the org list is paged — ORG_LIST_MAX_LIMIT rows per page, the same
+     * max this tool's pageParams() already allows (the API's own max is 500,
+     * api.huntress.io/v1/swagger_doc.json GET /v1/organizations) — for at most
+     * NAME_SCAN_MAX_PAGES pages, and filtered here.
+     *
+     * Fail closed (C-56): an envelope that is not {organizations: [objects...],
+     * pagination: {...}} or a cursor that is neither a string nor absent/null is an
+     * error, never "no match"; a repeated cursor is an error; a scan that stops at
+     * the page cap with more pages left reports scan_complete=false and, if nothing
+     * matched, refuses rather than claim no organization contains the text.
+     *
+     * @param  Collection<int, Client>  $mapped
+     */
+    private function listOrganizationsByNameSubstring(array $input, string $name, string $key, Collection $mapped): array
     {
-        $id = $this->positiveInt($input['organization_id'] ?? null);
-        if ($id === null) {
-            return ['error' => 'organization_id is required'];
+        if (trim((string) ($input['page_token'] ?? '')) !== '') {
+            return ['error' => 'page_token cannot be combined with name: the name filter scans the organization list itself and returns all matches (up to limit) in one answer.'];
         }
 
+        $limit = $this->limit($input, default: 50, max: self::ORG_LIST_MAX_LIMIT);
+        $needle = mb_strtolower($name);
+        $params = ['limit' => self::ORG_LIST_MAX_LIMIT];
+        if ($key !== '') {
+            $params['key'] = $key;
+        }
+
+        $matches = [];
+        $scanned = 0;
+        $pages = 0;
+        $seenTokens = [];
+        $next = null;
+
+        do {
+            try {
+                $response = $this->client()->get('organizations', $params);
+            } catch (\Throwable $e) {
+                return $this->apiError($e);
+            }
+            $pages++;
+
+            $page = $this->organizationsPage($response);
+            if ($page === null) {
+                Log::warning('[Huntress reads] organizations list returned an unrecognised shape', ['page' => $pages]);
+
+                return ['error' => 'Huntress returned an organizations list in an unrecognised shape, so the name search could not be completed. This is not a "no match" answer.'];
+            }
+
+            [$rows, $next] = $page;
+            $scanned += count($rows);
+            foreach ($rows as $row) {
+                $orgName = $row['name'] ?? null;
+                if (is_string($orgName) && str_contains(mb_strtolower($orgName), $needle)) {
+                    $matches[] = $row;
+                }
+            }
+
+            if ($next !== null) {
+                if (isset($seenTokens[$next])) {
+                    return ['error' => 'Huntress repeated a pagination cursor while listing organizations, so the name search could not be completed. This is not a "no match" answer.'];
+                }
+                $seenTokens[$next] = true;
+                $params['page_token'] = $next;
+            }
+        } while ($next !== null && $pages < self::NAME_SCAN_MAX_PAGES);
+
+        $complete = $next === null;
+        if (! $complete && $matches === []) {
+            return ['error' => 'No organization name containing that text was found in the first '.$scanned.' organizations, but the account has more than the '.self::NAME_SCAN_MAX_PAGES.'-page scan limit covers, so absence cannot be asserted. Narrow with key, or use client_id for a mapped client.'];
+        }
+
+        $total = count($matches);
+        $organizations = array_map(
+            fn (array $row): array => $this->mapOrganization($row, $mapped),
+            array_slice($matches, 0, $limit),
+        );
+
+        return [
+            'count' => count($organizations),
+            'total_matches' => $total,
+            'organizations' => $organizations,
+            'next_page_token' => null,
+            'match' => 'name_substring_case_insensitive',
+            'organizations_scanned' => $scanned,
+            'scan_complete' => $complete,
+            'note' => $complete
+                ? ($total === 0
+                    ? 'No Huntress organization name contains this text (case-insensitive). That says nothing about whether a PSA client is mapped — use client_id to look up a mapped client.'
+                    : null)
+                : 'Scan stopped at the '.self::NAME_SCAN_MAX_PAGES.'-page limit; more organizations exist that were not searched.',
+        ];
+    }
+
+    /**
+     * Strict read of one GET /v1/organizations page (swagger: required organizations
+     * + pagination; Pagination.next_page_token is a string). Returns [rows, next] or
+     * null on any other shape.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{0: array<int, array<string, mixed>>, 1: ?string}|null
+     */
+    private function organizationsPage(array $response): ?array
+    {
+        $rows = $response['organizations'] ?? null;
+        if (! is_array($rows) || ! array_is_list($rows)) {
+            return null;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row) || array_is_list($row) && $row !== []) {
+                return null;
+            }
+        }
+
+        if (! array_key_exists('pagination', $response) || ! is_array($response['pagination'])) {
+            return null;
+        }
+        $token = $response['pagination']['next_page_token'] ?? null;
+        if ($token !== null && ! is_string($token)) {
+            return null;
+        }
+
+        return [$rows, ($token === null || $token === '') ? null : $token];
+    }
+
+    private function getOrganization(array $input, ?int $clientId): array
+    {
+        $id = $this->positiveInt($input['organization_id'] ?? null);
+
+        if ($clientId !== null) {
+            $mappedId = $this->orgIdForClient($clientId);
+            if (is_array($mappedId)) {
+                return $mappedId;
+            }
+            if ($id !== null && $id !== $mappedId) {
+                return ['error' => "organization_id {$id} is not the Huntress organization mapped to PSA client {$clientId}. Pass one or the other."];
+            }
+            $id = $mappedId;
+        }
+
+        if ($id === null) {
+            return ['error' => 'organization_id or client_id is required'];
+        }
+
+        return $this->fetchOrganization($id);
+    }
+
+    /**
+     * The Huntress org id a PSA client is mapped to, or an error payload. Unmapped is
+     * an explicit refusal, never an empty result.
+     *
+     * @return int|array{error: string}
+     */
+    private function orgIdForClient(int $clientId): int|array
+    {
+        $client = Client::find($clientId);
+        if ($client === null) {
+            return ['error' => "PSA client {$clientId} was not found."];
+        }
+
+        $orgId = $this->positiveInt($client->huntress_organization_id);
+        if ($orgId === null) {
+            return ['error' => "PSA client {$clientId} ({$client->name}) is not mapped to a Huntress organization. Map it in Settings > Huntress Organization Mapping, or search unmapped organizations with huntress_list_organizations name (case-insensitive substring)."];
+        }
+
+        return $orgId;
+    }
+
+    /**
+     * Resolve the client_id / organization_id pair for the security list tools to the
+     * organization_id to send, or an error payload.
+     *
+     * @return int|array{error: string}|null
+     */
+    private function scopedOrgId(array $input, ?int $clientId): int|array|null
+    {
+        $orgId = $this->positiveInt($input['organization_id'] ?? null);
+        if ($clientId === null) {
+            return $orgId;
+        }
+
+        $mappedId = $this->orgIdForClient($clientId);
+        if (is_array($mappedId)) {
+            return $mappedId;
+        }
+        if ($orgId !== null && $orgId !== $mappedId) {
+            return ['error' => "organization_id {$orgId} is not the Huntress organization mapped to PSA client {$clientId}. Pass one or the other."];
+        }
+
+        return $mappedId;
+    }
+
+    private function fetchOrganization(int $id): array
+    {
         try {
             $response = $this->client()->getOrganization($id);
         } catch (\Throwable $e) {

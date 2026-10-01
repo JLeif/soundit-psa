@@ -130,6 +130,21 @@ class ScreenConnectSyncService
         return Client::whereRaw('LOWER(name) = ?', [mb_strtolower($company)])->first();
     }
 
+    /**
+     * Resolve the asset a webhook session belongs to.
+     *
+     *  1. An asset already carrying this session id.
+     *  2. Otherwise, only when the company resolved to a PSA client, a hostname match
+     *     SCOPED TO THAT CLIENT via ScreenConnectAssetMatcher: the webhook machine name
+     *     is shortened to its first label, then (a) an exact LOWER(hostname)/LOWER(name)
+     *     match is preferred; (b) failing that, an asset whose stored hostname is fully
+     *     qualified with that first label (stored "test-mbp.lan" for "Test-MBP") links
+     *     ONLY if it is the client's single such asset. Two or more first-label
+     *     candidates are ambiguous: nothing is linked and a non-PII reason is logged.
+     *
+     * The client must resolve first (resolveClient is an exact, case-insensitive
+     * company-name match); without it there is no hostname match at all — see below.
+     */
     private function resolveAsset(string $sessionId, ?string $hostname, ?Client $client): ?Asset
     {
         // 1. Match by session ID (already linked)
@@ -140,14 +155,10 @@ class ScreenConnectSyncService
 
         // 2. Match by hostname, scoped to client
         if ($hostname && $client) {
-            $shortHostname = explode('.', $hostname)[0];
+            $shortHostname = ScreenConnectAssetMatcher::firstLabel($hostname);
 
-            $asset = Asset::where('client_id', $client->id)
-                ->whereRaw('LOWER(hostname) = ? OR LOWER(name) = ?', [
-                    mb_strtolower($shortHostname),
-                    mb_strtolower($shortHostname),
-                ])
-                ->first();
+            $asset = ScreenConnectAssetMatcher::exactQuery($client->id, $shortHostname)->first()
+                ?? ScreenConnectAssetMatcher::uniqueFirstLabelMatch($client->id, $shortHostname, 'webhook');
 
             if ($asset) {
                 return $asset;

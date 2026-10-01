@@ -331,25 +331,26 @@ class ScreenConnectReadOnlyToolset
             return $asset;
         }
 
-        // Webhooks store the SHORT machine name (ScreenConnectSyncService strips the
-        // domain), so a fully-qualified input gets a second chance by its host part.
-        $short = explode('.', $hostname)[0];
+        // A fully-qualified input gets a second chance by its host part (the asset may
+        // be stored short). The reverse also happens: the asset may be stored fully
+        // qualified ("test-mbp.lan", e.g. from an RMM) while the caller passes the short
+        // name. That is the same first-label rule the webhook ingest uses, shared via
+        // ScreenConnectAssetMatcher — exact first, then a UNIQUE first-label match;
+        // ambiguous first-label matches resolve to "not found", never a guess.
+        $short = ScreenConnectAssetMatcher::firstLabel($hostname);
         if ($short !== '' && mb_strtolower($short) !== mb_strtolower($hostname)) {
-            return $this->assetByName($short, $clientId);
+            $asset = $this->assetByName($short, $clientId);
+            if ($asset !== null) {
+                return $asset;
+            }
         }
 
-        return null;
+        return ScreenConnectAssetMatcher::uniqueFirstLabelMatch($clientId, $short, 'read_tool');
     }
 
     private function assetByName(string $name, int $clientId): ?Asset
     {
-        $lower = mb_strtolower($name);
-
-        return Asset::where('client_id', $clientId)
-            ->where(function (Builder $query) use ($lower) {
-                $query->whereRaw('LOWER(hostname) = ?', [$lower])
-                    ->orWhereRaw('LOWER(name) = ?', [$lower]);
-            })
+        return ScreenConnectAssetMatcher::exactQuery($clientId, $name)
             // Prefer the ScreenConnect-linked row when a hostname is duplicated
             // (NULL synced_at sorts last on DESC in both MariaDB and SQLite).
             ->orderByDesc('screenconnect_synced_at')

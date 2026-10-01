@@ -353,6 +353,15 @@ class McpStaffController extends Controller
         // The entry only ADDS a refusal; an omitted client_id keeps the unscoped read.
         'get_email_item',
         'get_phone_call',
+
+        // Card tIP4JoIG: the Huntress reads gained an OPTIONAL client_id that resolves
+        // the org through clients.huntress_organization_id. Omitted, the list tools
+        // read every mapped org (organizations: the whole account), so a malformed
+        // client_id collapsing to null would widen exactly as above. Only ADDS a refusal.
+        'huntress_list_incident_reports',
+        'huntress_list_escalations',
+        'huntress_list_organizations',
+        'huntress_get_organization',
     ];
 
     /**
