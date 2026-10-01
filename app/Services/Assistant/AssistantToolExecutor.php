@@ -3069,9 +3069,9 @@ class AssistantToolExecutor
     // CIPP MCP relay when it is enabled, falling back to the direct CippClient path
     // when it is not, or when the relay cannot sign in.
 
-    protected function cippTenantDomain(): ?string
+    protected function cippScopeClient(): ?Client
     {
-        return $this->client?->cipp_tenant_domain;
+        return $this->client;
     }
 
     protected function cippLogPrefix(): string

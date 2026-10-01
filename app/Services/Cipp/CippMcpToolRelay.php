@@ -109,9 +109,11 @@ class CippMcpToolRelay
             return ['error' => 'Unsupported CIPP MCP argument(s): '.implode(', ', $unknownArguments)];
         }
 
-        $tenantDomain = $client?->cipp_tenant_domain;
-        if (! $tenantDomain) {
-            return ['error' => 'Client has no CIPP tenant mapping'];
+        // The same resolver HandlesCippTools::cippDispatch() already consulted (card
+        // 6abdcac2): the relay must not be safe only because of who calls it.
+        $tenantDomain = CippTenantScope::resolve($client, $clientId);
+        if (is_array($tenantDomain)) {
+            return $tenantDomain;
         }
 
         $prepared = $this->prepareCall($toolName, $input, $tenantDomain, $clientId);

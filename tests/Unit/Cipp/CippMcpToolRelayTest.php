@@ -32,11 +32,9 @@ class CippMcpToolRelayTest extends TestCase
 
     private function execute(CippMcpToolRelay $relay): array
     {
-        $client = new Client(['cipp_tenant_domain' => 'acme.example']);
-
         return $relay->execute('cipp_list_mailbox_permissions', [
             'user_id' => '11111111-1111-1111-1111-111111111111',
-        ], $client, null);
+        ], ...$this->acmeScope());
     }
 
     /**
@@ -51,9 +49,19 @@ class CippMcpToolRelayTest extends TestCase
         return new CippMcpToolRelay($mcp, app(ChetDataSurfaceTextSanitizer::class));
     }
 
-    private function acme(): Client
+    /**
+     * A saved acme and its own id: the relay resolves the tenant from client_id through
+     * the stored CIPP mapping (CippTenantScope, card 6abdcac2), as every production
+     * caller supplies it. An unsaved Client with a null id is a scope no caller has.
+     *
+     * @return array{0: Client, 1: int}
+     */
+    private function acmeScope(): array
     {
-        return new Client(['cipp_tenant_domain' => 'acme.example']);
+        $client = Client::query()->where('cipp_tenant_domain', 'acme.example')->first()
+            ?? Client::factory()->create(['cipp_tenant_domain' => 'acme.example']);
+
+        return [$client, $client->id];
     }
 
     /**
@@ -125,7 +133,7 @@ class CippMcpToolRelayTest extends TestCase
             'userPrincipalName' => 'user@acme.example',
             'primarySmtpAddress' => 'user@acme.example',
             'litigationHoldEnabled' => true,
-        ]])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertTrue($result[0]['litigationHoldEnabled']);
@@ -140,7 +148,7 @@ class CippMcpToolRelayTest extends TestCase
         $result = $this->relay([[
             'userPrincipalName' => 'user@acme.example',
             'LitigationHoldEnabled' => true,
-        ]])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertTrue($result[0]['litigationHoldEnabled']);
@@ -154,7 +162,7 @@ class CippMcpToolRelayTest extends TestCase
         $result = $this->relay([[
             'userPrincipalName' => 'user@acme.example',
             'LitigationHoldEnabled' => false,
-        ]])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertArrayHasKey('litigationHoldEnabled', $result[0]);
@@ -190,7 +198,7 @@ class CippMcpToolRelayTest extends TestCase
     public function test_mailboxes_projection_reads_the_real_cipp_row_shape(): void
     {
         $result = $this->relay([$this->realListMailboxesRow()])
-            ->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+            ->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         // UPN is aliased, so the caller-facing key stays userPrincipalName.
@@ -207,7 +215,7 @@ class CippMcpToolRelayTest extends TestCase
         // Chet was blind to auto-forwarding (psa-7lgo).
         $result = $this->relay([$this->realListMailboxesRow([
             'ForwardingSmtpAddress' => 'attacker@evil.example',
-        ])])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ])])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertSame('attacker@evil.example', $result[0]['forwardingSmtpAddress']);
@@ -222,7 +230,7 @@ class CippMcpToolRelayTest extends TestCase
         $result = $this->relay([$this->realListMailboxesRow([
             'ForwardingSmtpAddress' => 'attacker@evil.example',
             'DeliverToMailboxAndForward' => false,
-        ])])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ])])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertArrayHasKey('deliverToMailboxAndForward', $result[0]);
@@ -265,7 +273,7 @@ class CippMcpToolRelayTest extends TestCase
         $result = $this->relay([$this->realMaliciousInboxRuleRow()])
             ->execute('cipp_list_mailbox_rules', [
                 'user_id' => '11111111-1111-1111-1111-111111111111',
-            ], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+            ], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertNotSame([], $result[0], 'mailbox rule row projected empty — every field missed');
@@ -320,7 +328,7 @@ class CippMcpToolRelayTest extends TestCase
         $this->relayCapturingCall([$this->realMaliciousInboxRuleRow()], $captured)
             ->execute('cipp_list_mailbox_rules', [
                 'user_id' => 'user@acme.example',
-            ], $this->acme(), null);
+            ], ...$this->acmeScope());
 
         $this->assertSame('ListUserMailboxRules', $captured['tool']);
         $this->assertNotSame('ListMailboxRules', $captured['tool']);
@@ -341,7 +349,7 @@ class CippMcpToolRelayTest extends TestCase
 
         $result = $this->relay([$mine, $theirs])->execute('cipp_list_mailbox_rules', [
             'user_id' => 'user@acme.example',
-        ], $this->acme(), null);
+        ], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertStringContainsString('attacker@evil.example', $result[0]['forwardTo'][0]);
@@ -364,7 +372,7 @@ class CippMcpToolRelayTest extends TestCase
 
         $result = $this->relay([$rule])->execute('cipp_list_mailbox_rules', [
             'user_id' => 'user@acme.example',
-        ], $this->acme(), null);
+        ], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertTrue($result[0]['deleteMessage']);
@@ -379,7 +387,7 @@ class CippMcpToolRelayTest extends TestCase
 
         $result = $this->relay([$rule])->execute('cipp_list_mailbox_rules', [
             'user_id' => '11111111-1111-1111-1111-111111111111',
-        ], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertArrayHasKey('enabled', $result[0]);
@@ -397,7 +405,7 @@ class CippMcpToolRelayTest extends TestCase
         $row = $this->realListMailboxesRow();
         unset($row['ForwardingSmtpAddress']);
 
-        $this->relay([$row])->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        $this->relay([$row])->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         // Bound to the STRUCTURED signal, not to the prose. The earlier
         // version matched on the substring 'never resolved', which tied this
@@ -445,7 +453,7 @@ class CippMcpToolRelayTest extends TestCase
             'Status' => 'Delivered',
             'FromIP' => '203.0.113.1',
             'ToIP' => '203.0.113.9',
-        ]])->execute('cipp_list_message_trace', [], $this->acme(), null);
+        ]])->execute('cipp_list_message_trace', [], ...$this->acmeScope());
 
         foreach (['messageTraceId', 'received', 'senderAddress', 'recipientAddress', 'subject', 'status'] as $twin) {
             $this->assertNotContains(
@@ -469,7 +477,7 @@ class CippMcpToolRelayTest extends TestCase
 
         $result = $this->relay([$rule])->execute('cipp_list_mailbox_rules', [
             'user_id' => '11111111-1111-1111-1111-111111111111',
-        ], $this->acme(), null);
+        ], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $this->assertStringContainsString('not instructions', $result[0]['moveToFolder']);
@@ -489,7 +497,7 @@ class CippMcpToolRelayTest extends TestCase
         // properties as null. That is NOT schema drift and must not warn, or
         // the guard is pure noise on healthy tenants.
         $this->relay([$this->realListMailboxesRow(['ForwardingSmtpAddress' => null])])
-            ->execute('cipp_list_mailboxes', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+            ->execute('cipp_list_mailboxes', [], ...$this->acmeScope());
 
         Log::shouldNotHaveReceived('warning');
     }
@@ -517,7 +525,7 @@ class CippMcpToolRelayTest extends TestCase
     public function test_oauth_apps_projection_reads_the_real_cipp_row_shape(): void
     {
         $result = $this->relay([$this->realOAuthAppRow()])
-            ->execute('cipp_list_oauth_apps', [], $this->acme(), null);
+            ->execute('cipp_list_oauth_apps', [], ...$this->acmeScope());
 
         $apps = $result['apps'];
         $this->assertCount(1, $apps);
@@ -541,7 +549,7 @@ class CippMcpToolRelayTest extends TestCase
         // spend an upstream call to do it.
         $result = $this->relayExpectingNoCall()->execute('cipp_list_oauth_apps', [
             'user_id' => 'user@acme.example',
-        ], $this->acme(), null);
+        ], ...$this->acmeScope());
 
         $this->assertArrayHasKey('error', $result);
         $this->assertArrayNotHasKey('apps', $result);
@@ -558,7 +566,7 @@ class CippMcpToolRelayTest extends TestCase
         // for EVERY user, with no error anywhere (psa-idii).
         $result = $this->relayExpectingNoCall()->execute('cipp_list_user_conditional_access', [
             'user_id' => 'user@acme.example',
-        ], $this->acme(), null);
+        ], ...$this->acmeScope());
 
         $this->assertArrayHasKey('error', $result);
         $this->assertStringContainsStringIgnoringCase('unavailable', $result['error']);
@@ -604,7 +612,7 @@ class CippMcpToolRelayTest extends TestCase
     public function test_audit_logs_projection_reads_the_nested_raw_data(): void
     {
         $result = $this->relay([$this->realAuditLogRow()])
-            ->execute('cipp_list_audit_logs', [], $this->acme(), null);
+            ->execute('cipp_list_audit_logs', [], ...$this->acmeScope());
 
         $events = $result['events'];
         $this->assertCount(1, $events);
@@ -624,7 +632,7 @@ class CippMcpToolRelayTest extends TestCase
         // row carries `Timestamp` — so passing `days` dropped 100% of rows and
         // the tool answered "no audit events". Fail-closed on a security read.
         $result = $this->relay([$this->realAuditLogRow()])
-            ->execute('cipp_list_audit_logs', ['days' => 7], $this->acme(), null);
+            ->execute('cipp_list_audit_logs', ['days' => 7], ...$this->acmeScope());
 
         $this->assertSame(1, $result['count']);
         $this->assertCount(1, $result['events']);
@@ -678,7 +686,7 @@ class CippMcpToolRelayTest extends TestCase
         // RelativeTime accepts (\d+)([dhm]) — verified in Invoke-ListAuditLogs.
         $captured = null;
         $this->relayCapturingCall([$this->realAuditLogRow()], $captured)
-            ->execute('cipp_list_audit_logs', ['days' => 30], $this->acme(), null);
+            ->execute('cipp_list_audit_logs', ['days' => 30], ...$this->acmeScope());
 
         $this->assertSame('30d', $captured['arguments']['RelativeTime'] ?? null);
     }
@@ -690,7 +698,7 @@ class CippMcpToolRelayTest extends TestCase
         // filtered_by_days: 30 (psa-536g).
         $captured = null;
         $this->relayCapturingCall([], $captured)
-            ->execute('cipp_list_sign_ins', ['days' => 30], $this->acme(), null);
+            ->execute('cipp_list_sign_ins', ['days' => 30], ...$this->acmeScope());
 
         $this->assertSame(30, $captured['arguments']['Days'] ?? null);
     }
@@ -700,8 +708,7 @@ class CippMcpToolRelayTest extends TestCase
         return $this->relay($upstreamRows)->execute(
             'cipp_list_conditional_access_policies',
             [],
-            new Client(['cipp_tenant_domain' => 'acme.example']),
-            null,
+            ...$this->acmeScope(),
         );
     }
 
@@ -894,7 +901,7 @@ class CippMcpToolRelayTest extends TestCase
             'AssignedUsers' => 'user1@acme.example, user2@acme.example',
             'AssignedGroups' => '',
             'ServicePlans' => [['servicePlanId' => '9aaf7827-d63c-4b61-89c3-182f06f82e5c', 'servicePlanName' => 'EXCHANGE_S_STANDARD']],
-        ]])->execute('cipp_list_licenses', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_licenses', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $row = $result[0];
@@ -966,7 +973,7 @@ class CippMcpToolRelayTest extends TestCase
             ],
         ])->execute('cipp_list_user_groups', [
             'user_id' => '11111111-1111-1111-1111-111111111111',
-        ], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ], ...$this->acmeScope());
 
         $this->assertCount(2, $result);
         [$m365Group, $securityGroup] = $result;
@@ -1007,7 +1014,7 @@ class CippMcpToolRelayTest extends TestCase
             'Status' => 'Delivered',
             'FromIP' => '203.0.113.10',
             'ToIP' => '198.51.100.20',
-        ]])->execute('cipp_list_message_trace', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_message_trace', [], ...$this->acmeScope());
 
         $this->assertSame(1, $result['count']);
         $message = $result['messages'][0];
@@ -1036,7 +1043,7 @@ class CippMcpToolRelayTest extends TestCase
             'ReleaseStatus' => 'NOTRELEASED',
             'Expires' => '2026-07-26T16:42:00',
             'Direction' => 'Inbound',
-        ]])->execute('cipp_list_mail_quarantine', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_mail_quarantine', [], ...$this->acmeScope());
 
         $this->assertSame(1, $result['count']);
         $entry = $result['entries'][0];
@@ -1078,7 +1085,7 @@ class CippMcpToolRelayTest extends TestCase
             'accountEnabled' => true,
             'assignedLicenses' => [['skuId' => 'cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46', 'disabledPlans' => []]],
             'LicJoined' => 'Microsoft 365 Business Premium, Microsoft Teams Phone Standard',
-        ]])->execute('cipp_list_users', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_users', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $user = $result[0];
@@ -1105,7 +1112,7 @@ class CippMcpToolRelayTest extends TestCase
             'enrolledDateTime' => '2025-11-02T10:00:00Z',
             'lastSyncDateTime' => '2026-07-12T22:15:00Z',
             'serialNumber' => 'SN0042',
-        ]])->execute('cipp_list_devices', [], new Client(['cipp_tenant_domain' => 'acme.example']), null);
+        ]])->execute('cipp_list_devices', [], ...$this->acmeScope());
 
         $this->assertCount(1, $result);
         $device = $result[0];

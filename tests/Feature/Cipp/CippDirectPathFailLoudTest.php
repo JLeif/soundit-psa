@@ -14,6 +14,7 @@ use App\Services\Cipp\CippToolContract;
 use App\Services\Triage\TriageToolExecutor;
 use App\Support\CippConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Mockery;
 use Tests\TestCase;
 
@@ -101,6 +102,14 @@ class CippDirectPathFailLoudTest extends TestCase
     private function mallory(string $objectId): Person
     {
         $stranger = Client::factory()->create(['cipp_tenant_domain' => 'evil.onmicrosoft.com']);
+
+        // A second mapped client arms CippTenantScope's alias check, which reads CIPP's
+        // tenant list before any read runs. Give it a usable list in which the two
+        // tenants are distinct, so the attribution guard is what these tests exercise.
+        Cache::put('cipp-tenant-scope:tenant-list', [
+            ['customerId' => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'defaultDomainName' => 'contoso.onmicrosoft.com', 'initialDomainName' => 'contoso.onmicrosoft.com', 'displayName' => 'Contoso'],
+            ['customerId' => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'defaultDomainName' => 'evil.onmicrosoft.com', 'initialDomainName' => 'evil.onmicrosoft.com', 'displayName' => 'Evil'],
+        ]);
 
         return Person::create([
             'client_id' => $stranger->id,
