@@ -244,3 +244,7 @@ A short gold underline (60px, 3px, `::after` on `.section-title`) sits beneath l
 - **Don't** use gold for large fills, backgrounds, or gradients, and don't drench content areas in navy gradients. Identity through restraint, not saturation.
 - **Don't** use a colored left/right border stripe wider than 1px as decoration on cards, callouts, or alerts. The only legitimate left-border is the sidebar's active-position marker.
 - **Don't** set body sentences in all caps or introduce a third type family.
+
+## 7. Mockups (Designs as Code)
+
+New or changed screens are designed first as static HTML under `design/mockups/<area>/<screen>.html`, built only from the tokens above (`design/mockups/_tokens.css`, pinned to this front-matter by a test), and rendered to a committed PNG with `scripts/mockshot`. The PNG is what gets reviewed; a UI build PR cites its mockup and attaches a screenshot of the built page for comparison. Mockups use fake data only and load nothing external. The full convention is [design/mockups/README.md](design/mockups/README.md).
