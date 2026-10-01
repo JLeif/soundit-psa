@@ -33,6 +33,17 @@ class CippClientIdResolutionTest extends TestCase
     /** @var array<int, array{0: string, 1: array<string, mixed>}> */
     private array $sent = [];
 
+    /**
+     * CIPP's tenant list as REST ListTenants answers the resolver's alias check (null:
+     * the read throws). Synthetic rows in the Get-Tenants shape.
+     *
+     * @var array<int|string, mixed>|null
+     */
+    private ?array $tenantList = [
+        ['customerId' => '11111111-1111-1111-1111-111111111111', 'defaultDomainName' => 'alpha.example', 'initialDomainName' => 'alpha.onmicrosoft.example', 'displayName' => 'Alpha'],
+        ['customerId' => '22222222-2222-2222-2222-222222222222', 'defaultDomainName' => 'bravo.example', 'initialDomainName' => 'bravo.onmicrosoft.example', 'displayName' => 'Bravo'],
+    ];
+
     private Client $alpha;
 
     private Client $bravo;
@@ -60,7 +71,11 @@ class CippClientIdResolutionTest extends TestCase
         Setting::setValue('cipp_mcp_enabled', $relay ? '1' : '0');
     }
 
-    /** Record-only fakes for BOTH transports; $rows is what CIPP "answers". */
+    /**
+     * Record-only fakes for BOTH transports; $rows is what CIPP "answers". The REST
+     * ListTenants read the resolver makes for its alias check answers $tenantList and
+     * is kept out of $sent: it carries no tenant.
+     */
     private function fakeTransports(array $rows = [['id' => 'row-1', 'displayName' => 'Row']]): void
     {
         $mcp = Mockery::mock(CippMcpClient::class);
@@ -72,7 +87,14 @@ class CippClientIdResolutionTest extends TestCase
         $this->app->instance(CippMcpClient::class, $mcp);
 
         $rest = Mockery::mock(CippClient::class);
-        $rest->shouldReceive('get')->andReturnUsing(function (string $endpoint, array $query) use ($rows): array {
+        $rest->shouldReceive('get')->andReturnUsing(function (string $endpoint, array $query = []) use ($rows): array {
+            if ($endpoint === 'api/ListTenants') {
+                if ($this->tenantList === null) {
+                    throw new \RuntimeException('CIPP API error: synthetic outage');
+                }
+
+                return $this->tenantList;
+            }
             $this->sent[] = [$endpoint, $query];
 
             return $rows;
@@ -293,6 +315,81 @@ class CippClientIdResolutionTest extends TestCase
         $this->assertContains('client_id', $listed['inputSchema']['required']);
     }
 
+    /** @return array<string, array{0: bool, 1: string}> */
+    public static function aliasDuplicates(): array
+    {
+        return [
+            'relay, initial domain' => [true, 'alpha.onmicrosoft.example'],
+            'rest, initial domain' => [false, ' ALPHA.onmicrosoft.example '],
+            'relay, customer id' => [true, '11111111-1111-1111-1111-111111111111'],
+            'rest, customer id' => [false, '11111111-1111-1111-1111-111111111111'],
+        ];
+    }
+
+    /**
+     * Charlie mapped to one of Alpha's OTHER aliases is Alpha's tenant to CIPP
+     * (Get-Tenants matches customerId, defaultDomainName and initialDomainName), so
+     * neither client may read it, whichever key each one stores.
+     *
+     * @dataProvider aliasDuplicates
+     */
+    public function test_a_tenant_mapped_to_two_clients_under_different_aliases_fails_closed(bool $relay, string $alias): void
+    {
+        $this->configure($relay);
+        $this->fakeTransports();
+        $charlie = Client::factory()->create(['name' => 'Charlie', 'cipp_tenant_domain' => $alias]);
+        $token = $this->token(['cipp_list_users']);
+
+        foreach ([$this->alpha, $charlie] as $client) {
+            $response = $this->mcpCall($token, 'cipp_list_users', ['client_id' => $client->id]);
+            $this->assertTrue((bool) $response->json('result.isError'), $client->name);
+            $this->assertStringContainsString('also mapped, under another of its domains, to another PSA client', $this->text($response), $client->name);
+        }
+        $this->assertSame([], $this->sent);
+
+        // Bravo shares no alias with Alpha or Charlie and still reads.
+        $bravo = $this->mcpCall($token, 'cipp_list_users', ['client_id' => $this->bravo->id]);
+        $this->assertFalse((bool) $bravo->json('result.isError'), $this->text($bravo));
+        $this->assertSame(['bravo.example'], $this->tenantsSent());
+    }
+
+    /** @return array<string, array{0: bool, 1: array<int|string, mixed>|null}> */
+    public static function unusableTenantLists(): array
+    {
+        // CIPP's answer when it could not list tenants (Invoke-ListTenants.ps1).
+        $failed = ['Results' => 'Failed to retrieve tenants', 'defaultDomainName' => '', 'displayName' => 'Failed', 'customerId' => ''];
+
+        return [
+            'relay, read throws' => [true, null],
+            'rest, read throws' => [false, null],
+            'relay, vendor failure row' => [true, [$failed]],
+            'rest, vendor failure row' => [false, [$failed]],
+            'rest, empty list' => [false, []],
+        ];
+    }
+
+    /**
+     * With another client mapped, the alias check needs CIPP's tenant list. When that
+     * cannot be read as tenants (the read throws, as CippClient::get() does on the
+     * vendor's failure object, whose Results is a string; or the rows are the vendor's
+     * failure row) the read fails closed rather than skipping the check.
+     *
+     * @dataProvider unusableTenantLists
+     */
+    public function test_an_unreadable_tenant_list_fails_closed_without_a_tenant_read(bool $relay, ?array $tenantList): void
+    {
+        $this->configure($relay);
+        $this->tenantList = $tenantList;
+        $this->fakeTransports();
+
+        $response = $this->mcpCall($this->token(['cipp_list_users']), 'cipp_list_users', ['client_id' => $this->alpha->id]);
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('could not read a usable CIPP tenant list', $this->text($response));
+        $this->assertStringNotContainsString('Check the mapping', $this->text($response));
+        $this->assertSame([], $this->sent);
+    }
+
     // ── Dynamic catalog tools ──
 
     public function test_dynamic_graph_request_is_bound_to_the_mapped_tenant_and_unmapped_fails_closed(): void
@@ -344,6 +441,22 @@ class CippClientIdResolutionTest extends TestCase
         $this->assertContains('Endpoint', array_keys((array) $published['cipp_list_graph_request']['inputSchema']['properties']));
     }
 
+    public function test_dynamic_tools_refuse_a_tenant_mapped_to_another_client_under_another_alias(): void
+    {
+        $this->configure(true);
+        $this->fakeTransports();
+        $this->prodCatalog();
+        $charlie = Client::factory()->create(['name' => 'Charlie', 'cipp_tenant_domain' => 'alpha.onmicrosoft.example']);
+        $token = $this->token(['cipp_list_graph_request']);
+
+        foreach ([$this->alpha, $charlie] as $client) {
+            $response = $this->mcpCall($token, 'cipp_list_graph_request', ['client_id' => $client->id, 'Endpoint' => 'users']);
+            $this->assertTrue((bool) $response->json('result.isError'), $client->name);
+            $this->assertStringContainsString('also mapped, under another of its domains, to another PSA client', $this->text($response), $client->name);
+        }
+        $this->assertSame([], $this->sent);
+    }
+
     public function test_list_tenants_returns_only_the_mapped_clients_own_tenant_row(): void
     {
         $this->configure(true);
@@ -367,7 +480,7 @@ class CippClientIdResolutionTest extends TestCase
         $this->assertStringContainsString('Alpha', $this->text($response));
     }
 
-    /** @return array<string, array{0: array<int, array<string, mixed>>, 1: string}> */
+    /** @return array<string, array{0: array<int|string, mixed>, 1: string}> */
     public static function tenantListFailures(): array
     {
         $alpha = ['customerId' => '11111111-1111-1111-1111-111111111111', 'defaultDomainName' => 'alpha.example', 'initialDomainName' => 'alpha.onmicrosoft.example'];
@@ -375,7 +488,9 @@ class CippClientIdResolutionTest extends TestCase
         return [
             'no row for the mapping' => [[['customerId' => 'x', 'defaultDomainName' => 'other.example']], 'has no tenant matching'],
             'two rows for the mapping' => [[$alpha, ['customerId' => 'y', 'defaultDomainName' => 'other.example', 'initialDomainName' => 'alpha.example']], 'more than one tenant'],
-            'unknown envelope' => [[['Results' => 'Failed to retrieve tenants', 'displayName' => 'Failed']], 'shape PSA does not recognise'],
+            // CIPP's real answer when it could not list tenants: both keys present, empty.
+            'vendor failure row' => [[['Results' => 'Failed to retrieve tenants', 'defaultDomainName' => '', 'displayName' => 'Failed', 'customerId' => '']], 'answered with a row that is not a tenant'],
+            'vendor failure object' => [['Results' => 'Failed to retrieve tenants', 'defaultDomainName' => '', 'displayName' => 'Failed', 'customerId' => ''], 'answered with a row that is not a tenant'],
             'tenant also mapped to bravo under its initial domain' => [[array_merge($alpha, ['initialDomainName' => 'bravo.example'])], 'also mapped, under another of its domains'],
         ];
     }

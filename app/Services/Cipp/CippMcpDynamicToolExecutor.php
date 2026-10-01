@@ -197,7 +197,8 @@ class CippMcpDynamicToolExecutor
      * QUERY only — so the tenantFilter we send is ignored and CIPP answers with every
      * managed tenant. The row is matched on the aliases Get-Tenants itself matches
      * (customerId, defaultDomainName, initialDomainName). Not exactly one row, a row
-     * that is also another PSA client's mapping, or rows without those keys: an error.
+     * that is also another PSA client's mapping, or a row without customerId and
+     * defaultDomainName values (CIPP's own "Failed to retrieve tenants" row): an error.
      *
      * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, array<string, mixed>>|array{error: string}
@@ -208,8 +209,8 @@ class CippMcpDynamicToolExecutor
         $matches = [];
 
         foreach ($rows as $row) {
-            if (! is_array($row) || ! array_key_exists('customerId', $row) || ! array_key_exists('defaultDomainName', $row)) {
-                return ['error' => 'CIPP ListTenants answered in a shape PSA does not recognise (no customerId/defaultDomainName on a row), so the client\'s tenant could not be picked out. Nothing is returned rather than every tenant.'];
+            if (! CippTenantScope::isTenantRow($row)) {
+                return ['error' => 'CIPP ListTenants answered with a row that is not a tenant (no customerId or defaultDomainName value; CIPP answers that way when it could not retrieve its tenants), so the client\'s tenant could not be picked out. This is not a mapping problem. Nothing is returned rather than every tenant.'];
             }
 
             if (in_array($wanted, self::tenantAliases($row), true)) {
@@ -236,14 +237,7 @@ class CippMcpDynamicToolExecutor
      */
     private static function tenantAliases(array $row): array
     {
-        $aliases = [];
-        foreach (['customerId', 'defaultDomainName', 'initialDomainName'] as $key) {
-            if (is_string($row[$key] ?? null) && trim($row[$key]) !== '') {
-                $aliases[] = mb_strtolower(trim($row[$key]));
-            }
-        }
-
-        return $aliases;
+        return CippTenantScope::tenantAliases($row);
     }
 
     /** @return array<int, string> */
