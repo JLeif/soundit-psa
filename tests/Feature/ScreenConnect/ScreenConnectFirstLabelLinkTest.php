@@ -4,10 +4,10 @@ namespace Tests\Feature\ScreenConnect;
 
 use App\Models\Asset;
 use App\Models\Client;
+use App\Models\Setting;
 use App\Services\Chet\ChetDataSurfaceTextSanitizer;
 use App\Services\ScreenConnect\ScreenConnectReadOnlyToolset;
 use App\Services\ScreenConnect\ScreenConnectSyncService;
-use App\Models\Setting;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
