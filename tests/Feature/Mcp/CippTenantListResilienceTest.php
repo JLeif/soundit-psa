@@ -42,6 +42,11 @@ class CippTenantListResilienceTest extends TestCase
 
     private const FABRIKAM_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
+    /**
+     * A canary, not a credential: configure() stores it as cipp_client_secret, and
+     * test_a_rest_sign_in_failure_is_named_as_a_sign_in_failure() asserts the refusal
+     * never carries it.
+     */
     private const REST_CLIENT_CANARY = 'rest-canary-must-not-leak';
 
     /** @var array<int, array{0: string, 1: array<string, mixed>}> tenant reads that reached a transport */
