@@ -125,4 +125,44 @@ class HuntressReadToolsMcpTest extends TestCase
         $this->assertSame(7, $result['id']);
         $this->assertSame('Acme', $result['psa_client_name']);
     }
+
+    public function test_client_id_crosses_the_boundary_and_resolves_the_mapped_org(): void
+    {
+        // Card tIP4JoIG: the boundary lifts client_id out of the arguments; the Huntress
+        // reads must receive it and resolve through clients.huntress_organization_id.
+        $this->configureHuntress();
+        $client = Client::factory()->create(['name' => 'Gamma LLC', 'huntress_organization_id' => 42]);
+
+        $mock = Mockery::mock(HuntressClient::class);
+        $mock->shouldReceive('getOrganization')->once()->with(42)
+            ->andReturn(['organization' => ['id' => 42, 'name' => 'Gamma Holdings', 'key' => 'gamma']]);
+        app()->instance(HuntressClient::class, $mock);
+
+        $token = $this->token(['huntress_get_organization']);
+        $names = array_column($this->listTools($token), 'name');
+        $this->assertContains('huntress_get_organization', $names);
+
+        $response = $this->callTool($token, 'huntress_get_organization', ['client_id' => $client->id]);
+
+        $response->assertOk();
+        $this->assertFalse($response->json('result.isError'));
+        $result = $this->decodedResult($response);
+        $this->assertSame(42, $result['id']);
+        $this->assertSame($client->id, $result['psa_client_id']);
+    }
+
+    public function test_a_malformed_client_id_is_refused_rather_than_widened_to_the_whole_account(): void
+    {
+        $this->configureHuntress();
+        $mock = Mockery::mock(HuntressClient::class);
+        $mock->shouldNotReceive('get');
+        app()->instance(HuntressClient::class, $mock);
+
+        $token = $this->token(['huntress_list_organizations']);
+        $response = $this->callTool($token, 'huntress_list_organizations', ['client_id' => 'abc']);
+
+        $response->assertOk();
+        $this->assertTrue($response->json('result.isError'));
+        $this->assertStringContainsString('not a positive integer', (string) $response->json('result.content.0.text'));
+    }
 }
