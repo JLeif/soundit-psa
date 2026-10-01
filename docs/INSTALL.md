@@ -1096,6 +1096,8 @@ Optional. Lets the client portal's **Pay Online** button open a BenjiPays *appli
 
 **Auto Processing Forecast read (optional).** The staff MCP read tool `benjipays_autopay_forecast` asks BenjiPays whether one QuickBooks invoice will be auto-charged on a run date and why (`GET /v2/autoprocessing-forecast`, read-only). It uses the same stored key, which needs the additional scope `organizations:autoprocessing:read`; without it the tool answers with a plain 403 message naming that scope. Like every PSA read tool it must be granted to a token explicitly. It returns no customer, amount or payment-method details.
 
+**Client payment reads (optional).** Three more staff MCP read tools use the same stored key, each needing its own extra scope: `benjipays_list_transactions` (`organizations:transactions:read`), `benjipays_get_invoice` (`organizations:invoices:read`) and `benjipays_get_customer_payment_methods` (`organizations:payment-methods:read`). All are GET-only. They take a PSA client or PSA invoice, never a BenjiPays id, and refuse a client with no QuickBooks customer mapping. Payment methods and transactions are reduced to method type and last four digits. A missing scope gives a plain 403 message naming it. Each must be granted to a token explicitly.
+
 No BenjiPays call is made from tests or CI.
 
 ### Tier2Tickets / HelpDesk Buttons

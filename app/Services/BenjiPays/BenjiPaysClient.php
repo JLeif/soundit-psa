@@ -10,8 +10,9 @@ use Illuminate\Support\Str;
 /**
  * Merchant API client. No retries, redirects, accounting expansion or charges.
  *
- * Reads: gateways, invoice balance (stage 1) and the auto-processing forecast
- * for one invoice (card revwQxh4). The one write is
+ * Reads: gateways, invoice balance (stage 1), the auto-processing forecast
+ * for one invoice (card revwQxh4), and one customer's transactions and saved
+ * payment methods (card 6abec4f9; GET only). The one write is
  * createAppliedPaymentLink() (stage 2, #2065): minting a tokenized pay-now
  * link moves no money — the client pays on the vendor's page, if at all.
  */
@@ -92,6 +93,73 @@ class BenjiPaysClient
         $response = $this->send('GET', '/v2/autoprocessing-forecast?'.$query);
 
         return AutoprocessingForecast::fromResponse($response->body(), $accountingInvoiceId);
+    }
+
+    /**
+     * READ-ONLY transactions for ONE accounting (QBO) customer, optionally one
+     * invoice: GET /v2/transactions (scope organizations:transactions:read).
+     *
+     * Source: developer.benjipays.com/reference/get_v2-transactions (OpenAPI
+     * 3.1, read 2026-10-01). customerId / invoiceId are accounting ids;
+     * limit 1-1000 (callers cap far lower); newest first. Returns the raw
+     * envelope for BenjiPaysReadProjection to validate and redact.
+     *
+     * @return array{data: list<mixed>, pagination: array<string, mixed>}
+     */
+    public function transactions(string $accountingCustomerId, ?string $accountingInvoiceId, int $limit): array
+    {
+        $query = ['customerId' => $accountingCustomerId];
+        if ($accountingInvoiceId !== null) {
+            $this->invoicePathSegment($accountingInvoiceId);
+            $query['invoiceId'] = $accountingInvoiceId;
+        }
+
+        return $this->listRead('/v2/transactions', $accountingCustomerId, $query + [
+            'sort' => 'transactionDate', 'order' => 'desc', 'limit' => $limit, 'offset' => 0,
+        ]);
+    }
+
+    /**
+     * READ-ONLY saved payment methods for ONE accounting (QBO) customer:
+     * GET /v2/payment-methods?customerId= (scope organizations:payment-methods:read).
+     *
+     * Source: developer.benjipays.com/reference/get_v2-payment-methods (OpenAPI
+     * 3.1, read 2026-10-01). Returns the raw envelope for
+     * BenjiPaysReadProjection to validate and redact.
+     *
+     * @return array{data: list<mixed>, pagination: array<string, mixed>}
+     */
+    public function paymentMethods(string $accountingCustomerId, int $limit): array
+    {
+        return $this->listRead('/v2/payment-methods', $accountingCustomerId, [
+            'customerId' => $accountingCustomerId, 'limit' => $limit, 'offset' => 0,
+        ]);
+    }
+
+    /**
+     * One GET of a documented list envelope {data: [...], pagination: {...}}.
+     * Anything else is `invalid_response` (STANDARDS C-56: fail closed).
+     *
+     * @return array{data: list<mixed>, pagination: array<string, mixed>}
+     */
+    private function listRead(string $path, string $accountingCustomerId, array $query): array
+    {
+        $this->invoicePathSegment($accountingCustomerId); // same id guard; throws invalid_id
+        if (! is_int($query['limit']) || $query['limit'] < 1 || $query['limit'] > 1000) {
+            throw new \InvalidArgumentException('limit must be 1-1000 (the vendor bound).');
+        }
+        $response = $this->send('GET', $path.'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986));
+
+        $shape = json_decode($response->body());
+        $body = json_decode($response->body(), true);
+        if (! is_object($shape) || ! property_exists($shape, 'data') || ! is_array($shape->data)
+            || ! property_exists($shape, 'pagination') || ! is_object($shape->pagination)
+            || ! is_array($body) || ! is_array($body['data'] ?? null) || ! array_is_list($body['data'])
+            || ! is_array($body['pagination'] ?? null)) {
+            throw new BenjiPaysException('invalid_response');
+        }
+
+        return ['data' => $body['data'], 'pagination' => $body['pagination']];
     }
 
     /** Same id guard for every invoice-addressed path; one rawurlencoded segment. */

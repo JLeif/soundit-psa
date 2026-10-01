@@ -1254,6 +1254,9 @@ class McpToolRegistry
             self::listMislinkedAssetsTool(),
             \App\Services\Mcp\PsaVersionTool::definition(),
             \App\Services\Mcp\BenjiPaysForecastTool::definition(),
+            \App\Services\Mcp\BenjiPaysTransactionsTool::definition(),
+            \App\Services\Mcp\BenjiPaysInvoiceTool::definition(),
+            \App\Services\Mcp\BenjiPaysPaymentMethodsTool::definition(),
         ];
     }
 
