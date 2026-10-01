@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Services\Cipp\CippMcpDynamicToolExecutor;
+use App\Services\Cipp\CippTenantScope;
 use App\Support\CippMcpToolPolicy;
 use App\Support\McpInputSchema;
 use App\Support\McpToolRegistry;
@@ -123,7 +125,7 @@ class CippMcpTool extends Model
     {
         return [
             'name' => $this->local_name,
-            'description' => $this->description ?: "Run the CIPP {$this->upstream_name} tool for the selected client's tenant.",
+            'description' => $this->publicDescription(),
             'input_schema' => $this->publicInputSchema(),
         ];
     }
@@ -144,8 +146,14 @@ class CippMcpTool extends Model
         $schema = McpInputSchema::sanitizeDynamicCipp($rawSchema);
         $properties = (array) ($schema['properties'] ?? []);
 
-        foreach (self::tenantSelectorKeys() as $key) {
-            unset($properties[$key]);
+        // Card 6abdcac2: every tenant-selecting key is withheld, not just the four exact
+        // spellings tenantSelectorKeys() names, so the tenant can only come from client_id.
+        // Anything not published is refused by CippMcpDynamicToolExecutor::unknownArguments().
+        foreach (array_keys($properties) as $key) {
+            if (in_array($key, self::tenantSelectorKeys(), true)
+                || (is_string($key) && CippTenantScope::isTenantSelectorKey($key))) {
+                unset($properties[$key]);
+            }
         }
 
         $schema['type'] = 'object';
@@ -154,10 +162,38 @@ class CippMcpTool extends Model
             (array) ($schema['required'] ?? []),
             fn (mixed $field): bool => is_string($field)
                 && isset($properties[$field])
-                && ! in_array($field, self::tenantSelectorKeys(), true),
+                && ! in_array($field, self::tenantSelectorKeys(), true)
+                && ! CippTenantScope::isTenantSelectorKey($field),
         ));
 
         return $schema;
+    }
+
+    /**
+     * The published description, carrying how this tool is scoped (card 6abdcac2): the
+     * tenant comes from client_id through the stored CIPP mapping, a tool that cannot be
+     * bound to that tenant says it is unavailable, and a catalog/docs tool says it reads
+     * no tenant data.
+     */
+    public function publicDescription(): string
+    {
+        $description = $this->description ?: "Run the CIPP {$this->upstream_name} tool for the selected client's tenant.";
+
+        $refusal = CippMcpDynamicToolExecutor::tenantBindingRefusal($this);
+        if ($refusal !== null) {
+            return 'UNAVAILABLE THROUGH PSA: '.$refusal.' Upstream description: '.$description;
+        }
+
+        if (in_array($this->upstream_name, CippMcpDynamicToolExecutor::TENANTLESS_UPSTREAM_TOOLS, true)) {
+            return rtrim($description).' Reads CIPP\'s own tool catalog or documentation, not tenant data.';
+        }
+
+        $note = CippTenantScope::KEY_NOTE;
+        if (CippMcpDynamicToolExecutor::isTenantListTool($this)) {
+            $note .= ' This tool returns only the client\'s own tenant row, never the list of other managed tenants.';
+        }
+
+        return rtrim($description).' '.$note;
     }
 
     /** @return array<int, string> */

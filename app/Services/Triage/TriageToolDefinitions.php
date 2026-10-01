@@ -2,6 +2,7 @@
 
 namespace App\Services\Triage;
 
+use App\Services\Cipp\CippTenantScope;
 use App\Support\CippConfig;
 use App\Support\CometConfig;
 use App\Support\ControlDConfig;
@@ -578,6 +579,18 @@ class TriageToolDefinitions
     // ── CIPP / M365 Tools ──
 
     public static function cippTools(): array
+    {
+        // Card 6abdcac2: every curated CIPP read says how its tenant is chosen — from
+        // client_id through the stored CIPP mapping, never a tenant the agent names.
+        return array_map(static function (array $tool): array {
+            $tool['description'] = rtrim((string) $tool['description']).' '.CippTenantScope::KEY_NOTE;
+
+            return $tool;
+        }, self::cippToolDefinitions());
+    }
+
+    /** @return array<int, array<string, mixed>> */
+    private static function cippToolDefinitions(): array
     {
         return [
             [

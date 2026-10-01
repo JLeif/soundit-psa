@@ -48,17 +48,25 @@ class CippTenantMailboxRulesTest extends TestCase
         return new CippMcpToolRelay($mcp, app(ChetDataSurfaceTextSanitizer::class));
     }
 
-    private function acme(): Client
+    /**
+     * A saved acme and its own id: the relay resolves the tenant from client_id through
+     * the stored CIPP mapping (CippTenantScope, card 6abdcac2).
+     *
+     * @return array{0: Client, 1: int}
+     */
+    private function acmeScope(): array
     {
-        return Client::create([
+        $client = Client::create([
             'name' => 'Acme',
             'cipp_tenant_domain' => 'acme.example',
         ]);
+
+        return [$client, $client->id];
     }
 
     private function execute(CippMcpToolRelay $relay): array
     {
-        return $relay->execute('cipp_list_tenant_mailbox_rules', [], $this->acme(), null);
+        return $relay->execute('cipp_list_tenant_mailbox_rules', [], ...$this->acmeScope());
     }
 
     public function test_the_tenant_wide_tool_relays_to_list_mailbox_rules_not_the_per_user_endpoint(): void
@@ -74,7 +82,7 @@ class CippTenantMailboxRulesTest extends TestCase
 
         $relay = new CippMcpToolRelay($mcp, app(ChetDataSurfaceTextSanitizer::class));
 
-        $relay->execute('cipp_list_tenant_mailbox_rules', [], $this->acme(), null);
+        $relay->execute('cipp_list_tenant_mailbox_rules', [], ...$this->acmeScope());
     }
 
     public function test_a_real_rule_projects_its_exchange_pascal_case_fields(): void

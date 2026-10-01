@@ -15,9 +15,10 @@ use Illuminate\Support\Facades\Log;
  * The using class must satisfy this contract:
  *   - `protected ?int $clientId` — the client scope (Triage: always set from the
  *     ticket; Assistant: nullable). Read by the user-id resolver.
- *   - cippTenantDomain(): the tenant filter for CIPP calls. Triage reads it from
+ *   - cippScopeClient(): the PSA client the call is scoped to. Triage reads it from
  *     `$this->ticket->client`, the Assistant from `$this->client` — the one true
- *     divergence, abstracted here so the query bodies stay identical.
+ *     divergence, abstracted here so the query bodies stay identical. Its tenant is
+ *     resolved by CippTenantScope (card 6abdcac2), never typed by the agent.
  *   - cippLogPrefix(): the log tag ("[Triage]" / "[Assistant]") so failure logs
  *     stay attributable to their surface.
  *
@@ -28,8 +29,8 @@ use Illuminate\Support\Facades\Log;
  */
 trait HandlesCippTools
 {
-    /** Tenant filter for CIPP calls — sourced differently per executor. */
-    abstract protected function cippTenantDomain(): ?string;
+    /** The PSA client the CIPP call is scoped to — sourced differently per executor. */
+    abstract protected function cippScopeClient(): ?\App\Models\Client;
 
     /** Log tag for CIPP failure logs, e.g. "[Triage]" or "[Assistant]". */
     abstract protected function cippLogPrefix(): string;
@@ -69,8 +70,12 @@ trait HandlesCippTools
      *      the tool answers a clean "no sign-ins" (psa-cipp-p1). Same reasoning as
      *      (1): it is enforced here, before a transport is chosen, so no caller can
      *      reach CIPP without passing it.
-     *   3. The MCP relay, if this executor has one and it is enabled.
-     *   4. The tenant mapping, then the direct CippClient call.
+     *   3. The tenant, resolved from client_id through the client's stored CIPP
+     *      mapping by CippTenantScope (card 6abdcac2): unmapped, missing or shared
+     *      fails closed here, before either transport is chosen.
+     *   4. The MCP relay, if this executor has one and it is enabled (it re-resolves
+     *      through the same CippTenantScope).
+     *   5. The direct CippClient call, with the resolved tenant.
      *
      * @param  callable(string): array<int|string, mixed>  $direct  Receives the tenant domain.
      * @return array<int|string, mixed>
@@ -87,14 +92,14 @@ trait HandlesCippTools
             return ['error' => $identityRefusal];
         }
 
+        $tenantDomain = CippTenantScope::resolve($this->cippScopeClient(), $this->clientId);
+        if (is_array($tenantDomain)) {
+            return $tenantDomain;
+        }
+
         $relay = $this->cippMcpRelay($toolName, $input);
         if ($relay !== null) {
             return $relay;
-        }
-
-        $tenantDomain = $this->cippTenantDomain();
-        if (! $tenantDomain) {
-            return ['error' => 'Client has no CIPP tenant mapping'];
         }
 
         return $direct($tenantDomain);

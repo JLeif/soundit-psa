@@ -66,9 +66,20 @@ class CippMcpDynamicToolExecutor
             return ['error' => 'CIPP MCP relay is not enabled or configured.'];
         }
 
-        $tenantDomain = $client?->cipp_tenant_domain;
-        if (! $tenantDomain) {
-            return ['error' => 'Client has no CIPP tenant mapping'];
+        // Card 6abdcac2 (the Huntress pattern): client_id is the key, resolved through
+        // the client's stored CIPP mapping. Unmapped, missing or shared fails closed.
+        $tenantDomain = CippTenantScope::resolve($client, $clientId);
+        if (is_array($tenantDomain)) {
+            return $tenantDomain;
+        }
+
+        // A catalog tool that takes no tenant cannot be scoped by client_id at all: the
+        // tenantFilter injected below is silently ignored upstream, and what comes back
+        // is whatever the endpoint reads — for ExecTool, the tenant the agent typed into
+        // its nested arguments; for the fleet-wide reads, every tenant. Refused, not run.
+        $unbound = self::tenantBindingRefusal($tool);
+        if ($unbound !== null) {
+            return ['error' => $unbound];
         }
 
         $graphAttempt = $this->genericGraphAttempt($tool, $input);
@@ -129,7 +140,110 @@ class CippMcpDynamicToolExecutor
             ];
         }
 
-        return $this->referenceOnlyResult($tool, $this->normalizeRows($rows), $clientId, $this->listProperties($input));
+        $rows = $this->normalizeRows($rows);
+        if (self::isTenantListTool($tool)) {
+            $rows = $this->clientTenantRow($rows, $tenantDomain, (int) $clientId);
+            if (isset($rows['error'])) {
+                return $rows;
+            }
+        }
+
+        return $this->referenceOnlyResult($tool, $rows, $clientId, $this->listProperties($input));
+    }
+
+    /**
+     * Catalog tools that answer from CIPP's own tool catalog or documentation and
+     * return no tenant data, so client_id has nothing to scope. Verified at the vendor
+     * producer: Get-CippMcpToolResult.ps1 answers SearchTools / GetToolInfo from
+     * Get-CippMcpToolCatalog and SearchDocs / GetDoc from the shipped docs index,
+     * without re-dispatching to any tenant endpoint (CIPP-API 7c756b0).
+     */
+    public const TENANTLESS_UPSTREAM_TOOLS = ['SearchTools', 'GetToolInfo', 'SearchDocs', 'GetDoc'];
+
+    /**
+     * Why this catalog tool cannot be bound to a client's tenant, or null when it can
+     * (it declares a tenantFilter, which the executor fills from the mapping) or needs
+     * no tenant (TENANTLESS_UPSTREAM_TOOLS).
+     */
+    public static function tenantBindingRefusal(CippMcpTool $tool): ?string
+    {
+        if (in_array($tool->upstream_name, self::TENANTLESS_UPSTREAM_TOOLS, true)) {
+            return null;
+        }
+
+        $properties = is_array($tool->input_schema) ? (array) ($tool->input_schema['properties'] ?? []) : [];
+        foreach (array_keys($properties) as $key) {
+            if (is_string($key) && strcasecmp($key, 'tenantFilter') === 0) {
+                return null;
+            }
+        }
+
+        return "{$tool->local_name} is unavailable through PSA: CIPP's {$tool->upstream_name} takes no tenantFilter, so client_id cannot scope it to "
+            .'the client\'s tenant and it could return another client\'s data (ExecTool runs whatever tenant its nested arguments name). '
+            .'Use a curated cipp_list_* read, cipp_list_graph_request, or a catalog tool that takes a tenant. Nothing was sent to CIPP.';
+    }
+
+    /** CIPP's ListTenants: answers every managed tenant whatever tenantFilter it is sent. */
+    public static function isTenantListTool(CippMcpTool $tool): bool
+    {
+        return $tool->upstream_name === 'ListTenants';
+    }
+
+    /**
+     * Narrow CIPP's tenant list to the one row for the client's mapped tenant.
+     *
+     * ListTenants is POST-only, Invoke-CippMcpApiRequest.ps1:64 puts a POST's
+     * arguments in the BODY, and Invoke-ListTenants.ps1:87 reads tenantFilter from the
+     * QUERY only — so the tenantFilter we send is ignored and CIPP answers with every
+     * managed tenant. The row is matched on the aliases Get-Tenants itself matches
+     * (customerId, defaultDomainName, initialDomainName). Not exactly one row, a row
+     * that is also another PSA client's mapping, or rows without those keys: an error.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, mixed>>|array{error: string}
+     */
+    private function clientTenantRow(array $rows, string $tenantDomain, int $clientId): array
+    {
+        $wanted = mb_strtolower($tenantDomain);
+        $matches = [];
+
+        foreach ($rows as $row) {
+            if (! is_array($row) || ! array_key_exists('customerId', $row) || ! array_key_exists('defaultDomainName', $row)) {
+                return ['error' => 'CIPP ListTenants answered in a shape PSA does not recognise (no customerId/defaultDomainName on a row), so the client\'s tenant could not be picked out. Nothing is returned rather than every tenant.'];
+            }
+
+            if (in_array($wanted, self::tenantAliases($row), true)) {
+                $matches[] = $row;
+            }
+        }
+
+        if (count($matches) !== 1) {
+            return ['error' => count($matches) === 0
+                ? "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping. Check the mapping in Settings > CIPP Tenants. Other tenants are not returned."
+                : "CIPP's tenant list has more than one tenant matching PSA client {$clientId}'s CIPP mapping, so it is ambiguous. Nothing is returned."];
+        }
+
+        if (CippTenantScope::mappedToAnotherClient(self::tenantAliases($matches[0]), $clientId)) {
+            return ['error' => "The CIPP tenant mapped to PSA client {$clientId} is also mapped, under another of its domains, to a different PSA client, so it cannot be attributed. Fix the duplicate mapping in Settings > CIPP Tenants."];
+        }
+
+        return $matches;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<int, string>
+     */
+    private static function tenantAliases(array $row): array
+    {
+        $aliases = [];
+        foreach (['customerId', 'defaultDomainName', 'initialDomainName'] as $key) {
+            if (is_string($row[$key] ?? null) && trim($row[$key]) !== '') {
+                $aliases[] = mb_strtolower(trim($row[$key]));
+            }
+        }
+
+        return $aliases;
     }
 
     /** @return array<int, string> */

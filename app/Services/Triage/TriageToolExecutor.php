@@ -850,9 +850,9 @@ class TriageToolExecutor
     // trait. Triage sources the tenant filter from the ticket's client and tags its
     // CIPP failure logs [Triage]; it uses the trait's default (no-op) MCP relay.
 
-    protected function cippTenantDomain(): ?string
+    protected function cippScopeClient(): ?\App\Models\Client
     {
-        return $this->ticket->client?->cipp_tenant_domain;
+        return $this->ticket->client;
     }
 
     protected function cippLogPrefix(): string
