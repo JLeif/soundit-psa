@@ -390,6 +390,78 @@ class CippClientIdResolutionTest extends TestCase
         $this->assertSame([], $this->sent);
     }
 
+    /**
+     * Settings > CIPP Tenants maps a client from CIPP's live tenant list, while the
+     * resolver's copy is cached. A tenant added in CIPP after that copy was taken is
+     * re-read before the mapping is reported as wrong; a mapping CIPP really does not
+     * know still fails closed.
+     */
+    public function test_a_stale_cached_tenant_list_is_re_read_before_a_new_mapping_is_refused(): void
+    {
+        $this->configure(false);
+        $this->fakeTransports();
+        $token = $this->token(['cipp_list_users']);
+
+        // Alpha's read caches CIPP's list as it is now (Alpha and Bravo).
+        $alpha = $this->mcpCall($token, 'cipp_list_users', ['client_id' => $this->alpha->id]);
+        $this->assertFalse((bool) $alpha->json('result.isError'), $this->text($alpha));
+
+        // Charlie is then onboarded in CIPP and mapped from the live list.
+        $this->tenantList[] = ['customerId' => '33333333-3333-3333-3333-333333333333', 'defaultDomainName' => 'charlie.example', 'initialDomainName' => 'charlie.onmicrosoft.example', 'displayName' => 'Charlie'];
+        $charlie = Client::factory()->create(['name' => 'Charlie', 'cipp_tenant_domain' => 'charlie.example']);
+        $this->sent = [];
+
+        $response = $this->mcpCall($token, 'cipp_list_users', ['client_id' => $charlie->id]);
+        $this->assertFalse((bool) $response->json('result.isError'), $this->text($response));
+        $this->assertSame(['charlie.example'], $this->tenantsSent());
+
+        $this->sent = [];
+        $wrong = Client::factory()->create(['name' => 'Wrong', 'cipp_tenant_domain' => 'nowhere.example']);
+        $response = $this->mcpCall($token, 'cipp_list_users', ['client_id' => $wrong->id]);
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('has no tenant matching', $this->text($response));
+        $this->assertSame([], $this->sent);
+    }
+
+    /**
+     * CIPP may run over MCP alone (CippConfig::isMcpRelayEnabled() needs no REST
+     * credentials). The alias check then reads ListTenants over MCP, REST is never
+     * asked, and a mapped client's dynamic read still runs.
+     */
+    public function test_an_mcp_only_deployment_reads_the_tenant_list_over_mcp(): void
+    {
+        Setting::setValue('cipp_enabled', '1');
+        Setting::setValue('cipp_api_url', 'https://cipp.example.test');
+        Setting::setValue('cipp_tenant_id', 'tenant-1');
+        Setting::setValue('cipp_mcp_client_id', 'mcp-client');
+        Setting::setEncrypted('cipp_mcp_client_secret', 'mcp-secret');
+        Setting::setValue('cipp_mcp_enabled', '1');
+
+        $listReads = 0;
+        $mcp = Mockery::mock(CippMcpClient::class);
+        $mcp->shouldReceive('callTool')->andReturnUsing(function (string $tool, array $args) use (&$listReads): array {
+            if ($tool === 'ListTenants' && $args === []) {
+                $listReads++;
+
+                return $this->tenantList;
+            }
+            $this->sent[] = [$tool, $args];
+
+            return [['id' => 'row-1', 'displayName' => 'Row']];
+        });
+        $this->app->instance(CippMcpClient::class, $mcp);
+        $rest = Mockery::mock(CippClient::class);
+        $rest->shouldNotReceive('get');
+        $this->app->instance(CippClient::class, $rest);
+        $this->prodCatalog();
+
+        $response = $this->mcpCall($this->token(['cipp_list_graph_request']), 'cipp_list_graph_request', ['client_id' => $this->alpha->id, 'Endpoint' => 'users']);
+
+        $this->assertFalse((bool) $response->json('result.isError'), $this->text($response));
+        $this->assertSame(1, $listReads);
+        $this->assertSame(['alpha.example'], $this->tenantsSent());
+    }
+
     // ── Dynamic catalog tools ──
 
     public function test_dynamic_graph_request_is_bound_to_the_mapped_tenant_and_unmapped_fails_closed(): void

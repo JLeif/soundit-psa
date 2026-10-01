@@ -3,6 +3,7 @@
 namespace App\Services\Cipp;
 
 use App\Models\Client;
+use App\Support\CippConfig;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
@@ -141,13 +142,25 @@ final class CippTenantScope
             return null;
         }
 
-        $tenants = self::tenantList();
+        $unreadable = "PSA could not read a usable CIPP tenant list, so it cannot check PSA client {$clientId}'s CIPP tenant's other domains against other PSA clients' mappings, and this read was not run.";
+        $cached = self::cachedTenantList();
+        $tenants = $cached ?? self::readTenantList();
         if ($tenants === null) {
-            return "PSA could not read a usable CIPP tenant list, so it cannot check PSA client {$clientId}'s CIPP tenant's other domains against other PSA clients' mappings, and this read was not run.";
+            return $unreadable;
         }
 
-        $wanted = mb_strtolower($tenant);
-        $matches = array_values(array_filter($tenants, fn (array $row): bool => in_array($wanted, self::tenantAliases($row), true)));
+        $matches = self::rowsMatching($tenants, $tenant);
+        if (count($matches) !== 1 && $cached !== null) {
+            // Settings > CIPP Tenants maps a client from CIPP's live list, so a tenant
+            // added since this copy was cached is missing from it. Re-read before the
+            // mapping is reported as wrong or ambiguous.
+            $tenants = self::readTenantList();
+            if ($tenants === null) {
+                return $unreadable;
+            }
+            $matches = self::rowsMatching($tenants, $tenant);
+        }
+
         if (count($matches) !== 1) {
             return count($matches) === 0
                 ? "CIPP's tenant list has no tenant matching PSA client {$clientId}'s CIPP mapping, so its other domains cannot be checked against other PSA clients' mappings and this read was not run. Check the mapping in Settings > CIPP Tenants."
@@ -162,22 +175,50 @@ final class CippTenantScope
     }
 
     /**
-     * CIPP's tenant rows, or null when they could not be read as tenants. Cached only
-     * when usable, so a failed read is retried on the next call.
+     * @param  array<int, array<string, mixed>>  $tenants
+     * @return array<int, array<string, mixed>>
+     */
+    private static function rowsMatching(array $tenants, string $tenant): array
+    {
+        $wanted = mb_strtolower($tenant);
+
+        return array_values(array_filter($tenants, fn (array $row): bool => in_array($wanted, self::tenantAliases($row), true)));
+    }
+
+    /**
+     * The tenant rows PSA last read from CIPP, or null when none are cached.
      *
      * @return array<int, array<string, mixed>>|null
      */
-    private static function tenantList(): ?array
+    private static function cachedTenantList(): ?array
     {
         $cached = Cache::get(self::TENANT_LIST_CACHE_KEY);
-        if (is_array($cached)) {
-            return $cached;
-        }
 
+        return is_array($cached) ? $cached : null;
+    }
+
+    /**
+     * CIPP's tenant rows read now, or null when they could not be read as tenants.
+     * Cached only when usable, so a failed read is retried on the next call.
+     *
+     * @return array<int, array<string, mixed>>|null
+     */
+    private static function readTenantList(): ?array
+    {
         try {
-            // CIPP's failure object lands here too: get() unwraps its string Results,
-            // which the array return type refuses.
-            $rows = app(CippClient::class)->get('api/ListTenants', []);
+            // Over the transport this deployment has: REST when its credentials are set,
+            // else ExecMCP, which can run on its own credentials (isMcpRelayEnabled()
+            // does not need the REST ones). CIPP's failure object is refused either
+            // way: REST get() unwraps its string Results, which the array return type
+            // refuses; over MCP it arrives as an answer that is not a list of tenants,
+            // refused below.
+            if (CippConfig::isConfigured()) {
+                $rows = app(CippClient::class)->get('api/ListTenants', []);
+            } elseif (CippConfig::isMcpRelayEnabled()) {
+                $rows = app(CippMcpClient::class)->callTool('ListTenants', []);
+            } else {
+                throw new \RuntimeException('neither the CIPP REST API nor CIPP MCP is configured');
+            }
         } catch (\Throwable $e) {
             Log::warning('[CippTenantScope] CIPP tenant list could not be read for the alias check', [
                 'error' => mb_substr($e->getMessage(), 0, 300),
