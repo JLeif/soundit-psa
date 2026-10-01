@@ -626,6 +626,13 @@ class AssistantToolExecutor
             ])->toArray(),
         ];
 
+        // KKaM3bWS: every linked id, null = not mapped. CLIENT-SCOPED ONLY —
+        // whether bare ids may cross the unscoped staff read is a boundary
+        // question put to Jeeves on the card, not decided here.
+        if ($scoped) {
+            $out['linked_ids'] = LinkedIds::forTicket($ticket);
+        }
+
         if (in_array('assets', $expand, true)) {
             $out['expanded']['assets'] = $ticket->assets->map(fn (Asset $a) => self::assetDetailRow($a) + [
                 'is_primary' => (bool) $a->pivot->is_primary,
@@ -640,7 +647,7 @@ class AssistantToolExecutor
             // the SAME two names, so dropping only the related block would keep
             // disclosing the foreign client while the marker claims otherwise.
             unset($out['assets'], $out['related'], $out['client'], $out['contact']);
-            $out['client_scoped_detail'] = 'withheld — the client and contact names, the linked devices, and the related-record stubs are returned only on a client-scoped read of this ticket; use find_assets for device data on this surface';
+            $out['client_scoped_detail'] = 'withheld — the client and contact names, the linked devices, the related-record stubs, and the linked_ids block are returned only on a client-scoped read of this ticket; use find_assets for device data on this surface';
         }
 
         return $out;
@@ -1255,6 +1262,7 @@ class AssistantToolExecutor
             'is_active' => $this->client->is_active,
             'assets_count' => $fleetTotal,
             'assets' => $fleet->map(fn (Asset $a) => self::assetStubRow($a))->values()->toArray(),
+            'linked_ids' => LinkedIds::forClient($this->client),
         ];
     }
 
@@ -1415,6 +1423,7 @@ class AssistantToolExecutor
             'level_id' => $asset->level_id,
             'tactical_asset_id' => $asset->tactical_asset_id,
             'notes' => $asset->notes,
+            'linked_ids' => LinkedIds::forAsset($asset),
             // psa-823 part 2: one shallow orientation layer — owning client,
             // assigned users (active only, house fence), and the most recent
             // linked tickets as stubs. tickets_count is uncapped so the stub
