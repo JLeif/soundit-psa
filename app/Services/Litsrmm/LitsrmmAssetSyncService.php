@@ -378,8 +378,12 @@ class LitsrmmAssetSyncService
 
         // Null on the list means the vendor's agent is not there to say, not
         // that the machine has no OS or user: keep what the asset knows.
+        // The build is what tells 22H2 from 23H2 and Windows 10 from 11, and a
+        // Level-fed asset carried it, so a migrated asset keeps it.
         if ($device->osName !== null) {
-            $data['os'] = $device->osName;
+            $data['os'] = $device->osBuild !== null && $device->osBuild !== ''
+                ? "{$device->osName} (build {$device->osBuild})"
+                : $device->osName;
         }
         if ($device->lastUser !== null && $device->lastUser !== self::NOBODY_SIGNED_IN) {
             $data['last_user'] = $device->lastUser;

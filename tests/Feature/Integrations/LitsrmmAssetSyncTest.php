@@ -8,6 +8,8 @@ use App\Models\Client;
 use App\Models\License;
 use App\Models\LicenseType;
 use App\Models\Setting;
+use App\Models\User;
+use App\Services\AssetService;
 use App\Services\Litsrmm\LitsrmmAssetSyncService;
 use App\Services\Litsrmm\LitsrmmClient;
 use GuzzleHttp\HandlerStack;
@@ -177,7 +179,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('WORKSTATION-1', $asset->name);
         $this->assertSame('WORKSTATION-1', $asset->hostname);
         $this->assertSame('SN1REAL0', $asset->serial_number);
-        $this->assertSame('Win 11 Pro', $asset->os);
+        $this->assertSame('Win 11 Pro (build 26200)', $asset->os, 'the build tells 22H2 from 23H2; Level carried it too');
         $this->assertSame('exampleuser', $asset->last_user);
         $this->assertSame('Windows Workstation', $asset->asset_type);
         $this->assertTrue($asset->rmm_online);
@@ -189,6 +191,48 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('192.168.0.10', $asset->ip_address);
         $this->assertSame('2026-09-30 03:33:21', $asset->last_boot_at->utc()->format('Y-m-d H:i:s'));
         $this->assertTrue($asset->needs_reboot);
+    }
+
+    public function test_an_os_without_a_build_is_written_as_reported(): void
+    {
+        $this->device('1', ['osBuild' => null]);
+
+        $this->service()->sync();
+
+        $this->assertSame('Win 11 Pro', Asset::sole()->os);
+    }
+
+    // ---- an asset merge carries our link ----
+
+    public function test_a_merge_carries_the_link_to_the_survivor_and_the_next_sync_follows_it(): void
+    {
+        // Seen live 2026-10-01: DESKTOP-O21BE8G #36 (linked) was merged INTO the
+        // older #32. AssetService's identity list did not know litsrmm_device_id,
+        // so the link stayed on the retired tombstone and #32 was left unlinked.
+        $row = $this->device('1');
+        $this->service()->sync();
+        $linked = Asset::where('litsrmm_device_id', $row['id'])->sole();
+        $older = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1-OLD', 'serial_number' => null]);
+
+        app(AssetService::class)->mergeAssets($older->fresh(), $linked->fresh(), User::factory()->create()->id);
+
+        $this->assertSame($row['id'], $older->fresh()->litsrmm_device_id, 'the survivor takes the link');
+        $this->assertNotNull($older->fresh()->litsrmm_synced_at);
+        $this->assertNull(Asset::withTrashed()->find($linked->id)->litsrmm_device_id, 'the tombstone gives it up');
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(0, $result->created, 'the next sync follows the link, it does not recreate the device');
+        $this->assertSame(1, Asset::count());
+    }
+
+    public function test_two_different_links_refuse_to_merge(): void
+    {
+        // Two live LITSRMM devices are two machines, not one machine twice.
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000001']);
+        $b = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000002']);
+
+        $this->assertArrayHasKey('litsrmm_device_id', app(AssetService::class)->assetMergeIdentityConflicts($a, $b));
     }
 
     public function test_a_server_os_is_typed_as_a_server(): void
