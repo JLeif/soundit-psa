@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# mockshot — render a design/mockups HTML file to PNG with headless Chromium.
+#
+#   scripts/mockshot <file.html> [out.png] [--device phone|tablet|desktop | --size WxH] [--full]
+#
+# Thin wrapper: the implementation is scripts/lib/mockshot.cjs. It is a .cjs
+# file, not an extensionless node script, because node treats an extensionless
+# file as ESM whenever an ancestor directory's package.json says
+# "type": "module", and this repo can be checked out under such a directory.
+#
+# See design/mockups/README.md. Exit codes: 0 ok, 1 usage, 2 playwright-core
+# not found, 3 render failed, 127 node not found.
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v node >/dev/null 2>&1; then
+    echo "mockshot: node is not installed (Node 18+ required)" >&2
+    exit 127
+fi
+exec node "$HERE/lib/mockshot.cjs" "$@"

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Example mockup — ticket card</title>
+<!-- Example of the design/mockups convention: tokens only, no CDN, synthetic data (G-13). -->
+<link rel="stylesheet" href="../_tokens.css">
+<style>
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: var(--psa-colors-canvas);
+        color: var(--psa-colors-ink);
+        font-family: var(--psa-typography-body-font-family);
+        font-size: var(--psa-typography-body-font-size);
+        font-weight: var(--psa-typography-body-font-weight);
+        line-height: var(--psa-typography-body-line-height);
+    }
+    main { padding: var(--psa-spacing-lg); max-width: 760px; }
+    .section-title {
+        font-family: var(--psa-typography-display-font-family);
+        font-size: var(--psa-typography-display-font-size);
+        font-weight: var(--psa-typography-display-font-weight);
+        line-height: var(--psa-typography-display-line-height);
+        letter-spacing: var(--psa-typography-display-letter-spacing);
+        color: var(--psa-colors-navy);
+        text-transform: uppercase;
+        margin: 0 0 var(--psa-spacing-lg);
+    }
+    .section-title::after {
+        content: ""; display: block; width: 60px; height: 3px;
+        margin-top: var(--psa-spacing-sm);
+        background: var(--psa-colors-signal-gold);
+    }
+    .card {
+        background: var(--psa-colors-surface);
+        border: 1px solid var(--psa-colors-border);
+        border-radius: var(--psa-rounded-md);
+        overflow: hidden;
+    }
+    .card-header {
+        background: var(--psa-colors-navy);
+        color: var(--psa-colors-surface);
+        font-family: var(--psa-typography-title-font-family);
+        font-size: var(--psa-typography-title-font-size);
+        font-weight: var(--psa-typography-title-font-weight);
+        line-height: var(--psa-typography-title-line-height);
+        letter-spacing: var(--psa-typography-title-letter-spacing);
+        text-transform: uppercase;
+        padding: var(--psa-spacing-sm) var(--psa-spacing-md);
+        display: flex; align-items: center; justify-content: space-between;
+    }
+    .card-header .icon { color: var(--psa-colors-signal-gold); margin-right: var(--psa-spacing-sm); }
+    .card-body { padding: var(--psa-spacing-md); }
+    .subject {
+        font-family: var(--psa-typography-headline-font-family);
+        font-weight: var(--psa-typography-headline-font-weight);
+        color: var(--psa-colors-navy);
+        font-size: 1.15rem; margin: 0 0 var(--psa-spacing-sm);
+    }
+    dl { display: grid; grid-template-columns: 140px 1fr; gap: var(--psa-spacing-xs) var(--psa-spacing-md); margin: var(--psa-spacing-md) 0; }
+    dt {
+        font-family: var(--psa-typography-label-font-family);
+        font-size: var(--psa-typography-label-font-size);
+        font-weight: var(--psa-typography-label-font-weight);
+        color: var(--psa-colors-navy);
+    }
+    dd { margin: 0; }
+    .muted { color: var(--psa-colors-muted-ink); font-size: 0.875rem; }
+    .badge {
+        display: inline-block; padding: 2px 10px;
+        border-radius: var(--psa-rounded-pill);
+        font-family: var(--psa-typography-label-font-family);
+        font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .badge-warning { background: var(--psa-colors-warning); color: var(--psa-colors-navy-deep); }
+    .badge-info { background: var(--psa-colors-info); color: var(--psa-colors-navy-deep); }
+    .actions { display: flex; gap: var(--psa-spacing-sm); padding-top: var(--psa-spacing-md); border-top: 1px solid var(--psa-colors-border); }
+    .btn {
+        font-family: var(--psa-typography-label-font-family);
+        font-size: var(--psa-typography-label-font-size);
+        font-weight: 600; padding: var(--psa-spacing-sm) var(--psa-spacing-md);
+        border-radius: var(--psa-rounded-sm); border: 1px solid transparent; cursor: pointer;
+    }
+    .btn-accent { background: var(--psa-colors-signal-gold); color: var(--psa-colors-navy-deep); }
+    .btn-outline { background: var(--psa-colors-surface); color: var(--psa-colors-navy); border-color: var(--psa-colors-navy); }
+</style>
+</head>
+<body>
+<main>
+    <h1 class="section-title">Ticket</h1>
+    <article class="card">
+        <header class="card-header">
+            <span><span class="icon" aria-hidden="true">&#9679;</span>Ticket #10042</span>
+            <span class="badge badge-warning" title="Status">In progress</span>
+        </header>
+        <div class="card-body">
+            <h2 class="subject">Shared printer drops off the network after sleep</h2>
+            <p class="muted">Opened 2 hours ago by Alex Example &middot; via portal</p>
+            <dl>
+                <dt>Client</dt><dd>Example Dental Co.</dd>
+                <dt>Contact</dt><dd>Alex Example &lt;alex@example.test&gt;</dd>
+                <dt>Asset</dt><dd>PRINTER-EXAMPLE-01</dd>
+                <dt>Priority</dt><dd><span class="badge badge-info">P3</span> Normal business hours</dd>
+                <dt>Assigned</dt><dd>Sam Tech</dd>
+            </dl>
+            <div class="actions">
+                <button class="btn btn-accent" type="button">Log time &amp; reply</button>
+                <button class="btn btn-outline" type="button">Reassign</button>
+            </div>
+        </div>
+    </article>
+</main>
+</body>
+</html>
