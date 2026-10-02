@@ -154,7 +154,7 @@ class ProspectIntakeService
             if ($e->getMessage() !== 'contact_identity_owned') {
                 throw $e;
             }
-            // Locking reads, not plain ones. A caller's transaction (SubmissionProcessor) fixed its
+            // Locking reads, not plain ones. A caller's transaction may have fixed its
             // REPEATABLE READ snapshot before the winner committed; the conditional UPDATE above
             // saw the winner's row, but a plain re-read would see the old snapshot (owner NULL,
             // client and person absent) and throw. Measured on MariaDB 10.11 (card fs0tKV9e).
