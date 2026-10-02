@@ -77,9 +77,11 @@ class VerifyApiToken
     }
 
     /**
-     * @return array{0: ApiToken|null, 1: string|null, 2: ApiToken|null} the token, or null and the
-     *     refusal cause; [2] is the row the presented secret matches (null when none), so a
-     *     refusal is audited under that token
+     * Returns the token, or null and the refusal cause; [2] is the row the
+     * presented secret matches (null when none), so a refusal is audited under
+     * that token.
+     *
+     * @return array{0: ApiToken|null, 1: string|null, 2: ApiToken|null}
      */
     private function authenticate(Request $request): array
     {
