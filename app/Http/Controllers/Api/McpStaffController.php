@@ -311,6 +311,12 @@ class McpStaffController extends Controller
         'benjipays_list_transactions',
         'benjipays_get_invoice',
         'benjipays_get_customer_payment_methods',
+        // Card 6abec4f9 stage 2: sent-email history for ONE PSA client (same
+        // fence; recipients masked to j***@domain), and the merchant
+        // organization's own settings (org-wide, no client fence; non-secret
+        // flags only). GET only. Explicit-grant only like every entry here.
+        'benjipays_list_sent_emails',
+        'benjipays_get_settings',
     ];
 
     /**
@@ -1276,13 +1282,20 @@ class McpStaffController extends Controller
                 $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === \App\Services\Mcp\BenjiPaysForecastTool::NAME) {
                 $result = app(\App\Services\Mcp\BenjiPaysForecastTool::class)->execute($arguments);
-            } elseif (in_array($name, [\App\Services\Mcp\BenjiPaysTransactionsTool::NAME, \App\Services\Mcp\BenjiPaysInvoiceTool::NAME, \App\Services\Mcp\BenjiPaysPaymentMethodsTool::NAME], true)) {
+            } elseif ($name === \App\Services\Mcp\BenjiPaysSettingsTool::NAME) {
+                // Organization-wide settings: a client_id would suggest a per-client
+                // answer this read cannot give, so one is refused rather than ignored.
+                $result = $hasClientIdArgument
+                    ? ['error' => 'benjipays_get_settings reads the merchant organization\'s settings, not a client\'s; omit client_id.']
+                    : app(\App\Services\Mcp\BenjiPaysSettingsTool::class)->execute();
+            } elseif (in_array($name, [\App\Services\Mcp\BenjiPaysTransactionsTool::NAME, \App\Services\Mcp\BenjiPaysInvoiceTool::NAME, \App\Services\Mcp\BenjiPaysPaymentMethodsTool::NAME, \App\Services\Mcp\BenjiPaysSentEmailsTool::NAME], true)) {
                 // client_id was lifted out of $arguments above; hand the fence both the
                 // parsed id and whether one was supplied, so a malformed id is refused
                 // rather than collapsing to "no client".
                 $tool = match ($name) {
                     \App\Services\Mcp\BenjiPaysTransactionsTool::NAME => \App\Services\Mcp\BenjiPaysTransactionsTool::class,
                     \App\Services\Mcp\BenjiPaysInvoiceTool::NAME => \App\Services\Mcp\BenjiPaysInvoiceTool::class,
+                    \App\Services\Mcp\BenjiPaysSentEmailsTool::NAME => \App\Services\Mcp\BenjiPaysSentEmailsTool::class,
                     default => \App\Services\Mcp\BenjiPaysPaymentMethodsTool::class,
                 };
                 $result = app($tool)->execute($arguments, $clientId, $hasClientIdArgument);

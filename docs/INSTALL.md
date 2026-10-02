@@ -1098,6 +1098,8 @@ Optional. Lets the client portal's **Pay Online** button open a BenjiPays *appli
 
 **Client payment reads (optional).** Three more staff MCP read tools use the same stored key, each needing its own extra scope: `benjipays_list_transactions` (`organizations:transactions:read`), `benjipays_get_invoice` (`organizations:invoices:read`) and `benjipays_get_customer_payment_methods` (`organizations:payment-methods:read`). All are GET-only. They take a PSA client or PSA invoice, never a BenjiPays id, and refuse a client with no QuickBooks customer mapping. Payment methods and transactions are reduced to method type and last four digits. A missing scope gives a plain 403 message naming it. Each must be granted to a token explicitly.
 
+**Sent emails and settings reads (optional).** `benjipays_list_sent_emails` (`organizations:emails:read`) lists the emails BenjiPays sent about one PSA client (date, type, status, recipient masked to its first letter and domain); it uses the same client fence. `benjipays_get_settings` (`organizations:settings:read`) reads the merchant organization's own auto-processing, skip, surcharge and portal flags; it has no client fence because the settings are organization-wide, and it returns no keys, URLs, addresses or free text. Both are GET-only and must be granted to a token explicitly.
+
 No BenjiPays call is made from tests or CI.
 
 ### Tier2Tickets / HelpDesk Buttons

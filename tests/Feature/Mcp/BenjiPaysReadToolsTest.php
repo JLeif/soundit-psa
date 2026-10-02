@@ -269,6 +269,44 @@ class BenjiPaysReadToolsTest extends TestCase
         $this->assertStringNotContainsString('312.5', $text);
     }
 
+    /**
+     * #4739: last4 is the TRAILING four visible digits of the mask, or null.
+     * Digits elsewhere (a leading BIN, a routing number) are never last4.
+     *
+     * @return array<string, array{0: ?string, 1: ?string}>
+     */
+    public static function last4Masks(): array
+    {
+        return [
+            'trailing four' => ['****1111', '1111'],
+            'bin and trailing four' => ['411111******1111', '1111'],
+            'bank trailing four' => ['XXXX6789', '6789'],
+            'more than four trailing digits' => ['****991111', '1111'],
+            'lead digits only' => ['4111********', null],
+            'lead digits, spaced' => ['4111 11** **** ****', null],
+            'routing then masked account' => ['021000021-XXXX', null],
+            'trailing digits split by a space' => ['**** 11 11', null],
+            'only three trailing digits' => ['4111****111', null],
+            'no digits' => ['********', null],
+            'null' => [null, null],
+        ];
+    }
+
+    #[DataProvider('last4Masks')]
+    public function test_last4_is_the_trailing_four_visible_digits_or_null(?string $mask, ?string $last4): void
+    {
+        Http::fake(['https://api.benjipays.com/v2/transactions*' => Http::response(self::page([
+            self::txn(['details' => ['message' => null, 'maskedPan' => $mask, 'cardType' => null, 'receiptNumber' => null, 'paymentRef' => null, 'account' => null]]),
+            self::txn(['paymentType' => 'bank', 'details' => ['message' => null, 'maskedPan' => null, 'cardType' => null, 'receiptNumber' => null, 'paymentRef' => null, 'account' => $mask]]),
+        ])), 'https://api.benjipays.com/v2/payment-methods*' => Http::response(self::page([self::pm(['maskedPan' => $mask])]))]);
+
+        $txns = $this->answer($this->mcp(BenjiPaysTransactionsTool::NAME, ['client_id' => $this->client->id]))['transactions'];
+        $pms = $this->answer($this->mcp(BenjiPaysPaymentMethodsTool::NAME, ['client_id' => $this->client->id]))['payment_methods'];
+
+        $this->assertSame([$last4, $last4, $last4], [$txns[0]['last4'], $txns[1]['last4'], $pms[0]['last4']]);
+        $this->assertOnlyGets(2);
+    }
+
     // ── benjipays_get_invoice ───────────────────────────────────────────────
 
     public function test_invoice_happy_path_reports_balance_status_and_partial_payment(): void
