@@ -247,7 +247,7 @@ Route::middleware('auth')->group(function () {
     // Call log
     Route::get('/calls', [CallController::class, 'index'])->name('calls.index');
     Route::get('/calls/latest', [CallController::class, 'latest'])->name('calls.latest');
-    Route::post('/calls/bulk-action', [CallController::class, 'bulkAction'])->name('calls.bulk-action');
+    Route::post('/calls/bulk-action', [CallController::class, 'bulkAction'])->middleware('throttle:60,1,bulk-money:')->name('calls.bulk-action');
     Route::get('/calls/{call}', [CallController::class, 'show'])->name('calls.show');
     Route::get('/calls/{call}/create-ticket', [CallController::class, 'createTicket'])->name('calls.create-ticket');
     Route::post('/calls/{call}/create-ticket', [CallController::class, 'storeTicket'])->name('calls.store-ticket');
@@ -694,7 +694,7 @@ Route::middleware('auth')->group(function () {
 
     // Invoices
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
-    Route::post('/invoices/bulk-action', [InvoiceController::class, 'bulkAction'])->name('invoices.bulk-action');
+    Route::post('/invoices/bulk-action', [InvoiceController::class, 'bulkAction'])->middleware('throttle:60,1,bulk-money:')->name('invoices.bulk-action');
     Route::get('/invoices/create', [InvoiceController::class, 'create'])->name('invoices.create');
     Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
     Route::get('/invoices/{invoice}', [InvoiceController::class, 'show'])->name('invoices.show');
