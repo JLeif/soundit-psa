@@ -14,11 +14,13 @@ use App\Models\Ticket;
 use App\Models\TicketCategoryChangeLog;
 use App\Models\TicketDescriptionChangeLog;
 use App\Services\NotificationService;
+use App\Services\PrepayService;
 use App\Services\Signals\SignalHub;
 use App\Support\T2TConfig;
 use App\Support\TechnicianConfig;
 use App\Support\TriageConfig;
 use App\Support\WikiConfig;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class TicketObserver
@@ -192,6 +194,26 @@ class TicketObserver
 
     public function updated(Ticket $ticket): void
     {
+        // A ticket given its own contract no longer needs one chosen: re-run this ticket's
+        // debits held as "Needs contract" once the change is committed (card I3EvQKUV r2).
+        // The release is client-wide; entries on other tickets that still resolve
+        // AMBIGUOUS stay held.
+        if ($ticket->wasChanged('contract_id') && $ticket->contract_id !== null && $ticket->client_id !== null) {
+            $clientId = (int) $ticket->client_id;
+            $ticketId = (int) $ticket->id;
+            DB::afterCommit(function () use ($clientId, $ticketId) {
+                try {
+                    app(PrepayService::class)->releaseHeldDebits($clientId);
+                } catch (\Throwable $e) {
+                    Log::warning('[Prepay] Held debits release failed', [
+                        'client_id' => $clientId,
+                        'ticket_id' => $ticketId,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            });
+        }
+
         // Taxonomy change log (so-0ftg Part 4): every tickets.category_id move
         // is recorded here — the one seam ALL writers pass through (triage
         // mapping, web UI, future MCP tools) — so Phase-1 mapping refinement

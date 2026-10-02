@@ -661,20 +661,45 @@ class PrepayService
     }
 
     /**
-     * Re-run the debits held as "Needs contract" for a client (r1 diff:1): called
-     * when a default contract is chosen. Only entries the hold path marked are
-     * touched, never other unstamped history. Returns the number debited.
+     * Re-run the debits held as "Needs contract" for a client (r1 diff:1, r2):
+     * called on every transition that can end the ambiguity: a default chosen
+     * (ClientController), a contract leaving Active or deleted (Contract::booted),
+     * a ticket given its own contract (TicketObserver).
+     * Only entries the hold path marked and that have no ledger row are touched,
+     * never other unstamped history; each debit runs under the debit path's own
+     * locks, so a repeated release cannot debit twice. An entry whose ticket
+     * still resolves AMBIGUOUS or NONE is skipped and keeps its marker. Returns
+     * the number debited.
      */
     public function releaseHeldDebits(int $clientId): int
     {
         $onClient = fn ($q) => $q->where('client_id', $clientId);
         $released = 0;
+        $stillHeld = 0;
+        $resolvable = [];
+        $resolves = function (?Ticket $ticket, $stamp) use (&$resolvable): bool {
+            if (! $ticket) {
+                return false;
+            }
+            $resolver = app(ContractResolver::class);
+            if ($stamp !== null && $resolver->forEntry($ticket, (int) $stamp)->isResolved()) {
+                return true;
+            }
+
+            return $resolvable[$ticket->id] ??= $resolver->forEntry($ticket)->isResolved();
+        };
 
         $notes = TicketNote::whereNotNull('contract_held_at')->whereHas('ticket', $onClient)
             ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('prepay_transactions')
                 ->whereColumn('prepay_transactions.ticket_note_id', 'ticket_notes.id'))
             ->orderBy('id')->get();
         foreach ($notes as $note) {
+            // Still ambiguous (or no contract at all): leave it held, marker in place.
+            if (! $resolves($note->ticket, $note->contract_id)) {
+                $stillHeld++;
+
+                continue;
+            }
             try {
                 if ($this->debitFromTicketNote($note)) {
                     $released++;
@@ -692,6 +717,11 @@ class PrepayService
                 ->whereColumn('prepay_transactions.phone_call_id', 'phone_calls.id'))
             ->orderBy('id')->get();
         foreach ($calls as $call) {
+            if (! $resolves($call->ticket, $call->contract_id)) {
+                $stillHeld++;
+
+                continue;
+            }
             try {
                 if ($this->debitFromPhoneCall($call)) {
                     $released++;
@@ -702,6 +732,16 @@ class PrepayService
                     'error' => $e->getMessage(),
                 ]);
             }
+        }
+
+        if ($notes->isNotEmpty() || $calls->isNotEmpty()) {
+            Log::info('[Prepay] Held debits release run', [
+                'client_id' => $clientId,
+                'held_notes' => $notes->count(),
+                'held_calls' => $calls->count(),
+                'debited' => $released,
+                'still_held' => $stillHeld,
+            ]);
         }
 
         return $released;
@@ -806,7 +846,7 @@ class PrepayService
             if (! $this->stampPhoneCallContract($call)) {
                 $resolution = app(ContractResolver::class)->forEntry($ticket);
                 if ($resolution->isAmbiguous()) {
-                    // The marker releaseHeldDebits() re-runs when a default is chosen (r1 diff:1).
+                    // The marker releaseHeldDebits() re-runs when the ambiguity ends (r1 diff:1, r2).
                     PhoneCall::whereKey($call->id)->whereNull('contract_held_at')->update(['contract_held_at' => now()]);
                     Log::info('[Prepay] Phone call debit held: needs contract', [
                         'phone_call_id' => $call->id,

@@ -179,6 +179,12 @@
                                             @endif
                                         </span>
                                     @endif
+                                    {{-- A held call's prepay debit waits for the client's contract to be settled (card I3EvQKUV r2) --}}
+                                    @if($item->contract_held_at && $item->is_billable && $item->effectiveDurationSeconds())
+                                        <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Set a default contract or this ticket's contract.">
+                                            <i class="bi bi-exclamation-circle me-1"></i>Needs contract
+                                        </span>
+                                    @endif
                                     <span class="text-muted small ms-auto" title="{{ $item->started_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                         {{ $item->started_at?->diffForHumans() }}
                                     </span>

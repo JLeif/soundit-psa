@@ -7,6 +7,7 @@ use App\Enums\BillingSource;
 use App\Enums\ContractStatus;
 use App\Enums\ContractType;
 use App\Enums\TicketPriority;
+use App\Services\PrepayService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -14,6 +15,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class Contract extends Model
 {
@@ -92,9 +95,44 @@ class Contract extends Model
             $contract->clearAsClientDefault('deleted');
         });
 
+        // A soft delete can leave the client one active contract: release its held debits.
+        static::deleted(function (Contract $contract) {
+            if (! $contract->isForceDeleting()) {
+                $contract->releaseClientHeldDebits();
+            }
+        });
+
         static::updated(function (Contract $contract) {
             if ($contract->wasChanged('status') && $contract->status !== ContractStatus::Active) {
                 $contract->clearAsClientDefault($contract->status->value);
+            }
+            // Expiry, cancellation or re-activation can end the client's ambiguity (r2).
+            if ($contract->wasChanged('status')) {
+                $contract->releaseClientHeldDebits();
+            }
+        });
+    }
+
+    /**
+     * Re-run this client's debits held as "Needs contract" once the change is
+     * committed (card I3EvQKUV r2). Entries that still resolve AMBIGUOUS stay
+     * held; a failure never takes the contract write down with it.
+     */
+    private function releaseClientHeldDebits(): void
+    {
+        if ($this->client_id === null) {
+            return;
+        }
+        $clientId = (int) $this->client_id;
+        DB::afterCommit(function () use ($clientId) {
+            try {
+                app(PrepayService::class)->releaseHeldDebits($clientId);
+            } catch (\Throwable $e) {
+                Log::warning('[Prepay] Held debits release failed', [
+                    'client_id' => $clientId,
+                    'contract_id' => $this->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
         });
     }
