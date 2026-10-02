@@ -35,7 +35,7 @@ class TeamsMessageAttachmentFetcher
 {
     private const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
-    private const HISTORY_HINT = ' If you took this attachment_id from get_teams_chat_history or teams_search_channel, pass source "history".';
+    private const HISTORY_HINT = ' Do not resend this attachment_id with source "history": re-read the message with get_teams_chat_history, then pass the attachment_id from that result with source "history".';
 
     public function __construct(
         private readonly AttachmentService $attachments,
