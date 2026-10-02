@@ -1377,19 +1377,33 @@ class AssistantToolExecutor
 
         $includeInactive = self::wantsInactive($input);
 
+        $includeRetired = self::wantsRetired($input);
+        if (is_array($includeRetired)) {
+            return $includeRetired;
+        }
+
         $expand = self::requestedExpand($input, ['tickets']);
         if (isset($expand['error'])) {
             return $expand;
         }
 
-        $query = Asset::where('client_id', $this->clientId);
+        // The client fence is the first predicate on BOTH branches: include_retired
+        // only lifts the SoftDeletes scope, never the tenant boundary (card NSh7FP8I).
+        $query = $includeRetired
+            ? Asset::withTrashed()->where('client_id', $this->clientId)
+            : Asset::where('client_id', $this->clientId);
 
         // Active-by-default on both lookup paths (id/hostname) — the get_asset analogue
         // of the get_person bypass. include_inactive surfaces DEACTIVATED assets
         // deliberately; RETIRED (soft-deleted) assets stay out via SoftDeletes
-        // regardless (psa-eu5la review).
-        if (! $includeInactive) {
-            $query->active();
+        // unless include_retired is a literal true (psa-eu5la review; card NSh7FP8I).
+        $byHostname = empty($input['asset_id']) && ! empty($input['hostname']);
+
+        // include_retired + hostname: the active fence is applied AFTER the pick
+        // (below), so a deactivated live row still takes part in it and a
+        // retired row can never win over it (card NSh7FP8I r2, context:2).
+        if (! ($includeRetired && $byHostname)) {
+            self::applyActiveFence($query, $includeInactive, $includeRetired);
         }
 
         if (! empty($input['asset_id'])) {
@@ -1400,11 +1414,36 @@ class AssistantToolExecutor
             return ['error' => 'Provide one of: asset_id or hostname'];
         }
 
-        $asset = $query->first();
-        if (! $asset) {
-            $hint = $includeInactive ? '' : ' (deactivated assets are excluded — set include_inactive to include them)';
+        if ($includeRetired) {
+            // A hostname can be carried by a live row and a retired one (an old
+            // device and its re-enrolment). Deterministic pick: any non-retired
+            // row first, active or not; among live rows an active one first when
+            // include_inactive is unset; then id. Only on the opt-in path, so the
+            // default query is unchanged.
+            $query->orderByRaw('CASE WHEN '.$query->getModel()->getQualifiedDeletedAtColumn().' IS NULL THEN 0 ELSE 1 END');
+            if (! $includeInactive) {
+                $query->orderByDesc('is_active');
+            }
+            $query->orderBy('id');
+        }
 
-            return ['error' => 'Asset not found at this client'.$hint];
+        $asset = $query->first();
+
+        if ($asset && ! $asset->trashed() && ! $asset->is_active && ! $includeInactive) {
+            // Only reachable on include_retired + hostname: the winning row is a
+            // live deactivated device. It outranks any retired row carrying the
+            // hostname, and live rows still obey include_inactive, so report it
+            // the way the default path reports a deactivated device.
+            return ['error' => 'Asset not found at this client (a deactivated, non-retired asset carries this hostname and takes precedence over any retired row with it — set include_inactive to include it)'];
+        }
+
+        if (! $asset) {
+            // include_retired + hostname skipped the active fence, so rows of every
+            // state were searched: no deactivated row was excluded, and the hint
+            // must not say one was (card NSh7FP8I r3, diff:1).
+            $searchedInactive = $includeInactive || ($includeRetired && $byHostname);
+
+            return ['error' => 'Asset not found at this client'.self::assetNotFoundHint($searchedInactive, $includeRetired)];
         }
 
         $out = [
@@ -1428,6 +1467,7 @@ class AssistantToolExecutor
             'level_id' => $asset->level_id,
             'tactical_asset_id' => $asset->tactical_asset_id,
             'notes' => $asset->notes,
+            ...($includeRetired ? self::retiredFields($asset) : []),
             'linked_ids' => LinkedIds::forAsset($asset),
             // psa-823 part 2: one shallow orientation layer — owning client,
             // assigned users (active only, house fence), and the most recent
@@ -1595,6 +1635,106 @@ class AssistantToolExecutor
     }
 
     /**
+     * Resolve the include_retired opt-in on find_assets/get_asset (card NSh7FP8I).
+     *
+     * A VALIDATED boolean, unlike include_inactive's silent fail-closed read: an
+     * absent key (or null) is the default false, a literal boolean is honoured, and
+     * anything else is refused with an error. A caller who sent "true" and silently
+     * got the live-only answer would read "no retired row" as a fact.
+     *
+     * @param  array<string, mixed>  $input
+     * @return bool|array{error: string}
+     */
+    private static function wantsRetired(array $input): bool|array
+    {
+        $raw = $input['include_retired'] ?? null;
+        if ($raw === null) {
+            return false;
+        }
+        if (! is_bool($raw)) {
+            return ['error' => 'include_retired must be a boolean (true or false); got '.get_debug_type($raw).'.'];
+        }
+
+        return $raw;
+    }
+
+    /**
+     * The is_active fence shared by find_assets and get_asset. Without
+     * include_retired it is exactly the old active() scope. With it, a retired
+     * (soft-deleted) row is returned whatever its is_active value — the two flags
+     * are independent — while live rows still obey include_inactive.
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<Asset>  $query
+     */
+    private static function applyActiveFence($query, bool $includeInactive, bool $includeRetired): void
+    {
+        if ($includeInactive) {
+            return;
+        }
+
+        if (! $includeRetired) {
+            $query->active();
+
+            return;
+        }
+
+        $deletedAt = $query->getModel()->getQualifiedDeletedAtColumn();
+        $query->where(fn ($w) => $w->where('is_active', true)->orWhereNotNull($deletedAt));
+    }
+
+    /**
+     * is_retired / retired_at / restorable, carried on every row an
+     * include_retired read returns. restorable is derived from
+     * Asset::restoreRefusal(), the rule restore_asset itself applies: false on a
+     * live row and on a merge tombstone (card NSh7FP8I r2, contract:2).
+     *
+     * @return array{is_retired: bool, retired_at: string|null, restorable: bool}
+     */
+    private static function retiredFields(Asset $asset): array
+    {
+        return [
+            'is_retired' => $asset->trashed(),
+            'retired_at' => $asset->deleted_at?->toIso8601String(),
+            'restorable' => $asset->restoreRefusal() === null,
+        ];
+    }
+
+    /**
+     * get_asset's not-found hint: names exactly the populations this call did
+     * NOT search, and the flag that reaches each (card NSh7FP8I r2, context:3).
+     */
+    private static function assetNotFoundHint(bool $includeInactive, bool $includeRetired): string
+    {
+        $excluded = [];
+        if (! $includeInactive) {
+            $excluded[] = $includeRetired
+                ? 'deactivated non-retired assets are excluded — set include_inactive to include them'
+                : 'deactivated assets are excluded — set include_inactive to include them';
+        }
+        if (! $includeRetired) {
+            $excluded[] = 'retired (soft-deleted) assets are excluded — set include_retired to include them';
+        }
+
+        return $excluded === [] ? '' : ' ('.implode('; ', $excluded).')';
+    }
+
+    /**
+     * find_assets' scope clause for the is_active / retired fences. Unchanged
+     * when include_retired is unset; with it set, says that retired rows come
+     * back whatever their is_active (card NSh7FP8I r2, contract:4).
+     */
+    private static function assetScopeClause(bool $includeInactive, bool $includeRetired): string
+    {
+        if (! $includeRetired) {
+            return $includeInactive ? '; including inactive' : '; active only';
+        }
+
+        return $includeInactive
+            ? '; including inactive; including retired'
+            : '; non-retired rows active only; including retired (active or deactivated)';
+    }
+
+    /**
      * Parse the expand opt-in on entity gets (psa-823 part 2). Same fail-closed
      * posture as wantsInactive — these tools dispatch raw, unvalidated input, so
      * anything that is not an array of KNOWN strings is refused with the
@@ -1738,7 +1878,14 @@ class AssistantToolExecutor
         $offset = max(0, (int) ($input['offset'] ?? 0));
         $includeInactive = self::wantsInactive($input);
 
-        $q = Asset::query()->with('client:id,name');
+        $includeRetired = self::wantsRetired($input);
+        if (is_array($includeRetired)) {
+            return $includeRetired;
+        }
+
+        // include_retired lifts ONLY the SoftDeletes scope (card NSh7FP8I); the
+        // client_id fence below applies to this builder on both branches.
+        $q = ($includeRetired ? Asset::withTrashed() : Asset::query())->with('client:id,name');
 
         if (! $listAll) {
             $q->where(fn ($w) => $w
@@ -1753,10 +1900,10 @@ class AssistantToolExecutor
         // returned DEACTIVATED assets and hid active assets at deactivated clients,
         // against the "across ALL clients" contract. No tenant boundary here
         // (psa-eu5la; mirrors psa-6usr). Note: include_inactive flips is_active only —
-        // RETIRED (soft-deleted) assets stay excluded by Asset's SoftDeletes scope.
-        if (! $includeInactive) {
-            $q->active();
-        }
+        // RETIRED (soft-deleted) assets stay excluded by Asset's SoftDeletes scope
+        // unless include_retired is a literal true, which returns them whatever
+        // their is_active value (card NSh7FP8I).
+        self::applyActiveFence($q, $includeInactive, $includeRetired);
 
         if ($this->clientId) {
             $q->where('client_id', $this->clientId);
@@ -1775,7 +1922,10 @@ class AssistantToolExecutor
             ->orderBy('id')
             ->offset($offset)
             ->limit($limit)
-            ->get(['id', 'client_id', 'name', 'hostname', 'asset_type', 'serial_number', 'os', 'last_user', 'is_active']);
+            ->get(array_merge(
+                ['id', 'client_id', 'name', 'hostname', 'asset_type', 'serial_number', 'os', 'last_user', 'is_active'],
+                $includeRetired ? ['deleted_at', 'merged_into_asset_id'] : [],
+            ));
 
         return [
             'count' => $assets->count(),
@@ -1785,7 +1935,7 @@ class AssistantToolExecutor
             // offset+count must still read as more, or paging stops a page early.
             'has_more' => $total > $offset + $assets->count(),
             'scope' => ($this->clientId ? "client_id={$this->clientId}" : 'cross-client (no client_id provided)')
-                .($includeInactive ? '; including inactive' : '; active only')
+                .self::assetScopeClause($includeInactive, $includeRetired)
                 .($listAll ? '; list-all (no query)' : ''),
             'assets' => $assets->map(fn ($a) => [
                 'id' => $a->id,
@@ -1798,6 +1948,7 @@ class AssistantToolExecutor
                 'os' => $a->os,
                 'last_user' => $a->last_user,
                 'is_active' => $a->is_active,
+                ...($includeRetired ? self::retiredFields($a) : []),
             ])->toArray(),
         ];
     }

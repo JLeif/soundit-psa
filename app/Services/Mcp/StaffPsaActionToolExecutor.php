@@ -1878,11 +1878,10 @@ class StaffPsaActionToolExecutor
         if (! $asset) {
             return ['error' => 'Asset not found'];
         }
-        if (! $asset->trashed()) {
-            return ['error' => 'Asset is not retired; nothing to restore.'];
-        }
-        if ($asset->merged_into_asset_id !== null) {
-            return ['error' => "Asset #{$asset->id} was merged into asset #{$asset->merged_into_asset_id} and cannot be restored; work with the surviving asset."];
+        // Not retired, or a merge tombstone: Asset::restoreRefusal() is the one
+        // rule, shared with the include_retired reads' `restorable` flag.
+        if (($refusal = $asset->restoreRefusal()) !== null) {
+            return ['error' => $refusal];
         }
 
         $asset->restore();
