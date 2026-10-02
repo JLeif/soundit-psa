@@ -99,7 +99,7 @@ class HuntressWriteClient
     {
         if (! $this->isConfigured()) {
             throw new HuntressWriteScopeException(
-                'Huntress write credential (user-based API key) is not configured; nothing was sent.'
+                'Huntress write credential (user-based API key) is not configured; nothing was sent. Save the pair in '.\App\Support\HuntressConfig::WRITE_CREDENTIAL_LOCATION.'.'
             );
         }
 

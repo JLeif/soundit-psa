@@ -1134,6 +1134,7 @@ Sync EDR agent counts and ITDR user counts from Huntress for license billing.
 3. Click **Test Connection** to verify
 4. Go to **Organization Mapping** to map Huntress organizations to local clients
 5. Click **Sync Licenses Now** or wait for the daily 05:00 cron
+6. Optional, for escalation resolution only: an administrator enters a **User API key** and **User API secret** (a user-based Huntress API key, separate from the account key above) in the same card and saves. The card shows **Write enabled** once both are saved. Leaving them blank keeps the saved pair; **Clear the saved user API key pair** removes it.
 
 ### Huntress (Incident Tickets)
 

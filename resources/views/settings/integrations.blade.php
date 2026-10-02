@@ -2111,6 +2111,57 @@
                         </div>
                     </div>
 
+                    <div class="border-top pt-3 mb-3" id="huntress-user-key-pair">
+                        <h6 class="mb-1">Escalation resolution (write) credential</h6>
+                        <p class="text-muted small mb-2">A separate <strong>user-based</strong> Huntress API key pair, used only to resolve SOC escalations. The account API key above is read-only and is never used for writes.</p>
+                        <p class="small mb-2" id="huntress-write-status" role="status">
+                            @if($huntressWriteConfigured ?? false)
+                                <i class="bi bi-check-circle-fill text-success me-1" aria-hidden="true"></i><strong>Write enabled:</strong> a user API key pair is saved, so escalation resolution can be used where it has been granted.
+                            @else
+                                <i class="bi bi-dash-circle text-secondary me-1" aria-hidden="true"></i><strong>Write not enabled:</strong> escalation resolution is unavailable until a User API key and User API secret are saved here.
+                            @endif
+                        </p>
+                        @if(auth()->user()?->isAdmin())
+                        <div class="row">
+                            <div class="col-md-6 mb-2">
+                                <label for="huntress_user_api_key" class="form-label">User API key</label>
+                                <input type="password"
+                                       class="form-control"
+                                       id="huntress_user_api_key"
+                                       name="user_api_key"
+                                       value=""
+                                       maxlength="500"
+                                       autocomplete="new-password"
+                                       placeholder="{{ ($huntressUserKeyStored ?? false) ? '••••••••' : 'Enter user API key' }}">
+                                <div class="form-text">{{ ($huntressUserKeyStored ?? false) ? 'Saved. ' : '' }}Encrypted at rest. Leave blank to keep the saved value.</div>
+                            </div>
+                            <div class="col-md-6 mb-2">
+                                <label for="huntress_user_api_secret" class="form-label">User API secret</label>
+                                <input type="password"
+                                       class="form-control"
+                                       id="huntress_user_api_secret"
+                                       name="user_api_secret"
+                                       value=""
+                                       maxlength="500"
+                                       autocomplete="new-password"
+                                       placeholder="{{ ($huntressUserSecretStored ?? false) ? '••••••••' : 'Enter user API secret' }}">
+                                <div class="form-text">{{ ($huntressUserSecretStored ?? false) ? 'Saved. ' : '' }}Encrypted at rest. Leave blank to keep the saved value.</div>
+                            </div>
+                        </div>
+                        @if(($huntressUserKeyStored ?? false) || ($huntressUserSecretStored ?? false))
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="clear_user_api_key_pair" value="1" id="huntress_clear_user_api_key_pair">
+                                <label class="form-check-label small" for="huntress_clear_user_api_key_pair">Clear the saved user API key pair</label>
+                                <small class="text-muted d-block">Removes both halves when you save; escalation resolution then becomes unavailable.</small>
+                            </div>
+                        @endif
+                        @error('user_api_key')<div class="text-danger small mt-1">{{ $message }}</div>@enderror
+                        @error('user_api_secret')<div class="text-danger small mt-1">{{ $message }}</div>@enderror
+                        @else
+                        <p class="text-muted small mb-0">An administrator enters this pair.</p>
+                        @endif
+                    </div>
+
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-primary btn-sm">Save Huntress Settings</button>
                         <button type="button" class="btn btn-outline-secondary" id="test-huntress-btn"

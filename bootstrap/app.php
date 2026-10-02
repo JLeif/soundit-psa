@@ -112,6 +112,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'technician_teams_webhook_url',
             'token',
             'totp_secret',
+            'user_api_key',
+            'user_api_secret',
             'wake_secret',
             'webhook_secret',
             'webhook_verifier_token',
