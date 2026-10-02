@@ -406,7 +406,7 @@ class TeamsMessageAttachmentsTest extends TestCase
         $r = $this->fetch(['source' => 'guess']);
 
         $this->assertTrue((bool) $r->json('result.isError'));
-        $this->assertStringContainsString('source must be "poll" or "history"', (string) $r->json('result.content.0.text'));
+        $this->assertSame('source must be "poll" or "history"', json_decode((string) $r->json('result.content.0.text'), true)['error'] ?? null);
         $this->assertSame([], $this->history);
     }
 
