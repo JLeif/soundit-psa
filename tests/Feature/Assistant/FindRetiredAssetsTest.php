@@ -4,6 +4,9 @@ namespace Tests\Feature\Assistant;
 
 use App\Models\Asset;
 use App\Models\Client;
+use App\Models\Setting;
+use App\Models\User;
+use App\Services\AssetService;
 use App\Services\Assistant\AssistantToolExecutor;
 use App\Support\McpConfig;
 use App\Support\McpToolSurface;
@@ -313,5 +316,141 @@ class FindRetiredAssetsTest extends TestCase
 
         $bad = $this->mcp($token, 'find_assets', ['client_id' => $x->id, 'include_retired' => 'true']);
         $this->assertStringContainsString('include_retired must be a boolean', $bad['text']);
+    }
+
+    // ── r2 (Jeeves REVISE at 10846c14) ────────────────────────────────────────
+
+    /** Item 1 (context:2 / contract:1 / diff:1): a deactivated live row outranks a retired one. */
+    public function test_get_asset_never_lets_a_retired_row_win_over_a_deactivated_live_row(): void
+    {
+        $x = Client::factory()->create();
+        $retired = $this->asset($x, 'EXAMPLE-DESK', retired: true);
+        $liveOff = $this->asset($x, 'EXAMPLE-DESK', active: false);
+
+        $got = $this->at($x)->execute('get_asset', ['hostname' => 'EXAMPLE-DESK', 'include_retired' => true]);
+        $this->assertArrayNotHasKey('id', $got, 'the retired row must not win over a deactivated live row: '.json_encode($got));
+        $this->assertSame(
+            'Asset not found at this client (a deactivated, non-retired asset carries this hostname and takes precedence over any retired row with it — set include_inactive to include it)',
+            $got['error'] ?? null,
+        );
+
+        $both = $this->at($x)->execute('get_asset', ['hostname' => 'EXAMPLE-DESK', 'include_retired' => true, 'include_inactive' => true]);
+        $this->assertSame($liveOff->id, $both['id'] ?? null, 'with include_inactive the deactivated live row is returned: '.json_encode($both));
+        $this->assertFalse($both['is_retired']);
+        $this->assertFalse($both['restorable']);
+
+        // Among live rows an active one still beats a deactivated one, whatever the ids.
+        $liveOn = $this->asset($x, 'EXAMPLE-DESK');
+        $this->assertGreaterThan($liveOff->id, $liveOn->id);
+        $pick = $this->at($x)->execute('get_asset', ['hostname' => 'EXAMPLE-DESK', 'include_retired' => true]);
+        $this->assertSame($liveOn->id, $pick['id'] ?? null, json_encode($pick));
+
+        // By id the retired row is still reachable directly.
+        $byId = $this->at($x)->execute('get_asset', ['asset_id' => $retired->id, 'include_retired' => true]);
+        $this->assertSame($retired->id, $byId['id'] ?? null);
+    }
+
+    /** Item 2 (contract:4 / diff:2): the scope string states the real fence on every flag combination. */
+    public function test_find_assets_scope_string_states_the_real_scope(): void
+    {
+        $x = Client::factory()->create();
+        $this->asset($x, 'EXAMPLE-LIVE');
+        $retiredOff = $this->asset($x, 'EXAMPLE-RET-OFF', active: false, retired: true);
+
+        $cases = [
+            [[], "client_id={$x->id}; active only"],
+            [['include_inactive' => true], "client_id={$x->id}; including inactive"],
+            [['include_retired' => true], "client_id={$x->id}; non-retired rows active only; including retired (active or deactivated)"],
+            [['include_retired' => true, 'include_inactive' => true], "client_id={$x->id}; including inactive; including retired"],
+        ];
+        foreach ($cases as [$flags, $scope]) {
+            $result = $this->at($x)->execute('find_assets', ['query' => 'EXAMPLE'] + $flags);
+            $this->assertSame($scope, $result['scope'], json_encode($flags));
+        }
+
+        // The case the finding names: a deactivated retired row is in the payload,
+        // so the scope must not claim the result is active only.
+        $retiredOnly = $this->at($x)->execute('find_assets', ['query' => 'EXAMPLE', 'include_retired' => true]);
+        $row = collect($retiredOnly['assets'])->firstWhere('id', $retiredOff->id);
+        $this->assertNotNull($row);
+        $this->assertFalse($row['is_active']);
+        $this->assertStringNotContainsString('; active only', $retiredOnly['scope']);
+    }
+
+    /** Item 3 (diff:3 / contract:5 / context:3): the not-found hint is true on every path. */
+    public function test_get_asset_not_found_hint_is_true_on_every_flag_combination(): void
+    {
+        $x = Client::factory()->create();
+        $retired = $this->asset($x, 'EXAMPLE-GONE', active: false, retired: true);
+
+        $cases = [
+            [[], ' (deactivated assets are excluded — set include_inactive to include them; retired (soft-deleted) assets are excluded — set include_retired to include them)'],
+            [['include_inactive' => true], ' (retired (soft-deleted) assets are excluded — set include_retired to include them)'],
+            [['include_retired' => true], ' (deactivated non-retired assets are excluded — set include_inactive to include them)'],
+            [['include_retired' => true, 'include_inactive' => true], ''],
+        ];
+        foreach ($cases as [$flags, $hint]) {
+            foreach ([['hostname' => 'EXAMPLE-NOPE'], ['asset_id' => $retired->id + 1000]] as $lookup) {
+                $got = $this->at($x)->execute('get_asset', $lookup + $flags);
+                $this->assertSame('Asset not found at this client'.$hint, $got['error'] ?? null, json_encode($lookup + $flags));
+            }
+        }
+
+        // The default-path lookup of a retired device points at include_retired,
+        // and following that pointer reaches it.
+        $miss = $this->at($x)->execute('get_asset', ['asset_id' => $retired->id, 'include_inactive' => true]);
+        $this->assertStringContainsString('set include_retired', $miss['error']);
+        $hit = $this->at($x)->execute('get_asset', ['asset_id' => $retired->id, 'include_retired' => true]);
+        $this->assertSame($retired->id, $hit['id'] ?? null);
+    }
+
+    /** Item 4 (diff:6 / contract:2): merge tombstones are marked unrestorable, by restore_asset's own rule. */
+    public function test_merge_tombstones_are_marked_not_restorable_by_the_rule_restore_asset_applies(): void
+    {
+        $x = Client::factory()->create();
+        $user = User::factory()->create();
+        $survivor = $this->asset($x, 'EXAMPLE-NEW');
+        $duplicate = $this->asset($x, 'EXAMPLE-OLD');
+        app(AssetService::class)->mergeAssets($survivor, $duplicate, $user->id);
+        $tombstone = Asset::withTrashed()->findOrFail($duplicate->id);
+        $this->assertTrue($tombstone->trashed(), 'precondition: merge soft-deletes the duplicate');
+        $this->assertSame($survivor->id, (int) $tombstone->merged_into_asset_id);
+        $plainRetired = $this->asset($x, 'EXAMPLE-RET', retired: true);
+
+        $rows = collect($this->at($x)->execute('find_assets', ['query' => 'EXAMPLE', 'include_retired' => true])['assets'])->keyBy('id');
+        $this->assertTrue($rows[$tombstone->id]['is_retired']);
+        $this->assertFalse($rows[$tombstone->id]['restorable'], 'a merge tombstone must not be offered as restorable');
+        $this->assertTrue($rows[$plainRetired->id]['is_retired']);
+        $this->assertTrue($rows[$plainRetired->id]['restorable']);
+        $this->assertFalse($rows[$survivor->id]['restorable'], 'a live row has nothing to restore');
+
+        $got = $this->at($x)->execute('get_asset', ['asset_id' => $tombstone->id, 'include_retired' => true]);
+        $this->assertFalse($got['restorable']);
+        $this->assertSame($survivor->id, (int) $got['linked_ids']['merged_into_asset_id'], 'get_asset names the survivor');
+        $this->assertTrue($this->at($x)->execute('get_asset', ['asset_id' => $plainRetired->id, 'include_retired' => true])['restorable']);
+
+        // restorable agrees with restore_asset itself, row by row.
+        Setting::setValue('triage_system_user_id', (string) $user->id);
+        $token = McpConfig::rotateStaffToken(allowedTools: ['restore_asset'], label: 'find-retired-restore');
+        foreach ([$tombstone->id => false, $plainRetired->id => true] as $id => $restorable) {
+            $res = $this->mcp($token, 'restore_asset', ['asset_id' => $id]);
+            $this->assertSame(! $restorable, $res['is_error'], "restore_asset on #{$id}: ".$res['text']);
+        }
+        $this->assertNotNull(Asset::withTrashed()->find($tombstone->id)->deleted_at, 'the tombstone stays retired');
+        $this->assertNull(Asset::withTrashed()->find($plainRetired->id)->deleted_at);
+    }
+
+    /** The descriptions carry the r2 rules and still never mention restore_asset (r1 rework). */
+    public function test_descriptions_state_the_r2_rules_without_naming_restore_asset(): void
+    {
+        $tools = collect(\App\Services\Assistant\AssistantToolDefinitions::getTools(true))->keyBy('name');
+        foreach (['get_asset', 'find_assets'] as $name) {
+            $json = json_encode($tools[$name]);
+            $this->assertStringNotContainsString('restore_asset', $json, $name);
+            $this->assertStringContainsString('restorable', $tools[$name]['description'], $name);
+            $this->assertStringContainsString('merge tombstone', $tools[$name]['description'], $name);
+        }
+        $this->assertStringNotContainsString('the live one is returned', $tools['get_asset']['description']);
+        $this->assertStringContainsString('a non-retired row, active or deactivated, always takes precedence', $tools['get_asset']['description']);
     }
 }

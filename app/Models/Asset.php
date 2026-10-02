@@ -191,6 +191,24 @@ class Asset extends Model
         return $this->belongsTo(self::class, 'merged_into_asset_id')->withTrashed();
     }
 
+    /**
+     * Why restore_asset would refuse this row, or null when it would restore it.
+     * The single source of that rule: StaffPsaActionToolExecutor::restoreAsset
+     * returns this string as its error, and the include_retired reads derive
+     * their `restorable` flag from it (card NSh7FP8I), so the two cannot drift.
+     */
+    public function restoreRefusal(): ?string
+    {
+        if (! $this->trashed()) {
+            return 'Asset is not retired; nothing to restore.';
+        }
+        if ($this->merged_into_asset_id !== null) {
+            return "Asset #{$this->id} was merged into asset #{$this->merged_into_asset_id} and cannot be restored; work with the surviving asset.";
+        }
+
+        return null;
+    }
+
     // ── Scopes ──
 
     public function scopeActive(Builder $query): Builder
