@@ -2,6 +2,7 @@
 
 namespace App\Services\Chet;
 
+use App\Models\OperatorInbox;
 use App\Services\Wiki\Mining\WikiRedactor;
 use Illuminate\Support\Facades\Log;
 
@@ -86,6 +87,25 @@ class OperatorBridgeTextSanitizer
         }
 
         return ['text' => $redacted, 'truncated' => $totalChars > $maxChars, 'total_chars' => $totalChars, 'withheld' => false, 'redacted' => $redacted !== $capped];
+    }
+
+    /**
+     * The prompt meta for one operator_inbox row, with `withheld` meaning
+     * what poll_operator_messages means by it: withheld at ingest (recorded
+     * in text_withheld at write time) OR withheld now by this pipeline's
+     * scan of the stored text. poll_operator_messages and
+     * get_teams_message_attachment both call this (#4887), so the poll can
+     * never offer a message that the fetcher treats as not withheld, or the
+     * other way round.
+     *
+     * @return array{text: string, truncated: bool, total_chars: int, withheld: bool, redacted: bool}
+     */
+    public function inboxRowPromptMeta(OperatorInbox $row): array
+    {
+        $meta = $this->sanitizeForPromptWithMeta((string) $row->text);
+        $meta['withheld'] = $meta['withheld'] || (bool) $row->text_withheld;
+
+        return $meta;
     }
 
     /**

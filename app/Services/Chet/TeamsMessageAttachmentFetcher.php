@@ -30,6 +30,12 @@ use Illuminate\Support\Facades\Log;
  * is. The check keys on server state only: a history ordinal is the same
  * "inline-N" string as a poll ordinal, so nothing the caller says about
  * where it came from can skip it.
+ *
+ * A message that poll_operator_messages withheld is refused outright (#4887),
+ * whether or not its row recorded attachments, before any Graph read: the
+ * chat id and message id are not secrets (conversation_id rides on the
+ * withheld poll row, and get_teams_chat_history lists message ids), so the
+ * refusal has to key on the inbox row, not on which ids Chet was shown.
  */
 class TeamsMessageAttachmentFetcher
 {
@@ -37,6 +43,7 @@ class TeamsMessageAttachmentFetcher
 
     public function __construct(
         private readonly AttachmentService $attachments,
+        private readonly OperatorBridgeTextSanitizer $textSanitizer,
     ) {}
 
     /**
@@ -61,6 +68,10 @@ class TeamsMessageAttachmentFetcher
         $attachmentId = is_scalar($input['attachment_id'] ?? null) ? trim((string) $input['attachment_id']) : '';
         if (! preg_match('/^(inline|file)-[1-9][0-9]{0,2}$/', $attachmentId)) {
             return ['error' => 'attachment_id is required (e.g. "inline-1" from the message\'s attachments list)'];
+        }
+
+        if ($this->withheldByPoll($chatId, $messageId)) {
+            return ['error' => "poll_operator_messages withheld this message's text, so its attachments are not offered either; nothing was read from Teams. Ask the operator to resend what you need."];
         }
 
         $graph = app(GraphClient::class);
@@ -140,6 +151,21 @@ class TeamsMessageAttachmentFetcher
             'is_image' => true,
             'data_base64' => $data,
         ];
+    }
+
+    /**
+     * True when any inbox row for this chat and message is withheld in the
+     * sense poll_operator_messages uses: the one shared derivation,
+     * OperatorBridgeTextSanitizer::inboxRowPromptMeta(), so the two cannot
+     * drift. Rows of other chats never count.
+     */
+    private function withheldByPoll(string $chatId, string $messageId): bool
+    {
+        return OperatorInbox::query()
+            ->where('conversation_id', $chatId)
+            ->where('activity_id', $messageId)
+            ->get(['id', 'text', 'text_withheld'])
+            ->contains(fn (OperatorInbox $row): bool => $this->textSanitizer->inboxRowPromptMeta($row)['withheld']);
     }
 
     /**

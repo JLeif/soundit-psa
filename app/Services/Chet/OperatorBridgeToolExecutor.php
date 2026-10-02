@@ -342,7 +342,7 @@ class OperatorBridgeToolExecutor
             ->get();
 
         $messages = $rows->map(function (OperatorInbox $row): array {
-            $meta = $this->textSanitizer->sanitizeForPromptWithMeta($row->text);
+            $meta = $this->textSanitizer->inboxRowPromptMeta($row);
 
             // Delivery facts ride OUTSIDE the fenced text — a marker inside
             // the fence would be spoofable by the operator message itself.
@@ -370,7 +370,9 @@ class OperatorBridgeToolExecutor
             //    unknown and text_total_chars stays null — the stored
             //    length is not the original length and must not stand in
             //    for it.
-            $withheld = $meta['withheld'] || (bool) $row->text_withheld;
+            //    inboxRowPromptMeta() folds text_withheld into withheld; the
+            //    attachment fetcher refuses on the same call (#4887).
+            $withheld = $meta['withheld'];
             $ingestTruncated = $row->text_chars !== null
                 && $row->text_chars > OperatorBridgeTextSanitizer::MAX_STORAGE_CHARS;
 
