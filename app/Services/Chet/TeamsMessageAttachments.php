@@ -148,18 +148,32 @@ class TeamsMessageAttachments
         ], $refs));
     }
 
-    /** Our marker for one ref: "[image 1]" or "[file 1: name]". */
+    /**
+     * publicRefs() for output. The filename is sender-typed text, so it goes
+     * through the same fence and redaction as every other sender string;
+     * marker() never carries it.
+     *
+     * @param  array<int, array<string, mixed>>  $refs
+     * @return array<int, array{attachment_id: string, kind: string, filename: ?string, mime_type: ?string, size_bytes: ?int}>
+     */
+    public static function fencedRefs(array $refs, ChetDataSurfaceTextSanitizer $sanitizer): array
+    {
+        return array_map(static function (array $ref) use ($sanitizer): array {
+            $ref['filename'] = $sanitizer->sanitizeNullable('Teams chat attachment filename', $ref['filename'], self::FILENAME_MAX_CHARS);
+
+            return $ref;
+        }, self::publicRefs($refs));
+    }
+
+    /**
+     * Our marker for one ref: "[image 1]" or "[file 1]". It sits outside the
+     * untrusted fence, so it carries nothing the sender typed.
+     */
     public static function marker(array $ref): string
     {
         $n = (int) substr((string) $ref['attachment_id'], strrpos((string) $ref['attachment_id'], '-') + 1);
 
-        if (($ref['kind'] ?? null) === 'inline') {
-            return "[image {$n}]";
-        }
-
-        $name = $ref['filename'] ?? null;
-
-        return $name !== null ? "[file {$n}: {$name}]" : "[file {$n}]";
+        return ($ref['kind'] ?? null) === 'inline' ? "[image {$n}]" : "[file {$n}]";
     }
 
     /** @param  array<int, array<string, mixed>>  $refs */

@@ -2,6 +2,7 @@
 
 namespace App\Services\Chet;
 
+use App\Models\OperatorInbox;
 use App\Services\Assistant\AssistantToolExecutor;
 use App\Services\AttachmentService;
 use App\Services\Graph\GraphClient;
@@ -20,7 +21,12 @@ use Illuminate\Support\Facades\Log;
  *
  * File attachments (contentType reference) are SharePoint/OneDrive links. The
  * Graph permission that reads chats does not read those drives, so they are
- * refused with their name rather than fetched through a new Files grant.
+ * refused rather than fetched through a new Files grant.
+ *
+ * poll_operator_messages numbers refs from the Bot Framework activity, this
+ * tool from the Graph message; their parity is an assumption. Where the inbox
+ * recorded refs for the message, an edit or a per-kind count mismatch refuses
+ * rather than return whatever Graph's Nth image now is.
  */
 class TeamsMessageAttachmentFetcher
 {
@@ -63,8 +69,16 @@ class TeamsMessageAttachmentFetcher
             return $this->graphFailure($e, $chatId, 'message');
         }
 
+        $message = is_array($message) ? $message : [];
+        $graphRefs = TeamsMessageAttachments::fromGraphMessage($message);
+
+        $mismatch = $this->pollRefsMismatch($chatId, $messageId, $message, $graphRefs);
+        if ($mismatch !== null) {
+            return ['error' => $mismatch];
+        }
+
         $ref = null;
-        foreach (TeamsMessageAttachments::fromGraphMessage(is_array($message) ? $message : []) as $candidate) {
+        foreach ($graphRefs as $candidate) {
             if ($candidate['attachment_id'] === $attachmentId) {
                 $ref = $candidate;
                 break;
@@ -77,9 +91,7 @@ class TeamsMessageAttachmentFetcher
         }
 
         if ($ref['kind'] === 'file') {
-            $name = $ref['filename'] ?? 'unnamed file';
-
-            return ['error' => "Attachment {$attachmentId} is a shared file ({$name}), not an inline image. Shared files live in SharePoint/OneDrive and are not fetchable with this tool's Graph permission; ask the operator to paste it into the chat as an image or attach it to a ticket."];
+            return ['error' => "Attachment {$attachmentId} is a shared file, not an inline image. Shared files live in SharePoint/OneDrive and are not fetchable with this tool's Graph permission; ask the operator to paste it into the chat as an image or attach it to a ticket."];
         }
 
         try {
@@ -125,6 +137,57 @@ class TeamsMessageAttachmentFetcher
             'is_image' => true,
             'data_base64' => $data,
         ];
+    }
+
+    /**
+     * Refusal text when an inbox row recorded refs for this message and the
+     * Graph message no longer lines up with them; null when no row recorded
+     * refs (the caller's ordinal can only have come from Graph) or they agree.
+     *
+     * @param  array<int, array<string, mixed>>  $graphRefs
+     */
+    private function pollRefsMismatch(string $chatId, string $messageId, array $message, array $graphRefs): ?string
+    {
+        $rows = OperatorInbox::query()
+            ->where('conversation_id', $chatId)
+            ->where('activity_id', $messageId)
+            ->whereNotNull('attachments')
+            ->get(['attachments']);
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        if (! empty($message['lastEditedDateTime'])) {
+            return 'Teams reports this message as edited, so its attachment numbering may differ from what poll_operator_messages listed; no image was returned. Ask the operator to paste the image again.';
+        }
+
+        $live = self::kindCounts($graphRefs);
+        foreach ($rows as $row) {
+            $recorded = self::kindCounts(is_array($row->attachments) ? $row->attachments : []);
+            if ($recorded !== $live) {
+                return "Teams has {$live['inline']} inline image(s) and {$live['file']} file(s) on this message but poll_operator_messages recorded {$recorded['inline']} and {$recorded['file']}, so the requested attachment cannot be matched to the one listed; no image was returned. Ask the operator to paste the image again.";
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<int, mixed>  $refs
+     * @return array{inline: int, file: int}
+     */
+    private static function kindCounts(array $refs): array
+    {
+        $counts = ['inline' => 0, 'file' => 0];
+        foreach ($refs as $ref) {
+            $kind = is_array($ref) ? ($ref['kind'] ?? null) : null;
+            if ($kind === 'inline' || $kind === 'file') {
+                $counts[$kind]++;
+            }
+        }
+
+        return $counts;
     }
 
     /** @return array{error: string} */

@@ -382,9 +382,12 @@ class OperatorBridgeToolExecutor
             };
 
             // Attachment refs (card 2Cj3kOsy). null = captured before refs
-            // were recorded (unknown), [] = none. The marker is ours and sits
-            // OUTSIDE the fence; filenames were sanitized at ingest.
-            $refs = is_array($row->attachments) ? TeamsMessageAttachments::publicRefs($row->attachments) : null;
+            // were recorded (unknown), [] = none. The marker is ours, sits
+            // OUTSIDE the fence and carries no sender text; the filename is
+            // sender text, fenced and redacted as get_teams_chat_history does.
+            $refs = is_array($row->attachments)
+                ? TeamsMessageAttachments::fencedRefs($row->attachments, app(ChetDataSurfaceTextSanitizer::class))
+                : null;
             $markers = $refs === null ? null : TeamsMessageAttachments::markers($refs);
             $fenced = $this->promptFence->fence('operator message', $meta['text']);
 

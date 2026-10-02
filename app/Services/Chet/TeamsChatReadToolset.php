@@ -94,7 +94,7 @@ class TeamsChatReadToolset
             ],
             [
                 'name' => self::ATTACHMENT_TOOL,
-                'description' => 'See one image from a Teams chat message. Messages from get_teams_chat_history, teams_search_channel and poll_operator_messages carry attachments: [{attachment_id, kind, filename, mime_type, size_bytes}] and an "[image N]" / "[file N: name]" marker. Pass the message\'s chat id (or "operator" / "escalation"), its message id (poll_operator_messages: graph_chat_id and graph_message_id) and the attachment_id. Only chats known from durable PSA state are readable. An inline image is returned downscaled and base64-encoded ({attachment_id, filename, media_type, is_image, data_base64}) under the same byte and pixel ceilings as get_ticket_attachment; a non-image, oversize or undecodable image is refused. File attachments (kind file) are not fetched: the refusal names the file so you can ask the operator to paste it as an image or attach it to a ticket.',
+                'description' => 'See one image from a Teams chat message. Messages from get_teams_chat_history, teams_search_channel and poll_operator_messages carry attachments: [{attachment_id, kind, filename, mime_type, size_bytes}] and an "[image N]" / "[file N]" marker (filename is the sender's text and comes inside an untrusted fence). Pass the message\'s chat id (or "operator" / "escalation"), its message id (poll_operator_messages: graph_chat_id and graph_message_id) and the attachment_id. Only chats known from durable PSA state are readable. An inline image is returned downscaled and base64-encoded ({attachment_id, filename, media_type, is_image, data_base64}) under the same byte and pixel ceilings as get_ticket_attachment; a non-image, oversize or undecodable image is refused. File attachments (kind file) are not fetched; ask the operator to paste it as an image or attach it to a ticket. If poll_operator_messages recorded the message and Teams now reports it as edited, or with a different number of images or files, the fetch is refused rather than risk returning a different image.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -461,10 +461,11 @@ class TeamsChatReadToolset
             'from' => $this->sanitizeMessageFrom($message['from'] ?? null),
             'body_content_type' => $message['body']['contentType'] ?? null,
             // Our markers sit OUTSIDE the untrusted fence: a marker inside it
-            // could be typed by the sender. They are what keeps an image-only
-            // message from reading as an empty one; attachments carries the refs.
+            // could be typed by the sender, so they carry only kind and ordinal.
+            // They are what keeps an image-only message from reading as an
+            // empty one; attachments carries the refs, filenames fenced.
             'body' => $markers === null ? $body : 'Attachments: '.$markers."\n".$body,
-            'attachments' => TeamsMessageAttachments::publicRefs($refs),
+            'attachments' => TeamsMessageAttachments::fencedRefs($refs, $this->textSanitizer),
         ];
     }
 
