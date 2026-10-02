@@ -31,7 +31,11 @@ final class SubmissionProcessor
             // rolls back to pending, never a committed intermediate processing state.
             $claimed = ContactSubmission::whereKey($id)->where('state', 'pending')
                 ->update(['state' => 'processing', 'attempts' => DB::raw('attempts + 1')]);
-            $row = ContactSubmission::findOrFail($id);
+            // A LOCKING read. Under REPEATABLE READ the snapshot is fixed by the first plain read;
+            // fixed here, it predated a concurrent winner's commit for this identity and the matcher
+            // below classified on it (no Person, no ticket to link). When process() opens the
+            // transaction, as the drain does, the first plain read now follows the identity lock.
+            $row = ContactSubmission::lockForUpdate()->findOrFail($id);
             if ($claimed !== 1) {
                 return $row;
             }
@@ -94,9 +98,9 @@ final class SubmissionProcessor
             $row->update(['state' => 'processed', 'ticket_id' => $ticket->id, 'ticket_note_id' => $note->id,
                 'related_ticket_ids' => json_encode($related, JSON_THROW_ON_ERROR),
                 // Every submission already in the ledger was received before this ticket existed.
-                // A LOCKING read (diff:1). The snapshot was fixed at findOrFail, before the identity
-                // lock, so under REPEATABLE READ a plain max() missed any same-requester row the
-                // ledger committed while this transaction waited on that lock.
+                // A LOCKING read (diff:1): a current read counts every same-requester row the ledger
+                // committed while this transaction waited on the identity lock, whichever read fixed
+                // the REPEATABLE READ snapshot.
                 'ticket_watermark' => $createsTicket ? (int) ContactSubmission::lockForUpdate()->max('id') : null]);
             IntakeNotifications::record($row, 'processed');
 
