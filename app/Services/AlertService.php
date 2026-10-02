@@ -93,7 +93,7 @@ class AlertService
                     "Refusing to revive alert {$resolved->id}: it belongs to a client and this {$source->value} alert names none.",
                 );
             }
-            if ($resolved->client_id !== null && (int) $resolved->client_id !== (int) $incomingClientId) {
+            if ($resolved->client_id !== null && $incomingClientId !== null && (int) $resolved->client_id !== (int) $incomingClientId) {
                 throw new AlertClientConflictException(
                     $resolved->id,
                     "Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.",
