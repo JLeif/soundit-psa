@@ -49,6 +49,77 @@ class AlertService
             return $existing;
         }
 
+        // The `alerts` table has unique(source, source_alert_id) (the
+        // create_alerts_table migration), so a given key is owned by exactly
+        // one row for the table's entire lifetime, even after that row
+        // resolves. Without this branch, any source whose alert resolves and
+        // later recurs under the same source_alert_id would hit a duplicate-key
+        // error on the INSERT below instead of getting an alert. So a resolved
+        // row under this key is revived in place, reset to Active for the new
+        // occurrence, rather than a second row being created (which the index
+        // forbids) or the occurrence being lost.
+        $resolved = Alert::where('source', $source)
+            ->where('source_alert_id', $sourceAlertId)
+            ->where('status', AlertStatus::Resolved)
+            ->first();
+
+        if ($resolved) {
+            // Reviving in place would otherwise update client_id to whatever
+            // the incoming payload claims, which is how an alert could move
+            // between clients without anyone noticing. Tactical's fallback key
+            // (md5("{hostname}:{checkLabel}") in
+            // TacticalAlertService::handleAlertFailure) is not client-scoped,
+            // so two clients can each have a "SERVER01" with the same check and
+            // collide on one source_alert_id. Refusing here, before any write,
+            // keeps that collision loud instead of reassigning the alert (and
+            // its history) to the wrong client.
+            // Compared as integers: Laravel's `integer` validation rule accepts
+            // a numeric string without casting it, so a caller may pass "5"
+            // while $resolved->client_id is the model's native int.
+            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && (int) $resolved->client_id !== (int) $data['client_id']) {
+                throw new AlertClientConflictException(
+                    $resolved->id,
+                    "Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.",
+                );
+            }
+
+            $metadata = array_merge($resolved->metadata ?? [], $data['metadata'] ?? []);
+            if ($resolved->ticket_id !== null) {
+                $metadata['previous_ticket_id'] = $resolved->ticket_id;
+            }
+            if ($resolved->resolved_at !== null) {
+                $metadata['previous_resolved_at'] = $resolved->resolved_at->toIso8601String();
+            }
+
+            // title and severity are overwritten unconditionally: every caller
+            // passes both. Everything else that is not part of "this occurrence
+            // is new" falls back to the resolved row's value when the payload
+            // omits it, as the re-fire branch above does.
+            $resolved->update([
+                'asset_id' => $data['asset_id'] ?? $resolved->asset_id,
+                'client_id' => $data['client_id'] ?? $resolved->client_id,
+                'severity' => $data['severity'],
+                'status' => AlertStatus::Active,
+                'title' => $data['title'],
+                'message' => $data['message'] ?? $resolved->message,
+                'hostname' => $data['hostname'] ?? $resolved->hostname,
+                'ticket_id' => null,
+                'acknowledged_by' => null,
+                'acknowledged_at' => null,
+                'resolved_at' => null,
+                'refired_count' => $resolved->refired_count + 1,
+                'metadata' => $metadata,
+                'fired_at' => $data['fired_at'] ?? now(),
+            ]);
+
+            Log::info("[Alert] Revived {$source->value} alert {$sourceAlertId}", [
+                'alert_id' => $resolved->id,
+                'refired_count' => $resolved->refired_count,
+            ]);
+
+            return $resolved;
+        }
+
         $alert = Alert::create([
             'asset_id' => $data['asset_id'] ?? null,
             'client_id' => $data['client_id'] ?? null,
