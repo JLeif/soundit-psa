@@ -8,6 +8,7 @@ use App\Services\AttachmentService;
 use App\Services\Graph\GraphClient;
 use App\Services\Graph\GraphClientException;
 use Closure;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -31,15 +32,38 @@ use Illuminate\Support\Facades\Log;
  * "inline-N" string as a poll ordinal, so nothing the caller says about
  * where it came from can skip it.
  *
- * A message that poll_operator_messages withheld is refused outright (#4887),
- * whether or not its row recorded attachments, before any Graph read: the
- * chat id and message id are not secrets (conversation_id rides on the
- * withheld poll row, and get_teams_chat_history lists message ids), so the
- * refusal has to key on the inbox row, not on which ids Chet was shown.
+ * A message is refused outright, before any Graph read, when an inbox row of
+ * this chat is withheld under poll_operator_messages' rule evaluated now and
+ * that row either carries this message id (#4887) or carries none and is not
+ * provably older than the message (#4909), whether or not the row recorded
+ * attachments. The chat id and message id are not secrets (conversation_id
+ * rides on the withheld poll row, and get_teams_chat_history lists message
+ * ids), so the refusal has to key on inbox rows, not on which ids Chet was
+ * shown.
+ *
+ * A row with no activity_id (written before that column existed, or with a
+ * non-numeric activity id) cannot be linked to a Graph message, so it is
+ * matched by time instead, failing closed: a Teams chat message id is the
+ * epoch-millisecond creation time, and the row's ts is the activity
+ * timestamp (or the later receive time), so a message is treated as possibly
+ * such a withheld row's message unless its id time is more than
+ * UNLINKED_MARGIN_SECONDS after the row's ts. That refuses every older
+ * message in the chat too: coarse, but it needs no Graph read, so the
+ * decision reads only the DB and comes before any Graph request.
  */
 class TeamsMessageAttachmentFetcher
 {
     private const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+    /**
+     * How far before a message an unlinked withheld row may be timestamped and
+     * still refuse it. ts is stored to the second and falls back to the
+     * (later) receive time, so a row's ts sits at or after its message's id
+     * time less one second; the margin only has to absorb clock skew.
+     */
+    public const UNLINKED_MARGIN_SECONDS = 60;
+
+    public const WITHHELD_REFUSAL = "Refused before anything was read from Teams: an operator-inbox row in this chat that is withheld under poll_operator_messages' current rule either carries this message id or carries none and is not provably more than ".self::UNLINKED_MARGIN_SECONDS.' seconds older than this message, so its attachments are not returned. Ask the operator to resend what you need.';
 
     public function __construct(
         private readonly AttachmentService $attachments,
@@ -61,7 +85,8 @@ class TeamsMessageAttachmentFetcher
         }
 
         $messageId = is_scalar($input['message_id'] ?? null) ? trim((string) $input['message_id']) : '';
-        if (! preg_match('/^[0-9]{1,32}$/', $messageId)) {
+        // No leading zero (#4910): the inbox lookup is an exact string match.
+        if (! preg_match('/^[1-9][0-9]{0,31}$/', $messageId)) {
             return ['error' => 'message_id is required (the numeric Teams message id)'];
         }
 
@@ -70,8 +95,8 @@ class TeamsMessageAttachmentFetcher
             return ['error' => 'attachment_id is required (e.g. "inline-1" from the message\'s attachments list)'];
         }
 
-        if ($this->withheldByPoll($chatId, $messageId)) {
-            return ['error' => "poll_operator_messages withheld this message's text, so its attachments are not offered either; nothing was read from Teams. Ask the operator to resend what you need."];
+        if ($this->withheldByPoll($chatId, $messageId) || $this->unlinkedWithheldRowNotOlder($chatId, $messageId)) {
+            return ['error' => self::WITHHELD_REFUSAL];
         }
 
         $graph = app(GraphClient::class);
@@ -166,6 +191,46 @@ class TeamsMessageAttachmentFetcher
             ->where('activity_id', $messageId)
             ->get(['id', 'text', 'text_withheld'])
             ->contains(fn (OperatorInbox $row): bool => $this->textSanitizer->inboxRowPromptMeta($row)['withheld']);
+    }
+
+    /**
+     * True when this chat has a withheld inbox row with no activity_id whose
+     * ts is no earlier than UNLINKED_MARGIN_SECONDS before the message's id
+     * time (#4909). An id whose epoch-ms reading is more than a day in the
+     * future places the message nowhere, so then any such row refuses (fail
+     * closed). Same derivation as
+     * withheldByPoll(); rows of other chats never count.
+     */
+    private function unlinkedWithheldRowNotOlder(string $chatId, string $messageId): bool
+    {
+        $query = OperatorInbox::query()
+            ->where('conversation_id', $chatId)
+            ->whereNull('activity_id');
+
+        $sentAt = self::epochSecondsFromMessageId($messageId);
+        if ($sentAt !== null) {
+            $query->where('ts', '>=', Carbon::createFromTimestampUTC($sentAt - self::UNLINKED_MARGIN_SECONDS));
+        }
+
+        foreach ($query->select(['id', 'text', 'text_withheld'])->lazyById(200, 'id') as $row) {
+            if ($this->textSanitizer->inboxRowPromptMeta($row)['withheld']) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whole seconds of a Teams chat message id read as epoch ms; null when
+     * that is more than a day in the future (an over-long id saturates the
+     * int cast at PHP_INT_MAX, which lands here too).
+     */
+    private static function epochSecondsFromMessageId(string $messageId): ?int
+    {
+        $seconds = intdiv((int) $messageId, 1000);
+
+        return $seconds <= now()->getTimestamp() + 86400 ? $seconds : null;
     }
 
     /**
