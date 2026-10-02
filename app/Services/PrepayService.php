@@ -24,9 +24,11 @@ class PrepayService
      * Create a prepay deposit from an invoice's prepaid time lines.
      * Called by InvoiceObserver::handlePaid() and BackfillPrepaidTime.
      */
-    public function depositFromInvoice(Invoice $invoice, Contract $contract): ?PrepayTransaction
+    public function depositFromInvoice(Invoice $invoice, Contract $contract, ?User $user = null): ?PrepayTransaction
     {
-        return DB::transaction(function () use ($invoice, $contract) {
+        $userId = $user?->id ?? Auth::id();
+
+        return DB::transaction(function () use ($invoice, $contract, $userId) {
             // This method takes the invoice lock before the contract lock.
             $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
 
@@ -87,6 +89,7 @@ class PrepayService
             $txn = PrepayTransaction::create([
                 'contract_id' => $contract->id,
                 'source' => PrepayTransactionSource::InvoiceDeposit,
+                'user_id' => $userId,
                 'invoice_id' => $invoice->id,
                 'date' => $invoice->invoice_date,
                 'hours' => $totalHours,
@@ -137,8 +140,11 @@ class PrepayService
         Invoice $invoice,
         Contract $contract,
         ?string $description = null,
+        ?User $user = null,
     ): ?PrepayTransaction {
-        return DB::transaction(function () use ($invoice, $contract, $description) {
+        $userId = $user?->id ?? Auth::id();
+
+        return DB::transaction(function () use ($invoice, $contract, $description, $userId) {
             // Take the same exclusive invoice lock as depositFromInvoice().
             $lockedInvoice = Invoice::withTrashed()->whereKey($invoice->id)->lockForUpdate()->first();
 
@@ -186,6 +192,7 @@ class PrepayService
             $txn = PrepayTransaction::create([
                 'contract_id' => $contract->id,
                 'source' => PrepayTransactionSource::InvoiceReversal,
+                'user_id' => $userId,
                 'invoice_id' => $invoice->id,
                 'date' => now(),
                 'hours' => -$hours,
@@ -717,16 +724,28 @@ class PrepayService
                     }
                 }
 
+                Log::info('[Prepay] Phone call ledger event', [
+                    'action' => 'debit',
+                    'phone_call_id' => $call->id,
+                    'contract_id' => $existing->contract_id,
+                    'txn_id' => $existing->id,
+                    'acting_user_id' => Auth::id(),
+                    'amount' => -$diff,
+                ]);
+
                 return $existing;
             }
 
             $contract->increment('prepay_used', $hours);
             $contract->decrement('prepay_balance', $hours);
 
-            Log::info('[Prepay] Phone call time debit', [
-                'contract_id' => $contract->id,
+            Log::info('[Prepay] Phone call ledger event', [
+                'action' => 'debit',
                 'phone_call_id' => $call->id,
-                'hours' => $hours,
+                'contract_id' => $txn->contract_id,
+                'txn_id' => $txn->id,
+                'acting_user_id' => Auth::id(),
+                'amount' => -$hours,
             ]);
 
             return $txn;
@@ -762,9 +781,13 @@ class PrepayService
                 $contract->increment('prepay_balance', $hours);
             }
 
-            Log::info('[Prepay] Phone call time debit reversed', [
+            Log::info('[Prepay] Phone call ledger event', [
+                'action' => 'reversal',
                 'phone_call_id' => $call->id,
-                'hours' => $hours,
+                'contract_id' => $txn->contract_id,
+                'txn_id' => $txn->id,
+                'acting_user_id' => Auth::id(),
+                'amount' => $hours,
             ]);
         });
     }
