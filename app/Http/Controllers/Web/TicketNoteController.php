@@ -201,11 +201,18 @@ class TicketNoteController extends Controller
             $currentStamp = $note->contract_id === null ? null : (int) $note->contract_id;
             $submitted = $contractId === null ? null : (int) $contractId;
             $ledgerContractId = PrepayTransaction::where('ticket_note_id', $note->id)->value('contract_id');
-            if ($ledgerContractId !== null && $submitted !== null && $submitted !== (int) $ledgerContractId && $submitted !== $currentStamp) {
-                return $this->refuseContract($ticket, 'This time is already debited from another contract, and editing the note cannot move it. Leave the contract unchanged.');
-            }
             if ($ledgerContractId !== null) {
-                $contractId = (int) $ledgerContractId;
+                // The edit keeps the note's own stamp, else the ledger's. A stamp that differs
+                // from its ledger row is left alone (ruling Q6): rewriting it here would let the
+                // debit path re-sync the ledger row it refuses for such a note.
+                $ledgerContractId = (int) $ledgerContractId;
+                $keptStamp = $currentStamp ?? $ledgerContractId;
+                if ($submitted !== null && $submitted !== $keptStamp) {
+                    return $this->refuseContract($ticket, $keptStamp === $ledgerContractId
+                        ? 'This time is already debited from another contract, and editing the note cannot move it. Leave the contract unchanged.'
+                        : "This note's contract differs from the contract its time was debited from, and editing the note cannot change either. Leave the contract unchanged.");
+                }
+                $contractId = $keptStamp;
             } else {
                 // An unchanged stamp that no longer validates (expired, deleted, ticket moved)
                 // resolves afresh, as the debit path does, rather than refusing the field.

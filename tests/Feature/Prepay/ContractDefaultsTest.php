@@ -405,7 +405,7 @@ class ContractDefaultsTest extends TestCase
         $resp = $this->actingAs($user)->put(route('tickets.notes.update', [$this->ticket, $note]), [
             'body' => 'Synthetic edited', 'note_type' => 'note', 'time' => '2h', 'is_billable' => '1', 'contract_id' => $b->id,
         ]);
-        $resp->assertSessionHasErrors('contract_id');
+        $resp->assertSessionHasErrors(['contract_id' => 'This time is already debited from another contract, and editing the note cannot move it. Leave the contract unchanged.']);
         $this->assertSame($a->id, $note->fresh()->contract_id);
         $this->assertEquals(9, $a->fresh()->prepay_balance);
         $this->assertEquals(10, $b->fresh()->prepay_balance);
@@ -440,6 +440,59 @@ class ContractDefaultsTest extends TestCase
         $this->assertSame(\Monolog\Level::Warning, $records[0]->level);
         $this->assertSame(['ticket_note_id' => $note->id, 'stamp_contract_id' => $b->id, 'ledger_contract_id' => $a->id], $records[0]->context);
         $this->assertSame([], array_values(array_filter($logs->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch')));
+    }
+
+    public function test_s5_web_edit_of_mismatched_note_keeps_stamp_and_moves_no_balance(): void
+    {
+        $a = $this->contract('Synthetic A');
+        $b = $this->contract('Synthetic B');
+        $this->ticket->update(['contract_id' => $a->id]);
+        $user = User::factory()->create();
+        $note = $this->note(60, ['author_id' => $user->id, 'note_type' => 'note']);
+        DB::table('ticket_notes')->where('id', $note->id)->update(['contract_id' => $b->id, 'time_minutes' => 180]);
+        $route = route('tickets.notes.update', [$this->ticket, $note]);
+        $edit = fn (array $extra) => $this->actingAs($user)->put($route, array_merge([
+            'body' => 'Synthetic typo fixed', 'note_type' => 'note', 'time' => '3h', 'is_billable' => '1',
+        ], $extra));
+
+        // The preselected stamp and "Automatic" both keep the mismatch; the debit path refuses it.
+        foreach ([['contract_id' => $b->id], []] as $extra) {
+            $edit($extra)->assertSessionHasNoErrors();
+            $this->assertSame($b->id, $note->fresh()->contract_id);
+            $this->assertEquals(-1, PrepayTransaction::where('ticket_note_id', $note->id)->value('hours'));
+            $this->assertSame($a->id, PrepayTransaction::where('ticket_note_id', $note->id)->value('contract_id'));
+            $this->assertEquals(9, $a->fresh()->prepay_balance);
+            $this->assertEquals(10, $b->fresh()->prepay_balance);
+        }
+
+        // Picking the ledger contract is refused too: an edit does not re-stamp the note.
+        $edit(['contract_id' => $a->id])->assertSessionHasErrors(['contract_id' => "This note's contract differs from the contract its time was debited from, and editing the note cannot change either. Leave the contract unchanged."]);
+        $this->assertSame($b->id, $note->fresh()->contract_id);
+        $this->assertEquals(-1, PrepayTransaction::where('ticket_note_id', $note->id)->value('hours'));
+        $this->assertEquals(9, $a->fresh()->prepay_balance);
+        $this->assertEquals(10, $b->fresh()->prepay_balance);
+    }
+
+    public function test_held_note_with_stale_stamp_shows_needs_contract_not_billed_to(): void
+    {
+        $user = User::factory()->create();
+        $a = $this->contract('Synthetic A');
+        $note = $this->note(60, ['note_type' => 'note', 'author_id' => $user->id, 'is_billable' => false]);
+        $this->assertSame($a->id, $note->fresh()->contract_id);
+
+        $this->contract('Synthetic B');
+        $this->contract('Synthetic C');
+        DB::table('contracts')->where('id', $a->id)->update(['status' => 'expired']);
+        $note = $note->fresh();
+        $note->is_billable = true;
+        $note->save();
+
+        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->actingAs($user)->get(route('tickets.show', $this->ticket))
+            ->assertOk()
+            ->assertSee('Not debited: the client had several active contracts and no default.')
+            ->assertDontSee('Billed to Synthetic A');
     }
 
     // ── Client default setting (spec §1, ruling Q1) ──

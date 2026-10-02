@@ -379,13 +379,14 @@
                                                 @endif
                                             </span>
                                         @endif
-                                        @if($note->contract_id && $note->contract_id !== $ticket->contract_id)
-                                            <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">
-                                                <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
-                                            </span>
-                                        @elseif($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
+                                        {{-- A held note can keep a stamp that no longer validates; it is not billed to it --}}
+                                        @if($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
                                             <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Edit the note to choose its contract.">
                                                 <i class="bi bi-exclamation-circle me-1"></i>Needs contract
+                                            </span>
+                                        @elseif($note->contract_id && $note->contract_id !== $ticket->contract_id)
+                                            <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">
+                                                <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
                                             </span>
                                         @endif
                                         <span class="text-muted small ms-auto" title="{{ $note->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
