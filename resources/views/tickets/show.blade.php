@@ -383,8 +383,8 @@
                                             <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">
                                                 <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
                                             </span>
-                                        @elseif(! $note->contract_id && $note->is_billable && $note->time_minutes > 0 && ($ticketNeedsContract ??= app(\App\Services\ContractResolver::class)->forEntry($ticket)->isAmbiguous()))
-                                            <span class="badge bg-warning text-dark small" title="Edit this note to choose the contract its time belongs to">
+                                        @elseif($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
+                                            <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Edit the note to choose its contract.">
                                                 <i class="bi bi-exclamation-circle me-1"></i>Needs contract
                                             </span>
                                         @endif

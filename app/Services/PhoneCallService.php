@@ -1214,6 +1214,7 @@ class PhoneCallService
         // stamped afresh below.
         if ($relinked && ! PrepayTransaction::where('phone_call_id', $call->id)->exists()) {
             $call->contract_id = null;
+            $call->contract_held_at = null;
         }
 
         // Only set billability if triage has already classified this ticket
@@ -1417,6 +1418,7 @@ class PhoneCallService
 
         $call->ticket_id = null;
         $call->contract_id = null;
+        $call->contract_held_at = null;
         $call->is_billable = null;
         $call->save();
 

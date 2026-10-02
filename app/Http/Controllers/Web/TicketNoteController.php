@@ -195,15 +195,26 @@ class TicketNoteController extends Controller
 
         if ($timeMinutes) {
             // Debited time stays on the contract it was debited from; an edit cannot
-            // re-point it (card I3EvQKUV: moving time is its own explicit act).
+            // re-point it (card I3EvQKUV: moving time is its own explicit act). The form
+            // preselects the note's own stamp, so resubmitting it unchanged is never a
+            // move (r1 diff:7).
+            $currentStamp = $note->contract_id === null ? null : (int) $note->contract_id;
+            $submitted = $contractId === null ? null : (int) $contractId;
             $ledgerContractId = PrepayTransaction::where('ticket_note_id', $note->id)->value('contract_id');
-            if ($ledgerContractId !== null && $contractId !== null && (int) $contractId !== (int) $ledgerContractId) {
+            if ($ledgerContractId !== null && $submitted !== null && $submitted !== (int) $ledgerContractId && $submitted !== $currentStamp) {
                 return $this->refuseContract($ticket, 'This time is already debited from another contract, and editing the note cannot move it. Leave the contract unchanged.');
             }
             if ($ledgerContractId !== null) {
                 $contractId = (int) $ledgerContractId;
-            } elseif ($refusal = $this->contractRefusal($ticket, $contractId)) {
-                return $refusal;
+            } else {
+                // An unchanged stamp that no longer validates (expired, deleted, ticket moved)
+                // resolves afresh, as the debit path does, rather than refusing the field.
+                if ($submitted !== null && $submitted === $currentStamp && ! $this->contractResolver->forEntry($ticket, $submitted)->isResolved()) {
+                    $contractId = null;
+                }
+                if ($refusal = $this->contractRefusal($ticket, $contractId)) {
+                    return $refusal;
+                }
             }
         }
 

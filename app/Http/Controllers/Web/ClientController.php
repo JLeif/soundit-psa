@@ -28,6 +28,7 @@ use App\Services\AssetService;
 use App\Services\ClientIntegrationService;
 use App\Services\ClientService;
 use App\Services\ContractResolver;
+use App\Services\PrepayService;
 use App\Services\TicketService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -602,9 +603,10 @@ class ClientController extends Controller
     /**
      * Set or clear the client's default contract (card I3EvQKUV §1): any
      * ACTIVE contract of this client (ruling Q1). The change is recorded on
-     * the history of each contract it touches.
+     * the history of each contract it touches. Choosing a default re-runs the
+     * debits held for want of one (r1 diff:1).
      */
-    public function updateDefaultContract(Request $request, Client $client, ContractResolver $resolver): RedirectResponse
+    public function updateDefaultContract(Request $request, Client $client, ContractResolver $resolver, PrepayService $prepay): RedirectResponse
     {
         $validated = $request->validate([
             'default_contract_id' => ['nullable', 'integer'],
@@ -624,25 +626,35 @@ class ClientController extends Controller
         }
 
         $oldId = $client->default_contract_id === null ? null : (int) $client->default_contract_id;
-        if ($oldId === $newId) {
+        if ($oldId !== $newId) {
+            DB::transaction(function () use ($client, $oldId, $newId) {
+                $client->forceFill(['default_contract_id' => $newId])->save();
+                $changes = ['client_id' => $client->id, 'from_contract_id' => $oldId, 'to_contract_id' => $newId];
+                foreach (array_filter([$oldId, $newId]) as $contractId) {
+                    ContractActivity::create([
+                        'contract_id' => $contractId,
+                        'user_id' => auth()->id(),
+                        'action' => $contractId === $newId ? 'client_default_set' : 'client_default_cleared',
+                        'changes' => $changes,
+                        'created_at' => now(),
+                    ]);
+                }
+            });
+        }
+
+        // Choosing a default releases the debits held as "Needs contract"; re-submitting
+        // the same default retries any still held.
+        $released = $newId === null ? 0 : $prepay->releaseHeldDebits($client->id);
+        if ($oldId === $newId && $released === 0) {
             return redirect()->route('clients.show', $client);
         }
 
-        DB::transaction(function () use ($client, $oldId, $newId) {
-            $client->forceFill(['default_contract_id' => $newId])->save();
-            $changes = ['client_id' => $client->id, 'from_contract_id' => $oldId, 'to_contract_id' => $newId];
-            foreach (array_filter([$oldId, $newId]) as $contractId) {
-                ContractActivity::create([
-                    'contract_id' => $contractId,
-                    'user_id' => auth()->id(),
-                    'action' => $contractId === $newId ? 'client_default_set' : 'client_default_cleared',
-                    'changes' => $changes,
-                    'created_at' => now(),
-                ]);
-            }
-        });
+        $message = $oldId === $newId ? '' : ($newId === null ? 'Default contract cleared.' : 'Default contract updated.');
+        if ($released > 0) {
+            $message = trim($message.' '.$released.' held time '.($released === 1 ? 'entry' : 'entries').' debited.');
+        }
 
         return redirect()->route('clients.show', $client)
-            ->with('success', $newId === null ? 'Default contract cleared.' : 'Default contract updated.');
+            ->with('success', $message);
     }
 }
