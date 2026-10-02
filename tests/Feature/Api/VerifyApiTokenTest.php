@@ -177,6 +177,60 @@ class VerifyApiTokenTest extends TestCase
             ->assertSee('<td class="small">paused</td>', false);
     }
 
+    /**
+     * The resolved refusal causes other than paused (covered above), each
+     * minted in exactly that state.
+     *
+     * @return array<string, array{string, array<string, mixed>}>
+     */
+    public static function resolvedRefusalCauses(): array
+    {
+        return [
+            'draft' => ['draft', []],
+            'revoked' => ['revoked', ['activated_at' => 'now', 'revoked_at' => 'now']],
+            'expired' => ['expired', ['activated_at' => 'now', 'expires_at' => 'past']],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $state
+     */
+    #[DataProvider('resolvedRefusalCauses')]
+    public function test_a_resolved_refusal_is_filed_under_the_matched_token(string $cause, array $state): void
+    {
+        if (($state['expires_at'] ?? null) === 'past') {
+            $state['expires_at'] = now()->subSecond();
+        }
+        [$token, $plain] = $this->mintApiToken(state: $state, label: $cause);
+        // A second, unrelated token, so a log that named "some token" rather
+        // than the matched one cannot pass.
+        $this->mintApiToken(label: 'bystander');
+
+        $response = $this->getJson('/api/v1/clients', $this->bearer($plain));
+
+        $response->assertStatus(401);
+        $this->assertSame('{"error":"Unauthorized"}', $response->getContent());
+        $log = ApiRequestLog::query()->latest('id')->first();
+        $this->assertSame($cause, $log->cause);
+        $this->assertSame(401, (int) $log->status);
+        $this->assertSame($token->id, $log->api_token_id);
+    }
+
+    public function test_unknown_and_malformed_refusals_stay_unattributed(): void
+    {
+        $this->mintApiToken(label: 'bystander');
+
+        $this->getJson('/api/v1/clients', $this->bearer('psa-api-'.str_repeat('x', 48)))->assertStatus(401);
+        $log = ApiRequestLog::query()->latest('id')->first();
+        $this->assertSame('unknown', $log->cause);
+        $this->assertNull($log->api_token_id);
+
+        $this->getJson('/api/v1/clients', ['Authorization' => 'Basic '.base64_encode('a:b')])->assertStatus(401);
+        $log = ApiRequestLog::query()->latest('id')->first();
+        $this->assertSame('malformed', $log->cause);
+        $this->assertNull($log->api_token_id);
+    }
+
     public function test_no_session_or_cookie_is_issued(): void
     {
         [, $plain] = $this->mintApiToken();
