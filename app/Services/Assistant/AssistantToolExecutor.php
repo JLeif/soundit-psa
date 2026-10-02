@@ -1438,7 +1438,12 @@ class AssistantToolExecutor
         }
 
         if (! $asset) {
-            return ['error' => 'Asset not found at this client'.self::assetNotFoundHint($includeInactive, $includeRetired)];
+            // include_retired + hostname skipped the active fence, so rows of every
+            // state were searched: no deactivated row was excluded, and the hint
+            // must not say one was (card NSh7FP8I r3, diff:1).
+            $searchedInactive = $includeInactive || ($includeRetired && $byHostname);
+
+            return ['error' => 'Asset not found at this client'.self::assetNotFoundHint($searchedInactive, $includeRetired)];
         }
 
         $out = [

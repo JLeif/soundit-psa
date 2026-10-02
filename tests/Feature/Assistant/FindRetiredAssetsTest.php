@@ -383,14 +383,17 @@ class FindRetiredAssetsTest extends TestCase
         $x = Client::factory()->create();
         $retired = $this->asset($x, 'EXAMPLE-GONE', active: false, retired: true);
 
+        // [flags, hint by hostname, hint by id]. include_retired + hostname skips the
+        // active fence (a live deactivated row would hit the precedence error), so
+        // a miss there excluded nothing and carries no hint; by id the fence holds.
         $cases = [
-            [[], ' (deactivated assets are excluded — set include_inactive to include them; retired (soft-deleted) assets are excluded — set include_retired to include them)'],
-            [['include_inactive' => true], ' (retired (soft-deleted) assets are excluded — set include_retired to include them)'],
-            [['include_retired' => true], ' (deactivated non-retired assets are excluded — set include_inactive to include them)'],
-            [['include_retired' => true, 'include_inactive' => true], ''],
+            [[], ' (deactivated assets are excluded — set include_inactive to include them; retired (soft-deleted) assets are excluded — set include_retired to include them)', null],
+            [['include_inactive' => true], ' (retired (soft-deleted) assets are excluded — set include_retired to include them)', null],
+            [['include_retired' => true], '', ' (deactivated non-retired assets are excluded — set include_inactive to include them)'],
+            [['include_retired' => true, 'include_inactive' => true], '', null],
         ];
-        foreach ($cases as [$flags, $hint]) {
-            foreach ([['hostname' => 'EXAMPLE-NOPE'], ['asset_id' => $retired->id + 1000]] as $lookup) {
+        foreach ($cases as [$flags, $hostnameHint, $idHint]) {
+            foreach ([[['hostname' => 'EXAMPLE-NOPE'], $hostnameHint], [['asset_id' => $retired->id + 1000], $idHint ?? $hostnameHint]] as [$lookup, $hint]) {
                 $got = $this->at($x)->execute('get_asset', $lookup + $flags);
                 $this->assertSame('Asset not found at this client'.$hint, $got['error'] ?? null, json_encode($lookup + $flags));
             }
