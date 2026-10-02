@@ -390,7 +390,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'get_asset',
-                'description' => 'Look up a device (asset) at this client by id or hostname. Returns only ACTIVE (in-service) devices by default — a deactivated device is reported as "not found" unless you set include_inactive; retired/soft-deleted assets are never returned. Returns hardware, OS, warranty, RMM IDs, and free-form notes, plus a related block (owning client stub, assigned users as id+name stubs, tickets_count, and the 5 most recent linked tickets as stubs); pass expand: ["tickets"] for up to 20 fuller linked-ticket rows. Also returns linked_ids: every PSA, foreign-key and integration id on the device (halo_id, client_id, ninja_id, level_id, tactical_asset_id, controld_device_id, zorus_endpoint_id, m365_device_id, screenconnect_session_id, comet_device_id, servosity_dr_backup_id, autoelevate_computer_id, merged_into_asset_id), plus tactical_agent_id (the Tactical vendor agent id; tactical_asset_id is only a local row key) and user_person_ids. Check linked_ids before concluding a device is not enrolled in an integration. A null in linked_ids means "not mapped" (the column is empty), never "unknown" — every key is always present.',
+                'description' => 'Look up a device (asset) at this client by id or hostname. Returns only ACTIVE (in-service) devices by default — a deactivated device is reported as "not found" unless you set include_inactive. Retired (soft-deleted) assets are excluded unless you set include_retired: true, which resolves a retired device whatever its is_active value (include_retired and include_inactive are independent) and adds is_retired (bool) and retired_at (ISO-8601, or null for a live device) to the response; when a hostname is carried by both a live and a retired row the live one is returned. A retired device can be brought back with restore_asset on its id. Returns hardware, OS, warranty, RMM IDs, and free-form notes, plus a related block (owning client stub, assigned users as id+name stubs, tickets_count, and the 5 most recent linked tickets as stubs); pass expand: ["tickets"] for up to 20 fuller linked-ticket rows. Also returns linked_ids: every PSA, foreign-key and integration id on the device (halo_id, client_id, ninja_id, level_id, tactical_asset_id, controld_device_id, zorus_endpoint_id, m365_device_id, screenconnect_session_id, comet_device_id, servosity_dr_backup_id, autoelevate_computer_id, merged_into_asset_id), plus tactical_agent_id (the Tactical vendor agent id; tactical_asset_id is only a local row key) and user_person_ids. Check linked_ids before concluding a device is not enrolled in an integration. A null in linked_ids means "not mapped" (the column is empty), never "unknown" — every key is always present.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -404,7 +404,11 @@ class AssistantToolDefinitions
                         ],
                         'include_inactive' => [
                             'type' => 'boolean',
-                            'description' => 'Resolve deactivated devices too. Defaults to false (active only). Retired/soft-deleted assets are never returned.',
+                            'description' => 'Resolve deactivated devices too. Defaults to false (active only). Does not reach retired/soft-deleted assets — that is include_retired.',
+                        ],
+                        'include_retired' => [
+                            'type' => 'boolean',
+                            'description' => 'Also resolve RETIRED (soft-deleted) devices, whatever their is_active value. Defaults to false. Must be a JSON boolean; any other value is refused. The response then carries is_retired and retired_at; use restore_asset on a retired id to bring it back.',
                         ],
                         'expand' => [
                             'type' => 'array',
@@ -439,7 +443,7 @@ class AssistantToolDefinitions
             ],
             [
                 'name' => 'find_assets',
-                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive) — or OMIT query entirely to list assets outright (the way to answer "what devices does this client have"; never probe with a junk query, a zero-match search is indistinguishable from a client with no assets). If client_id is provided the search/list is scoped to that client; otherwise it runs across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE (in-service) assets by default; set include_inactive to true to ALSO include DEACTIVATED (is_active=false) assets — retired/soft-deleted assets are never returned by this tool (every result carries is_active either way). The response carries total (full matching count) and has_more — when has_more is true the list is truncated at your limit, not complete. Page with offset while has_more is true (offset=25 after a 25-row page, then 50, and so on) — this is the only way past a capped list, including get_client\'s 50-row fleet block, which this tool orders identically (active only, hostname then id): continue it with query omitted, include_inactive unset, and offset=50. Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
+                'description' => 'Search assets/devices by hostname, name, or serial number (partial case-insensitive) — or OMIT query entirely to list assets outright (the way to answer "what devices does this client have"; never probe with a junk query, a zero-match search is indistinguishable from a client with no assets). If client_id is provided the search/list is scoped to that client; otherwise it runs across ALL clients and returns each match with its owning client_id and client_name. Returns only ACTIVE (in-service) assets by default; set include_inactive to true to ALSO include DEACTIVATED (is_active=false) assets (every result carries is_active either way). Retired (soft-deleted) assets are excluded unless you set include_retired: true, which ALSO returns them whatever their is_active value — the two flags are independent — and adds is_retired (bool) and retired_at (ISO-8601, or null for a live row) to every row; a retired row\'s id is what restore_asset takes to bring the device back. The response carries total (full matching count) and has_more — when has_more is true the list is truncated at your limit, not complete. Page with offset while has_more is true (offset=25 after a 25-row page, then 50, and so on) — this is the only way past a capped list, including get_client\'s 50-row fleet block, which this tool orders identically (active only, hostname then id): continue it with query omitted, include_inactive unset, and offset=50. Use the cross-client form when you only have a serial number, hostname, or device descriptor and don\'t yet know what client owns it.',
                 'input_schema' => [
                     'type' => 'object',
                     'properties' => [
@@ -449,7 +453,11 @@ class AssistantToolDefinitions
                         ],
                         'include_inactive' => [
                             'type' => 'boolean',
-                            'description' => 'Include deactivated (is_active=false) assets. Defaults to false (active only). Retired/soft-deleted assets are never returned.',
+                            'description' => 'Include deactivated (is_active=false) assets. Defaults to false (active only). Does not reach retired/soft-deleted assets — that is include_retired.',
+                        ],
+                        'include_retired' => [
+                            'type' => 'boolean',
+                            'description' => 'Also include RETIRED (soft-deleted) assets, whatever their is_active value. Defaults to false; with it unset the results, order and paging are unchanged. Must be a JSON boolean; any other value is refused. Every row then carries is_retired and retired_at; use restore_asset on a retired row\'s id to bring it back.',
                         ],
                         'limit' => [
                             'type' => 'integer',
