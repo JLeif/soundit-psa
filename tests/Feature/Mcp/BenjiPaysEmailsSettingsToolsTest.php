@@ -232,6 +232,8 @@ class BenjiPaysEmailsSettingsToolsTest extends TestCase
             'recipient without a domain dot' => [['to' => ['jane@localhost']]],
             'recipient with two @' => [['to' => ['a@b@example.com']]],
             'recipient not a string' => [['to' => [['address' => 'jane.sentinel@example.com']]]],
+            'display-name recipient past the cap' => [['to' => [...array_map(fn (int $i) => "r{$i}@example.com", range(1, 10)), 'Jane Sentinel <jane.sentinel@example.com>']]],
+            'non-string recipient past the cap' => [['to' => [...array_map(fn (int $i) => "r{$i}@example.com", range(1, 10)), ['address' => 'jane.sentinel@example.com']]]],
             'to not a list' => [['to' => 'jane.sentinel@example.com']],
             'bad sentDate' => [['sentDate' => 'yesterday']],
         ];

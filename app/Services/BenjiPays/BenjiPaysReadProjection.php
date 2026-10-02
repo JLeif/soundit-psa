@@ -221,10 +221,9 @@ final class BenjiPaysReadProjection
                 || ($row['status'] !== null && ! in_array($row['status'], self::EMAIL_STATUSES, true))) {
                 throw new BenjiPaysException('invalid_response');
             }
-            $recipients = [];
-            foreach (array_slice($row['to'], 0, self::MAX_RECIPIENTS) as $address) {
-                $recipients[] = self::maskEmail($address);
-            }
+            // Every recipient is masked (so validated) before the cap is applied:
+            // a bad address past the first MAX_RECIPIENTS still fails the read.
+            $recipients = array_slice(array_map(self::maskEmail(...), $row['to']), 0, self::MAX_RECIPIENTS);
             $rows[] = [
                 'date' => self::isoDate($row, 'sentDate'),
                 'type' => $row['type'],
