@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\OperatorInbox;
 use App\Models\TeamsPersona;
 use App\Services\Chet\OperatorBridgeTextSanitizer;
+use App\Services\Chet\TeamsMessageAttachments;
 use App\Services\Teams\ResolvedSender;
 use App\Services\Teams\TeamsAmbientService;
 use App\Services\Teams\TeamsIdentityResolver;
@@ -257,6 +258,13 @@ class TeamsMessagesController extends Controller
             'authorized_steer' => $senderUserId !== null
                 && in_array($senderUserId, TeamsBotConfig::operatorAllowlistUserIds(), true),
             'delivered_at' => null,
+            // Card 2Cj3kOsy: activity.text carries no trace of a pasted image or
+            // a shared file, so keep metadata refs (never URLs or bytes) and the
+            // message id the poll hands to get_teams_message_attachment.
+            'attachments' => TeamsMessageAttachments::fromActivity($activity),
+            'activity_id' => is_string($activity['id'] ?? null) && preg_match('/^[0-9]{1,32}$/', $activity['id'])
+                ? $activity['id']
+                : null,
         ]);
     }
 

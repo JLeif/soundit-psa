@@ -131,6 +131,40 @@ class ChetRoutingTest extends TestCase
         $this->assertNull($row->delivered_at);
     }
 
+    /**
+     * Card 2Cj3kOsy: an image-only turn (empty text, Bot Framework image/*
+     * attachment, shape per the Teams bot file/image docs) is stored with an
+     * attachment ref and the Graph message id, never the content URL, so the
+     * poll can hand Chet a ref he resolves in one call.
+     */
+    public function test_image_only_turn_stores_attachment_refs_and_the_message_id_but_no_urls(): void
+    {
+        Setting::setValue('teams_chet_routing_enabled', '1');
+        Setting::setValue('teams_chet_conversation_id', 'a:conv-1');
+        User::factory()->create(['microsoft_id' => 'aad-charlie', 'is_active' => true]);
+
+        $activity = $this->activity('aad-charlie', mention: false);
+        $activity['id'] = '1700000000002';
+        $activity['text'] = '';
+        $activity['attachments'] = [
+            ['contentType' => 'image/*', 'contentUrl' => 'https://synthetic.example.test/v3/attachments/img-1/views/original'],
+            ['contentType' => 'text/html', 'content' => '<div><img src="https://synthetic.example.test/v3/attachments/img-1/views/original"></div>'],
+            ['contentType' => 'application/vnd.microsoft.teams.file.download.info', 'name' => '../notes <v2>.txt',
+                'contentUrl' => 'https://synthetic.example.test/personal/notes.txt',
+                'content' => ['downloadUrl' => 'https://synthetic.example.test/download?token=synthetic', 'fileType' => 'txt']],
+        ];
+
+        $this->sendActivity($activity)->assertOk();
+
+        $row = OperatorInbox::firstOrFail();
+        $this->assertSame([
+            ['attachment_id' => 'inline-1', 'kind' => 'inline', 'filename' => null, 'mime_type' => null, 'size_bytes' => null],
+            ['attachment_id' => 'file-1', 'kind' => 'file', 'filename' => 'notes _v2_.txt', 'mime_type' => null, 'size_bytes' => null],
+        ], $row->attachments);
+        $this->assertSame('1700000000002', $row->activity_id);
+        $this->assertStringNotContainsString('synthetic.example.test', (string) json_encode($row->getAttributes()));
+    }
+
     public function test_non_allowlisted_resolved_sender_is_captured_but_not_authorized(): void
     {
         Setting::setValue('teams_bot_enabled', '1');

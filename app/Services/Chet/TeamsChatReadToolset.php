@@ -17,7 +17,17 @@ class TeamsChatReadToolset
         'get_teams_chat_members',
         'get_teams_chat_history',
         'teams_search_channel',
+        self::ATTACHMENT_TOOL,
     ];
+
+    public const ATTACHMENT_TOOL = 'get_teams_message_attachment';
+
+    /**
+     * The Graph application permission a hosted-content read needs (Microsoft
+     * Learn, chatmessagehostedcontent-get and chatmessage-get, v1.0: Application
+     * = Chat.Read.All least privileged, Chat.ReadWrite.All higher).
+     */
+    public const HOSTED_CONTENT_PERMISSION = 'Chat.Read.All';
 
     /** Graph's page size for chat messages is capped at 50. */
     private const SEARCH_PAGE_SIZE = 50;
@@ -82,6 +92,19 @@ class TeamsChatReadToolset
                     'required' => ['chat_or_channel', 'query'],
                 ],
             ],
+            [
+                'name' => self::ATTACHMENT_TOOL,
+                'description' => 'See one image from a Teams chat message. Messages from get_teams_chat_history, teams_search_channel and poll_operator_messages carry attachments: [{attachment_id, kind, filename, mime_type, size_bytes}] and an "[image N]" / "[file N: name]" marker. Pass the message\'s chat id (or "operator" / "escalation"), its message id (poll_operator_messages: graph_chat_id and graph_message_id) and the attachment_id. Only chats known from durable PSA state are readable. An inline image is returned downscaled and base64-encoded ({attachment_id, filename, media_type, is_image, data_base64}) under the same byte and pixel ceilings as get_ticket_attachment; a non-image, oversize or undecodable image is refused. File attachments (kind file) are not fetched: the refusal names the file so you can ask the operator to paste it as an image or attach it to a ticket.',
+                'input_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'chat_id' => ['type' => 'string', 'description' => 'Microsoft Graph chat ID, or "operator" / "escalation".'],
+                        'message_id' => ['type' => 'string', 'description' => 'Microsoft Graph chat message ID.'],
+                        'attachment_id' => ['type' => 'string', 'description' => 'attachment_id from the message\'s attachments list, e.g. "inline-1".'],
+                    ],
+                    'required' => ['chat_id', 'message_id', 'attachment_id'],
+                ],
+            ],
         ];
     }
 
@@ -97,6 +120,11 @@ class TeamsChatReadToolset
             'get_teams_chat_members' => $this->getMembers($input),
             'get_teams_chat_history' => $this->getHistory($input),
             'teams_search_channel' => $this->searchChannel($input),
+            self::ATTACHMENT_TOOL => app(TeamsMessageAttachmentFetcher::class)->fetch(
+                $this->resolveChatAlias($input['chat_id'] ?? null),
+                $input,
+                fn (string $chatId): bool => $this->isKnownConversation($chatId),
+            ),
             default => ['error' => "Unknown tool: {$toolName}"],
         };
     }
@@ -214,12 +242,7 @@ class TeamsChatReadToolset
      */
     private function searchChannel(array $input): array
     {
-        $requested = is_scalar($input['chat_or_channel'] ?? null) ? trim((string) $input['chat_or_channel']) : '';
-        $chatId = match (strtolower($requested)) {
-            'operator' => $this->normalizeChatId(TeamsBotConfig::chetConversationId()),
-            'escalation' => $this->normalizeChatId(TeamsBotConfig::escalationConversationId()),
-            default => $this->normalizeChatId($requested),
-        };
+        $chatId = $this->resolveChatAlias($input['chat_or_channel'] ?? null);
         if ($chatId === null) {
             return ['error' => 'chat_or_channel is required and must name a configured or known Teams chat'];
         }
@@ -406,8 +429,28 @@ class TeamsChatReadToolset
         ];
     }
 
+    /** "operator" / "escalation" alias, or a literal chat id; null when neither. */
+    private function resolveChatAlias(mixed $requested): ?string
+    {
+        $requested = is_scalar($requested) ? trim((string) $requested) : '';
+
+        return match (strtolower($requested)) {
+            'operator' => $this->normalizeChatId(TeamsBotConfig::chetConversationId()),
+            'escalation' => $this->normalizeChatId(TeamsBotConfig::escalationConversationId()),
+            default => $this->normalizeChatId($requested),
+        };
+    }
+
     private function sanitizeMessage(array $message): array
     {
+        $refs = TeamsMessageAttachments::fromGraphMessage($message);
+        $markers = TeamsMessageAttachments::markers($refs);
+        $body = $this->textSanitizer->sanitize(
+            'Teams chat message body',
+            $this->plainText($message['body']['content'] ?? ''),
+            4000,
+        );
+
         return [
             'id' => $message['id'] ?? null,
             'created_at' => $message['createdDateTime'] ?? null,
@@ -417,11 +460,11 @@ class TeamsChatReadToolset
             'subject' => $this->textSanitizer->sanitizeNullable('Teams chat message subject', $message['subject'] ?? null, 300),
             'from' => $this->sanitizeMessageFrom($message['from'] ?? null),
             'body_content_type' => $message['body']['contentType'] ?? null,
-            'body' => $this->textSanitizer->sanitize(
-                'Teams chat message body',
-                $this->plainText($message['body']['content'] ?? ''),
-                4000,
-            ),
+            // Our markers sit OUTSIDE the untrusted fence: a marker inside it
+            // could be typed by the sender. They are what keeps an image-only
+            // message from reading as an empty one; attachments carries the refs.
+            'body' => $markers === null ? $body : 'Attachments: '.$markers."\n".$body,
+            'attachments' => TeamsMessageAttachments::publicRefs($refs),
         ];
     }
 

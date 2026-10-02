@@ -240,6 +240,19 @@ class AttachmentService
             return null;
         }
 
+        return $this->resizeImageBytesForAi($content, (string) $attachment->mime_type);
+    }
+
+    /**
+     * resizeImageForAi() over bytes already in hand (Teams hosted content,
+     * card 2Cj3kOsy): same 1568px bound, same re-encode per $mimeType.
+     */
+    public function resizeImageBytesForAi(string $content, string $mimeType): ?string
+    {
+        if ($content === '') {
+            return null;
+        }
+
         $image = @imagecreatefromstring($content);
         if (! $image) {
             return null;
@@ -260,7 +273,7 @@ class AttachmentService
 
             $resized = imagecreatetruecolor($newWidth, $newHeight);
 
-            if (in_array($attachment->mime_type, ['image/png', 'image/webp', 'image/gif'])) {
+            if (in_array($mimeType, ['image/png', 'image/webp', 'image/gif'])) {
                 imagealphablending($resized, false);
                 imagesavealpha($resized, true);
             }
@@ -271,11 +284,11 @@ class AttachmentService
         }
 
         ob_start();
-        if ($attachment->mime_type === 'image/png') {
+        if ($mimeType === 'image/png') {
             imagepng($image);
-        } elseif ($attachment->mime_type === 'image/webp') {
+        } elseif ($mimeType === 'image/webp') {
             imagewebp($image);
-        } elseif ($attachment->mime_type === 'image/gif') {
+        } elseif ($mimeType === 'image/gif') {
             imagepng($image); // GIF → PNG for Anthropic compatibility
         } else {
             imagejpeg($image, null, 85);

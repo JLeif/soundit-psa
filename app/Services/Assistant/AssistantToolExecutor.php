@@ -56,10 +56,10 @@ class AssistantToolExecutor
     use PaginatesTicketLists;
 
     /** get_ticket_attachment inline ceiling: bytes returned base64 in a tool result. */
-    private const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+    public const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
     /** get_ticket_attachment decompression-bomb guard: max source pixels before GD decode. */
-    private const MAX_IMAGE_PIXELS = 30_000_000;
+    public const MAX_IMAGE_PIXELS = 30_000_000;
 
     private ?Ticket $ticket;
 
