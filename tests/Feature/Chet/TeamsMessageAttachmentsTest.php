@@ -369,28 +369,46 @@ class TeamsMessageAttachmentsTest extends TestCase
         $this->assertCount(2, $this->graphPaths());
     }
 
-    public function test_a_caller_declared_source_does_not_skip_the_edit_guard(): void
+    public function test_a_caller_declared_source_is_refused_and_the_edit_guard_still_fires(): void
     {
         // A history ordinal is the same "inline-N" string as a poll ordinal, so the
-        // guard keys on the inbox row, never on what the caller says about provenance.
+        // guard keys on the inbox row. There is no provenance argument to declare:
+        // the gate refuses one before anything runs.
         $this->pollRow([$this->activityImage('a1')]);
-        $this->graph($this->graphJson(['lastEditedDateTime' => '2026-10-02T15:20:00Z'] + $this->imageOnlyMessage()), new Response(200, [], $this->png(4, 4)));
+        $this->graph();
 
         $r = $this->fetch(['source' => 'history']);
+
+        $this->assertTrue((bool) $r->json('result.isError'));
+        $this->assertStringContainsString('Unsupported MCP argument(s): source.', (string) $r->json('result.content.0.text'));
+        $this->assertSame([], $this->graphPaths(), 'nothing read for a refused argument');
+
+        $this->graph($this->graphJson(['lastEditedDateTime' => '2026-10-02T15:20:00Z'] + $this->imageOnlyMessage()), new Response(200, [], $this->png(4, 4)));
+
+        $r = $this->fetch([]);
 
         $this->assertTrue((bool) $r->json('result.isError'));
         $this->assertStringContainsString('Teams reports this message as edited', (string) $r->json('result.content.0.text'));
         $this->assertSame(['/v1.0/chats/'.self::CHAT.'/messages/'.self::MSG], $this->graphPaths(), 'no hosted content read');
     }
 
-    public function test_a_caller_declared_source_does_not_skip_the_count_guard(): void
+    public function test_a_caller_declared_source_is_refused_and_the_count_guard_still_fires(): void
     {
         $this->pollRow([$this->activityImage('a1')]);
+        $this->graph();
+
+        $r = $this->fetch(['source' => 'history']);
+
+        $this->assertTrue((bool) $r->json('result.isError'));
+        $this->assertStringContainsString('Unsupported MCP argument(s): source.', (string) $r->json('result.content.0.text'));
+        $this->assertSame([], $this->graphPaths(), 'nothing read for a refused argument');
+
+        // Graph has MORE images than the poll recorded (the other direction is covered above).
         $twoImages = $this->imageOnlyMessage();
         $twoImages['body']['content'] = $this->imgTag(self::HOSTED).$this->imgTag(self::HOSTED_2);
         $this->graph($this->graphJson($twoImages), new Response(200, [], $this->png(4, 4)));
 
-        $r = $this->fetch(['source' => 'history']);
+        $r = $this->fetch([]);
 
         $this->assertTrue((bool) $r->json('result.isError'));
         $this->assertStringContainsString('Teams has 2 inline image(s) and 0 file(s) on this message but poll_operator_messages recorded 1 and 0', (string) $r->json('result.content.0.text'));
