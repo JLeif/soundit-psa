@@ -369,6 +369,47 @@ class TeamsMessageAttachmentsTest extends TestCase
         $this->assertCount(2, $this->graphPaths());
     }
 
+    public function test_a_history_ordinal_is_fetched_after_an_edit_the_poll_recorded(): void
+    {
+        // get_teams_chat_history numbers from the current Graph message, as the fetch does.
+        $this->pollRow([$this->activityImage('a1')]);
+        $this->graph($this->graphJson(['lastEditedDateTime' => '2026-10-02T15:20:00Z'] + $this->imageOnlyMessage()), new Response(200, [], $this->png(4, 4)));
+
+        $r = $this->fetch(['source' => 'history']);
+
+        $this->assertFalse((bool) $r->json('result.isError'), (string) $r->json('result.content.0.text'));
+        $this->assertSame('inline-1', $this->decoded($r)['attachment_id']);
+        $this->assertSame([
+            '/v1.0/chats/'.self::CHAT.'/messages/'.self::MSG,
+            '/v1.0/chats/'.self::CHAT.'/messages/'.self::MSG.'/hostedContents/'.self::HOSTED.'/$value',
+        ], $this->graphPaths());
+    }
+
+    public function test_a_row_that_recorded_no_refs_does_not_block_an_image_graph_lists(): void
+    {
+        // The activity carried no image/* attachment, so the poll handed out no ordinal.
+        $this->pollRow([]);
+        $this->assertSame([], OperatorInbox::firstOrFail()->attachments);
+        $this->graph($this->graphJson($this->imageOnlyMessage()), new Response(200, [], $this->png(4, 4)));
+
+        $r = $this->fetch([]);
+
+        $this->assertFalse((bool) $r->json('result.isError'), (string) $r->json('result.content.0.text'));
+        $this->assertSame('inline-1', $this->decoded($r)['attachment_id']);
+        $this->assertCount(2, $this->graphPaths());
+    }
+
+    public function test_an_unknown_source_is_refused_before_any_graph_call(): void
+    {
+        $this->graph();
+
+        $r = $this->fetch(['source' => 'guess']);
+
+        $this->assertTrue((bool) $r->json('result.isError'));
+        $this->assertStringContainsString('source must be "poll" or "history"', (string) $r->json('result.content.0.text'));
+        $this->assertSame([], $this->history);
+    }
+
     public function test_tool_is_registered_as_an_explicit_grant_raw_file_read(): void
     {
         $this->assertContains('get_teams_message_attachment', McpToolRegistry::RAW_FILE_CONTENT_TOOLS);

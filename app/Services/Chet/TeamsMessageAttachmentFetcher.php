@@ -24,13 +24,18 @@ use Illuminate\Support\Facades\Log;
  * refused rather than fetched through a new Files grant.
  *
  * poll_operator_messages numbers refs from the Bot Framework activity, this
- * tool from the Graph message; their parity is an assumption. Where the inbox
- * recorded refs for the message, an edit or a per-kind count mismatch refuses
- * rather than return whatever Graph's Nth image now is.
+ * tool from the Graph message; their parity is an assumption. For a poll
+ * ordinal (source "poll", the default) where the inbox recorded that
+ * attachment_id for the message, an edit or a per-kind count mismatch refuses
+ * rather than return whatever Graph's Nth image now is. A history ordinal
+ * (source "history") was numbered from the Graph message by the same
+ * fromGraphMessage() this tool resolves against, so it is not checked.
  */
 class TeamsMessageAttachmentFetcher
 {
     private const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+    private const HISTORY_HINT = ' If you took this attachment_id from get_teams_chat_history or teams_search_channel, pass source "history".';
 
     public function __construct(
         private readonly AttachmentService $attachments,
@@ -60,6 +65,14 @@ class TeamsMessageAttachmentFetcher
             return ['error' => 'attachment_id is required (e.g. "inline-1" from the message\'s attachments list)'];
         }
 
+        // Where the caller's ordinal came from. Absent means poll, so a poll
+        // ordinal is always checked against what the inbox recorded.
+        $source = $input['source'] ?? null;
+        $source = $source === null || $source === '' ? 'poll' : $source;
+        if (! in_array($source, ['poll', 'history'], true)) {
+            return ['error' => 'source must be "poll" or "history"'];
+        }
+
         $graph = app(GraphClient::class);
         $messagePath = "chats/{$chatId}/messages/{$messageId}";
 
@@ -72,7 +85,9 @@ class TeamsMessageAttachmentFetcher
         $message = is_array($message) ? $message : [];
         $graphRefs = TeamsMessageAttachments::fromGraphMessage($message);
 
-        $mismatch = $this->pollRefsMismatch($chatId, $messageId, $message, $graphRefs);
+        $mismatch = $source === 'poll'
+            ? $this->pollRefsMismatch($chatId, $messageId, $attachmentId, $message, $graphRefs)
+            : null;
         if ($mismatch !== null) {
             return ['error' => $mismatch];
         }
@@ -140,33 +155,39 @@ class TeamsMessageAttachmentFetcher
     }
 
     /**
-     * Refusal text when an inbox row recorded refs for this message and the
-     * Graph message no longer lines up with them; null when no row recorded
-     * refs (the caller's ordinal can only have come from Graph) or they agree.
+     * Refusal text when an inbox row recorded the requested attachment_id for
+     * this message and the Graph message no longer lines up with that row;
+     * null when no row listed it (poll_operator_messages never handed out
+     * that ordinal, including a row that recorded no refs) or they agree.
      *
      * @param  array<int, array<string, mixed>>  $graphRefs
      */
-    private function pollRefsMismatch(string $chatId, string $messageId, array $message, array $graphRefs): ?string
+    private function pollRefsMismatch(string $chatId, string $messageId, string $attachmentId, array $message, array $graphRefs): ?string
     {
         $rows = OperatorInbox::query()
             ->where('conversation_id', $chatId)
             ->where('activity_id', $messageId)
             ->whereNotNull('attachments')
-            ->get(['attachments']);
+            ->get(['attachments'])
+            ->filter(static fn (OperatorInbox $row): bool => is_array($row->attachments) && in_array(
+                $attachmentId,
+                array_column(array_filter($row->attachments, 'is_array'), 'attachment_id'),
+                true,
+            ));
 
         if ($rows->isEmpty()) {
             return null;
         }
 
         if (! empty($message['lastEditedDateTime'])) {
-            return 'Teams reports this message as edited, so its attachment numbering may differ from what poll_operator_messages listed; no image was returned. Ask the operator to paste the image again.';
+            return 'Teams reports this message as edited, so its attachment numbering may differ from what poll_operator_messages listed; no image was returned. Ask the operator to paste the image again.'.self::HISTORY_HINT;
         }
 
         $live = self::kindCounts($graphRefs);
         foreach ($rows as $row) {
             $recorded = self::kindCounts(is_array($row->attachments) ? $row->attachments : []);
             if ($recorded !== $live) {
-                return "Teams has {$live['inline']} inline image(s) and {$live['file']} file(s) on this message but poll_operator_messages recorded {$recorded['inline']} and {$recorded['file']}, so the requested attachment cannot be matched to the one listed; no image was returned. Ask the operator to paste the image again.";
+                return "Teams has {$live['inline']} inline image(s) and {$live['file']} file(s) on this message but poll_operator_messages recorded {$recorded['inline']} and {$recorded['file']}, so the requested attachment cannot be matched to the one listed; no image was returned. Ask the operator to paste the image again.".self::HISTORY_HINT;
             }
         }
 
