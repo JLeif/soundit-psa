@@ -170,6 +170,68 @@ class ApiTokensSettingsTest extends TestCase
         $this->assertSame('2030', $token->fresh()->expires_at->format('Y'));
     }
 
+    // -- expires_at upper bound (Jeeves RULED (B) term 4, run 01a0fb29) -------
+    //
+    // expires_at is a TIMESTAMP column, which ends at 2038-01-19 03:14:07 UTC
+    // on MariaDB; the bound refuses a later date as a validation error rather
+    // than letting the write fail.
+
+    private const EXPIRY_MESSAGE = 'The expiry date must be before 2038-01-19. Leave it blank for a token that never expires.';
+
+    public function test_update_refuses_an_expiry_on_or_after_2038_01_19_with_a_friendly_message(): void
+    {
+        $admin = $this->admin();
+        [$token] = $this->mintApiToken(endpoints: [], state: []);
+
+        foreach (['2038-01-19', '2040-06-01', '9999-12-31'] as $date) {
+            $this->actingAs($admin)
+                ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => $date])
+                ->assertSessionHasErrors(['expires_at' => self::EXPIRY_MESSAGE]);
+            $this->assertNull($token->fresh()->expires_at, "{$date} was stored");
+            $this->assertSame('test-token', $token->fresh()->label, "{$date} saved the label anyway");
+        }
+
+        // The day before the bound is still accepted.
+        $this->actingAs($admin)
+            ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => '2038-01-18'])
+            ->assertSessionHasNoErrors();
+        $this->assertSame('2038-01-18', $token->fresh()->expires_at->format('Y-m-d'));
+    }
+
+    public function test_create_refuses_an_expiry_on_or_after_2038_01_19_with_a_friendly_message(): void
+    {
+        $admin = $this->admin();
+
+        $this->actingAs($admin)
+            ->post(route('settings.api-tokens.store'), ['expires_at' => '2038-01-19'])
+            ->assertSessionHasErrors(['expires_at' => self::EXPIRY_MESSAGE]);
+        $this->assertSame(0, ApiToken::count(), 'a token was minted despite the refused expiry');
+
+        $this->actingAs($admin)
+            ->post(route('settings.api-tokens.store'), ['expires_at' => '2037-12-31'])
+            ->assertRedirect();
+        $this->assertSame('2037-12-31', ApiToken::query()->sole()->expires_at->format('Y-m-d'));
+    }
+
+    public function test_the_last_day_before_the_bound_is_refused_where_its_utc_end_of_day_passes_the_column_limit(): void
+    {
+        // 2038-01-18 end of day in Los Angeles is 2038-01-19 07:59:59 UTC,
+        // past the column's 03:14:07 UTC limit, though it passes before:.
+        \App\Models\Setting::setValue('app_timezone', 'America/Los_Angeles');
+        $admin = $this->admin();
+        [$token] = $this->mintApiToken(endpoints: [], state: []);
+
+        $this->actingAs($admin)
+            ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => '2038-01-18'])
+            ->assertSessionHasErrors('expires_at');
+        $this->assertNull($token->fresh()->expires_at);
+
+        $this->actingAs($admin)
+            ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => '2038-01-17'])
+            ->assertSessionHasNoErrors();
+        $this->assertSame('2038-01-18 07:59:59', $token->fresh()->expires_at->utc()->format('Y-m-d H:i:s'));
+    }
+
     public function test_api_tokens_do_not_touch_mcp_tokens(): void
     {
         $admin = $this->admin();
