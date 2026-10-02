@@ -23,6 +23,8 @@ class OperatorInbox extends Model
         'direct_mention',
         'authorized_steer',
         'delivered_at',
+        'attachments',
+        'activity_id',
     ];
 
     protected function casts(): array
@@ -35,6 +37,7 @@ class OperatorInbox extends Model
             'delivered_at' => 'datetime',
             'direct_mention' => 'boolean',
             'authorized_steer' => 'boolean',
+            'attachments' => 'array',
         ];
     }
 

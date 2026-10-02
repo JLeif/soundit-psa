@@ -477,6 +477,13 @@ These commands execute automatically based on their schedule:
 
 > This allows the staff MCP calendar/scheduling tools to read free/busy availability and calendar events — and, with `Calendars.ReadWrite`, to create/update/cancel events and respond to invites — on behalf of allowlisted mailboxes, using client credentials without a user session. It reuses the same Entra app registration and `MICROSOFT_*` credentials as email/SSO — no additional `.env` variables. The tools are **off by default** and only reach the mailboxes you explicitly allowlist (see Section 9). Skip this permission if you are not using the calendar tools.
 
+**Application permissions** (for the Teams chat read tools — optional):
+
+1. Add **Application** permission: `Chat.Read.All`
+2. Click **Grant admin consent for [Your Organization]**
+
+> The staff MCP Teams chat reads (`get_teams_chat_history`, `teams_search_channel`) and `get_teams_message_attachment` call Microsoft Graph with these same app credentials. Images pasted into a Teams chat are Graph *hosted contents*, and Microsoft documents `Chat.Read.All` as the least-privileged application permission for reading them; a resource-specific chat consent is not listed for that call. Without it the image tool answers with an HTTP 403 message that names this permission. Files shared into a chat live in SharePoint/OneDrive and are not fetched by these tools.
+
 ### Rebuild config cache
 
 After updating `.env`:

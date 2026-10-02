@@ -38,6 +38,8 @@ class McpToolRegistry
      */
     public const RAW_FILE_CONTENT_TOOLS = [
         'get_ticket_attachment',
+        // Teams chat images (card 2Cj3kOsy): same return shape, same posture.
+        'get_teams_message_attachment',
     ];
 
     /**
@@ -81,8 +83,11 @@ class McpToolRegistry
             // the by-name decision the gate says the operator must make (psa-lulgh: a
             // mislabelled tier is how an operator grants a capability believing it is a read).
             $rawFileNames = array_flip(self::RAW_FILE_CONTENT_TOOLS);
-            $rawFileContent = array_values(array_filter($client, fn (array $t): bool => isset($rawFileNames[$t['name']])));
+            $rawFileContent = array_values(array_filter(array_merge($client, $general), fn (array $t): bool => isset($rawFileNames[$t['name']])));
             $client = array_values(array_filter($client, fn (array $t): bool => ! isset($rawFileNames[$t['name']])));
+            // The Teams image reader is registered with its Chet siblings (general) but is a
+            // raw-file read too, so it moves to the same sensitive tier (card 2Cj3kOsy).
+            $general = array_values(array_filter($general, fn (array $t): bool => ! isset($rawFileNames[$t['name']])));
 
             $bridge = self::shape(OperatorBridgeTools::definitions());
             $wikiWrites = self::shape([self::wikiAddFactTool(), self::wikiCreatePageTool(), self::wikiUpdatePageTool()]);

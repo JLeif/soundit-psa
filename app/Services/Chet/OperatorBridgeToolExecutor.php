@@ -381,12 +381,26 @@ class OperatorBridgeToolExecutor
                 default => false,
             };
 
+            // Attachment refs (card 2Cj3kOsy). null = captured before refs
+            // were recorded (unknown), [] = none. The marker is ours, sits
+            // OUTSIDE the fence and carries no sender text; the filename is
+            // sender text, fenced and redacted as get_teams_chat_history does.
+            $refs = is_array($row->attachments)
+                ? TeamsMessageAttachments::fencedRefs($row->attachments, app(ChetDataSurfaceTextSanitizer::class))
+                : null;
+            $markers = $refs === null ? null : TeamsMessageAttachments::markers($refs);
+            $fenced = $this->promptFence->fence('operator message', $meta['text']);
+
             return [
                 'id' => $row->id,
                 'conversation_id' => $row->conversation_id,
                 'sender_user_id' => $row->sender_user_id,
                 'sender_name' => $row->sender?->name,
-                'text' => $this->promptFence->fence('operator message', $meta['text']),
+                'text' => $markers === null ? $fenced : 'Attachments: '.$markers."\n".$fenced,
+                'attachments' => $refs,
+                // What get_teams_message_attachment takes as chat_id / message_id.
+                'graph_chat_id' => $row->conversation_id,
+                'graph_message_id' => $row->activity_id,
                 'text_withheld' => $withheld,
                 // An observed poll-side replacement is positive evidence;
                 // otherwise preserve the nullable ingest fact, not a body marker.
