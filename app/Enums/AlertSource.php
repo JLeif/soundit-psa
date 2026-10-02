@@ -10,6 +10,7 @@ enum AlertSource: string
     case Huntress = 'huntress';
     case Cipp = 'cipp';
     case AppRiver = 'appriver';
+    case LeifRmm = 'leif_rmm';
 
     public function label(): string
     {
@@ -20,6 +21,7 @@ enum AlertSource: string
             self::Huntress => 'Huntress',
             self::Cipp => 'CIPP',
             self::AppRiver => 'AppRiver',
+            self::LeifRmm => 'Leif RMM',
         };
     }
 
@@ -32,6 +34,7 @@ enum AlertSource: string
             self::Huntress => 'bi-shield-check',
             self::Cipp => 'bi-microsoft',
             self::AppRiver => 'bi-key',
+            self::LeifRmm => 'bi-hdd-network',
         };
     }
 }

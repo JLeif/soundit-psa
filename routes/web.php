@@ -342,6 +342,18 @@ Route::middleware('auth')->group(function () {
     Route::delete('/settings/mcp-tokens/{token}/signal-destinations/{destination}', [McpTokensController::class, 'unlinkSignalDestination'])->middleware('admin')->name('settings.mcp-tokens.signal-destinations.unlink');
     Route::delete('/settings/mcp-tokens/{token}', [McpTokensController::class, 'revoke'])->middleware('admin')->name('settings.mcp-tokens.revoke');
 
+    // API Tokens (PSA REST API bearer tokens). Reads need auth; every write is admin-only.
+    Route::get('/settings/api-tokens', [\App\Http\Controllers\Web\ApiTokensController::class, 'index'])->name('settings.api-tokens.index');
+    Route::post('/settings/api-tokens', [\App\Http\Controllers\Web\ApiTokensController::class, 'store'])->middleware('admin')->name('settings.api-tokens.store');
+    Route::get('/settings/api-tokens/{token}', [\App\Http\Controllers\Web\ApiTokensController::class, 'show'])->name('settings.api-tokens.show');
+    Route::patch('/settings/api-tokens/{token}', [\App\Http\Controllers\Web\ApiTokensController::class, 'update'])->middleware('admin')->name('settings.api-tokens.update');
+    Route::patch('/settings/api-tokens/{token}/endpoints', [\App\Http\Controllers\Web\ApiTokensController::class, 'updateEndpoints'])->middleware('admin')->name('settings.api-tokens.endpoints');
+    Route::post('/settings/api-tokens/{token}/activate', [\App\Http\Controllers\Web\ApiTokensController::class, 'activate'])->middleware('admin')->name('settings.api-tokens.activate');
+    Route::post('/settings/api-tokens/{token}/pause', [\App\Http\Controllers\Web\ApiTokensController::class, 'pause'])->middleware('admin')->name('settings.api-tokens.pause');
+    Route::post('/settings/api-tokens/{token}/resume', [\App\Http\Controllers\Web\ApiTokensController::class, 'resume'])->middleware('admin')->name('settings.api-tokens.resume');
+    Route::post('/settings/api-tokens/{token}/regenerate', [\App\Http\Controllers\Web\ApiTokensController::class, 'regenerate'])->middleware('admin')->name('settings.api-tokens.regenerate');
+    Route::delete('/settings/api-tokens/{token}', [\App\Http\Controllers\Web\ApiTokensController::class, 'revoke'])->middleware('admin')->name('settings.api-tokens.revoke');
+
     // Settings — AI Tooling Gaps (agent-reported missing/unused/broken tools + operator corrections)
     Route::get('/settings/tooling-gaps', [\App\Http\Controllers\Web\ToolingGapController::class, 'index'])->name('settings.tooling-gaps.index');
     Route::patch('/settings/tooling-gaps/{toolingGap}', [\App\Http\Controllers\Web\ToolingGapController::class, 'update'])->name('settings.tooling-gaps.update');

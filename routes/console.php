@@ -394,6 +394,12 @@ Schedule::command('integrations:prune-webhooks')
     ->withoutOverlapping()
     ->runInBackground();
 
+// API Tokens — prune api_request_logs rows older than 90 days (ApiRequestLog::prunable)
+Schedule::command('model:prune', ['--model' => [\App\Models\ApiRequestLog::class]])
+    ->dailyAt('04:10')
+    ->withoutOverlapping()
+    ->runInBackground();
+
 // Wiki — nightly maintenance sweeps (staleness/contradiction/link-lint/open-ticket/stale-only regen)
 // withoutOverlapping(60): 60-minute overlap-lock guard for a scheduled command.
 // NOT ->expireAfter() — that is queue-middleware-only and throws BadMethodCallException on Schedule events.

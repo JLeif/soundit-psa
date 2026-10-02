@@ -410,6 +410,7 @@ These commands execute automatically based on their schedule:
 | `prepay:expire` | Daily at 04:10 | Forfeit the unconsumed remainder of expired prepaid-time credits (no-op until a contract sets an expiration policy). Use `--dry-run` to preview, `--contract=ID` to scope. |
 | `prepay:check-balances` | Hourly | Check prepay contracts for low balances; trigger alerts / auto-top-ups |
 | `integrations:prune-webhooks` | Daily at 04:05 | Delete processed/terminal webhook rows older than 30 days from `tactical_webhooks` and `ninja_webhooks`. Pending rows are never pruned regardless of age. Use `--dry-run` to preview counts without deleting; `--days=N` to override the retention window. |
+| `model:prune --model=App\Models\ApiRequestLog` | Daily at 04:10 | Delete `api_request_logs` rows (PSA REST API request and token lifecycle audit) older than 90 days. |
 | `briefing:send-daily` | Every minute; fires once per local day at `briefing_time` (default 07:00) | Email each active technician their personalized daily briefing — open tickets, SLA risks, overnight alerts, voicemails, and AI-suggested next actions. Ships dormant; only runs when `briefing_enabled=1`. Per-technician idempotency via the `daily_briefings` table. Use `--dry-run` to preview recipients, `--user=ID` to target one technician. |
 
 **Ad-hoc maintenance commands** (not scheduled — run manually when needed):
@@ -1603,6 +1604,45 @@ When enabled, portal-enabled contacts automatically receive email notifications 
 - A technician posts a public reply on their ticket
 - Their ticket is marked Resolved (with a link to confirm or reopen)
 - Their ticket is set to Pending Client (with a link to reply)
+
+### PSA REST API — bearer-token surface (`/api/v1`)
+
+A small REST API for service consumers (first consumer: LITS RMM). Tokens are managed under
+**Settings → API Tokens** (admin-only writes). The API needs no `.env` variable or setting:
+with no token minted, every request gets 401.
+
+- **Paths.** `/api/v1/*` is canonical. `/api/rmm/*` is a compatibility alias on the same
+  handler and grant, because the LITS RMM client calls `/api/rmm/*`.
+- **Auth.** `Authorization: Bearer <secret>`, nothing else (no query-string token, no
+  cookie or session). The PSA stores only `sha256(secret)`; the secret (`psa-api-…`) is
+  shown once at mint or regenerate.
+- **Lifecycle.** A new token is an inactive draft with no endpoints. Grant endpoints on its
+  Endpoints tab, then Activate. Pause, Resume, Regenerate and Revoke work as on MCP tokens.
+  Expiry is optional with no default.
+- **Refusals.** Every authentication failure (missing, malformed, unknown, draft, paused,
+  revoked, expired) gets the same `401 {"error":"Unauthorized"}`. A valid token calling an
+  endpoint it was not granted gets `403 {"error":"Forbidden"}`. The cause is recorded in
+  the token's Activity tab and the log, never in the response.
+- **Limits.** 60 failed authentications per IP per minute, and 120 requests per token per
+  minute, both answered with 429 and `Retry-After`.
+- **Audit.** `api_request_logs` keeps the endpoint, status, cause, duration and source IP
+  per request (never bodies), plus lifecycle actions. It is pruned after 90 days.
+
+| Endpoint (grant) | Method and path | Alias |
+|---|---|---|
+| `clients.read` | `GET /api/v1/clients` | `GET /api/rmm/clients` |
+| `assets.read` | `GET /api/v1/assets` | `GET /api/rmm/assets` |
+| `alerts.leif_rmm.raise` | `POST /api/v1/alerts/leif-rmm` | `POST /api/rmm/alerts` |
+| `alerts.leif_rmm.resolve` | `POST /api/v1/alerts/leif-rmm/resolve` | `POST /api/rmm/alerts/resolve` |
+
+The endpoint list lives in `App\Support\ApiEndpointRegistry`. A new endpoint needs one
+registry entry and its route lines in `routes/api.php`; a test keeps the two in step.
+
+**LITS RMM setup** (after deploy): mint a token labelled `lits-rmm`, grant the four
+endpoints above, and activate it. On the RMM server, set `PSA_BASE_URL` (the PSA's public
+URL), `PSA_API_KEY` (the secret) and `PSA_INTERNAL_CLIENT_ID`. To cut the RMM off, pause the
+token. This is separate from `litsrmm_api_key`, which is the PSA's outbound credential to
+the RMM.
 
 ### MCP server — staff tool surface
 

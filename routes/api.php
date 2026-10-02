@@ -77,6 +77,28 @@ Route::post('webhooks/tactical', [TacticalWebhookController::class, 'handle'])
 Route::post('webhooks/comet', [CometWebhookController::class, 'handle'])
     ->middleware([VerifyCometWebhookKey::class, 'throttle:120,1']);
 
+// PSA REST API. Every route here is bearer-token authenticated by
+// VerifyApiToken against a per-token endpoint grant (Settings -> API Tokens),
+// and every route name maps to one App\Support\ApiEndpointRegistry entry:
+// api.v1.<endpoint> is canonical, api.rmm.<endpoint> is the compatibility
+// alias the LITS RMM client calls. ApiEndpointRegistryTest keeps the two in a
+// bijection. Adding an endpoint = one registry entry + its route lines here.
+Route::middleware([\App\Http\Middleware\VerifyApiToken::class])->group(function () {
+    Route::prefix('v1')->name('api.v1.')->group(function () {
+        Route::get('clients', [\App\Http\Controllers\Api\RmmController::class, 'clients'])->name('clients.read');
+        Route::get('assets', [\App\Http\Controllers\Api\RmmController::class, 'assets'])->name('assets.read');
+        Route::post('alerts/leif-rmm', [\App\Http\Controllers\Api\RmmAlertController::class, 'store'])->name('alerts.leif_rmm.raise');
+        Route::post('alerts/leif-rmm/resolve', [\App\Http\Controllers\Api\RmmAlertController::class, 'resolve'])->name('alerts.leif_rmm.resolve');
+    });
+
+    Route::prefix('rmm')->name('api.rmm.')->group(function () {
+        Route::get('clients', [\App\Http\Controllers\Api\RmmController::class, 'clients'])->name('clients.read');
+        Route::get('assets', [\App\Http\Controllers\Api\RmmController::class, 'assets'])->name('assets.read');
+        Route::post('alerts', [\App\Http\Controllers\Api\RmmAlertController::class, 'store'])->name('alerts.leif_rmm.raise');
+        Route::post('alerts/resolve', [\App\Http\Controllers\Api\RmmAlertController::class, 'resolve'])->name('alerts.leif_rmm.resolve');
+    });
+});
+
 // ConnectWise Manage API compatibility layer (for Tier2Tickets / HelpDeskButtons)
 // T2T's connectivity test hits /service/boards without auth — allow it through
 // so the test button passes. All data-bearing endpoints require auth.

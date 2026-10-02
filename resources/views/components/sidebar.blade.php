@@ -257,6 +257,13 @@
                 <i class="bi bi-key sidebar-icon"></i>
                 <span class="sidebar-label">MCP Tokens</span>
             </a>
+            <a href="{{ route('settings.api-tokens.index') }}"
+               class="sidebar-link {{ request()->routeIs('settings.api-tokens*') ? 'active' : '' }}"
+               @if(request()->routeIs('settings.api-tokens*')) aria-current="page" @endif
+               data-bs-toggle="tooltip" data-bs-placement="right" data-bs-title="API Tokens">
+                <i class="bi bi-braces sidebar-icon"></i>
+                <span class="sidebar-label">API Tokens</span>
+            </a>
             <a href="{{ route('settings.tooling-gaps.index') }}"
                class="sidebar-link {{ request()->routeIs('settings.tooling-gaps*') ? 'active' : '' }}"
                @if(request()->routeIs('settings.tooling-gaps*')) aria-current="page" @endif
