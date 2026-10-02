@@ -87,4 +87,45 @@ class SubmissionProcessorTest extends TestCase
         $this->assertDatabaseCount('people', 1);
         $this->assertSame($first['client']->id, DB::table('contact_intake_identities')->value('prospect_client_id'));
     }
+
+    /**
+     * Card fs0tKV9e (MariaDB two-process canary): the loser of the conditional identity claim
+     * runs inside a caller transaction whose REPEATABLE READ snapshot predates the winner's
+     * commit. Its conditional UPDATE is a current read and correctly sees the owner, but a
+     * plain re-read of the owner returned the old snapshot and threw ModelNotFoundException,
+     * leaving the submission pending. SQLite serialises writers, so this is MariaDB/MySQL-only.
+     */
+    public function test_loser_with_snapshot_older_than_winner_commit_links_to_winner(): void
+    {
+        $driver = DB::connection()->getDriverName();
+        if (! in_array($driver, ['mysql', 'mariadb'], true)) {
+            $this->markTestSkipped("Needs two InnoDB connections with REPEATABLE READ; driver is [{$driver}].");
+        }
+        $default = DB::getDefaultConnection();
+        config(['database.connections.contact_intake_winner' => config("database.connections.{$default}")]);
+        $winnerDb = DB::connection('contact_intake_winner');
+        $hash = hash('sha256', 'snapshot-loser-'.Str::uuid());
+        $data = ['name' => 'Synthetic Snapshot '.Str::random(8), 'email' => 'snapshot-loser@example.test', 'phone' => null, 'company' => null];
+        // Committed on the second connection, outside RefreshDatabase's wrapping transaction.
+        $winnerDb->table('contact_intake_identities')->insert(['identity_hash' => $hash]);
+        $this->beforeApplicationDestroyed(function () use ($winnerDb, $hash, $data) {
+            $owner = $winnerDb->table('contact_intake_identities')->where('identity_hash', $hash)->first();
+            $winnerDb->table('contact_intake_identities')->where('identity_hash', $hash)->delete();
+            $winnerDb->table('people')->where('id', $owner?->person_id)->delete();
+            $winnerDb->table('clients')->where('name', $data['name'])->delete();
+        });
+        // The loser's snapshot is fixed by its first consistent read, as findOrFail does in process().
+        $this->assertSame(1, DB::table('contact_intake_identities')->where('identity_hash', $hash)->count());
+        $service = app(ProspectIntakeService::class);
+        DB::setDefaultConnection('contact_intake_winner');
+        try {
+            $winner = $service->provisionContactIdentity($hash, $data);
+        } finally {
+            DB::setDefaultConnection($default);
+        }
+        $loser = $service->provisionContactIdentity($hash, $data);
+        $this->assertSame($winner['client']->id, $loser['client']->id);
+        $this->assertSame($winner['person']->id, $loser['person']->id);
+        $this->assertSame(1, $winnerDb->table('clients')->where('name', $data['name'])->count());
+    }
 }

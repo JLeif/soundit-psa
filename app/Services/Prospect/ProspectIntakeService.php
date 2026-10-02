@@ -154,9 +154,13 @@ class ProspectIntakeService
             if ($e->getMessage() !== 'contact_identity_owned') {
                 throw $e;
             }
-            $owner = DB::table('contact_intake_identities')->where('identity_hash', $identityHash)->first();
-            $client = Client::findOrFail($owner?->prospect_client_id);
-            $person = Person::where('client_id', $client->id)->findOrFail($owner?->person_id);
+            // Locking reads, not plain ones. A caller's transaction (SubmissionProcessor) fixed its
+            // REPEATABLE READ snapshot before the winner committed; the conditional UPDATE above
+            // saw the winner's row, but a plain re-read would see the old snapshot (owner NULL,
+            // client and person absent) and throw. Measured on MariaDB 10.11 (card fs0tKV9e).
+            $owner = DB::table('contact_intake_identities')->where('identity_hash', $identityHash)->lockForUpdate()->first();
+            $client = Client::lockForUpdate()->findOrFail($owner?->prospect_client_id);
+            $person = Person::where('client_id', $client->id)->lockForUpdate()->findOrFail($owner?->person_id);
             if (! $client->is_active || ! $person->is_active) {
                 throw new \DomainException('Inactive contact identity.');
             }
