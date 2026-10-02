@@ -33,7 +33,7 @@ class ContactNoteContainmentTest extends TestCase
 
     public function test_form_note_edits_preserve_private_zero_time_provenance(): void
     {
-        $observer = new \App\Observers\TicketNoteObserver(app(\App\Services\PrepayService::class));
+        $observer = new \App\Observers\TicketNoteObserver(app(\App\Services\PrepayService::class), app(\App\Services\ContractResolver::class));
         $note = $this->note('FORM_CONTENT', true, true);
         $note->exists = true;
         $note->syncOriginal();

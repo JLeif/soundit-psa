@@ -321,16 +321,15 @@ class PhoneCallActionService
             // ticket reassigned between staging and approval move prepay hours
             // against a contract nobody reviewed.
             //
-            // ticket_contract_id is NOT sufficient on its own. When it is null —
-            // the common intake case — the debit falls back to an unordered
-            // first() over the client's active hours prepay contracts, so the
-            // contract actually debited is not named anywhere on the ticket. Two
-            // different contracts both compare equal as "null", and a prepay
-            // rollover between staging and approval (expire C1, activate C2) is
-            // an ordinary billing event, not a contrivance. So we additionally
-            // pin resolved_contract_id: the id PrepayService itself would pick,
-            // read from the one producer of that answer so this cannot drift
-            // from the query it mirrors.
+            // ticket_contract_id is NOT sufficient on its own. The debit reads
+            // the call's stamped contract, else ContractResolver's answer (the
+            // client default or only active contract), and neither is named on
+            // the ticket. Two different contracts both compare equal as "null",
+            // and a prepay rollover between staging and approval (expire C1,
+            // activate C2) is an ordinary billing event, not a contrivance. So we
+            // additionally pin resolved_contract_id: the id PrepayService itself
+            // would pick, read from the one producer of that answer so this
+            // cannot drift from it.
             $ticket = $call->ticket_id === null ? null : Ticket::find($call->ticket_id);
             $resolved = app(PrepayService::class)->resolveContractForPhoneCall($call);
 

@@ -179,6 +179,12 @@
                                             @endif
                                         </span>
                                     @endif
+                                    {{-- A held call's prepay debit waits for the client's contract to be settled (card I3EvQKUV r2) --}}
+                                    @if($item->contract_held_at && $item->is_billable && $item->effectiveDurationSeconds())
+                                        <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Set a default contract or this ticket's contract.">
+                                            <i class="bi bi-exclamation-circle me-1"></i>Needs contract
+                                        </span>
+                                    @endif
                                     <span class="text-muted small ms-auto" title="{{ $item->started_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                         {{ $item->started_at?->diffForHumans() }}
                                     </span>
@@ -379,7 +385,12 @@
                                                 @endif
                                             </span>
                                         @endif
-                                        @if($note->contract_id && $note->contract_id !== $ticket->contract_id)
+                                        {{-- A held note can keep a stamp that no longer validates; it is not billed to it --}}
+                                        @if($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
+                                            <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Edit the note to choose its contract.">
+                                                <i class="bi bi-exclamation-circle me-1"></i>Needs contract
+                                            </span>
+                                        @elseif($note->contract_id && $note->contract_id !== $ticket->contract_id)
                                             <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">
                                                 <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
                                             </span>
@@ -502,8 +513,8 @@
                                         <div class="col-auto">
                                             <label class="form-label small">Contract</label>
                                             <select name="contract_id" class="form-select form-select-sm">
-                                                <option value="">Ticket default</option>
-                                                @foreach($ticket->client?->contracts ?? [] as $ct)
+                                                <option value="">Automatic</option>
+                                                @foreach(($ticket->client?->contracts ?? collect())->filter(fn ($ct) => $ct->status === \App\Enums\ContractStatus::Active || $ct->id === $item->contract_id) as $ct)
                                                     <option value="{{ $ct->id }}" {{ $item->contract_id == $ct->id ? 'selected' : '' }}>
                                                         {{ $ct->name }}
                                                     </option>

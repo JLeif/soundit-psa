@@ -7,12 +7,16 @@ use App\Enums\BillingSource;
 use App\Enums\ContractStatus;
 use App\Enums\ContractType;
 use App\Enums\TicketPriority;
+use App\Services\PrepayService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class Contract extends Model
 {
@@ -88,7 +92,88 @@ class Contract extends Model
             }
             // Deactivate all profiles when soft-deleting a contract
             $contract->profiles()->update(['is_active' => false]);
+            $contract->clearAsClientDefault('deleted');
         });
+
+        // A soft or force delete can leave the client one active contract: release its held debits.
+        static::deleted(function (Contract $contract) {
+            $contract->releaseClientHeldDebits();
+        });
+
+        // A new or restored active contract can leave the client exactly one (or end NONE).
+        static::created(function (Contract $contract) {
+            if ($contract->status === ContractStatus::Active) {
+                $contract->releaseClientHeldDebits();
+            }
+        });
+
+        static::restored(function (Contract $contract) {
+            if ($contract->status === ContractStatus::Active) {
+                $contract->releaseClientHeldDebits();
+            }
+        });
+
+        static::updated(function (Contract $contract) {
+            if ($contract->wasChanged('status') && $contract->status !== ContractStatus::Active) {
+                $contract->clearAsClientDefault($contract->status->value);
+            }
+            // Expiry, cancellation or re-activation can end the client's ambiguity (r2); a
+            // contract moved to another client can end it for the client it joined or left.
+            if ($contract->wasChanged('status') || $contract->wasChanged('client_id')) {
+                $contract->releaseClientHeldDebits();
+            }
+            if ($contract->wasChanged('client_id')) {
+                $contract->releaseClientHeldDebits($contract->getOriginal('client_id'));
+            }
+        });
+    }
+
+    /**
+     * Re-run this client's debits held as "Needs contract" once the change is
+     * committed (card I3EvQKUV r2). Entries that still resolve AMBIGUOUS stay
+     * held; a failure never takes the contract write down with it.
+     */
+    private function releaseClientHeldDebits(int|string|null $clientId = null): void
+    {
+        $clientId ??= $this->client_id;
+        if ($clientId === null) {
+            return;
+        }
+        $clientId = (int) $clientId;
+        DB::afterCommit(function () use ($clientId) {
+            try {
+                app(PrepayService::class)->releaseHeldDebits($clientId);
+            } catch (\Throwable $e) {
+                Log::warning('[Prepay] Held debits release failed', [
+                    'client_id' => $clientId,
+                    'contract_id' => $this->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        });
+    }
+
+    /**
+     * A client's default must be an active contract (card I3EvQKUV §1). When
+     * this contract stops being one, clear it as its client's default and
+     * record that on the contract's history. Nothing is reassigned.
+     */
+    private function clearAsClientDefault(string $reason): void
+    {
+        $cleared = Client::query()
+            ->where('id', $this->client_id)
+            ->where('default_contract_id', $this->id)
+            ->update(['default_contract_id' => null]);
+
+        if ($cleared > 0) {
+            ContractActivity::create([
+                'contract_id' => $this->id,
+                'user_id' => Auth::id(),
+                'action' => 'client_default_cleared',
+                'changes' => ['client_id' => $this->client_id, 'reason' => $reason],
+                'created_at' => now(),
+            ]);
+        }
     }
 
     public function hasSla(): bool

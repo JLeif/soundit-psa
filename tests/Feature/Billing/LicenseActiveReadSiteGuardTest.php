@@ -32,7 +32,7 @@ use Tests\TestCase;
  * - ScreenConnectCountLicenses / AppRiverLicenseSyncService / License model
  *   deactivation helpers: sync-internal cleanup WRITES, not billing reads — EXEMPT
  *   (the AppRiver hold-out path marks held rows seen before cleanup ever runs).
- * - InvoiceController / PrepayService / ClientService / ContractAssignmentService /
+ * - InvoiceController / ClientService / ContractAssignmentService /
  *   CippWriteScopeResolver: `status = 'active'` on CONTRACTS or other tables, not
  *   licences — EXEMPT.
  */
@@ -46,7 +46,6 @@ class LicenseActiveReadSiteGuardTest extends TestCase
 
     private const UNQUALIFIED = [
         'app/Http/Controllers/Web/DashboardController.php' => 1,
-        'app/Services/PrepayService.php' => 2,
         'app/Http/Controllers/Web/InvoiceController.php' => 1,
         'app/Console/Commands/ScreenConnectCountLicenses.php' => 1,
         'app/Services/BillingService.php' => 5,

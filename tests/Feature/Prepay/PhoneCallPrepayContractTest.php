@@ -41,7 +41,10 @@ class PhoneCallPrepayContractTest extends TestCase
         $txn = app(PrepayService::class)->debitFromPhoneCall($call);
         $ticket->update(['contract_id' => $b->id]);
         $call->unsetRelation('ticket');
-        $this->assertSame($b->id, app(PrepayService::class)->resolveContractForPhoneCall($call)->id);
+        // Card I3EvQKUV: the call was stamped with A when its time was debited, so a later
+        // change of the ticket's contract does not re-target it.
+        $this->assertSame($a->id, $call->fresh()->contract_id);
+        $this->assertSame($a->id, app(PrepayService::class)->resolveContractForPhoneCall($call)->id);
 
         return [$call, $a, $b, $txn];
     }

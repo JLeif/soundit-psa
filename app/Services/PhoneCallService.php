@@ -12,6 +12,7 @@ use App\Enums\TicketType;
 use App\Jobs\ResolveCallerFromPeople;
 use App\Models\Person;
 use App\Models\PhoneCall;
+use App\Models\PrepayTransaction;
 use App\Models\SipEndpoint;
 use App\Models\Ticket;
 use App\Services\Triage\AssetMatcher;
@@ -1206,7 +1207,15 @@ class PhoneCallService
      */
     public function linkCallToTicket(PhoneCall $call, int $ticketId): PhoneCall
     {
+        $relinked = $call->ticket_id !== null && (int) $call->ticket_id !== $ticketId;
         $call->ticket_id = $ticketId;
+        // A call whose time is already debited keeps that ledger contract (card I3EvQKUV:
+        // earlier time stays where it was debited); otherwise a link to another ticket is
+        // stamped afresh below.
+        if ($relinked && ! PrepayTransaction::where('phone_call_id', $call->id)->exists()) {
+            $call->contract_id = null;
+            $call->contract_held_at = null;
+        }
 
         // Only set billability if triage has already classified this ticket
         if ($call->is_billable === null) {
@@ -1217,6 +1226,10 @@ class PhoneCallService
         }
 
         $call->save();
+
+        // Stamp the contract this call's time belongs to at link time, before any duration
+        // arrives (card I3EvQKUV §3). Several active contracts and no default leave it NULL.
+        app(PrepayService::class)->stampPhoneCallContract($call);
 
         // Trigger prepay debit only if billability is determined
         if ($call->is_billable && $call->duration) {
@@ -1404,6 +1417,8 @@ class PhoneCallService
         app(PrepayService::class)->reverseDebitForPhoneCall($call);
 
         $call->ticket_id = null;
+        $call->contract_id = null;
+        $call->contract_held_at = null;
         $call->is_billable = null;
         $call->save();
 

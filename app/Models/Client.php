@@ -161,6 +161,16 @@ class Client extends Model
         return $this->hasMany(Contract::class);
     }
 
+    /**
+     * The contract new time belongs to when the client has several active
+     * contracts (card I3EvQKUV). Read it through ContractResolver, which
+     * re-checks that it is still an active contract of this client.
+     */
+    public function defaultContract(): BelongsTo
+    {
+        return $this->belongsTo(Contract::class, 'default_contract_id');
+    }
+
     public function invoices(): HasMany
     {
         return $this->hasMany(Invoice::class);

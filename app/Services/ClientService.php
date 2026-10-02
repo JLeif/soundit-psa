@@ -253,6 +253,21 @@ class ClientService
 
             $duplicate->delete();
 
+            // The merge moved tickets and contracts by query builder, so no model hook saw it:
+            // re-run the survivor's held debits once it commits (card I3EvQKUV r2). A release
+            // failure is logged and never takes the merge down with it.
+            $survivorId = (int) $survivor->id;
+            DB::afterCommit(function () use ($survivorId) {
+                try {
+                    app(PrepayService::class)->releaseHeldDebits($survivorId);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning('[Prepay] Held debits release failed', [
+                        'client_id' => $survivorId,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            });
+
             return $counts;
         });
     }
