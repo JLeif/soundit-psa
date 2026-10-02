@@ -385,11 +385,33 @@ class OperatorBridgeToolExecutor
             // were recorded (unknown), [] = none. The marker is ours, sits
             // OUTSIDE the fence and carries no sender text; the filename is
             // sender text, fenced and redacted as get_teams_chat_history does.
-            $refs = is_array($row->attachments)
-                ? TeamsMessageAttachments::fencedRefs($row->attachments, app(ChetDataSurfaceTextSanitizer::class))
-                : null;
-            $markers = $refs === null ? null : TeamsMessageAttachments::markers($refs);
+            //
+            // A WITHHELD row offers no way to its attachments (#4879): no
+            // refs, no marker and no Graph ids, so an image cannot carry
+            // what the text pipeline refused. attachments_withheld says only
+            // whether refs were recorded (null = unknown, legacy row).
+            if ($withheld) {
+                $refs = null;
+                $markers = null;
+            } else {
+                $refs = is_array($row->attachments)
+                    ? TeamsMessageAttachments::fencedRefs($row->attachments, app(ChetDataSurfaceTextSanitizer::class))
+                    : null;
+                $markers = $refs === null ? null : TeamsMessageAttachments::markers($refs);
+            }
             $fenced = $this->promptFence->fence('operator message', $meta['text']);
+
+            $ids = $withheld
+                ? [
+                    'graph_chat_id' => null,
+                    'graph_message_id' => null,
+                    'attachments_withheld' => is_array($row->attachments) ? $row->attachments !== [] : null,
+                ]
+                : [
+                    // What get_teams_message_attachment takes as chat_id / message_id.
+                    'graph_chat_id' => $row->conversation_id,
+                    'graph_message_id' => $row->activity_id,
+                ];
 
             return [
                 'id' => $row->id,
@@ -398,9 +420,7 @@ class OperatorBridgeToolExecutor
                 'sender_name' => $row->sender?->name,
                 'text' => $markers === null ? $fenced : 'Attachments: '.$markers."\n".$fenced,
                 'attachments' => $refs,
-                // What get_teams_message_attachment takes as chat_id / message_id.
-                'graph_chat_id' => $row->conversation_id,
-                'graph_message_id' => $row->activity_id,
+                ...$ids,
                 'text_withheld' => $withheld,
                 // An observed poll-side replacement is positive evidence;
                 // otherwise preserve the nullable ingest fact, not a body marker.
