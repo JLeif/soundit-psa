@@ -232,6 +232,36 @@ class ApiTokensSettingsTest extends TestCase
         $this->assertSame('2038-01-18 07:59:59', $token->fresh()->expires_at->utc()->format('Y-m-d H:i:s'));
     }
 
+    public function test_an_expiry_before_the_columns_1970_start_is_refused_on_update_and_create(): void
+    {
+        // The TIMESTAMP range starts at 1970-01-01 00:00:01 UTC; an earlier
+        // date must be a validation error, not a failed write (and, on create,
+        // not an orphan draft).
+        \App\Models\Setting::setValue('app_timezone', 'UTC');
+        $message = 'That expiry date is too far in the past. Choose a later date, or leave it blank.';
+        $admin = $this->admin();
+        [$token] = $this->mintApiToken(endpoints: [], state: []);
+
+        foreach (['1969-12-31', '0001-01-01'] as $date) {
+            $this->actingAs($admin)
+                ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => $date])
+                ->assertSessionHasErrors(['expires_at' => $message]);
+            $this->assertNull($token->fresh()->expires_at, "{$date} was stored");
+            $this->assertSame('test-token', $token->fresh()->label, "{$date} saved the label anyway");
+        }
+
+        $this->actingAs($admin)
+            ->post(route('settings.api-tokens.store'), ['expires_at' => '1969-12-31'])
+            ->assertSessionHasErrors(['expires_at' => $message]);
+        $this->assertSame(1, ApiToken::count(), 'a token was minted despite the refused expiry');
+
+        // The first storable day is still accepted.
+        $this->actingAs($admin)
+            ->patch(route('settings.api-tokens.update', $token), ['label' => 'lits-rmm', 'expires_at' => '1970-01-01'])
+            ->assertSessionHasNoErrors();
+        $this->assertSame('1970-01-01 23:59:59', $token->fresh()->expires_at->utc()->format('Y-m-d H:i:s'));
+    }
+
     public function test_api_tokens_do_not_touch_mcp_tokens(): void
     {
         $admin = $this->admin();

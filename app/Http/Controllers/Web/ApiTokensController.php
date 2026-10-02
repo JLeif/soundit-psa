@@ -94,8 +94,9 @@ class ApiTokensController extends Controller
     }
 
     /**
-     * expires_at is a TIMESTAMP column, whose range ends at
-     * 2038-01-19 03:14:07 UTC on MariaDB/MySQL; a later value fails the write.
+     * expires_at is a TIMESTAMP column, whose range on MariaDB/MySQL is
+     * 1970-01-01 00:00:01 to 2038-01-19 03:14:07 UTC; a value outside it fails
+     * the write.
      * The column type stays (Jeeves's RULED (B) term 4, run 01a0fb29), so the
      * input is bounded instead, on create and on update.
      *
@@ -117,6 +118,11 @@ class ApiTokensController extends Controller
                     if ($instant !== null && $instant->gt(self::latestStorableExpiry())) {
                         $fail('That expiry date is too far in the future for this time zone. Choose an earlier date, or leave it blank.');
                     }
+                    // The column's range starts at 1970-01-01 00:00:01 UTC, so
+                    // an earlier instant fails the write the same way.
+                    if ($instant !== null && $instant->lt(self::earliestStorableExpiry())) {
+                        $fail('That expiry date is too far in the past. Choose a later date, or leave it blank.');
+                    }
                 },
             ],
         ];
@@ -133,6 +139,11 @@ class ApiTokensController extends Controller
     private static function latestStorableExpiry(): Carbon
     {
         return Carbon::parse('2038-01-19 03:14:07', 'UTC');
+    }
+
+    private static function earliestStorableExpiry(): Carbon
+    {
+        return Carbon::parse('1970-01-01 00:00:01', 'UTC');
     }
 
     /**
