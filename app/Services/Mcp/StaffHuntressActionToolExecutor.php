@@ -176,7 +176,7 @@ class StaffHuntressActionToolExecutor
         }
 
         if (! HuntressConfig::isWriteConfigured()) {
-            return ['error' => 'Huntress write credential (user-based API key) is not configured; escalation resolution is unavailable until it is added in Settings > Integrations.'];
+            return ['error' => 'Huntress write credential (user-based API key) is not configured; escalation resolution is unavailable until the pair is saved in '.HuntressConfig::WRITE_CREDENTIAL_LOCATION.'.'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {

@@ -7,6 +7,13 @@ use App\Models\User;
 
 class HuntressConfig
 {
+    /**
+     * Where an operator enters the escalation-resolve write credential: the
+     * user-based key pair inputs in the Huntress card on the Integrations page.
+     * One constant so every remedy message names the same, real field.
+     */
+    public const WRITE_CREDENTIAL_LOCATION = 'Settings > Integrations > Huntress EDR / ITDR > User API key and User API secret';
+
     public static function get(string $key): ?string
     {
         return match ($key) {

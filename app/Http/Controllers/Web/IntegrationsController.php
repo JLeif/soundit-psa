@@ -165,6 +165,15 @@ class IntegrationsController extends Controller
         $huntressWebhookAccountId = HuntressConfig::get('webhook_account_id');
         $huntressWebhooksEnabled = HuntressConfig::webhooksEnabled();
         $huntressConfigured = HuntressConfig::isConfigured();
+        // Saved-ness from the raw rows (no decrypt) drives the masked hints;
+        // the status line asks the same predicate the write lane gates on.
+        $huntressUserKeyStored = filled(Setting::getValue('huntress_user_api_key'));
+        $huntressUserSecretStored = filled(Setting::getValue('huntress_user_api_secret'));
+        try {
+            $huntressWriteConfigured = HuntressConfig::isWriteConfigured();
+        } catch (\Illuminate\Contracts\Encryption\DecryptException) {
+            $huntressWriteConfigured = false;
+        }
         $huntressConnected = (bool) $fmtTs(Setting::getValue('huntress_connected_at'));
 
         // UniFi
@@ -598,6 +607,7 @@ class IntegrationsController extends Controller
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
             'huntressConfigured', 'huntressConnected', 'huntressEnabled',
             'huntressWebhookSecretStored', 'huntressWebhookAccountId', 'huntressWebhooksEnabled',
+            'huntressUserKeyStored', 'huntressUserSecretStored', 'huntressWriteConfigured',
             'unifiConfigured', 'unifiConnected', 'unifiBaseUrl', 'unifiEnabled',
             'powerdmarcConfigured', 'powerdmarcConnected', 'powerdmarcBaseUrl', 'powerdmarcMsspBaseUrl', 'powerdmarcMsspWalkSeconds', 'powerdmarcEnabled',
             'servosityConfigured', 'servosityConnected', 'servosityConnectedAt', 'servosityEnabled',
@@ -1895,13 +1905,65 @@ class IntegrationsController extends Controller
         $validated = $request->validate([
             'api_key' => 'nullable|string|min:1|max:500',
             'api_secret' => 'nullable|string|min:1|max:500',
+            // The user-based key pair the escalation-resolve write lane needs
+            // (HuntressConfig::isWriteConfigured). Write-only: blank keeps the
+            // stored value, the explicit clear control removes both halves.
+            'user_api_key' => 'nullable|string|max:500',
+            'user_api_secret' => 'nullable|string|max:500',
+            'clear_user_api_key_pair' => 'nullable|boolean',
         ]);
+
+        $userKey = trim((string) ($validated['user_api_key'] ?? ''));
+        $userSecret = trim((string) ($validated['user_api_secret'] ?? ''));
+        $replaceUserKey = $userKey !== '' && $userKey !== self::SECRET_MASK;
+        $replaceUserSecret = $userSecret !== '' && $userSecret !== self::SECRET_MASK;
+        $clearUserPair = $request->boolean('clear_user_api_key_pair');
+
+        if (($replaceUserKey || $replaceUserSecret || $clearUserPair) && ! $request->user()?->isAdmin()) {
+            // The write credential is rendered to administrators only; a
+            // non-admin submit that carries it is refused before anything saves.
+            abort(403, 'Administrator access required.');
+        }
+
+        if ($clearUserPair && ($replaceUserKey || $replaceUserSecret)) {
+            return redirect()->route('settings.integrations')->withErrors([
+                'user_api_key' => 'Nothing was saved: a new user API key or secret and "Clear the saved user API key pair" were both given. Choose one.',
+            ]);
+        }
+
+        // Pair consistency: the stored result must be both halves or neither,
+        // because the write lane needs both and a lone half reads as configured
+        // to nobody. Checked before any write so a refused submit saves nothing.
+        if (! $clearUserPair) {
+            $keyAfter = $replaceUserKey || filled(Setting::getValue('huntress_user_api_key'));
+            $secretAfter = $replaceUserSecret || filled(Setting::getValue('huntress_user_api_secret'));
+            if ($keyAfter !== $secretAfter) {
+                return redirect()->route('settings.integrations')->withErrors([
+                    $keyAfter ? 'user_api_secret' : 'user_api_key' => 'Nothing was saved: enter both the User API key and the User API secret.',
+                ]);
+            }
+        }
 
         if (! empty($validated['api_key'])) {
             Setting::setEncrypted('huntress_api_key', $validated['api_key']);
         }
         if (! empty($validated['api_secret'])) {
             Setting::setEncrypted('huntress_api_secret', $validated['api_secret']);
+        }
+
+        if ($clearUserPair) {
+            Setting::whereIn('key', ['huntress_user_api_key', 'huntress_user_api_secret'])->delete();
+            \Illuminate\Support\Facades\Log::info('[Huntress] Stored user API key pair cleared by an administrator', ['user_id' => $request->user()?->id]);
+
+            return redirect()->route('settings.integrations')
+                ->with('success', 'Huntress credentials saved. The user API key pair was cleared.');
+        }
+
+        if ($replaceUserKey) {
+            Setting::setEncrypted('huntress_user_api_key', $userKey);
+        }
+        if ($replaceUserSecret) {
+            Setting::setEncrypted('huntress_user_api_secret', $userSecret);
         }
 
         return redirect()->route('settings.integrations')
