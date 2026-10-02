@@ -37,9 +37,9 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const KEY = 'synthetic-user-key-7Q2xK9pL';
+    private const KEY = 'synthetic-user-key-fixture-value';
 
-    private const SECRET_VALUE = 'synthetic-user-secret-Vb3nM8rT';
+    private const SECRET_VALUE = 'synthetic-user-secret-fixture-value';
 
     private function admin(): User
     {
