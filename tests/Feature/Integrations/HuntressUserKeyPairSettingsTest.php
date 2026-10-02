@@ -39,7 +39,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 
     private const KEY = 'synthetic-user-key-7Q2xK9pL';
 
-    private const SECRET = 'synthetic-user-secret-Vb3nM8rT';
+    private const SECRET_VALUE = 'synthetic-user-secret-Vb3nM8rT';
 
     private function admin(): User
     {
@@ -58,7 +58,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
         return DB::table('settings')->where('key', $key)->value('value');
     }
 
-    private function storePair(string $key = self::KEY, string $secret = self::SECRET): void
+    private function storePair(string $key = self::KEY, string $secret = self::SECRET_VALUE): void
     {
         Setting::setEncrypted('huntress_user_api_key', $key);
         Setting::setEncrypted('huntress_user_api_secret', $secret);
@@ -68,7 +68,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 
     public function test_the_pair_round_trips_encrypted_through_the_form(): void
     {
-        $response = $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET]);
+        $response = $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET_VALUE]);
 
         $response->assertRedirect(route('settings.integrations'));
         $response->assertSessionHasNoErrors();
@@ -78,12 +78,12 @@ class HuntressUserKeyPairSettingsTest extends TestCase
         $this->assertNotNull($rawKey, 'the user API key row was not written');
         $this->assertNotNull($rawSecret, 'the user API secret row was not written');
         $this->assertStringNotContainsString(self::KEY, $rawKey, 'the user API key is stored in plaintext');
-        $this->assertStringNotContainsString(self::SECRET, $rawSecret, 'the user API secret is stored in plaintext');
+        $this->assertStringNotContainsString(self::SECRET_VALUE, $rawSecret, 'the user API secret is stored in plaintext');
 
         $this->assertSame(self::KEY, Setting::getEncrypted('huntress_user_api_key'));
-        $this->assertSame(self::SECRET, Setting::getEncrypted('huntress_user_api_secret'));
+        $this->assertSame(self::SECRET_VALUE, Setting::getEncrypted('huntress_user_api_secret'));
         $this->assertSame(self::KEY, HuntressConfig::get('user_api_key'));
-        $this->assertSame(self::SECRET, HuntressConfig::get('user_api_secret'));
+        $this->assertSame(self::SECRET_VALUE, HuntressConfig::get('user_api_secret'));
         $this->assertTrue(HuntressConfig::isWriteConfigured());
     }
 
@@ -92,7 +92,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
         Setting::setEncrypted('huntress_api_key', 'synthetic-read-key');
         Setting::setEncrypted('huntress_api_secret', 'synthetic-read-secret');
 
-        $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET])->assertSessionHasNoErrors();
+        $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET_VALUE])->assertSessionHasNoErrors();
 
         $this->assertSame('synthetic-read-key', HuntressConfig::get('api_key'));
         $this->assertSame('synthetic-read-secret', HuntressConfig::get('api_secret'));
@@ -115,7 +115,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 
         $html = $response->getContent();
         $this->assertStringNotContainsString(self::KEY, $html, 'the stored user API key was rendered into the page');
-        $this->assertStringNotContainsString(self::SECRET, $html, 'the stored user API secret was rendered into the page');
+        $this->assertStringNotContainsString(self::SECRET_VALUE, $html, 'the stored user API secret was rendered into the page');
         $this->assertStringNotContainsString($this->raw('huntress_user_api_key'), $html, 'the ciphertext was rendered into the page');
     }
 
@@ -153,7 +153,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 
         $this->assertSame($before, [$this->raw('huntress_user_api_key'), $this->raw('huntress_user_api_secret')], 'a blank or masked submit rewrote the stored pair');
         $this->assertSame(self::KEY, HuntressConfig::get('user_api_key'));
-        $this->assertSame(self::SECRET, HuntressConfig::get('user_api_secret'));
+        $this->assertSame(self::SECRET_VALUE, HuntressConfig::get('user_api_secret'));
     }
 
     public function test_one_new_half_replaces_only_that_half(): void
@@ -183,7 +183,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
 
     public function test_over_length_values_are_refused_and_nothing_is_saved(): void
     {
-        $this->save(['user_api_key' => str_repeat('k', 501), 'user_api_secret' => self::SECRET])
+        $this->save(['user_api_key' => str_repeat('k', 501), 'user_api_secret' => self::SECRET_VALUE])
             ->assertSessionHasErrors('user_api_key');
         $this->save(['user_api_key' => self::KEY, 'user_api_secret' => str_repeat('s', 501)])
             ->assertSessionHasErrors('user_api_secret');
@@ -203,7 +203,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
     public function test_a_lone_half_is_refused_when_nothing_is_stored(): void
     {
         $this->save(['user_api_key' => self::KEY])->assertSessionHasErrors('user_api_secret');
-        $this->save(['user_api_secret' => self::SECRET])->assertSessionHasErrors('user_api_key');
+        $this->save(['user_api_secret' => self::SECRET_VALUE])->assertSessionHasErrors('user_api_key');
 
         $this->assertNull($this->raw('huntress_user_api_key'), 'a refused lone half was saved');
         $this->assertNull($this->raw('huntress_user_api_secret'), 'a refused lone half was saved');
@@ -217,6 +217,21 @@ class HuntressUserKeyPairSettingsTest extends TestCase
         $this->assertNull($this->raw('huntress_api_key'), 'a refused submit still saved the read key');
     }
 
+    public function test_a_stored_lone_half_does_not_block_a_save_that_leaves_the_user_pair_alone(): void
+    {
+        Setting::setEncrypted('huntress_user_api_key', self::KEY);
+        $tech = User::factory()->create(['role' => UserRole::Tech, 'is_active' => true]);
+
+        $this->save(['api_key' => 'synthetic-read-key'], $tech)
+            ->assertSessionHasNoErrors()
+            ->assertSessionHas('success', 'Huntress credentials saved.');
+        $this->assertSame('synthetic-read-key', HuntressConfig::get('api_key'), 'a stored lone half blocked the read-pair save');
+
+        $this->save([])->assertSessionHasNoErrors();
+        $this->assertSame(self::KEY, HuntressConfig::get('user_api_key'), 'a blank save rewrote the stored half');
+        $this->assertNull($this->raw('huntress_user_api_secret'));
+    }
+
     public function test_clear_together_with_a_new_value_is_refused(): void
     {
         $this->storePair();
@@ -225,7 +240,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
             ->assertSessionHasErrors('user_api_key');
 
         $this->assertSame(self::KEY, HuntressConfig::get('user_api_key'));
-        $this->assertSame(self::SECRET, HuntressConfig::get('user_api_secret'));
+        $this->assertSame(self::SECRET_VALUE, HuntressConfig::get('user_api_secret'));
     }
 
     public function test_a_failed_save_does_not_flash_the_pair(): void
@@ -243,7 +258,7 @@ class HuntressUserKeyPairSettingsTest extends TestCase
     {
         $tech = User::factory()->create(['role' => UserRole::Tech, 'is_active' => true]);
 
-        $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET], $tech)->assertForbidden();
+        $this->save(['user_api_key' => self::KEY, 'user_api_secret' => self::SECRET_VALUE], $tech)->assertForbidden();
         $this->assertNull($this->raw('huntress_user_api_key'));
 
         $this->storePair();

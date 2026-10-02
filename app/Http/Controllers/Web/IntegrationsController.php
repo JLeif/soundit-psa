@@ -1933,8 +1933,10 @@ class IntegrationsController extends Controller
 
         // Pair consistency: the stored result must be both halves or neither,
         // because the write lane needs both and a lone half reads as configured
-        // to nobody. Checked before any write so a refused submit saves nothing.
-        if (! $clearUserPair) {
+        // to nobody. Checked before any write so a refused submit saves nothing,
+        // and only when a user half is being replaced, so a lone half already
+        // stored never blocks a save that does not touch the user pair.
+        if (! $clearUserPair && ($replaceUserKey || $replaceUserSecret)) {
             $keyAfter = $replaceUserKey || filled(Setting::getValue('huntress_user_api_key'));
             $secretAfter = $replaceUserSecret || filled(Setting::getValue('huntress_user_api_secret'));
             if ($keyAfter !== $secretAfter) {
