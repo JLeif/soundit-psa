@@ -158,7 +158,7 @@ class VerifyApiTokenTest extends TestCase
 
     public function test_the_refusal_cause_is_recorded_but_not_returned(): void
     {
-        [, $plain] = $this->mintApiToken(state: ['activated_at' => 'now', 'paused_at' => 'now']);
+        [$token, $plain] = $this->mintApiToken(state: ['activated_at' => 'now', 'paused_at' => 'now']);
 
         $response = $this->getJson('/api/v1/clients', $this->bearer($plain));
 
@@ -167,7 +167,14 @@ class VerifyApiTokenTest extends TestCase
         $log = ApiRequestLog::query()->latest('id')->first();
         $this->assertSame('paused', $log->cause);
         $this->assertSame(401, (int) $log->status);
-        $this->assertNull($log->api_token_id);
+        // Filed under the token the secret matched, so the refusal shows in
+        // that token's Activity tab; the response still names nothing.
+        $this->assertSame($token->id, $log->api_token_id);
+
+        $this->actingAs(\App\Models\User::factory()->admin()->create())
+            ->get(route('settings.api-tokens.show', $token))
+            ->assertOk()
+            ->assertSee('<td class="small">paused</td>', false);
     }
 
     public function test_no_session_or_cookie_is_issued(): void

@@ -1622,7 +1622,8 @@ with no token minted, every request gets 401.
 - **Refusals.** Every authentication failure (missing, malformed, unknown, draft, paused,
   revoked, expired) gets the same `401 {"error":"Unauthorized"}`. A valid token calling an
   endpoint it was not granted gets `403 {"error":"Forbidden"}`. The cause is recorded in
-  the token's Activity tab and the log, never in the response.
+  `api_request_logs` and the server log, never in the response. 401s for a draft, paused,
+  revoked or expired token, and 403s, also appear in that token's Activity tab.
 - **Limits.** 60 failed authentications per IP per minute, and 120 requests per token per
   minute, both answered with 429 and `Retry-After`.
 - **Audit.** `api_request_logs` keeps the endpoint, status, cause, duration and source IP

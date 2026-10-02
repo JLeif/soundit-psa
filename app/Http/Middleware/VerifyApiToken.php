@@ -46,12 +46,12 @@ class VerifyApiToken
             return $this->finish($request, $started, null, $endpoint, $this->tooMany(RateLimiter::availableIn($guessKey)), 'guess_throttled');
         }
 
-        [$token, $cause] = $this->authenticate($request);
+        [$token, $cause, $presented] = $this->authenticate($request);
 
         if ($token === null) {
             RateLimiter::hit($guessKey, 60);
 
-            return $this->finish($request, $started, null, $endpoint, $this->unauthorized(), $cause);
+            return $this->finish($request, $started, $presented, $endpoint, $this->unauthorized(), $cause);
         }
 
         if ($endpoint === null) {
@@ -77,13 +77,15 @@ class VerifyApiToken
     }
 
     /**
-     * @return array{0: ApiToken|null, 1: string|null} the token, or null and the refusal cause
+     * @return array{0: ApiToken|null, 1: string|null, 2: ApiToken|null} the token, or null and the
+     *     refusal cause; [2] is the row the presented secret matches (null when none), so a
+     *     refusal is audited under that token
      */
     private function authenticate(Request $request): array
     {
         $header = (string) $request->header('Authorization', '');
         if (! preg_match('/^Bearer\s+(\S+)\s*$/i', $header, $m)) {
-            return [null, $header === '' ? 'missing' : 'malformed'];
+            return [null, $header === '' ? 'missing' : 'malformed', null];
         }
 
         $hash = ApiToken::hashPlaintext($m[1]);
@@ -94,21 +96,25 @@ class VerifyApiToken
         // comparison silently.
         $row = ApiToken::authenticatable()->where('token_hash', $hash)->first();
         if ($row !== null && hash_equals((string) $row->token_hash, $hash)) {
-            return [$row, null];
+            return [$row, null, $row];
         }
 
-        return [null, $this->refusalCause($hash)];
+        return [null, ...$this->refusalCause($hash)];
     }
 
     /**
-     * Why a presented token did not authenticate, for the audit row only. This
-     * runs after the refusal is decided and cannot turn it into an acceptance.
+     * Why a presented token did not authenticate, and the row its digest
+     * matches (null when none), for the audit row only. This runs after the
+     * refusal is decided and cannot turn it into an acceptance: the row is used
+     * only to file the refusal under that token's Activity.
+     *
+     * @return array{0: string, 1: ApiToken|null}
      */
-    private function refusalCause(string $hash): string
+    private function refusalCause(string $hash): array
     {
         $row = ApiToken::query()->where('token_hash', $hash)->first();
 
-        return match (true) {
+        $cause = match (true) {
             $row === null => 'unknown',
             $row->isRevoked() => 'revoked',
             $row->isPaused() => 'paused',
@@ -116,6 +122,8 @@ class VerifyApiToken
             $row->isExpired() => 'expired',
             default => 'unknown',
         };
+
+        return [$cause, $row];
     }
 
     private function touchLastUsed(ApiToken $token, Request $request): void

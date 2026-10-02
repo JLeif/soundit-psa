@@ -11,6 +11,7 @@ use App\Services\AlertClientConflictException;
 use App\Services\AlertService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 
 /**
  * The write surface Leif RMM uses to report coverage drift:
@@ -114,7 +115,10 @@ class RmmAlertController extends Controller
                     'message' => $data['message'] ?? null,
                     'hostname' => $data['hostname'] ?? null,
                     'metadata' => $data['metadata'] ?? null,
-                    'fired_at' => $data['fired_at'] ?? now(),
+                    // Stored UTC (C-14). The `date` rule admits any offset, and
+                    // the datetime cast would keep the sender's wall time, so
+                    // convert to the UTC instant here.
+                    'fired_at' => isset($data['fired_at']) ? Carbon::parse($data['fired_at'])->utc() : now(),
                 ],
             );
         } catch (AlertClientConflictException) {

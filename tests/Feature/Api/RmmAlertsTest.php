@@ -196,6 +196,29 @@ class RmmAlertsTest extends TestCase
         $this->assertSame(2, Alert::count());
     }
 
+    #[DataProvider('paths')]
+    public function test_a_fired_at_with_an_offset_is_stored_as_the_utc_instant(string $resolvePath, string $raisePath): void
+    {
+        // C-14: stored UTC. The `date` rule admits any ISO-8601 offset, and the
+        // datetime cast would otherwise keep the sender's wall time.
+        $this->configure();
+        $client = Client::factory()->create();
+
+        $raised = $this->postJson($raisePath, $this->payload($client->id, [
+            'fired_at' => '2026-09-16T03:00:00+02:00',
+        ]), $this->authed())->assertOk();
+
+        $alert = Alert::findOrFail($raised->json('alert_id'));
+        $this->assertSame('2026-09-16 01:00:00', $alert->fired_at->utc()->format('Y-m-d H:i:s'));
+
+        // The re-fire branch writes fired_at too.
+        $this->postJson($raisePath, $this->payload($client->id, [
+            'fired_at' => '2026-09-16T05:30:00-04:00',
+        ]), $this->authed())->assertOk();
+
+        $this->assertSame('2026-09-16 09:30:00', $alert->refresh()->fired_at->utc()->format('Y-m-d H:i:s'));
+    }
+
     // -- refusals -------------------------------------------------------------
 
     #[DataProvider('paths')]

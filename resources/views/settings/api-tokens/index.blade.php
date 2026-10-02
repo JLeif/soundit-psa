@@ -96,6 +96,6 @@
 
 <div class="text-muted small mt-3">
     <i class="bi bi-info-circle me-1"></i>
-    New tokens start as inactive drafts with no endpoints granted, so a token is never live with the wrong access. Unknown, draft, paused, revoked and expired tokens all get the same 401, and every request is recorded in the token's Activity.
+    New tokens start as inactive drafts with no endpoints granted, so a token is never live with the wrong access. Unknown, draft, paused, revoked and expired tokens all get the same 401. Requests made with a token's secret, including its 401 and 403 refusals, are recorded in that token's Activity.
 </div>
 @endsection
