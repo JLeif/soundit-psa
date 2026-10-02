@@ -1250,6 +1250,7 @@ class McpToolRegistry
             \App\Services\Mcp\TicketTimelineTool::definition(),
             self::listClientContractsTool(),
             self::getContractTool(),
+            self::listPrepayTransactionsTool(),
             self::listEmailItemsTool(),
             self::getEmailItemTool(),
             self::listPhoneCallsTool(),
@@ -1358,7 +1359,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'get_contract',
-            'description' => 'Get one contract\'s coverage detail (type, status, dates, term, auto-renew, SLA terms, notes, and linked asset/person/license/profile/document counts), scoped to the client. Read-only; pricing and financial fields are not exposed. Requires an explicit token grant.',
+            'description' => 'Get one contract\'s coverage detail (type, status, dates, term, auto-renew, SLA terms, notes, and linked asset/person/license/profile/document counts), scoped to the client. Also returns a prepay block with the contract\'s stored prepay figures: unit (hours or dollars), total, used, expired, balance, expiry_months, halo_prepay_synced_at, and the low-balance alert and auto top-up settings. prepay is null when the contract has no prepay. Pricing and billing terms are not exposed. Read-only. Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -1366,6 +1367,29 @@ class McpToolRegistry
                     'contract_id' => ['type' => 'integer', 'description' => 'The contract ID to read.'],
                 ],
                 'required' => ['client_id', 'contract_id'],
+            ],
+        ];
+    }
+
+    /**
+     * list_prepay_transactions — one contract's prepay ledger (card 3vhEBCDG).
+     * Staff-class read; client_id is an optional fence that must own the contract.
+     *
+     * @return array<string, mixed>
+     */
+    public static function listPrepayTransactionsTool(): array
+    {
+        return [
+            'name' => 'list_prepay_transactions',
+            'description' => 'List one contract\'s prepay ledger, newest first: date, type (the ledger source: halo_sync, invoice_deposit, invoice_reversal, manual_credit, manual_debit, ticket_time, phone_call_time, expiration, transfer_out, transfer_in), hours or amount (signed: credits positive, debits negative; unit names which column applies), invoice id/number, ticket_note_id, phone_call_id, the ticket id behind a note or call, and expiry_date. balance_after is the running ledger net after each row; it is reported only when the whole ledger nets to the contract\'s stored prepay balance, and is null otherwise (balance_after_available says which). Free-text descriptions and notes are not returned. If client_id is given it must own the contract, else the read is refused. Read-only. Requires an explicit token grant.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'contract_id' => ['type' => 'integer', 'description' => 'The contract whose prepay ledger to read.'],
+                    'client_id' => ['type' => 'integer', 'description' => 'Optional: the client that must own the contract. A mismatch is refused.'],
+                    'limit' => ['type' => 'integer', 'description' => 'Max rows (default 25, cap 100). total and has_more report the full ledger size.'],
+                ],
+                'required' => ['contract_id'],
             ],
         ];
     }
@@ -1451,8 +1475,9 @@ class McpToolRegistry
      * list_client_contracts.
      *
      * *** THE DATA BOUNDARY IS DELIBERATELY THE OPPOSITE OF ITS psa_read NEIGHBOURS. ***
-     * list_client_contracts/get_contract state "pricing and financial fields are not
-     * exposed"; these expose totals AND unit_cost/cost_amount/total_cost/margin, on
+     * list_client_contracts states "pricing and financial fields are not exposed"
+     * (get_contract holds pricing and billing terms; since card 3vhEBCDG it carries
+     * only the contract's stored prepay figures); these expose totals AND unit_cost/cost_amount/total_cost/margin, on
      * Charlie's explicit ruling. He asked that a grant be LEGIBLE, so the descriptions
      * NAME the cost fields outright — a granter must be able to see they are handing
      * over cross-client margin, not "financial details". Do not soften that wording.
