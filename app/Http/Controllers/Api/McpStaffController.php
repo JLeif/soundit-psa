@@ -272,6 +272,10 @@ class McpStaffController extends Controller
         'get_ticket_timeline',
         'list_client_contracts',
         'get_contract',
+        // Card 3vhEBCDG: one contract's prepay ledger, read-only. Staff-class like the
+        // invoice reads: client_id is an optional fence that must own the contract.
+        // Explicit-grant only like every entry in this list.
+        'list_prepay_transactions',
         'list_email_items',
         'get_email_item',
         'list_phone_calls',
@@ -374,6 +378,11 @@ class McpStaffController extends Controller
         // mapping, so a malformed client_id collapsing to null would widen exactly as
         // above. The device reads already require client_id. Only ADDS a refusal.
         'tactical_list_clients_sites',
+
+        // Card 3vhEBCDG: list_prepay_transactions honours client_id as an ownership
+        // fence on the contract. A malformed one collapsing to null would silently
+        // drop that fence, exactly as get_recurring_profile above. Only ADDS a refusal.
+        'list_prepay_transactions',
     ];
 
     /**

@@ -73,7 +73,9 @@ class PsaContractReadToolsTest extends TestCase
             'start_date' => now()->subYear()->toDateString(),
             'end_date' => now()->addYear()->toDateString(),
             'auto_renew' => true,
-            // Pricing/financial columns that MUST NOT leak into tool output.
+            // Pricing/billing columns that MUST NOT leak into tool output under their
+            // column names. get_contract reports prepay only inside its prepay block
+            // (card 3vhEBCDG, PrepayReadToolsTest); list_client_contracts not at all.
             'prepay_balance' => 500.00,
             'billing_period' => 'monthly',
             'payment_terms_days' => 30,

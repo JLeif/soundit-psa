@@ -18,6 +18,7 @@ use App\Models\Invoice;
 use App\Models\InvoiceLine;
 use App\Models\Person;
 use App\Models\PhoneCall;
+use App\Models\PrepayTransaction;
 use App\Models\RecurringInvoiceProfile;
 use App\Models\RecurringInvoiceProfileLine;
 use App\Models\TechnicianRun;
@@ -175,6 +176,7 @@ class AssistantToolExecutor
             'verify_device_absent' => [ToolEffect::Read, static fn (self $x, array $in) => $x->verifyDeviceAbsent($in)],
             'list_client_contracts' => [ToolEffect::Read, static fn (self $x, array $in) => $x->listClientContracts($in)],
             'get_contract' => [ToolEffect::Read, static fn (self $x, array $in) => $x->getContract($in)],
+            'list_prepay_transactions' => [ToolEffect::Read, static fn (self $x, array $in) => $x->listPrepayTransactions($in)],
 
             // Cross-client staff-class reads (client_id optional filter, never required)
             'list_email_items' => [ToolEffect::Read, static fn (self $x, array $in) => $x->listEmailItems($in)],
@@ -1220,6 +1222,9 @@ class AssistantToolExecutor
     /** get_client asset-fleet block cap — assets_count carries the real total. */
     private const CLIENT_ASSETS_CAP = 50;
 
+    /** list_prepay_transactions: rows per call (default 25). */
+    private const PREPAY_LEDGER_LIMIT_MAX = 100;
+
     private function getClient(): array
     {
         if (! $this->client) {
@@ -1847,8 +1852,11 @@ class AssistantToolExecutor
     }
 
     /**
-     * get_contract — one contract's coverage detail, scoped to the client. Pricing/
-     * financial fields are never exposed (see the PR design notes for the held list).
+     * get_contract — one contract's coverage detail, scoped to the client. Billing
+     * terms and pricing stay held (see the PR design notes for the held list). The
+     * one exception is the prepay block (card 3vhEBCDG, Charlie 2026-10-01): the
+     * contract's prepay columns, read as stored, or null when the contract carries
+     * no prepay (prepay_balance null — Contract::has_prepay).
      *
      * @param  array<string, mixed>  $input
      * @return array<string, mixed>
@@ -1895,6 +1903,143 @@ class AssistantToolExecutor
             'licenses_count' => $contract->licenses_count,
             'profiles_count' => $contract->profiles_count,
             'documents_count' => $contract->documents_count,
+            'prepay' => $this->contractPrepayBlock($contract),
+        ];
+    }
+
+    /**
+     * The stored prepay columns of one contract, or null when it has no prepay.
+     * Read as stored: nothing is recomputed from the ledger here. The unit is
+     * named because the same columns hold hours or dollars (prepay_as_amount).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function contractPrepayBlock(Contract $contract): ?array
+    {
+        if (! $contract->has_prepay) {
+            return null;
+        }
+
+        $decimal = static fn ($v): ?float => $v === null ? null : (float) $v;
+        $syncedAt = $contract->getAttribute('halo_prepay_synced_at');
+
+        return [
+            'unit' => $contract->prepay_as_amount ? 'dollars' : 'hours',
+            'as_amount' => (bool) $contract->prepay_as_amount,
+            'total' => $decimal($contract->prepay_total),
+            'used' => $decimal($contract->prepay_used),
+            'expired' => $decimal($contract->prepay_expired),
+            'balance' => $decimal($contract->prepay_balance),
+            'expiry_months' => $contract->prepay_expiry_months,
+            'halo_prepay_synced_at' => $syncedAt !== null ? \Carbon\Carbon::parse($syncedAt)->toIso8601String() : null,
+            'alert_threshold' => $decimal($contract->prepay_alert_threshold),
+            'alert_notified_at' => $contract->prepay_alert_notified_at?->toIso8601String(),
+            'auto_topup_enabled' => (bool) $contract->prepay_auto_topup_enabled,
+            'auto_topup_qty' => $contract->prepay_auto_topup_qty,
+        ];
+    }
+
+    /**
+     * list_prepay_transactions — one contract's prepay ledger, newest first.
+     * Staff-class: client_id is an optional fence threaded from the MCP boundary
+     * ($this->clientId); when present it must own the contract or the read is
+     * refused. Read-only: nothing is written, recalculated or reconciled.
+     *
+     * balance_after is the ledger's own running net (credits minus debits in the
+     * contract's unit, the sum PrepayService::recalculateBalanceLocked() uses) in
+     * date-then-id order. It is reported only when that net over the WHOLE ledger
+     * equals the stored contracts.prepay_balance at its stored precision; when it
+     * does not, every balance_after is null and the reply says so, rather than
+     * printing a running balance that disagrees with the contract.
+     *
+     * The free-text description and note columns are not returned: the structured
+     * ids carry what they summarise, and note is operator prose.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    private function listPrepayTransactions(array $input): array
+    {
+        $contractId = (int) ($input['contract_id'] ?? 0);
+        if ($contractId <= 0) {
+            return ['error' => 'contract_id is required'];
+        }
+
+        $contract = Contract::find($contractId);
+        if (! $contract) {
+            return ['error' => "Contract {$contractId} not found"];
+        }
+
+        if ($this->clientId !== null && (int) $contract->client_id !== (int) $this->clientId) {
+            return ['error' => "Contract {$contractId} does not belong to client {$this->clientId}; refused"];
+        }
+
+        $limit = max(1, min((int) ($input['limit'] ?? 25), self::PREPAY_LEDGER_LIMIT_MAX));
+        $asAmount = (bool) $contract->prepay_as_amount;
+        $field = $asAmount ? 'amount' : 'hours';
+
+        $base = PrepayTransaction::where('contract_id', $contract->id);
+        $total = (clone $base)->count();
+
+        $rows = (clone $base)
+            ->with([
+                'ticketNote' => fn ($q) => $q->withTrashed()->select(['id', 'ticket_id']),
+                'phoneCall' => fn ($q) => $q->select(['id', 'ticket_id']),
+            ])
+            ->orderByDesc('date')
+            ->orderByDesc('id')
+            ->limit($limit)
+            ->get();
+
+        // Balance after: anchored on the ledger's own net, published only when
+        // that net reproduces the stored balance (see the docblock).
+        $ledgerNet = round((float) (clone $base)->sum($field), 4);
+        $storedBalance = $contract->prepay_balance === null ? null : (float) $contract->prepay_balance;
+        $reproduces = $storedBalance !== null
+            && abs(round($ledgerNet, 2) - round($storedBalance, 2)) < 0.000001;
+
+        $runningAfter = $ledgerNet;
+        $out = [];
+        foreach ($rows as $txn) {
+            $value = $txn->{$field} === null ? 0.0 : (float) $txn->{$field};
+            $out[] = [
+                'id' => $txn->id,
+                'date' => $txn->date?->toIso8601String(),
+                'type' => $txn->source?->value,
+                'type_label' => $txn->source?->label(),
+                'is_credit' => $txn->source?->isCredit(),
+                'hours' => $txn->hours === null ? null : (float) $txn->hours,
+                'amount' => $txn->amount === null ? null : (float) $txn->amount,
+                'balance_after' => $reproduces ? round($runningAfter, 4) : null,
+                'invoice_id' => $txn->invoice_id,
+                'invoice_number' => $txn->invoice_number,
+                'ticket_note_id' => $txn->ticket_note_id,
+                'phone_call_id' => $txn->phone_call_id,
+                'ticket_id' => $txn->ticketNote?->ticket_id ?? $txn->phoneCall?->ticket_id,
+                'user_id' => $txn->user_id,
+                'expiry_date' => $txn->expiry_date?->toIso8601String(),
+                'expired_transaction_id' => $txn->expired_transaction_id,
+                'has_note' => $txn->note !== null && trim((string) $txn->note) !== '',
+            ];
+            $runningAfter -= $value;
+        }
+
+        return [
+            'contract_id' => $contract->id,
+            'client_id' => $contract->client_id,
+            'has_prepay' => $contract->has_prepay,
+            'unit' => $asAmount ? 'dollars' : 'hours',
+            'stored_balance' => $storedBalance,
+            'ledger_net' => $ledgerNet,
+            'balance_after_available' => $reproduces,
+            'balance_after_note' => $reproduces
+                ? 'balance_after is the running ledger net in date order; the whole-ledger net equals the stored contract balance.'
+                : 'balance_after is null: the whole-ledger net does not equal the stored contract balance (or the contract has no prepay), so no running balance is reported.',
+            'count' => count($out),
+            'total' => $total,
+            'has_more' => $total > count($out),
+            'limit' => $limit,
+            'transactions' => $out,
         ];
     }
 
