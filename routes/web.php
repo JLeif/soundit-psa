@@ -151,6 +151,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/clients/{client}/install-link/rotate', [ClientController::class, 'rotateInstallLink'])->name('clients.install-link.rotate');
     Route::post('/clients/{client}/install-link/disable', [ClientController::class, 'disableInstallLink'])->name('clients.install-link.disable');
     Route::patch('/clients/{client}/portal-primary-rmm', [ClientController::class, 'updatePortalPrimaryRmm'])->name('clients.portal-primary-rmm.update');
+    Route::patch('/clients/{client}/default-contract', [ClientController::class, 'updateDefaultContract'])->name('clients.default-contract.update');
     Route::get('/clients/{client}/activity', [ClientController::class, 'activity'])->name('clients.activity');
     Route::get('/clients/{client}/tickets', [ClientController::class, 'tickets'])->name('clients.tickets');
     Route::get('/clients/{client}/people', [ClientController::class, 'people'])->name('clients.people');

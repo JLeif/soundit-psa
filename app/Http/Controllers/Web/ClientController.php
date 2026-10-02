@@ -16,6 +16,7 @@ use App\Http\Requests\ClientUpdateRequest;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Contract;
+use App\Models\ContractActivity;
 use App\Models\License;
 use App\Models\LicenseType;
 use App\Models\Person;
@@ -26,11 +27,13 @@ use App\Services\ActivityStreamService;
 use App\Services\AssetService;
 use App\Services\ClientIntegrationService;
 use App\Services\ClientService;
+use App\Services\ContractResolver;
 use App\Services\TicketService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class ClientController extends Controller
@@ -594,5 +597,52 @@ class ClientController extends Controller
 
         return redirect()->route('clients.show', $client)
             ->with('success', 'Primary RMM updated.');
+    }
+
+    /**
+     * Set or clear the client's default contract (card I3EvQKUV §1): any
+     * ACTIVE contract of this client (ruling Q1). The change is recorded on
+     * the history of each contract it touches.
+     */
+    public function updateDefaultContract(Request $request, Client $client, ContractResolver $resolver): RedirectResponse
+    {
+        $validated = $request->validate([
+            'default_contract_id' => ['nullable', 'integer'],
+        ]);
+        $newId = isset($validated['default_contract_id']) ? (int) $validated['default_contract_id'] : null;
+
+        if ($newId !== null && ! $resolver->canBeDefault($client->id, $newId)) {
+            $owned = Contract::whereKey($newId)->where('client_id', $client->id)->exists();
+
+            return redirect()->route('clients.show', $client)
+                ->withErrors(['default_contract_id' => $owned
+                    ? 'Only an active contract can be the default.'
+                    : 'That contract belongs to another client.'])
+                ->with('error', $owned
+                    ? 'Only an active contract can be the default.'
+                    : 'That contract belongs to another client.');
+        }
+
+        $oldId = $client->default_contract_id === null ? null : (int) $client->default_contract_id;
+        if ($oldId === $newId) {
+            return redirect()->route('clients.show', $client);
+        }
+
+        DB::transaction(function () use ($client, $oldId, $newId) {
+            $client->forceFill(['default_contract_id' => $newId])->save();
+            $changes = ['client_id' => $client->id, 'from_contract_id' => $oldId, 'to_contract_id' => $newId];
+            foreach (array_filter([$oldId, $newId]) as $contractId) {
+                ContractActivity::create([
+                    'contract_id' => $contractId,
+                    'user_id' => auth()->id(),
+                    'action' => $contractId === $newId ? 'client_default_set' : 'client_default_cleared',
+                    'changes' => $changes,
+                    'created_at' => now(),
+                ]);
+            }
+        });
+
+        return redirect()->route('clients.show', $client)
+            ->with('success', $newId === null ? 'Default contract cleared.' : 'Default contract updated.');
     }
 }

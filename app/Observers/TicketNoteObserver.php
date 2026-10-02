@@ -4,7 +4,10 @@ namespace App\Observers;
 
 use App\Enums\NoteType;
 use App\Enums\WhoType;
+use App\Models\PrepayTransaction;
+use App\Models\Ticket;
 use App\Models\TicketNote;
+use App\Services\ContractResolver;
 use App\Services\PrepayService;
 use App\Services\Signals\SignalHub;
 use Illuminate\Support\Facades\Log;
@@ -13,6 +16,7 @@ class TicketNoteObserver
 {
     public function __construct(
         private readonly PrepayService $prepayService,
+        private readonly ContractResolver $resolver,
     ) {}
 
     public function saving(TicketNote $note): void
@@ -31,6 +35,43 @@ class TicketNoteObserver
             $note->time_minutes = 0;
             $note->contract_id = null;
             $note->email_id = null;
+
+            return;
+        }
+
+        $this->stampContract($note);
+    }
+
+    /**
+     * Stamp the contract this note's time belongs to when time is logged
+     * (card I3EvQKUV §3), so a later change to the ticket's contract does not
+     * move it. A note that already has a ledger row keeps that row's contract;
+     * otherwise ContractResolver answers. An ambiguous client leaves NULL and
+     * the debit is held under "Needs contract".
+     */
+    private function stampContract(TicketNote $note): void
+    {
+        if ($note->contract_id !== null || ! $note->time_minutes || $note->time_minutes <= 0) {
+            return;
+        }
+
+        if ($note->exists) {
+            $ledgerContractId = PrepayTransaction::where('ticket_note_id', $note->id)->value('contract_id');
+            if ($ledgerContractId !== null) {
+                $note->contract_id = (int) $ledgerContractId;
+
+                return;
+            }
+        }
+
+        $ticket = $note->ticket_id === null ? null : Ticket::find($note->ticket_id);
+        if (! $ticket) {
+            return;
+        }
+
+        $resolution = $this->resolver->forEntry($ticket);
+        if ($resolution->isResolved()) {
+            $note->contract_id = $resolution->contract->id;
         }
     }
 

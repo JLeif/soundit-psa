@@ -19,6 +19,7 @@ use App\Models\User;
 use App\Services\ActivityStreamService;
 use App\Services\Ai\AiClient;
 use App\Services\PhoneCallService;
+use App\Services\PrepayService;
 use App\Services\TicketService;
 use App\Support\AiConfig;
 use App\Support\TranscriptionConfig;
@@ -313,6 +314,7 @@ class CallController extends Controller
             $ticket = $this->ticketService->createTicket($validated, auth()->id());
 
             $call->update(['ticket_id' => $ticket->id]);
+            app(PrepayService::class)->stampPhoneCallContract($call);
 
             if ($call->needsFollowUp()) {
                 $this->phoneCallService->markFollowedUp($call, auth()->id());

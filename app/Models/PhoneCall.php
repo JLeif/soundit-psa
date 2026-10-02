@@ -188,6 +188,16 @@ class PhoneCall extends Model
         return $this->belongsTo(Ticket::class);
     }
 
+    /**
+     * The contract this call's time was stamped with when it was linked
+     * (card I3EvQKUV). Not mass-assignable: PrepayService stamps it and
+     * PhoneCallService's link/unlink set or clear it.
+     */
+    public function contract(): BelongsTo
+    {
+        return $this->belongsTo(Contract::class);
+    }
+
     public function sipEndpointRecord(): BelongsTo
     {
         return $this->belongsTo(SipEndpoint::class, 'sip_endpoint', 'sip_uri');

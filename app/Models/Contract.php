@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Auth;
 
 class Contract extends Model
 {
@@ -88,7 +89,37 @@ class Contract extends Model
             }
             // Deactivate all profiles when soft-deleting a contract
             $contract->profiles()->update(['is_active' => false]);
+            $contract->clearAsClientDefault('deleted');
         });
+
+        static::updated(function (Contract $contract) {
+            if ($contract->wasChanged('status') && $contract->status !== ContractStatus::Active) {
+                $contract->clearAsClientDefault($contract->status->value);
+            }
+        });
+    }
+
+    /**
+     * A client's default must be an active contract (card I3EvQKUV §1). When
+     * this contract stops being one, clear it as its client's default and
+     * record that on the contract's history. Nothing is reassigned.
+     */
+    private function clearAsClientDefault(string $reason): void
+    {
+        $cleared = Client::query()
+            ->where('id', $this->client_id)
+            ->where('default_contract_id', $this->id)
+            ->update(['default_contract_id' => null]);
+
+        if ($cleared > 0) {
+            ContractActivity::create([
+                'contract_id' => $this->id,
+                'user_id' => Auth::id(),
+                'action' => 'client_default_cleared',
+                'changes' => ['client_id' => $this->client_id, 'reason' => $reason],
+                'created_at' => now(),
+            ]);
+        }
     }
 
     public function hasSla(): bool

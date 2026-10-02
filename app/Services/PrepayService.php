@@ -9,6 +9,7 @@ use App\Models\ContractActivity;
 use App\Models\Invoice;
 use App\Models\PhoneCall;
 use App\Models\PrepayTransaction;
+use App\Models\Ticket;
 use App\Models\TicketNote;
 use App\Models\User;
 use Carbon\CarbonInterface;
@@ -489,33 +490,18 @@ class PrepayService
             $description = null;
 
             if ($ticket) {
-                // Priority: note's contract → ticket's contract → client's hours-based prepay contract
-                $contract = $note->contract_id ? $note->contract : null;
-
-                if (! $contract && $ticket->contract_id) {
-                    $contract = $ticket->contract;
-                }
-
-                if (! $contract && $ticket->client_id) {
-                    $contract = Contract::where('client_id', $ticket->client_id)
-                        ->where('status', 'active')
-                        ->whereNotNull('prepay_balance')
-                        ->where('prepay_as_amount', false)
-                        ->orderBy('id')
-                        ->first();
-                }
-
-                if ($contract && (! $contract->has_prepay || $contract->prepay_as_amount)) {
-                    $contract = null;
-                }
-
                 $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
                 $description = "Ticket #{$ticket->id}: {$subject}";
             }
 
-            // Only a new debit needs an eligible resolved contract; an existing one stays on its ledger contract.
-            if (! $existing && ! $contract) {
-                return null;
+            // The entry's stamp is the debit target (card I3EvQKUV §3). A new debit with no
+            // stamp (logged before stamping, or under an ambiguous client) resolves once
+            // through ContractResolver and is stamped; ambiguity holds the debit.
+            if (! $existing) {
+                $contract = $this->stampedOrResolvedNoteContract($note, $ticket);
+                if (! $contract) {
+                    return null;
+                }
             }
 
             $alertContract = $contract;
@@ -552,18 +538,25 @@ class PrepayService
 
                     return null;
                 }
-                $moved = $contract?->id !== $existing->contract_id;
-                if ($moved) {
-                    Log::warning('[Prepay] Ticket note contract mismatch', [
+                if ($note->contract_id !== null && (int) $note->contract_id !== (int) $existing->contract_id) {
+                    Log::warning('[Prepay] Ticket note stamp differs from ledger', [
                         'ticket_note_id' => $note->id,
-                        'resolved_contract_id' => $contract?->id,
-                        'ledger_contract_id' => $existing->contract_id,
+                        'stamp_contract_id' => (int) $note->contract_id,
+                        'ledger_contract_id' => (int) $existing->contract_id,
                     ]);
+
+                    return null;
                 }
+                if ($note->contract_id === null) {
+                    $this->stampNote($note, (int) $existing->contract_id);
+                }
+                // A ticket moved to another client keeps its earlier time on the old client's
+                // contract (ruling Q5); that contract's ledger keeps its own description.
+                $sameClient = $ticket !== null && (int) $ticket->client_id === (int) $originalContract->client_id;
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
-                    'description' => $moved ? $existing->description : $description,
+                    'description' => $sameClient ? $description : $existing->description,
                     'date' => $note->noted_at ?? $note->created_at,
                 ]);
 
@@ -601,39 +594,115 @@ class PrepayService
     }
 
     /**
-     * THE money target for a phone call's prepay debit: the one contract
-     * debitFromPhoneCall() would actually move hours on, or null if there is
-     * none. This is deliberately the single producer of that answer — the
-     * ticket's own contract is only PART of it, because when ticket.contract_id
-     * is null (the common intake case) the target is whichever active hours
-     * prepay contract of the ticket's client the fallback query returns, and
-     * that identity is not derivable from the ticket's columns.
-     *
-     * Callers that must pin the target across a time gap (a staged agent action
-     * approved minutes later) snapshot THIS id, not ticket.contract_id.
+     * A ticket note's debit target: its stamp, else (unstamped legacy or
+     * resolver-held note) one ContractResolver answer, which is stamped on the
+     * note when it resolves. Returns null when the target is not an hours
+     * prepay contract or the client needs a contract chosen (held).
      */
-    public function resolveContractForPhoneCall(PhoneCall $call): ?Contract
+    private function stampedOrResolvedNoteContract(TicketNote $note, ?Ticket $ticket): ?Contract
     {
-        $ticket = $call->ticket;
+        if ($note->contract_id !== null) {
+            return $this->hoursPrepayOrNull(Contract::find($note->contract_id));
+        }
 
         if (! $ticket) {
             return null;
         }
 
-        // Resolve prepay contract: ticket's contract → client's hours-based prepay contract
-        $contract = $ticket->contract_id ? $ticket->contract : null;
+        $resolution = app(ContractResolver::class)->forEntry($ticket);
+        if (! $resolution->isResolved()) {
+            if ($resolution->isAmbiguous()) {
+                Log::info('[Prepay] Ticket note debit held: needs contract', [
+                    'ticket_note_id' => $note->id,
+                    'ticket_id' => $ticket->id,
+                    'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
+                ]);
+            }
 
-        if (! $contract && $ticket->client_id) {
-            $contract = Contract::where('client_id', $ticket->client_id)
-                ->where('status', 'active')
-                ->whereNotNull('prepay_balance')
-                ->where('prepay_as_amount', false)
-                ->orderBy('id')
-                ->first();
+            return null;
         }
 
+        $this->stampNote($note, $resolution->contract->id);
+
+        return $this->hoursPrepayOrNull($resolution->contract);
+    }
+
+    private function stampNote(TicketNote $note, int $contractId): void
+    {
+        // Query-builder write: stamping is not an edit and must not re-enter the observer.
+        TicketNote::withTrashed()->whereKey($note->id)->update(['contract_id' => $contractId]);
+        $note->setAttribute('contract_id', $contractId);
+        $note->syncOriginalAttribute('contract_id');
+    }
+
+    private function hoursPrepayOrNull(?Contract $contract): ?Contract
+    {
         if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
             return null;
+        }
+
+        return $contract;
+    }
+
+    /**
+     * The contract a phone call's time belongs to, WITHOUT writing anything:
+     * its existing ledger row's contract (even soft-deleted: debited time stays
+     * where it was debited), else its stamp (phone_calls.contract_id), else the
+     * ContractResolver answer for its ticket. Null when there is no ticket, or
+     * the client has several active contracts and no default (the debit is
+     * then held under "Needs contract", ruling Q7).
+     */
+    public function contractForPhoneCall(PhoneCall $call): ?Contract
+    {
+        $ledgerContractId = $call->exists
+            ? PrepayTransaction::where('phone_call_id', $call->id)->value('contract_id')
+            : null;
+        if ($ledgerContractId !== null) {
+            return Contract::withTrashed()->find($ledgerContractId);
+        }
+
+        if ($call->contract_id !== null) {
+            return Contract::find($call->contract_id);
+        }
+
+        $ticket = $call->ticket;
+        if (! $ticket) {
+            return null;
+        }
+
+        $resolution = app(ContractResolver::class)->forEntry($ticket);
+
+        return $resolution->isResolved() ? $resolution->contract : null;
+    }
+
+    /**
+     * THE money target for a phone call's prepay debit: the one contract
+     * debitFromPhoneCall() would actually move hours on, or null if there is
+     * none: contractForPhoneCall() narrowed to hours prepay. A ticket whose
+     * contract changed after the call was stamped or debited does not move the
+     * call's time (card I3EvQKUV). Read-only: PhoneCallActionService snapshots
+     * this id for a staged action.
+     */
+    public function resolveContractForPhoneCall(PhoneCall $call): ?Contract
+    {
+        if (! $call->ticket) {
+            return null;
+        }
+
+        return $this->hoursPrepayOrNull($this->contractForPhoneCall($call));
+    }
+
+    /**
+     * Stamp a call with the contract its time belongs to (at link time).
+     * Leaves NULL when the client needs a contract chosen.
+     */
+    public function stampPhoneCallContract(PhoneCall $call): ?Contract
+    {
+        $contract = $this->contractForPhoneCall($call);
+        if ($contract && (int) $call->contract_id !== $contract->id) {
+            PhoneCall::whereKey($call->id)->update(['contract_id' => $contract->id]);
+            $call->setAttribute('contract_id', $contract->id);
+            $call->syncOriginalAttribute('contract_id');
         }
 
         return $contract;
@@ -648,6 +717,20 @@ class PrepayService
 
         if (! $ticket) {
             return null;
+        }
+
+        if ($call->contract_id === null && $call->exists) {
+            $this->stampPhoneCallContract($call);
+            if ($call->contract_id === null) {
+                $resolution = app(ContractResolver::class)->forEntry($ticket);
+                if ($resolution->isAmbiguous()) {
+                    Log::info('[Prepay] Phone call debit held: needs contract', [
+                        'phone_call_id' => $call->id,
+                        'ticket_id' => $ticket->id,
+                        'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
+                    ]);
+                }
+            }
         }
 
         $contract = $this->resolveContractForPhoneCall($call);

@@ -412,6 +412,28 @@
                                 </div>
                             @endforeach
                         </div>
+                        {{-- Default contract (card I3EvQKUV): which contract new time belongs to when several are active --}}
+                        @php $defaultResolution = app(\App\Services\ContractResolver::class)->forClient($client->id); @endphp
+                        <div class="card-body border-top py-2">
+                            <form method="POST" action="{{ route('clients.default-contract.update', $client) }}" class="d-flex flex-wrap align-items-center gap-2">
+                                @csrf
+                                @method('PATCH')
+                                <label for="defaultContractSelect" class="form-label small mb-0">Default contract</label>
+                                <select name="default_contract_id" id="defaultContractSelect" class="form-select form-select-sm {{ $errors->has('default_contract_id') ? 'is-invalid' : '' }}" style="max-width: 260px;">
+                                    <option value="">{{ $activeContracts->count() === 1 ? 'Automatic (only active contract)' : 'None' }}</option>
+                                    @foreach($activeContracts as $contract)
+                                        <option value="{{ $contract->id }}" {{ (int) $client->default_contract_id === $contract->id ? 'selected' : '' }}>{{ $contract->name }}</option>
+                                    @endforeach
+                                </select>
+                                <button type="submit" class="btn btn-outline-primary btn-sm">Save</button>
+                                @if($defaultResolution->isAmbiguous())
+                                    <span class="badge bg-warning text-dark small"><i class="bi bi-exclamation-triangle me-1"></i>No default contract, several active</span>
+                                @endif
+                                @error('default_contract_id')
+                                    <div class="invalid-feedback d-block small">{{ $message }}</div>
+                                @enderror
+                            </form>
+                        </div>
                     @endif
                 </div>
 

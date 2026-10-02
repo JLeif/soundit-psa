@@ -5,12 +5,16 @@ namespace App\Http\Controllers\Web;
 use App\Enums\NoteType;
 use App\Enums\TicketStatus;
 use App\Http\Controllers\Controller;
+use App\Models\PrepayTransaction;
 use App\Models\Ticket;
 use App\Models\TicketNote;
 use App\Services\ContactIntakeContainedException;
+use App\Services\ContractResolution;
+use App\Services\ContractResolver;
 use App\Services\EmailService;
 use App\Services\TicketService;
 use App\Support\AppTimezone;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -20,6 +24,7 @@ class TicketNoteController extends Controller
     public function __construct(
         private readonly TicketService $ticketService,
         private readonly EmailService $emailService,
+        private readonly ContractResolver $contractResolver,
     ) {}
 
     public function store(Request $request, Ticket $ticket)
@@ -51,6 +56,10 @@ class TicketNoteController extends Controller
 
         // Only pass contract_id when time is being logged
         $contractId = $timeMinutes ? ($request->input('contract_id') ?: null) : null;
+
+        if ($timeMinutes && ($refusal = $this->contractRefusal($ticket, $contractId))) {
+            return $refusal;
+        }
 
         $note = $this->ticketService->addNote(
             $ticket,
@@ -184,6 +193,20 @@ class TicketNoteController extends Controller
         $isBillable = $timeMinutes ? $request->boolean('is_billable') : null;
         $contractId = $timeMinutes ? ($request->input('contract_id') ?: null) : null;
 
+        if ($timeMinutes) {
+            // Debited time stays on the contract it was debited from; an edit cannot
+            // re-point it (card I3EvQKUV: moving time is its own explicit act).
+            $ledgerContractId = PrepayTransaction::where('ticket_note_id', $note->id)->value('contract_id');
+            if ($ledgerContractId !== null && $contractId !== null && (int) $contractId !== (int) $ledgerContractId) {
+                return $this->refuseContract($ticket, 'This time is already debited from another contract, and editing the note cannot move it. Leave the contract unchanged.');
+            }
+            if ($ledgerContractId !== null) {
+                $contractId = (int) $ledgerContractId;
+            } elseif ($refusal = $this->contractRefusal($ticket, $contractId)) {
+                return $refusal;
+            }
+        }
+
         $attributes = [
             'body' => $request->input('body'),
             'body_html' => \App\Helpers\MarkdownRenderer::render($request->input('body')),
@@ -236,6 +259,34 @@ class TicketNoteController extends Controller
 
         return redirect()->route('tickets.show', $ticket)
             ->with('success', 'Note deleted.');
+    }
+
+    /**
+     * Refuse time whose contract cannot be settled: a picked contract that is
+     * not an active contract of this client, or no pick on a client with
+     * several active contracts and no default (card I3EvQKUV §2).
+     */
+    private function contractRefusal(Ticket $ticket, int|string|null $contractId): ?RedirectResponse
+    {
+        $resolution = $this->contractResolver->forEntry($ticket, $contractId === null ? null : (int) $contractId);
+
+        if ($resolution->status === ContractResolution::INVALID_PICK) {
+            return $this->refuseContract($ticket, 'Choose one of this client\'s active contracts.');
+        }
+
+        if ($resolution->isAmbiguous()) {
+            return $this->refuseContract($ticket, 'This client has several active contracts and no default. Choose the contract this time belongs to.');
+        }
+
+        return null;
+    }
+
+    private function refuseContract(Ticket $ticket, string $message): RedirectResponse
+    {
+        return redirect()->route('tickets.show', $ticket)
+            ->withErrors(['contract_id' => $message])
+            ->withInput()
+            ->with('error', $message);
     }
 
     private function parseCcEmails(?string $input): array

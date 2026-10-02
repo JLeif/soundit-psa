@@ -112,7 +112,7 @@ class TicketNotePrepayRaceTest extends TestCase
         $this->assertEquals(10, $contract->fresh()->prepay_balance);
     }
 
-    public function test_existing_debit_dollar_target_keeps_original_contract_and_warning(): void
+    public function test_out_of_band_dollar_stamp_is_refused_and_ledger_untouched(): void
     {
         [$note, $contract] = $this->fixture();
         $service = app(PrepayService::class);
@@ -123,16 +123,21 @@ class TicketNotePrepayRaceTest extends TestCase
         $handler = new \Monolog\Handler\TestHandler;
         \Illuminate\Support\Facades\Log::getLogger()->pushHandler($handler);
         $note->forceFill(['contract_id' => $other->id, 'time_minutes' => 150])->saveQuietly();
-        $service->debitFromTicketNote($note);
-        $this->assertDebit($note, $contract, 2.5);
+        $this->assertNull($service->debitFromTicketNote($note));
+        $this->assertDebit($note, $contract, 1.0);
         $this->assertEquals(10, $other->fresh()->prepay_balance);
         $this->assertEquals(0, $other->fresh()->prepay_used);
         $this->assertSame($description, $txn->fresh()->description);
-        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch'));
+        $this->assertStampRefusal($handler, $note, $other->id, $contract->id);
+    }
+
+    private function assertStampRefusal(\Monolog\Handler\TestHandler $handler, TicketNote $note, int $stampId, int $ledgerId): void
+    {
+        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note stamp differs from ledger'));
         $this->assertCount(1, $records);
         $this->assertSame(\Monolog\Level::Warning, $records[0]->level);
-        $this->assertNull($records[0]->context['resolved_contract_id']);
-        $this->assertSame($contract->id, $records[0]->context['ledger_contract_id']);
+        $this->assertSame(['ticket_note_id' => $note->id, 'stamp_contract_id' => $stampId, 'ledger_contract_id' => $ledgerId], $records[0]->context);
+        $this->assertSame([], array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch')));
     }
 
     public function test_unmatched_unique_exception_is_rethrown(): void
@@ -191,9 +196,7 @@ class TicketNotePrepayRaceTest extends TestCase
         [$note, $contract] = $this->fixture();
         $service = app(PrepayService::class);
         $service->debitFromTicketNote($note);
-        $other = $contract->replicate();
-        $other->save();
-        $note->forceFill(['contract_id' => $other->id, 'time_minutes' => 120])->saveQuietly();
+        $note->forceFill(['time_minutes' => 120])->saveQuietly();
         $contract->delete();
         $alerts = $this->spy(\App\Services\PrepayAlertService::class);
         $service->debitFromTicketNote($note);
@@ -390,7 +393,7 @@ class TicketNotePrepayRaceTest extends TestCase
         $this->assertEquals(10, $contract->fresh()->prepay_balance);
     }
 
-    public function test_both_fallbacks_explicitly_order_by_lower_id(): void
+    public function test_no_oldest_first_fallback_remains_in_either_debit_path(): void
     {
         [$note, $contract] = $this->fixture();
         $higher = $contract->replicate();
@@ -398,22 +401,33 @@ class TicketNotePrepayRaceTest extends TestCase
         $note->ticket->update(['contract_id' => null]);
         $queries = [];
         DB::listen(function ($query) use (&$queries) {
-            if (str_starts_with($query->sql, 'select * from "contracts"') && str_contains($query->sql, '"status" = ?')) {
+            if (str_starts_with($query->sql, 'select') && str_contains($query->sql, '"contracts"')) {
                 $queries[] = $query->sql;
             }
         });
-        $txn = app(PrepayService::class)->debitFromTicketNote($note);
-        $this->assertSame($contract->id, $txn->contract_id);
+        // Several active contracts, no default: held, not drawn from the lower id (ruling Q7/Q10).
+        $this->assertNull(app(PrepayService::class)->debitFromTicketNote($note));
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->assertNull($note->fresh()->contract_id);
         $call = new \App\Models\PhoneCall;
         $call->setRelation('ticket', $note->ticket);
-        $this->assertSame($contract->id, app(PrepayService::class)->resolveContractForPhoneCall($call)->id);
-        $this->assertCount(2, $queries);
+        $this->assertNull(app(PrepayService::class)->resolveContractForPhoneCall($call));
+        $this->assertNotEmpty($queries);
         foreach ($queries as $sql) {
-            $this->assertStringContainsString('order by "id" asc', $sql);
+            $this->assertStringNotContainsString('order by "id"', $sql);
         }
+        $this->assertEquals(10, $contract->fresh()->prepay_balance);
+        $this->assertEquals(10, $higher->fresh()->prepay_balance);
+
+        // With a default, both paths take it, even though it is the higher id.
+        $note->ticket->client->forceFill(['default_contract_id' => $higher->id])->save();
+        $this->assertSame($higher->id, app(PrepayService::class)->resolveContractForPhoneCall($call)->id);
+        $txn = app(PrepayService::class)->debitFromTicketNote($note);
+        $this->assertSame($higher->id, $txn->contract_id);
+        $this->assertSame($higher->id, $note->fresh()->contract_id);
     }
 
-    public function test_changed_target_updates_original_contract_only(): void
+    public function test_out_of_band_restamp_is_refused_with_no_balance_change(): void
     {
         [$note, $contract] = $this->fixture();
         $service = app(PrepayService::class);
@@ -429,14 +443,10 @@ class TicketNotePrepayRaceTest extends TestCase
         $note->contract_id = $other->id;
         $note->time_minutes = 90;
         $note->saveQuietly();
-        $service->debitFromTicketNote($note);
+        $this->assertNull($service->debitFromTicketNote($note));
         $this->assertSame($description, PrepayTransaction::where('ticket_note_id', $note->id)->value('description'));
-        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch'));
-        $this->assertCount(1, $records);
-        $this->assertSame(\Monolog\Level::Warning, $records[0]->level);
-        $this->assertSame($other->id, $records[0]->context['resolved_contract_id']);
-        $this->assertSame($contract->id, $records[0]->context['ledger_contract_id']);
-        $this->assertDebit($note, $contract, 1.5);
+        $this->assertStampRefusal($handler, $note, $other->id, $contract->id);
+        $this->assertDebit($note, $contract, 1.0);
         $this->assertEquals(0, $other->fresh()->prepay_used);
         $this->assertEquals(10, $other->fresh()->prepay_balance);
     }
@@ -459,13 +469,11 @@ class TicketNotePrepayRaceTest extends TestCase
         $note->saveQuietly();
         $service->debitFromTicketNote($note);
         $this->assertDebit($note, $contract, 0.5);
-        $records = array_values(array_filter($handler->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note contract mismatch'));
-        $this->assertCount(2, $records);
-        foreach ($records as $record) {
-            $this->assertSame(\Monolog\Level::Warning, $record->level);
-            $this->assertNull($record->context['resolved_contract_id']);
-            $this->assertSame($contract->id, $record->context['ledger_contract_id']);
-        }
+        $this->assertSame($contract->id, $note->fresh()->contract_id);
+        // The stamp equals the ledger: the old client's contract keeps the time (ruling Q5),
+        // and nothing is logged as a mismatch or a refusal.
+        $warnings = array_values(array_filter($handler->getRecords(), fn ($r) => $r->level->value >= \Monolog\Level::Warning->value));
+        $this->assertSame([], $warnings);
     }
 
     public function test_direct_debit_call_unbillable_zero_time_and_soft_delete_restore(): void

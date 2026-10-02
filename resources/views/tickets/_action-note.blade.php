@@ -15,22 +15,45 @@
             </div>
             <div class="input-group input-group-sm" style="width: 140px;">
                 <span class="input-group-text"><i class="bi bi-clock"></i></span>
-                <input type="text" name="time" class="form-control" placeholder="0h 15m" id="noteTimeInput">
+                <input type="text" name="time" class="form-control" placeholder="0h 15m" id="noteTimeInput" value="{{ old('time') }}">
             </div>
             <div class="form-check d-none" id="noteBillableGroup">
                 <input type="checkbox" name="is_billable" value="1" class="form-check-input"
                        id="noteBillable" {{ ($defaultBillable ?? true) ? 'checked' : '' }}>
                 <label class="form-check-label small" for="noteBillable">Billable</label>
             </div>
-            <div class="d-none" id="noteContractGroup">
-                <select name="contract_id" class="form-select form-select-sm" style="max-width: 180px;">
-                    <option value="">Ticket default</option>
-                    @foreach($ticket->client?->contracts ?? [] as $ct)
-                        <option value="{{ $ct->id }}" {{ $ticket->contract_id == $ct->id ? 'selected' : '' }}>
+            @php
+                // Card I3EvQKUV: new time goes to the picked contract, else the ticket's active
+                // contract, else the client default, else the only active contract.
+                $noteResolution = app(\App\Services\ContractResolver::class)->forEntry($ticket);
+                $noteActiveContracts = ($ticket->client?->contracts ?? collect())
+                    ->where('status', \App\Enums\ContractStatus::Active);
+                $noteContractError = $errors->first('contract_id');
+            @endphp
+            <div class="{{ $noteContractError ? '' : 'd-none' }}" id="noteContractGroup">
+                <label for="noteContractSelect" class="visually-hidden">Contract</label>
+                <select name="contract_id" id="noteContractSelect" class="form-select form-select-sm {{ $noteContractError ? 'is-invalid' : '' }}" style="max-width: 220px;"
+                        aria-describedby="noteContractHint">
+                    @if($noteResolution->isResolved())
+                        <option value="">Automatic: {{ $noteResolution->contract->name }}</option>
+                    @elseif($noteResolution->isAmbiguous())
+                        <option value="">Choose a contract&hellip;</option>
+                    @else
+                        <option value="">No contract</option>
+                    @endif
+                    @foreach($noteActiveContracts as $ct)
+                        <option value="{{ $ct->id }}" {{ (string) old('contract_id') === (string) $ct->id ? 'selected' : '' }}>
                             {{ $ct->name }}
                         </option>
                     @endforeach
                 </select>
+                @if($noteContractError)
+                    <div class="invalid-feedback d-block small" id="noteContractHint">{{ $noteContractError }}</div>
+                @elseif($noteResolution->isAmbiguous())
+                    <div class="small text-muted" id="noteContractHint">
+                        <i class="bi bi-exclamation-circle me-1"></i>Required: this client has several active contracts and no default.
+                    </div>
+                @endif
             </div>
             <div class="input-group input-group-sm" style="width: auto;">
                 <span class="input-group-text"><i class="bi bi-arrow-left-right"></i></span>

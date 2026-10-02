@@ -383,6 +383,10 @@
                                             <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">
                                                 <i class="bi bi-file-earmark-text me-1"></i>{{ $note->contract?->name }}
                                             </span>
+                                        @elseif(! $note->contract_id && $note->is_billable && $note->time_minutes > 0 && ($ticketNeedsContract ??= app(\App\Services\ContractResolver::class)->forEntry($ticket)->isAmbiguous()))
+                                            <span class="badge bg-warning text-dark small" title="Edit this note to choose the contract its time belongs to">
+                                                <i class="bi bi-exclamation-circle me-1"></i>Needs contract
+                                            </span>
                                         @endif
                                         <span class="text-muted small ms-auto" title="{{ $note->noted_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
                                             {{ $note->noted_at?->diffForHumans() }}
@@ -502,8 +506,8 @@
                                         <div class="col-auto">
                                             <label class="form-label small">Contract</label>
                                             <select name="contract_id" class="form-select form-select-sm">
-                                                <option value="">Ticket default</option>
-                                                @foreach($ticket->client?->contracts ?? [] as $ct)
+                                                <option value="">Automatic</option>
+                                                @foreach(($ticket->client?->contracts ?? collect())->filter(fn ($ct) => $ct->status === \App\Enums\ContractStatus::Active || $ct->id === $item->contract_id) as $ct)
                                                     <option value="{{ $ct->id }}" {{ $item->contract_id == $ct->id ? 'selected' : '' }}>
                                                         {{ $ct->name }}
                                                     </option>
