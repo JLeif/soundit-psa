@@ -25,19 +25,24 @@
             <div class="card-body">
                 <table class="table table-sm table-borderless mb-0">
                     <tr>
-                        <th class="text-muted" style="width: 140px">From</th>
+                        <th class="text-muted" style="width: 140px">Other party</th>
                         <td>
-                            {{ \App\Support\PhoneNumber::format($call->from_number) }}
-                            @if($call->from_number)
-                            <a href="#" data-phone="{{ $call->from_number }}" class="ms-1 text-decoration-none" title="Call">
+                            {{ \App\Support\PhoneNumber::format($call->farEndNumber()) }}
+                            @if($call->farEndProvenance() === 'caller_id')
+                                <small class="text-muted">caller ID</small>
+                            @elseif($call->farEndProvenance() === 'dialled')
+                                <small class="text-muted">dialled</small>
+                            @endif
+                            @if($call->farEndNumber())
+                            <a href="#" data-phone="{{ $call->farEndNumber() }}" class="ms-1 text-decoration-none" title="Call">
                                 <i class="bi bi-telephone-outbound text-muted small"></i>
                             </a>
                             @endif
                         </td>
                     </tr>
                     <tr>
-                        <th class="text-muted">To</th>
-                        <td>{{ $call->to_number ?? '—' }}</td>
+                        <th class="text-muted">Our line</th>
+                        <td>{{ $call->to_number ?: '—' }}</td>
                     </tr>
                     <tr>
                         <th class="text-muted">Direction</th>

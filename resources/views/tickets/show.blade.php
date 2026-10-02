@@ -195,7 +195,11 @@
                                     </div>
                                 </div>
                                 <div class="small">
-                                    {{ \App\Support\PhoneNumber::format($item->from_number) }} &rarr; {{ $item->to_number ?? 'Unknown' }}
+                                    @if($item->direction->value === 'outbound')
+                                        {{ $item->to_number ?: '—' }} &rarr; {{ \App\Support\PhoneNumber::format($item->farEndNumber()) }}
+                                    @else
+                                        {{ \App\Support\PhoneNumber::format($item->farEndNumber()) }} &rarr; {{ $item->to_number ?: '—' }}
+                                    @endif
                                     @if($item->person)
                                         &mdash; {{ $item->person->fullName }}
                                     @endif
