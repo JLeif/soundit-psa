@@ -194,11 +194,13 @@ class TicketObserver
 
     public function updated(Ticket $ticket): void
     {
-        // A ticket given its own contract no longer needs one chosen: re-run this ticket's
-        // debits held as "Needs contract" once the change is committed (card I3EvQKUV r2).
+        // A ticket given its own contract, or moved to another client whose contracts may
+        // settle it, can stop needing one chosen: re-run the debits held as "Needs contract"
+        // for its (new) client once the change is committed (card I3EvQKUV r2).
         // The release is client-wide; entries on other tickets that still resolve
         // AMBIGUOUS stay held.
-        if ($ticket->wasChanged('contract_id') && $ticket->contract_id !== null && $ticket->client_id !== null) {
+        $contractSet = $ticket->wasChanged('contract_id') && $ticket->contract_id !== null;
+        if (($contractSet || $ticket->wasChanged('client_id')) && $ticket->client_id !== null) {
             $clientId = (int) $ticket->client_id;
             $ticketId = (int) $ticket->id;
             DB::afterCommit(function () use ($clientId, $ticketId) {

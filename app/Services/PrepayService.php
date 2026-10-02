@@ -662,9 +662,11 @@ class PrepayService
 
     /**
      * Re-run the debits held as "Needs contract" for a client (r1 diff:1, r2):
-     * called on every transition that can end the ambiguity: a default chosen
-     * (ClientController), a contract leaving Active or deleted (Contract::booted),
-     * a ticket given its own contract (TicketObserver).
+     * called on every model transition that can end the ambiguity: a default chosen
+     * (ClientController); a contract created or restored active, changing status,
+     * moved to another client, or soft- or force-deleted (Contract::booted); a
+     * ticket given its own contract or moved to another client (TicketObserver);
+     * a client merge (ClientService::mergeClients).
      * Only entries the hold path marked and that have no ledger row are touched,
      * never other unstamped history; each debit runs under the debit path's own
      * locks, so a repeated release cannot debit twice. An entry whose ticket

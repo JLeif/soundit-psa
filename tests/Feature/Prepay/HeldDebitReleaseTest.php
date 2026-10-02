@@ -181,6 +181,81 @@ class HeldDebitReleaseTest extends TestCase
         $this->assertReleasedTo($this->a, $note, $call, 'one left after the second change');
     }
 
+    // ── Transitions outside status/default/ticket-contract that also end the ambiguity ──
+
+    public function test_ticket_moved_to_a_client_with_one_active_contract_releases_there(): void
+    {
+        [$note, $call] = $this->heldPair();
+        $other = Client::factory()->create();
+        $c = $this->contract('Synthetic C', [], $other->id);
+
+        app(\App\Services\TicketService::class)->moveToClient($this->ticket->fresh(), $other->id, null, User::factory()->create()->id);
+
+        $this->assertSame([$other->id, null], [$this->ticket->fresh()->client_id, $this->ticket->fresh()->contract_id]);
+        $this->assertReleasedTo($c, $note, $call, 'ticket moved');
+        $this->assertEquals(10, $this->a->fresh()->prepay_balance);
+        $this->assertEquals(10, $this->b->fresh()->prepay_balance);
+    }
+
+    public function test_contract_moved_to_another_client_releases_the_client_it_left(): void
+    {
+        [$note, $call] = $this->heldPair();
+
+        $this->b->update(['client_id' => Client::factory()->create()->id]);
+
+        $this->assertReleasedTo($this->a, $note, $call, 'contract moved away');
+        $this->assertEquals(10, $this->b->fresh()->prepay_balance);
+    }
+
+    public function test_force_deleting_a_contract_releases_held_entries(): void
+    {
+        [$note, $call] = $this->heldPair();
+
+        $this->b->forceDelete();
+
+        $this->assertNull(Contract::withTrashed()->find($this->b->id));
+        $this->assertReleasedTo($this->a, $note, $call, 'contract force-deleted');
+    }
+
+    public function test_a_renewal_created_after_a_bulk_expiry_releases_entries_held_with_no_contract(): void
+    {
+        [$note, $call] = $this->heldPair();
+        app(ContractService::class)->bulkChangeStatus([$this->a->id, $this->b->id], \App\Enums\ContractStatus::Expired, User::factory()->create()->id);
+        $this->assertStillHeld($note, $call, 'both expired together');
+
+        $renewal = $this->contract('Synthetic renewal');
+
+        $this->assertReleasedTo($renewal, $note, $call, 'renewal created');
+    }
+
+    public function test_a_contract_restored_active_releases_entries_held_with_no_contract(): void
+    {
+        [$note, $call] = $this->heldPair();
+        DB::table('contracts')->update(['deleted_at' => now()]);
+        $this->assertSame(0, app(PrepayService::class)->releaseHeldDebits($this->client->id));
+        $this->assertStillHeld($note, $call, 'every contract deleted out of band');
+
+        Contract::withTrashed()->find($this->a->id)->restore();
+
+        $this->assertReleasedTo($this->a, $note, $call, 'contract restored');
+        $this->assertEquals(10, Contract::withTrashed()->find($this->b->id)->prepay_balance);
+    }
+
+    public function test_merging_into_a_client_whose_default_settles_it_releases_the_moved_held_entries(): void
+    {
+        [$note, $call] = $this->heldPair();
+        $survivor = Client::factory()->create();
+        $c = $this->contract('Synthetic survivor C', [], $survivor->id);
+        $survivor->forceFill(['default_contract_id' => $c->id])->save();
+
+        app(\App\Services\ClientService::class)->mergeClients($survivor, $this->client, User::factory()->create()->id);
+
+        $this->assertSame($survivor->id, $this->ticket->fresh()->client_id);
+        $this->assertReleasedTo($c, $note, $call, 'client merged');
+        $this->assertEquals(10, $this->a->fresh()->prepay_balance);
+        $this->assertEquals(10, $this->b->fresh()->prepay_balance);
+    }
+
     // ── Still ambiguous (or no contract at all) stays held; the marker stays ──
 
     public function test_release_that_still_resolves_ambiguous_or_none_leaves_the_marker_and_counts_it(): void

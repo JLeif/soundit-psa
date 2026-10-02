@@ -95,9 +95,20 @@ class Contract extends Model
             $contract->clearAsClientDefault('deleted');
         });
 
-        // A soft delete can leave the client one active contract: release its held debits.
+        // A soft or force delete can leave the client one active contract: release its held debits.
         static::deleted(function (Contract $contract) {
-            if (! $contract->isForceDeleting()) {
+            $contract->releaseClientHeldDebits();
+        });
+
+        // A new or restored active contract can leave the client exactly one (or end NONE).
+        static::created(function (Contract $contract) {
+            if ($contract->status === ContractStatus::Active) {
+                $contract->releaseClientHeldDebits();
+            }
+        });
+
+        static::restored(function (Contract $contract) {
+            if ($contract->status === ContractStatus::Active) {
                 $contract->releaseClientHeldDebits();
             }
         });
@@ -106,9 +117,13 @@ class Contract extends Model
             if ($contract->wasChanged('status') && $contract->status !== ContractStatus::Active) {
                 $contract->clearAsClientDefault($contract->status->value);
             }
-            // Expiry, cancellation or re-activation can end the client's ambiguity (r2).
-            if ($contract->wasChanged('status')) {
+            // Expiry, cancellation or re-activation can end the client's ambiguity (r2); a
+            // contract moved to another client can end it for the client it joined or left.
+            if ($contract->wasChanged('status') || $contract->wasChanged('client_id')) {
                 $contract->releaseClientHeldDebits();
+            }
+            if ($contract->wasChanged('client_id')) {
+                $contract->releaseClientHeldDebits($contract->getOriginal('client_id'));
             }
         });
     }
@@ -118,12 +133,13 @@ class Contract extends Model
      * committed (card I3EvQKUV r2). Entries that still resolve AMBIGUOUS stay
      * held; a failure never takes the contract write down with it.
      */
-    private function releaseClientHeldDebits(): void
+    private function releaseClientHeldDebits(int|string|null $clientId = null): void
     {
-        if ($this->client_id === null) {
+        $clientId ??= $this->client_id;
+        if ($clientId === null) {
             return;
         }
-        $clientId = (int) $this->client_id;
+        $clientId = (int) $clientId;
         DB::afterCommit(function () use ($clientId) {
             try {
                 app(PrepayService::class)->releaseHeldDebits($clientId);
