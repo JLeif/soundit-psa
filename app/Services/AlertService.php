@@ -76,7 +76,24 @@ class AlertService
             // Compared as integers: Laravel's `integer` validation rule accepts
             // a numeric string without casting it, so a caller may pass "5"
             // while $resolved->client_id is the model's native int.
-            if ($resolved->client_id !== null && ($data['client_id'] ?? null) !== null && (int) $resolved->client_id !== (int) $data['client_id']) {
+            //
+            // An occurrence that names NO client is refused too when the row
+            // has one (Jeeves's RULED (B) term 3, run 01a0fb29). Tactical and
+            // Ninja pass a null client_id for an agent/device with no PSA
+            // asset, and Tactical's fallback key is not client-scoped, so an
+            // unmapped host can share a key with a client's resolved alert.
+            // Reviving would put an occurrence of unknown ownership into that
+            // client's alert and history. A fresh row is not an option: the
+            // unique (source, source_alert_id) index forbids a second row
+            // under the key, which is the failure this branch replaced.
+            $incomingClientId = $data['client_id'] ?? null;
+            if ($resolved->client_id !== null && $incomingClientId === null) {
+                throw new AlertClientConflictException(
+                    $resolved->id,
+                    "Refusing to revive alert {$resolved->id}: it belongs to a client and this {$source->value} alert names none.",
+                );
+            }
+            if ($resolved->client_id !== null && (int) $resolved->client_id !== (int) $incomingClientId) {
                 throw new AlertClientConflictException(
                     $resolved->id,
                     "Refusing to revive alert {$resolved->id}: it belongs to a different client than this {$source->value} alert claims.",

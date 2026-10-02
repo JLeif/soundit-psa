@@ -214,6 +214,144 @@ class AlertServiceReviveTest extends TestCase
         $this->assertSame($clientA->id, $unchanged->client_id);
     }
 
+    // -- null incoming client (Jeeves RULED (B) term 3, run 01a0fb29) ---------
+    //
+    // Callers that can pass client_id = null to upsert, read at source:
+    // Tactical (agent with no PSA asset), Ninja (device with no PSA asset),
+    // Huntress (organisation not resolved to a client), Cipp and AppRiver
+    // (never pass a client). Leif RMM validates client_id required|exists, Comet
+    // writes its own rows without upsert, and Level raises no alerts.
+
+    /** @return array<string, array{AlertSource}> */
+    public static function nullClientSources(): array
+    {
+        return [
+            'tactical' => [AlertSource::Tactical],
+            'ninja' => [AlertSource::Ninja],
+            'huntress' => [AlertSource::Huntress],
+            'cipp' => [AlertSource::Cipp],
+            'appriver' => [AlertSource::AppRiver],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('nullClientSources')]
+    public function test_a_null_client_occurrence_does_not_revive_a_clients_resolved_alert(AlertSource $source): void
+    {
+        $service = app(AlertService::class);
+        $client = Client::factory()->create();
+
+        $first = $service->upsert($source, 'unscoped-key-1', $this->data($client));
+        $service->resolve($first);
+        $before = Alert::findOrFail($first->id);
+
+        try {
+            $service->upsert($source, 'unscoped-key-1', $this->data($client, ['client_id' => null, 'message' => 'Unknown host.']));
+            $this->fail('Expected AlertClientConflictException');
+        } catch (\App\Services\AlertClientConflictException $e) {
+            $this->assertSame($first->id, $e->alertId);
+            $this->assertSame("Refusing to revive alert {$first->id}: it belongs to a client and this {$source->value} alert names none.", $e->getMessage());
+        }
+
+        $unchanged = Alert::findOrFail($first->id);
+        $this->assertSame(1, Alert::count());
+        $this->assertSame(AlertStatus::Resolved, $unchanged->status);
+        $this->assertSame($client->id, $unchanged->client_id);
+        $this->assertSame(0, $unchanged->refired_count);
+        $this->assertSame($before->message, $unchanged->message);
+        $this->assertEquals($before->resolved_at, $unchanged->resolved_at);
+    }
+
+    public function test_a_null_client_occurrence_omitting_the_key_entirely_is_refused_too(): void
+    {
+        // Cipp and AppRiver omit client_id from $data altogether rather than
+        // passing null; the guard must read absence the same way.
+        $service = app(AlertService::class);
+        $client = Client::factory()->create();
+
+        $first = $service->upsert(AlertSource::Cipp, 'absent-key-1', $this->data($client));
+        $service->resolve($first);
+
+        $data = $this->data($client);
+        unset($data['client_id']);
+
+        $this->expectException(\App\Services\AlertClientConflictException::class);
+        try {
+            $service->upsert(AlertSource::Cipp, 'absent-key-1', $data);
+        } finally {
+            $this->assertSame(AlertStatus::Resolved, Alert::findOrFail($first->id)->status);
+        }
+    }
+
+    public function test_a_null_client_occurrence_still_revives_a_clientless_resolved_alert(): void
+    {
+        // Nothing to protect when neither side names a client: revive as before.
+        $service = app(AlertService::class);
+        $client = Client::factory()->create();
+
+        $first = $service->upsert(AlertSource::Tactical, 'clientless-both', $this->data($client, ['client_id' => null]));
+        $service->resolve($first);
+
+        $revived = $service->upsert(AlertSource::Tactical, 'clientless-both', $this->data($client, ['client_id' => null]));
+
+        $this->assertSame($first->id, $revived->id);
+        $this->assertSame(AlertStatus::Active, $revived->status);
+        $this->assertNull($revived->client_id);
+        $this->assertSame(1, $revived->refired_count);
+    }
+
+    public function test_tactical_unmapped_agent_does_not_revive_a_clients_resolved_alert(): void
+    {
+        // End to end through the real caller: an alert_failure for an agent
+        // with no TacticalAsset resolves client_id to null, and with no
+        // alert_id the key is md5("{hostname}:{checkLabel}"), which a
+        // client's earlier alert on a same-named host can already own.
+        $client = Client::factory()->create();
+        $payload = json_decode(file_get_contents(base_path('tests/Fixtures/tactical/alert_failure.json')), true);
+        unset($payload['alert_id']);
+        $payload['agent_id'] = 'agent-with-no-psa-asset';
+        $key = md5("{$payload['hostname']}:{$payload['check_name']}");
+
+        $owned = app(AlertService::class)->upsert(AlertSource::Tactical, $key, $this->data($client));
+        app(AlertService::class)->resolve($owned);
+
+        try {
+            app(\App\Services\Tactical\TacticalAlertService::class)->handleAlertFailure($payload);
+            $this->fail('Expected AlertClientConflictException');
+        } catch (\App\Services\AlertClientConflictException $e) {
+            $this->assertSame($owned->id, $e->alertId);
+        }
+
+        $unchanged = Alert::findOrFail($owned->id);
+        $this->assertSame(AlertStatus::Resolved, $unchanged->status);
+        $this->assertSame($client->id, $unchanged->client_id);
+        $this->assertSame(1, Alert::count());
+    }
+
+    public function test_ninja_device_without_asset_does_not_revive_a_clients_resolved_alert(): void
+    {
+        // End to end through NinjaAlertService::handleTriggered: a deviceId
+        // with no PSA asset passes client_id = null.
+        $client = Client::factory()->create();
+        $owned = app(AlertService::class)->upsert(AlertSource::Ninja, 'ninja-series-9', $this->data($client));
+        app(AlertService::class)->resolve($owned);
+
+        try {
+            app(\App\Services\Ninja\NinjaAlertService::class)->handleTriggered([
+                'seriesUid' => 'ninja-series-9',
+                'deviceId' => 999999,
+                'severity' => 'MAJOR',
+                'message' => 'Disk failing',
+                'sourceName' => 'Disk health',
+            ]);
+            $this->fail('Expected AlertClientConflictException');
+        } catch (\App\Services\AlertClientConflictException $e) {
+            $this->assertSame($owned->id, $e->alertId);
+        }
+
+        $this->assertSame(AlertStatus::Resolved, Alert::findOrFail($owned->id)->status);
+        $this->assertSame($client->id, Alert::findOrFail($owned->id)->client_id);
+    }
+
     public function test_reviving_preserves_the_previous_ticket_in_metadata(): void
     {
         $service = app(AlertService::class);
