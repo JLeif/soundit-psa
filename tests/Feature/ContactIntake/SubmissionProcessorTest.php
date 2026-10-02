@@ -149,12 +149,16 @@ class SubmissionProcessorTest extends TestCase
             config(["database.connections.{$name}" => config("database.connections.{$default}")]);
         }
         $winnerDb = DB::connection('contact_intake_winner');
+        // The winner runs inside the loser's query listener, so a lock it waits on is a cycle
+        // InnoDB cannot see. Fail in seconds, not after the 50s default.
+        $winnerDb->statement('SET SESSION innodb_lock_wait_timeout = 5');
         $hash = hash('sha256', 'race-matcher-'.Str::uuid());
+        $earlierHash = hash('sha256', 'race-matcher-earlier-'.Str::uuid());
         $email = 'race-matcher-'.Str::lower(Str::random(10)).'@example.test';
         $priorSetting = $winnerDb->table('settings')->where('key', 'contact_intake_enabled')->first();
         // Everything below commits outside RefreshDatabase's transaction; remove it in FK order.
-        $this->beforeApplicationDestroyed(function () use ($winnerDb, $hash, $email, $priorSetting) {
-            $submissionIds = $winnerDb->table('contact_submissions')->where('identity_hash', $hash)->pluck('id');
+        $this->beforeApplicationDestroyed(function () use ($winnerDb, $hash, $earlierHash, $email, $priorSetting) {
+            $submissionIds = $winnerDb->table('contact_submissions')->whereIn('identity_hash', [$hash, $earlierHash])->pluck('id');
             $personIds = $winnerDb->table('people')->where('email', $email)->pluck('id');
             $clientIds = $winnerDb->table('people')->whereIn('id', $personIds)->pluck('client_id');
             $ticketIds = $winnerDb->table('tickets')->whereIn('client_id', $clientIds)->pluck('id');
@@ -177,6 +181,16 @@ class SubmissionProcessorTest extends TestCase
         try {
             Setting::setValue('contact_intake_enabled', '1');
             $winnerDb->table('contact_intake_identities')->insert(['identity_hash' => $hash]);
+            // A ledger with history, as production has: an earlier, processed inquiry from another
+            // requester. The loser's claim (`state = 'pending'`) scans the state index and gap-locks
+            // up to the next entry; in an empty ledger that gap covers ('processed', first id), so
+            // the winner's own state change would wait on the loser, which real processes resolve
+            // as a deadlock and retry. This row bounds the gap below the winner's entry.
+            ContactSubmission::create([
+                'integration_id' => 'website', 'submission_id' => (string) Str::uuid(), 'receipt' => (string) Str::uuid(),
+                'payload_hash' => hash('sha256', 'EARLIER'), 'identity_hash' => $earlierHash, 'state' => 'processed',
+                'payload' => ['name' => 'Synthetic Earlier', 'email' => 'earlier-'.$email, 'message' => 'EARLIER', 'submitted_at' => '2026-09-24T11:00:00Z'],
+            ]);
             [$first, $second] = array_map(fn (string $message) => ContactSubmission::create([
                 'integration_id' => 'website', 'submission_id' => (string) Str::uuid(), 'receipt' => (string) Str::uuid(),
                 'payload_hash' => hash('sha256', $message), 'identity_hash' => $hash, 'state' => 'pending',
@@ -186,7 +200,8 @@ class SubmissionProcessorTest extends TestCase
             DB::setDefaultConnection($default);
         }
         $fired = false;
-        DB::listen(function (QueryExecuted $query) use (&$fired, $hash, $first, $second) {
+        $winnerError = null;
+        DB::listen(function (QueryExecuted $query) use (&$fired, &$winnerError, $hash, $first, $second) {
             if ($fired || $query->connectionName !== 'contact_intake_loser'
                 || ! str_starts_with(strtolower($query->sql), 'select') || ! str_contains($query->sql, 'contact_submissions')) {
                 return;
@@ -207,6 +222,10 @@ class SubmissionProcessorTest extends TestCase
                 ]);
                 $ticket->forceFill(['contact_intake_origin' => true])->save();
                 ContactSubmission::whereKey($first->id)->update(['state' => 'processed', 'ticket_id' => $ticket->id, 'ticket_watermark' => $second->id]);
+            } catch (\Throwable $e) {
+                // Recorded, not thrown: thrown here it surfaces as the loser's query error and
+                // process() retries the loser without a winner.
+                $winnerError = $e;
             } finally {
                 DB::setDefaultConnection($loser);
             }
@@ -218,7 +237,9 @@ class SubmissionProcessorTest extends TestCase
             DB::setDefaultConnection($default);
         }
         $this->assertTrue($fired, 'The winner never committed inside the loser transaction.');
+        $this->assertNull($winnerError, 'The winner failed: '.$winnerError?->getMessage());
         $winnerTicketId = (int) $winnerDb->table('contact_submissions')->where('id', $first->id)->value('ticket_id');
+        $this->assertGreaterThan(0, $winnerTicketId, 'The winner committed no ticket on its submission.');
         $this->assertSame('processed', $row->state);
         $this->assertNotSame($winnerTicketId, (int) $row->ticket_id);
         $this->assertSame([$winnerTicketId], json_decode((string) $row->related_ticket_ids, true));
