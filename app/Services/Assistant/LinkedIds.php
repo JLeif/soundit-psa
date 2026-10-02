@@ -61,6 +61,8 @@ final class LinkedIds
         'autoelevate_company_id',
         'primary_tech_id',
         'reseller_id',
+        // The contract new time belongs to when several are active (card I3EvQKUV).
+        'default_contract_id',
         'site_notes_updated_by',
         'credentials_updated_by',
     ];
