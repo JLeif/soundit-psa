@@ -481,6 +481,8 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(0, PrepayRelinkHaloTicketTime::adjustmentMinutes(0));
         $this->assertSame(90, PrepayRelinkHaloTicketTime::adjustmentMinutes(1.5));
         $this->assertSame(1, PrepayRelinkHaloTicketTime::adjustmentMinutes(0.0167));
+        // 0.0333 h x 60 = 1.998: rounds to 2, never truncates to 1.
+        $this->assertSame(2, PrepayRelinkHaloTicketTime::adjustmentMinutes(0.0333));
         $this->assertNull(PrepayRelinkHaloTicketTime::adjustmentMinutes(0.123));   // 7.38 min
         $this->assertNull(PrepayRelinkHaloTicketTime::adjustmentMinutes(-0.25));
         $this->assertNull(PrepayRelinkHaloTicketTime::adjustmentMinutes('0.25'));
@@ -627,6 +629,48 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(1, $exit, $out);
         $this->assertNull($this->linkedTo($ptx));
         $this->assertNull($this->noteOf('link'));
+    }
+
+    public function test_an_adjustment_cleared_after_planning_aborts_the_whole_write(): void
+    {
+        // Planned with the same adjustment already on the note (nothing to write), then cleared.
+        [$ptx, $note] = $this->adjusted(20, 70020, 30, -0.7167, 0.2167, ['time_adjustment_minutes' => 13]);
+        $fired = false;
+        Event::listen(TransactionBeginning::class, function () use (&$fired, $note) {
+            if (! $fired) {
+                $fired = true;
+                DB::table('ticket_notes')->where('id', $note)->update(['time_adjustment_minutes' => null]);
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertTrue($fired);
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Ptx {$ptx} or note {$note} no longer passes the planning checks", $out);
+        $this->assertNull($this->linkedTo($ptx));
+        $this->assertNull($this->noteOf('link'));
+    }
+
+    public function test_a_linked_zero_minute_adjusted_note_made_non_billable_reverses_and_re_debits(): void
+    {
+        [$ptx, $note] = $this->adjusted(21, 70021, 0, -0.25, 0.25);
+        $this->commit();
+        $contract = (int) DB::table('prepay_transactions')->where('id', $ptx)->value('contract_id');
+        $before = (float) DB::table('contracts')->where('id', $contract)->value('prepay_balance');
+
+        $model = TicketNote::findOrFail($note);
+        $model->is_billable = false;
+        $model->save();
+
+        $this->assertSame(0, DB::table('prepay_transactions')->where('ticket_note_id', $note)->count());
+        $this->assertEqualsWithDelta($before + 0.25, (float) DB::table('contracts')->where('id', $contract)->value('prepay_balance'), 0.006);
+
+        $model->is_billable = true;
+        $model->save();
+
+        $this->assertSame(-0.25, (float) DB::table('prepay_transactions')->where('ticket_note_id', $note)->value('hours'));
+        $this->assertEqualsWithDelta($before, (float) DB::table('contracts')->where('id', $contract)->value('prepay_balance'), 0.006);
     }
 
     public function test_rollback_unlinks_and_restores_the_adjustment(): void
