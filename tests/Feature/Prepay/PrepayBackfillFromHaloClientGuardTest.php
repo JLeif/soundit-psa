@@ -149,6 +149,60 @@ class PrepayBackfillFromHaloClientGuardTest extends TestCase
         $this->assertMatchesRegularExpression('/^unattributed: 1 rows not imported .*; Halo action ids: 80001$/m', $out);
     }
 
+    /** relinkAndEdit, then staff merge the row's ticket into another same-client ticket. */
+    private function relinkEditAndMerge(): Ticket
+    {
+        $this->relinkAndEdit();
+        $primary = Ticket::factory()->create(['client_id' => $this->own->client_id, 'subject' => 'Synthetic primary']);
+        // What TicketService::mergeTickets does to the rows the backfill reads: the notes move to the
+        // primary, and the secondary keeps its halo_id and points at the primary.
+        DB::table('ticket_notes')->where('ticket_id', $this->own->id)->update(['ticket_id' => $primary->id]);
+        DB::table('tickets')->where('id', $this->own->id)->update(['parent_ticket_id' => $primary->id]);
+
+        return $primary;
+    }
+
+    public function test_a_rerun_with_the_map_after_a_merge_does_not_debit_the_relinked_row_again(): void
+    {
+        $this->relinkEditAndMerge();
+
+        $out = $this->import(['--map' => $this->map([[80001, 9101, 1, 0.5, 0.0]])]);
+
+        $this->assertSame(1, DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->count(), $out);
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->sum('hours'));
+        $this->assertStringNotContainsString('unattributed', $out);
+    }
+
+    public function test_a_rerun_without_the_map_after_a_merge_imports_nothing_and_reports_the_action(): void
+    {
+        $this->relinkEditAndMerge();
+
+        $out = $this->import();
+
+        $this->assertSame(1, DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->count(), $out);
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->sum('hours'));
+        $this->assertMatchesRegularExpression('/^unattributed: 1 rows not imported .*; Halo action ids: 80001$/m', $out);
+    }
+
+    public function test_an_action_number_shared_within_a_merge_family_is_reported_not_skipped_or_imported(): void
+    {
+        $primary = $this->relinkEditAndMerge();
+        // The primary's own Halo action 1, not yet imported: the family now has two notes numbered 1.
+        DB::table('tickets')->where('id', $primary->id)->update(['halo_id' => 9103]);
+        DB::table('ticket_notes')->insert([
+            'ticket_id' => $primary->id, 'halo_note_id' => 1, 'body' => 'Synthetic', 'is_billable' => true,
+            'time_minutes' => 15, 'noted_at' => '2026-01-07 10:00:00', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        file_put_contents($this->csv, "1,9103,80003,0.25,0.25,1/7/2026 10:00 AM,501\n", FILE_APPEND);
+
+        $out = $this->import(['--map' => $this->map([[80001, 9101, 1, 0.5, 0.0], [80003, 9103, 1, 0.25, 0.0]])]);
+
+        $this->assertSame(1, DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->count(), $out);
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->sum('hours'));
+        $this->assertMatchesRegularExpression('/^unattributed: 2 rows not imported .*; Halo action ids: 80001, 80003$/m', $out);
+        $this->assertStringContainsString('0 skipped (already exist)', $out);
+    }
+
     public function test_an_app_written_description_ending_in_digits_does_not_suppress_a_debit(): void
     {
         // A native note's debit: its description ends in the free-text subject, here "[80001]".
