@@ -227,8 +227,11 @@ class McpToolRegistry
                         // BenjiPays card, not PSA Core. Display only: grants are by
                         // tool name. Without this, the prefix arm in
                         // integrationForToolName() would never be consulted for them.
-                        $target = $integration === 'psa' && self::integrationForToolName((string) $tool['name']) === 'benjipays'
-                            ? 'benjipays' : $integration;
+                        // Likewise the Teams image reader sits in psa_raw_file (its own sensitive
+                        // "Attachment content" tier and shield) but renders on the Teams & Operator
+                        // card beside its Chet siblings (card 2Cj3kOsy, Charlie's correction).
+                        $routed = $integration === 'psa' ? self::integrationForToolName((string) $tool['name']) : $integration;
+                        $target = in_array($routed, ['benjipays', 'teams'], true) ? $routed : $integration;
                         $push($target, $tierKey, $tierLabel, true, $order, $tool);
                     }
 

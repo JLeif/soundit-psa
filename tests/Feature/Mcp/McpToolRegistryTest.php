@@ -245,6 +245,50 @@ class McpToolRegistryTest extends TestCase
         $this->assertSame('psa', McpToolRegistry::integrationForToolName('list_invoices'), 'PSA-native invoice reads stay under PSA Core');
     }
 
+    /**
+     * Card 2Cj3kOsy (Charlie's correction, 2026-10-02): the Teams image reader renders
+     * on the Teams & Operator card with the other Teams grants, not under PSA Core. It
+     * stays in psa_raw_file, keeping its own sensitive "Attachment content" tier and
+     * shield; the card is display only, since grants are stored and checked by tool name.
+     */
+    public function test_teams_attachment_reader_renders_on_the_teams_card_in_its_own_sensitive_tier(): void
+    {
+        $tool = 'get_teams_message_attachment';
+        $groups = McpToolRegistry::integrationGroups();
+
+        $tiersOf = function (string $integration) use ($groups): array {
+            $out = [];
+            foreach ($groups[$integration]['tiers'] as $tier) {
+                foreach ($tier['tools'] as $t) {
+                    $out[$t['name']] = $tier;
+                }
+            }
+
+            return $out;
+        };
+        $teams = $tiersOf('teams');
+        $psa = $tiersOf('psa');
+
+        $this->assertArrayHasKey($tool, $teams, 'the Teams image reader must render on the Teams & Operator card');
+        $this->assertArrayNotHasKey($tool, $psa, 'the Teams image reader must not render under PSA Core');
+        $this->assertSame(['raw_file', 'Attachment content', true], [$teams[$tool]['key'], $teams[$tool]['label'], $teams[$tool]['sensitive']], 'it keeps its own sensitive Attachment content tier');
+        $this->assertTrue($teams[$tool]['tools'][array_search($tool, array_column($teams[$tool]['tools'], 'name'), true)]['sensitive']);
+        foreach ($teams as $name => $tier) {
+            if ($tier['key'] === 'raw_file') {
+                $this->assertSame($tool, $name, 'only the Teams image reader joins the Teams raw_file tier');
+            }
+        }
+
+        // Grant gate unchanged: still registered and explicit-grant in psa_raw_file.
+        $this->assertContains($tool, array_column(McpToolRegistry::groups()['psa_raw_file']['tools'], 'name'));
+        $this->assertContains($tool, McpToolRegistry::RAW_FILE_CONTENT_TOOLS);
+
+        // The PSA ticket attachment reader stays under PSA Core.
+        $this->assertArrayHasKey('get_ticket_attachment', $psa);
+        $this->assertSame('raw_file', $psa['get_ticket_attachment']['key']);
+        $this->assertArrayNotHasKey('get_ticket_attachment', $teams);
+    }
+
     public function test_screenconnect_reads_are_registry_backed_and_mapped_to_a_screenconnect_card(): void
     {
         $screenconnectReads = [
@@ -333,12 +377,16 @@ class McpToolRegistryTest extends TestCase
      */
     public function test_raw_file_content_reads_render_as_a_sensitive_tier_not_a_plain_read(): void
     {
-        $tiers = collect(McpToolRegistry::integrationGroups()['psa']['tiers']);
+        $groups = McpToolRegistry::integrationGroups();
 
         foreach (McpToolRegistry::RAW_FILE_CONTENT_TOOLS as $name) {
+            // Each renders on its own integration's card (the Teams image reader on Teams &
+            // Operator, card 2Cj3kOsy); the sensitive-tier invariant holds wherever it sits.
+            $card = McpToolRegistry::integrationForToolName($name);
+            $tiers = collect($groups[$card]['tiers']);
             $tier = $tiers->first(fn (array $t): bool => in_array($name, array_column($t['tools'], 'name'), true));
 
-            $this->assertNotNull($tier, "{$name} must render on the PSA card");
+            $this->assertNotNull($tier, "{$name} must render on the {$card} card");
             $this->assertTrue($tier['sensitive'], "{$name} must sit in a sensitive tier — the bulk-grant confirmation is driven by the tier flag");
             $this->assertTrue(
                 collect($tier['tools'])->firstWhere('name', $name)['sensitive'],
