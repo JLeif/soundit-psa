@@ -27,8 +27,9 @@ use RuntimeException;
  *     soft-deleted notes (no-note / multi-note); a soft-deleted match is refused
  *     (trashed-note): linking to a deleted note would hand the row to the note-delete
  *     reversal path;
- *   - no other prepay row already holds that note (already-linked-note), and no other
- *     candidate in this run targets it (duplicate-target: all of them are refused);
+ *   - no other prepay row already holds that note, through ticket_note_id or
+ *     moved_ticket_note_id (already-linked-note), and no other candidate in this run
+ *     targets it (duplicate-target: all of them are refused);
  *   - the row id is not excluded.
  *
  * Excluded by default: DEFAULT_EXCLUDED (see its comment). --exclude adds ids; it cannot
@@ -38,8 +39,10 @@ use RuntimeException;
  * file (ptx id -> note id linked) is written before the first update and the command
  * refuses if the path exists. Rollback, per entry:
  *   UPDATE prepay_transactions SET ticket_note_id = NULL WHERE id = <ptx> AND ticket_note_id = <note>;
- * Every update is guarded on ticket_note_id IS NULL and phone_call_id IS NULL inside one
- * transaction; if any guarded update hits no row, the whole run rolls back.
+ * Inside one transaction, each update first re-checks under lock that no row holds the note
+ * through ticket_note_id or moved_ticket_note_id, and is guarded on ticket_note_id IS NULL
+ * and phone_call_id IS NULL; if the note is held or a guarded update hits no row, the whole
+ * run rolls back.
  *
  * Output is counts and ledger row ids only: no subjects, names or descriptions.
  * Running it against production (dry run included) needs Charlie's go for that run.
@@ -202,11 +205,14 @@ class PrepayRelinkHaloTicketTime extends Command
             $targets[$ptxId] = (int) $notes[0]->id;
         }
 
-        // ticket_note_id is unique: a note another ledger row already holds cannot be taken.
+        // A note another ledger row holds cannot be taken: through ticket_note_id, or through
+        // moved_ticket_note_id on the original row of a contract move.
         $held = [];
         foreach (array_chunk(array_unique(array_values($targets)), 500) as $chunk) {
-            foreach (DB::table('prepay_transactions')->whereIn('ticket_note_id', $chunk)->pluck('ticket_note_id') as $id) {
-                $held[(int) $id] = true;
+            foreach (['ticket_note_id', 'moved_ticket_note_id'] as $column) {
+                foreach (DB::table('prepay_transactions')->whereIn($column, $chunk)->pluck($column) as $id) {
+                    $held[(int) $id] = true;
+                }
             }
         }
         $perNote = array_count_values($targets);
@@ -250,6 +256,13 @@ class PrepayRelinkHaloTicketTime extends Command
         try {
             DB::transaction(function () use ($links) {
                 foreach ($links as $ptxId => $noteId) {
+                    $holder = DB::table('prepay_transactions')
+                        ->where(fn ($q) => $q->where('ticket_note_id', $noteId)->orWhere('moved_ticket_note_id', $noteId))
+                        ->lockForUpdate()
+                        ->value('id');
+                    if ($holder !== null) {
+                        throw new RuntimeException("Note {$noteId} for ptx {$ptxId} is already held by ptx {$holder}; rolled back, no ledger row was changed.");
+                    }
                     $updated = DB::table('prepay_transactions')
                         ->where('id', $ptxId)
                         ->where('source', PrepayTransactionSource::TicketTime->value)

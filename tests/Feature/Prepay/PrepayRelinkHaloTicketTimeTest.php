@@ -5,9 +5,11 @@ namespace Tests\Feature\Prepay;
 use App\Models\Client;
 use App\Models\Contract;
 use App\Models\Ticket;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -301,5 +303,66 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         [, $out] = $this->commit();
         $this->assertRefused('link', 'duplicate-target', $out);
         $this->assertRefused('no_map', 'duplicate-target', $out);
+    }
+
+    private function scenarioTicketId(): int
+    {
+        return (int) DB::table('ticket_notes')->where('id', $this->notes['link'])->value('ticket_id');
+    }
+
+    /** Attributes of a synthetic ledger row on the scenario contract. */
+    private function ledgerRow(string $desc, array $extra = []): array
+    {
+        return $extra + [
+            'contract_id' => (int) DB::table('prepay_transactions')->where('id', $this->ptx['link'])->value('contract_id'),
+            'source' => 'ticket_time', 'ticket_note_id' => null, 'user_id' => null,
+            'date' => '2026-01-05 00:00:00', 'hours' => -0.5, 'description' => $desc,
+            'created_at' => now(), 'updated_at' => now(),
+        ];
+    }
+
+    public function test_refuses_a_note_held_through_moved_ticket_note_id(): void
+    {
+        $moved = DB::table('ticket_notes')->insertGetId([
+            'ticket_id' => $this->scenarioTicketId(), 'halo_note_id' => 8, 'body' => 'Synthetic', 'is_billable' => true,
+            'time_minutes' => 30, 'noted_at' => '2026-01-05 10:00:00', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        // The original row of a contract move: ticket_note_id NULL, moved_ticket_note_id = the note.
+        $holder = DB::table('prepay_transactions')->insertGetId(
+            $this->ledgerRow('Synthetic moved entry', ['moved_ticket_note_id' => $moved]),
+        );
+        $this->ptx['moved_target'] = DB::table('prepay_transactions')->insertGetId(
+            $this->ledgerRow("Ticket #{$this->scenarioTicketId()}: Synthetic P ticket [70011]"),
+        );
+        $this->writeMap([[70001, 9001, 1, 0.5, 0.0], [70011, 9001, 8, 0.5, 0.0]]);
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertRefused('moved_target', 'already-linked-note', $out);
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+        $this->assertNull(DB::table('prepay_transactions')->where('id', $holder)->value('ticket_note_id'));
+        $this->assertSame($moved, (int) DB::table('prepay_transactions')->where('id', $holder)->value('moved_ticket_note_id'));
+    }
+
+    public function test_a_note_taken_by_another_row_after_planning_aborts_the_whole_write(): void
+    {
+        // Simulate another writer moving an entry onto the planned note once the write transaction has begun.
+        $racer = $this->ledgerRow('Synthetic moved entry', ['moved_ticket_note_id' => $this->notes['link']]);
+        $fired = false;
+        Event::listen(TransactionBeginning::class, function () use (&$fired, $racer) {
+            if (! $fired) {
+                $fired = true;
+                DB::table('prepay_transactions')->insert($racer);
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertTrue($fired);
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Note {$this->notes['link']} for ptx {$this->ptx['link']} is already held by ptx ", $out);
+        $this->assertStringContainsString('rolled back, no ledger row was changed', $out);
+        $this->assertNull($this->noteOf('link'));
     }
 }

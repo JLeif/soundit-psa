@@ -89,4 +89,24 @@ class PrepayBackfillFromHaloClientGuardTest extends TestCase
         $this->assertStringContainsString('Halo action ids: 80002', $out);
         $this->assertStringNotContainsString('Other client subject', $out);
     }
+
+    public function test_a_rerun_after_relink_does_not_debit_the_relinked_row_again(): void
+    {
+        $this->import();
+        $row = DB::table('prepay_transactions')->where('contract_id', $this->contract->id)
+            ->where('description', 'like', '%[80001]')->first();
+        $this->assertNotNull($row);
+
+        // What prepay:relink-halo-ticket-time does: fill ticket_note_id, description unchanged.
+        $noteId = DB::table('ticket_notes')->insertGetId([
+            'ticket_id' => $this->own->id, 'halo_note_id' => 1, 'body' => 'Synthetic', 'is_billable' => true,
+            'time_minutes' => 30, 'noted_at' => '2026-01-05 10:00:00', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        DB::table('prepay_transactions')->where('id', $row->id)->update(['ticket_note_id' => $noteId]);
+
+        $out = $this->import();
+
+        $this->assertSame(1, DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->count(), $out);
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('contract_id', $this->contract->id)->sum('hours'));
+    }
 }

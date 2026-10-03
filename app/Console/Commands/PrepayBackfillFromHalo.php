@@ -231,13 +231,13 @@ class PrepayBackfillFromHalo extends Command
             }
         }
 
-        // Unlinked transactions: extract action_id from description [action_id]
+        // Every ticket_time row, linked or not: unlinked imports end in [action_id], and rows that
+        // prepay:relink-halo-ticket-time later linked (#5067) keep that description.
         PrepayTransaction::where('contract_id', $contract->id)
             ->where('source', PrepayTransactionSource::TicketTime)
-            ->whereNull('ticket_note_id')
             ->pluck('description')
             ->each(function ($desc) use (&$existingActionIds) {
-                if (preg_match('/\[(\d+)\]$/', $desc, $m)) {
+                if (preg_match('/\[(\d+)\]$/', (string) $desc, $m)) {
                     $existingActionIds[(int) $m[1]] = true;
                 }
             });
