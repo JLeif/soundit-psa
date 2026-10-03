@@ -10,6 +10,19 @@ use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
+/**
+ * Retired (#5067): this command refuses to run.
+ *
+ * It was the one-time import of Halo prepay debits from a Halo CSV export. Halo is
+ * decommissioned, and prepay:relink-halo-ticket-time fills ticket_note_id on the rows this
+ * import wrote. This import only recognised a linked row as already imported through
+ * ticket_notes.halo_note_id, which holds Halo's per-ticket action number rather than the
+ * action id, so running it again after a relink would debit the relinked time a second time.
+ *
+ * handle() therefore returns FAILURE before it reads any file or touches the database,
+ * whatever the options, --dry-run included. There is no override. The import code below is
+ * kept, unreachable, as a record of what was imported and how.
+ */
 class PrepayBackfillFromHalo extends Command
 {
     protected $signature = 'prepay:backfill-from-halo
@@ -19,10 +32,14 @@ class PrepayBackfillFromHalo extends Command
         {--verified-only : Only import contracts where CSV total matches prepay_used}
         {--csv= : Path to CSV file (default: base_path Client_Time Log _Detailed_ (1).csv)}';
 
-    protected $description = 'Backfill prepay debit transactions from Halo CSV export of actionprepayhours data';
+    protected $description = 'Retired (#5067): refuses to run. Was the one-time backfill of prepay debits from a Halo CSV export';
 
     public function handle(PrepayService $prepayService): int
     {
+        $this->error('prepay:backfill-from-halo is retired and did nothing. Halo is decommissioned, and running this import again after prepay:relink-halo-ticket-time would debit relinked time a second time (see #5067).');
+
+        return self::FAILURE;
+
         $dryRun = $this->option('dry-run');
         $contractFilter = $this->option('contract');
         $haloContractFilter = $this->option('halo-contract');
@@ -100,6 +117,7 @@ class PrepayBackfillFromHalo extends Command
         $contractSummaries = [];
         $unmapped = [];
         $verifySkipped = [];
+        $clientMismatch = [];
 
         foreach ($haloContractIds as $haloContractId) {
             $contract = $contractMap->get($haloContractId);
@@ -141,6 +159,12 @@ class PrepayBackfillFromHalo extends Command
             $totalCreated += $result['created'];
             $totalSkipped += $result['skipped'];
             $totalHours += $result['hours'];
+            array_push($clientMismatch, ...$result['client_mismatch']);
+        }
+
+        // #5067: rows whose local ticket belongs to another client were not imported.
+        if (! empty($clientMismatch)) {
+            $this->warn('client_mismatch: '.count($clientMismatch).' rows not imported (ticket client differs from contract client); Halo action ids: '.implode(', ', $clientMismatch));
         }
 
         // Report unmapped contracts
@@ -204,7 +228,7 @@ class PrepayBackfillFromHalo extends Command
         $clientMap,
         bool $dryRun,
     ): array {
-        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0];
+        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0, 'client_mismatch' => []];
 
         // Existing dedup: check for action IDs already imported
         // We store halo action_id in description as [action_id] for unlinked,
@@ -258,6 +282,14 @@ class PrepayBackfillFromHalo extends Command
             // Try to find local ticket and note
             $localTicket = $ticketMap->get($haloTicketId);
             $localNote = $noteMap->get($actionId);
+
+            // #5067: never debit one client's contract for another client's ticket, nor copy
+            // that ticket's subject into this contract's ledger.
+            if ($localTicket && (int) $localTicket->client_id !== (int) $contract->client_id) {
+                $result['client_mismatch'][] = $actionId;
+
+                continue;
+            }
 
             if ($localNote) {
                 $ticketSubject = $localTicket
