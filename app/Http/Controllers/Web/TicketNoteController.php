@@ -190,10 +190,13 @@ class TicketNoteController extends Controller
             }
         }
 
-        $isBillable = $timeMinutes ? $request->boolean('is_billable') : null;
-        $contractId = $timeMinutes ? ($request->input('contract_id') ?: null) : null;
+        // A note carrying a time adjustment (#5067 r3) still has priced time when its own
+        // time field is empty, so its billable flag and contract are kept like any timed note's.
+        $hasTime = $timeMinutes || (int) $note->time_adjustment_minutes > 0;
+        $isBillable = $hasTime ? $request->boolean('is_billable') : null;
+        $contractId = $hasTime ? ($request->input('contract_id') ?: null) : null;
 
-        if ($timeMinutes) {
+        if ($hasTime) {
             // Debited time stays on the contract it was debited from; an edit cannot
             // re-point it (card I3EvQKUV: moving time is its own explicit act). The form
             // preselects the note's own stamp, so resubmitting it unchanged is never a

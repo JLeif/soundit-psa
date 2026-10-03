@@ -56,6 +56,7 @@ class TicketNote extends Model
             'is_private' => 'boolean',
             'is_billable' => 'boolean',
             'time_minutes' => 'integer',
+            'time_adjustment_minutes' => 'integer',
             'noted_at' => 'datetime',
             'edited_at' => 'datetime',
             'contact_intake_origin' => 'boolean',
@@ -150,6 +151,18 @@ class TicketNote extends Model
         }
 
         return nl2br(e($this->body ?? ''));
+    }
+
+    /**
+     * Minutes this note bills against prepay: time_minutes plus time_adjustment_minutes
+     * (#5067 r3; NULL counts as 0). The adjustment is written only by
+     * prepay:relink-halo-ticket-time and is deliberately not mass assignable, so an
+     * ordinary edit of the note's time keeps it. formatted_time shows time_minutes alone:
+     * the edit form round-trips that value into time_minutes.
+     */
+    public function pricedMinutes(): int
+    {
+        return (int) $this->time_minutes + (int) $this->time_adjustment_minutes;
     }
 
     public function getFormattedTimeAttribute(): ?string

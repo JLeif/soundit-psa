@@ -33,7 +33,9 @@ class TimeEntryContractMoveService
     public function entries(Ticket $ticket, ?int $toContractId = null): Collection
     {
         $notes = TicketNote::where('ticket_id', $ticket->id)->where('is_billable', true)
-            ->where('time_minutes', '>', 0)->with('author')->orderBy('noted_at')->orderBy('id')->get();
+            // Priced minutes (#5067 r3): time plus the note's time adjustment.
+            ->whereRaw('COALESCE(time_minutes, 0) + COALESCE(time_adjustment_minutes, 0) > 0')
+            ->with('author')->orderBy('noted_at')->orderBy('id')->get();
         $calls = PhoneCall::where('ticket_id', $ticket->id)->where('is_billable', true)
             ->with('answeredBy')->orderBy('started_at')->orderBy('id')->get()
             ->filter(fn (PhoneCall $c) => ($c->effectiveDurationSeconds() ?? 0) > 0);
@@ -49,7 +51,7 @@ class TimeEntryContractMoveService
         foreach ($notes as $note) {
             $row = $noteRows->get($note->id);
             $rows->push($this->row('note', $note->id, mb_substr(trim(strip_tags((string) $note->body)), 0, 60), $note->noted_at ?? $note->created_at,
-                $note->author?->name, round($note->time_minutes / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId,
+                $note->author?->name, round($note->pricedMinutes() / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId,
                 $this->drawHoursIfMoved($note, $row)));
         }
         foreach ($calls as $call) {
@@ -102,7 +104,7 @@ class TimeEntryContractMoveService
             return 0.0;
         }
         if ($entry instanceof TicketNote) {
-            return $entry->isUnverifiedContactIntake() || $entry->time_minutes <= 0 ? 0.0 : round($entry->time_minutes / 60, 4);
+            return $entry->isUnverifiedContactIntake() || $entry->pricedMinutes() <= 0 ? 0.0 : round($entry->pricedMinutes() / 60, 4);
         }
         $seconds = $entry->effectiveDurationSeconds() ?? 0;
 
