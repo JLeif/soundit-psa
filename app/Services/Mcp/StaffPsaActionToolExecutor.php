@@ -275,22 +275,29 @@ class StaffPsaActionToolExecutor
     }
 
     /**
-     * The contract an EXISTING ticket carries, reported with rule "ticket" (the
-     * ContractResolver rule for a ticket's own contract), or none.
+     * The contract block for an EXISTING ticket (idempotent replay, a linked email):
+     * ContractResolver::forEntry($ticket), the resolution a new time entry on it gets,
+     * in the same shape as a fresh create (r2, review r1 diff:8). The stored
+     * tickets.contract_id (null included) is added as ticket_contract_id only when it
+     * differs from the resolved contract's id.
      *
      * @return array<string, mixed>
      */
     private function existingTicketContractBlock(?Ticket $ticket): array
     {
-        $contract = $ticket?->contract_id !== null ? \App\Models\Contract::withTrashed()->find($ticket->contract_id) : null;
-        if ($contract === null) {
-            return ['contract' => null, 'contract_rule' => 'none'];
+        if ($ticket === null) {
+            return \App\Services\TicketContractOutcome::fromResolution(\App\Services\ContractResolution::none())->toArray();
         }
 
-        return [
-            'contract' => ['id' => $contract->id, 'name' => $contract->name, 'rule' => \App\Services\ContractResolver::RULE_TICKET],
-            'contract_rule' => \App\Services\ContractResolver::RULE_TICKET,
-        ];
+        $resolution = app(\App\Services\ContractResolver::class)->forEntry($ticket);
+        $block = \App\Services\TicketContractOutcome::fromResolution($resolution)->toArray();
+
+        $stored = $ticket->contract_id === null ? null : (int) $ticket->contract_id;
+        if ($stored !== $resolution->contract?->id) {
+            $block['ticket_contract_id'] = $stored;
+        }
+
+        return $block;
     }
 
     /** @return array<string, mixed> */

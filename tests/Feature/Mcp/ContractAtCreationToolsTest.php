@@ -32,7 +32,7 @@ class ContractAtCreationToolsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const LINE = 'Optional. Must be an active contract of this ticket\'s client; omit it and the server uses the client\'s default contract, else its only active contract, else none — the response says which.';
+    private const LINE = 'Optional. Must be an active contract of this ticket\'s client; omit it and the server uses the client\'s default contract, else its only active contract, else none — the response says which. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied, and the response\'s contract block is authoritative.';
 
     private Client $client;
 
@@ -114,7 +114,7 @@ class ContractAtCreationToolsTest extends TestCase
         $id = $contract instanceof Contract ? $contract->id : $contract;
         $this->assertSame('contract_not_allowed', $r['error_code'] ?? null, json_encode($r));
         $this->assertSame(
-            "contract_id must be an ACTIVE contract of this ticket's client; contract {$id} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default.",
+            "contract_id must be an ACTIVE contract of this ticket's client; contract {$id} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default or only active contract.",
             $r['error'],
         );
     }
@@ -211,8 +211,133 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertTrue($dup['idempotent'] ?? false, json_encode($dup));
         // The idempotent answer reports the existing ticket's contract, not the one asked for.
         $this->assertSame(['id' => $a->id, 'name' => 'Synthetic A', 'rule' => 'ticket'], $dup['contract']);
+        // Positive control (r2 diff:8): an ACTIVE ticket contract still resolves by rule
+        // "ticket", and the stored id equals the resolved one, so it is not repeated.
+        $this->assertSame('ticket', $dup['contract_rule']);
+        $this->assertArrayNotHasKey('ticket_contract_id', $dup);
+        $this->assertArrayNotHasKey('candidate_contracts', $dup);
         $this->assertSame(1, Ticket::count());
         $this->assertSame($a->id, Ticket::sole()->contract_id);
+    }
+
+    // ── r2 diff:8: an existing ticket's block is ContractResolver::forEntry ──
+
+    private function vendorBurst(?Contract $ticketContract): Ticket
+    {
+        $ticket = Ticket::factory()->create([
+            'client_id' => $this->client->id, 'contract_id' => $ticketContract?->id,
+            'subject' => 'Email Delivery Request: user@example.test', 'status' => \App\Enums\TicketStatus::New,
+        ]);
+        $email = Email::create([
+            'direction' => EmailDirection::Inbound, 'from_address' => 'noreply@emailsecurity.app',
+            'subject' => 'Email Delivery Request: user@example.test', 'body_text' => 'Synthetic delivery request.',
+            'received_at' => now(), 'client_id' => $this->client->id,
+        ]);
+        $this->linked = $this->callTool(['create_ticket_from_email'], 'create_ticket_from_email', [
+            'email_id' => $email->id, 'reason' => 'Synthetic',
+        ]);
+        $this->assertSame($ticket->id, $this->linked['ticket_id'] ?? null, json_encode($this->linked));
+        $this->assertSame(1, Ticket::count(), 'linked onto the existing ticket, no new one');
+
+        return $ticket;
+    }
+
+    /** @var array<string, mixed> */
+    private array $linked = [];
+
+    public function test_replay_on_a_lapsed_ticket_contract_reports_the_client_default(): void
+    {
+        $a = $this->contract('Synthetic A');
+        $first = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $a->id]));
+        $this->assertSame('picked', $first['contract_rule'] ?? null, json_encode($first));
+
+        $a->update(['status' => 'expired']);
+        $b = $this->contract('Synthetic B');
+        $this->contract('Synthetic C');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $b->id]);
+
+        $dup = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs());
+        $this->assertTrue($dup['idempotent'] ?? false, json_encode($dup));
+        $this->assertSame(['id' => $b->id, 'name' => 'Synthetic B', 'rule' => 'client_default'], $dup['contract']);
+        $this->assertSame('client_default', $dup['contract_rule']);
+        $this->assertSame($a->id, $dup['ticket_contract_id']);
+        $this->assertArrayNotHasKey('candidate_contracts', $dup);
+        $this->assertSame($a->id, Ticket::sole()->contract_id, 'the replay writes nothing');
+    }
+
+    public function test_replay_on_a_null_ticket_contract_reports_a_live_client_default(): void
+    {
+        $first = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs());
+        $this->assertSame('none', $first['contract_rule'] ?? null, json_encode($first));
+
+        $b = $this->contract('Synthetic B');
+        $this->contract('Synthetic C');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $b->id]);
+
+        $dup = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs());
+        $this->assertTrue($dup['idempotent'] ?? false, json_encode($dup));
+        $this->assertSame(['id' => $b->id, 'name' => 'Synthetic B', 'rule' => 'client_default'], $dup['contract']);
+        $this->assertSame('client_default', $dup['contract_rule']);
+        $this->assertArrayHasKey('ticket_contract_id', $dup);
+        $this->assertNull($dup['ticket_contract_id']);
+        $this->assertNull(Ticket::sole()->contract_id);
+    }
+
+    public function test_vendor_burst_on_a_trashed_ticket_contract_reports_the_client_default(): void
+    {
+        $a = $this->contract('Synthetic A');
+        $a->delete();
+        $b = $this->contract('Synthetic B');
+        $this->contract('Synthetic C');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $b->id]);
+
+        $this->vendorBurst($a);
+
+        $this->assertSame(['id' => $b->id, 'name' => 'Synthetic B', 'rule' => 'client_default'], $this->linked['contract']);
+        $this->assertSame('client_default', $this->linked['contract_rule']);
+        $this->assertSame($a->id, $this->linked['ticket_contract_id']);
+    }
+
+    public function test_vendor_burst_on_an_expired_ticket_contract_reports_ambiguous_with_candidates(): void
+    {
+        $a = $this->contract('Synthetic A', ['status' => 'expired']);
+        $b = $this->contract('Synthetic B');
+        $c = $this->contract('Synthetic C');
+
+        $this->vendorBurst($a);
+
+        $this->assertNull($this->linked['contract']);
+        $this->assertSame('ambiguous', $this->linked['contract_rule']);
+        $this->assertSame([
+            ['id' => $b->id, 'name' => 'Synthetic B', 'type' => 'managed'],
+            ['id' => $c->id, 'name' => 'Synthetic C', 'type' => 'managed'],
+        ], $this->linked['candidate_contracts']);
+        $this->assertSame($a->id, $this->linked['ticket_contract_id']);
+    }
+
+    public function test_vendor_burst_on_an_expired_ticket_contract_reports_none_when_nothing_is_active(): void
+    {
+        $a = $this->contract('Synthetic A', ['status' => 'expired']);
+
+        $this->vendorBurst($a);
+
+        $this->assertNull($this->linked['contract']);
+        $this->assertSame('none', $this->linked['contract_rule']);
+        $this->assertArrayNotHasKey('candidate_contracts', $this->linked);
+        $this->assertSame($a->id, $this->linked['ticket_contract_id']);
+    }
+
+    public function test_vendor_burst_on_an_active_ticket_contract_still_reports_ticket(): void
+    {
+        $a = $this->contract('Synthetic A');
+        $b = $this->contract('Synthetic B');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $b->id]);
+
+        $this->vendorBurst($a);
+
+        $this->assertSame(['id' => $a->id, 'name' => 'Synthetic A', 'rule' => 'ticket'], $this->linked['contract']);
+        $this->assertSame('ticket', $this->linked['contract_rule']);
+        $this->assertArrayNotHasKey('ticket_contract_id', $this->linked);
     }
 
     // ── C3: outcome reported in every create response ───────────────────────

@@ -104,7 +104,7 @@
                     @error('contract_id')
                         <div class="invalid-feedback">{{ $message }}</div>
                     @enderror
-                    <div class="form-text" id="contractHint">Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.</div>
+                    <div class="form-text" id="contractHint">Only the chosen client's active contracts are listed.</div>
                 </div>
 
                 {{-- Asset (AJAX) --}}
@@ -194,6 +194,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const contractSelect = document.getElementById('contract_id');
     const contractHint = document.getElementById('contractHint');
     const contractHintDefault = contractHint.textContent;
+    // One hint per picker state (review r1 context:8, contract-s1:4): only a state that shows
+    // a contract says new time goes to it.
+    const contractHints = {
+        chosen: "Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.",
+        none: 'This client has no active contracts, so the ticket is created without one.',
+        failed: "Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.",
+    };
 
     function contractOption(value, text) {
         const opt = document.createElement('option');
@@ -234,15 +241,18 @@ document.addEventListener('DOMContentLoaded', function() {
             contractSelect.innerHTML = '';
             if (contracts.length === 0) {
                 contractSelect.appendChild(contractOption('', 'None: no active contracts'));
+                contractHint.textContent = contractHints.none;
                 contractSelect.disabled = true;
                 return;
             }
             const fallback = contracts.find(c => c.is_default) || (contracts.length === 1 ? contracts[0] : null);
             if (!fallback) {
-                contractSelect.appendChild(contractOption('', 'No contract — choose when time is logged'));
+                contractSelect.appendChild(contractOption('', 'No contract — time logged without one is held as “Needs contract”'));
                 contractHint.textContent = 'No default: this client has ' + contracts.length
-                    + ' active contracts. Pick one now, or each time entry will ask.';
+                    + ' active contracts. Pick one now; time logged on this ticket without a contract is held as “Needs contract” until one is chosen.';
                 contractHint.classList.add('text-warning-emphasis');
+            } else {
+                contractHint.textContent = contractHints.chosen;
             }
             contracts.forEach(c => contractSelect.appendChild(contractOption(String(c.id), contractLabel(c))));
             const preferred = preferId && contracts.some(c => String(c.id) === String(preferId)) ? String(preferId) : null;
@@ -254,6 +264,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // the only active contract when the ticket is created.
             contractSelect.innerHTML = '';
             contractSelect.appendChild(contractOption('', 'Contracts could not be loaded'));
+            contractHint.textContent = contractHints.failed;
             contractSelect.disabled = true;
         });
     }

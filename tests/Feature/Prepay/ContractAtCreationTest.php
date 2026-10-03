@@ -369,6 +369,27 @@ class ContractAtCreationTest extends TestCase
         $this->assertSame([false, false], array_column($rows, 'is_default'));
     }
 
+    /**
+     * r2 (review r1 context:8, contract-s1:4): the hint claims "goes to this contract" only
+     * in the state that shows one; the zero-contract and load-failure states say what is
+     * true there, and the several-no-default copy says time is held as "Needs contract".
+     */
+    public function test_r2_create_form_contract_copy_fits_each_picker_state(): void
+    {
+        $html = $this->actingAs($this->staff())->get(route('tickets.create'))->assertOk()->getContent();
+
+        $this->assertMatchesRegularExpression('#<div class="form-text" id="contractHint">Only the chosen client\'s active contracts are listed\.</div>#', $html);
+        $this->assertSame(1, substr_count($html, 'goes to this contract'), 'only the contract-shown state says it');
+        $this->assertStringContainsString("chosen: \"Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.\"", $html);
+        $this->assertStringContainsString("none: 'This client has no active contracts, so the ticket is created without one.'", $html);
+        $this->assertStringContainsString('contractHint.textContent = contractHints.none;', $html);
+        $this->assertStringContainsString("failed: \"Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.\"", $html);
+        $this->assertStringContainsString('contractHint.textContent = contractHints.failed;', $html);
+        $this->assertStringContainsString('active contracts. Pick one now; time logged on this ticket without a contract is held as “Needs contract” until one is chosen.', $html);
+        $this->assertStringNotContainsString('each time entry will ask', $html);
+        $this->assertStringNotContainsString('choose when time is logged', $html);
+    }
+
     public function test_u1_create_form_renders_the_contract_picker_disabled_until_a_client_is_chosen(): void
     {
         $html = $this->actingAs($this->staff())->get(route('tickets.create'))->assertOk()->getContent();
@@ -376,7 +397,7 @@ class ContractAtCreationTest extends TestCase
         $this->assertMatchesRegularExpression('/<select name="contract_id" id="contract_id"[^>]*\bdisabled>/s', $html);
         $this->assertStringContainsString('Choose a client first', $html);
         $this->assertStringContainsString("'/active-contracts'", $html);
-        $this->assertStringContainsString('No contract — choose when time is logged', $html);
+        $this->assertStringContainsString('No contract — time logged without one is held as “Needs contract”', $html);
         $this->assertStringContainsString("' · default'", $html);
     }
 }

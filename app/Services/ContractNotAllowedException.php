@@ -31,7 +31,7 @@ class ContractNotAllowedException extends InvalidArgumentException
     public function toolRefusal(): array
     {
         return [
-            'error' => "contract_id must be an ACTIVE contract of this ticket's client; contract {$this->renderedContractId} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default.",
+            'error' => "contract_id must be an ACTIVE contract of this ticket's client; contract {$this->renderedContractId} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default or only active contract.",
             'error_code' => 'contract_not_allowed',
         ];
     }
