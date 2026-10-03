@@ -379,19 +379,79 @@ class McpToolRegistryTest extends TestCase
     {
         $groups = McpToolRegistry::integrationGroups();
 
-        foreach (McpToolRegistry::RAW_FILE_CONTENT_TOOLS as $name) {
-            // Each renders on its own integration's card (the Teams image reader on Teams &
-            // Operator, card 2Cj3kOsy); the sensitive-tier invariant holds wherever it sits.
-            $card = McpToolRegistry::integrationForToolName($name);
+        // The expected card is fixed here, never derived from integrationForToolName() (the
+        // function production routes with), so a misroute cannot carry the test along (#4972).
+        $expectedCard = [
+            'get_ticket_attachment' => 'psa',
+            'get_teams_message_attachment' => 'teams',
+        ];
+        $this->assertSame(array_keys($expectedCard), McpToolRegistry::RAW_FILE_CONTENT_TOOLS, 'a new raw-file tool needs its card pinned here');
+
+        foreach ($expectedCard as $name => $card) {
+            $this->assertArrayHasKey($card, $groups, "the {$card} card must render");
             $tiers = collect($groups[$card]['tiers']);
             $tier = $tiers->first(fn (array $t): bool => in_array($name, array_column($t['tools'], 'name'), true));
 
             $this->assertNotNull($tier, "{$name} must render on the {$card} card");
+            $this->assertSame('raw_file', $tier['key'], "{$name} keeps its own raw_file tier");
             $this->assertTrue($tier['sensitive'], "{$name} must sit in a sensitive tier — the bulk-grant confirmation is driven by the tier flag");
             $this->assertTrue(
                 collect($tier['tools'])->firstWhere('name', $name)['sensitive'],
                 "{$name} must carry the Sensitive badge",
             );
         }
+    }
+
+    /**
+     * #4967/#4968/#4969/#4971: the PSA-registered tools that render off the PSA Core card are
+     * an exact, pinned set — routed by exact name (or the anchored benjipays_ prefix), never by
+     * a name substring — and every tool on the page renders exactly once, and every re-routed tool
+     * lands in a sensitive tier (a sensitive tool merged into a non-sensitive tier would
+     * be bulk-grantable through "Grant shown" without the sensitive confirmation, psa-lulgh).
+     */
+    public function test_psa_tools_rendered_off_psa_core_are_an_exact_set_and_every_tool_renders_once_rerouted_into_sensitive_tiers(): void
+    {
+        $groups = McpToolRegistry::integrationGroups();
+
+        $seen = [];
+        $tierOf = [];
+        foreach ($groups as $card => $group) {
+            foreach ($group['tiers'] as $tier) {
+                foreach ($tier['tools'] as $tool) {
+                    $seen[$tool['name']][] = $card;
+                    $tierOf[$tool['name']] = $tier;
+                }
+            }
+        }
+        foreach ($seen as $name => $cards) {
+            $this->assertCount(1, $cards, "{$name} must render exactly once on the page, got: ".implode(',', $cards));
+        }
+
+        $psaGroups = ['psa_action', 'psa_records', 'psa_read', 'psa_raw_file', 'intake_manage', 'taxonomy'];
+        $offCore = [];
+        foreach ($psaGroups as $key) {
+            foreach (McpToolRegistry::groups()[$key]['tools'] ?? [] as $tool) {
+                $name = (string) $tool['name'];
+                $this->assertArrayHasKey($name, $seen, "{$name} must render somewhere on the page");
+                if ($seen[$name][0] !== 'psa') {
+                    $offCore[$name] = $seen[$name][0];
+                }
+            }
+        }
+        ksort($offCore);
+
+        $this->assertSame([
+            'benjipays_autopay_forecast' => 'benjipays',
+            'benjipays_get_customer_payment_methods' => 'benjipays',
+            'benjipays_get_invoice' => 'benjipays',
+            'benjipays_get_settings' => 'benjipays',
+            'benjipays_list_sent_emails' => 'benjipays',
+            'benjipays_list_transactions' => 'benjipays',
+            'get_teams_message_attachment' => 'teams',
+        ], $offCore, 'only the pinned PSA tools may render off the PSA Core card');
+        foreach (array_keys($offCore) as $name) {
+            $this->assertTrue($tierOf[$name]['sensitive'], "{$name} is re-routed off PSA Core and must land in a sensitive tier, never a target card's plain Read tier");
+        }
+        $this->assertSame(['get_teams_message_attachment' => 'teams'], McpToolRegistry::PSA_TOOLS_ON_OTHER_CARDS);
     }
 }
