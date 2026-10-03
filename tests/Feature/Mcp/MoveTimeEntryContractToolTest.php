@@ -365,6 +365,38 @@ class MoveTimeEntryContractToolTest extends TestCase
         $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'));
     }
 
+    /** diff:1: a pending staged call action is stated on the card, and approval leaves the move pending, not stale. */
+    public function test_pending_call_action_keeps_the_held_move_pending(): void
+    {
+        $call = \App\Models\PhoneCall::withoutEvents(fn () => \App\Models\PhoneCall::forceCreate([
+            'call_uuid' => 'synthetic-pending', 'direction' => 'inbound', 'from_number' => '+15555550145',
+            'status' => 'completed', 'is_billable' => true, 'duration' => 720, 'started_at' => now(), 'ticket_id' => $this->ticket->id,
+        ]));
+        app(\App\Services\PrepayService::class)->debitFromPhoneCall($call);
+        $this->assertSame($this->a->id, PrepayTransaction::where('phone_call_id', $call->id)->value('contract_id'), 'precondition: ledgered on A');
+        $held = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract',
+            $this->args(['entry_type' => 'call', 'entry_id' => $call->id])));
+        $this->assertTrue($held['staged']);
+        $action = \App\Models\PhoneCallActionProposal::create(['phone_call_id' => $call->id, 'action_type' => 'set_call_billable', 'payload' => [],
+            'content_hash' => str_repeat('c', 64), 'state' => 'pending', 'drafted_by' => 'synthetic']);
+
+        $moves = app(\App\Services\TimeEntryContractMoveService::class);
+        $this->assertSame('A staged action on this call is awaiting approval, so approving refuses this move and leaves it pending; approve or deny that action first. Nothing has moved yet.',
+            $moves->approvalEffect(TimeEntryMoveProposal::find($held['proposal_id'])));
+
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $this->actingAs($admin)->post(route('time-entry-moves.approve', $held['proposal_id']))
+            ->assertSessionHas('error', 'A staged action on this call is awaiting approval; approve or deny it first. This move stays pending.');
+        $this->assertSame('pending', TimeEntryMoveProposal::find($held['proposal_id'])->state, 'not consumed as stale');
+        $this->assertSame($this->a->id, PrepayTransaction::where('phone_call_id', $call->id)->value('contract_id'), 'nothing moved');
+
+        \App\Models\PhoneCallActionProposal::whereKey($action->id)->update(['state' => 'denied']);
+        $this->assertStringStartsWith('Approving credits 0.20h back to Synthetic Block A', $moves->approvalEffect(TimeEntryMoveProposal::find($held['proposal_id'])));
+        $this->actingAs($admin)->post(route('time-entry-moves.approve', $held['proposal_id']))->assertSessionHas('success');
+        $this->assertSame('done', TimeEntryMoveProposal::find($held['proposal_id'])->state);
+        $this->assertSame($this->b->id, PrepayTransaction::where('phone_call_id', $call->id)->value('contract_id'));
+    }
+
     /** contract-s1:8: moved A -> C -> A since staging is still a change, so approval refuses it as stale. */
     public function test_held_move_goes_stale_after_a_round_trip(): void
     {

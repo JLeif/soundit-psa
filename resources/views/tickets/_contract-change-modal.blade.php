@@ -1,7 +1,8 @@
 {{--
     Ticket contract change (card I3EvQKUV PR 2, SPEC §4, mockup 3). Earlier time stays on the
     contract it was logged against; a ticked entry is moved through PrepayService::moveEntryContract
-    (a visible credit on its contract and a debit on the new one). Expects $ticket and $contractEntries.
+    (a ledgered entry: a visible credit on its contract, and a debit on the new one only when that is hours-prepay;
+    an unledgered entry: a draw from the new contract only when that is hours-prepay). Expects $ticket and $contractEntries.
 --}}
 @php
     $ccContracts = ($ticket->client?->contracts ?? collect())->keyBy('id');
@@ -25,9 +26,10 @@
             <div class="modal-body">
                 <div class="alert alert-info small">
                     Time already logged <strong>stays on the contract it was logged against</strong>. New time on this ticket will use
-                    <strong class="js-cc-to-name"></strong>. Tick any entries that belong on the new contract: each one is credited back to
-                    its contract and debited from the new one, and both contracts' history records the move. An entry with no prepay ledger row
-                    is drawn from the new contract if that contract is hours-prepay; the row says so before you move it.
+                    <strong class="js-cc-to-name"></strong>. Tick any entries that belong on the new contract. An entry with a prepay ledger row is
+                    credited back to its contract and, only when the new contract is hours-prepay, debited from it. An entry with no prepay
+                    ledger row is drawn from the new contract only if that contract is hours-prepay. Both contracts' history records each move,
+                    and each row says what moving it does before you move it.
                 </div>
                 <div class="table-responsive">
                     <table class="table table-sm align-middle mb-3">

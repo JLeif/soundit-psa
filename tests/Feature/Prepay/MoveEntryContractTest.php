@@ -405,6 +405,25 @@ class MoveEntryContractTest extends TestCase
         $this->assertRecalcMatches($this->b);
     }
 
+    /** diff:3: an unledgered call moved with no draw reports its duration in the system note, as a note reports its minutes. */
+    public function test_unledgered_call_move_without_a_draw_reports_its_time(): void
+    {
+        $m = $this->contract('Synthetic Managed M', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $n = $this->contract('Synthetic Managed N', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $this->ticket->update(['contract_id' => $m->id]);
+        $call = $this->phoneCall(720);
+        $this->assertSame($m->id, $call->contract_id, 'precondition: stamped on the non-prepay contract');
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count(), 'precondition: no ledger row');
+
+        $result = $this->move($call, $n);
+
+        $this->assertFalse($result['ledger']);
+        $this->assertSame(0.0, $result['drawn_hours']);
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count(), 'nothing drawn');
+        $this->assertSame("Moved phone call #{$call->id} time (0.20 h) from Synthetic Managed M to Synthetic Managed N: Synthetic reclassification",
+            TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->sole()->body);
+    }
+
     /** Moving a ledgered entry to a non-prepay contract credits A and debits nothing. */
     public function test_move_to_non_prepay_contract_credits_old_and_writes_no_debit(): void
     {

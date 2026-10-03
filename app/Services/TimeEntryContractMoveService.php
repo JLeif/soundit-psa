@@ -316,7 +316,16 @@ class TimeEntryContractMoveService
         try {
             $result = $this->prepay->moveEntryContract($entry, $to, $p->reason.' (staged by '.$p->drafted_by.')', $approver, $guard);
         } catch (\InvalidArgumentException $e) {
-            return $handled ? ['error' => $e->getMessage()] : $stale($e->getMessage());
+            if ($handled) {
+                return ['error' => $e->getMessage()];
+            }
+            // A staged action on the call is refused before the guard runs and is transient: the
+            // move stays pending, to be approved once that action is approved or denied.
+            if ($p->entry_type === 'call' && $this->hasPendingCallAction((int) $p->entry_id)) {
+                return ['error' => $e->getMessage().' This move stays pending.'];
+            }
+
+            return $stale($e->getMessage());
         }
 
         return ['success' => true] + $result;
@@ -368,7 +377,10 @@ class TimeEntryContractMoveService
         $ledger = $entry ? PrepayTransaction::where($p->entry_type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->first() : null;
         $from = $ledger ? Contract::withTrashed()->find($ledger->contract_id) : null;
 
-        if (! $entry || ! $to || (int) $entry->ticket_id !== (int) $p->ticket_id
+        if ($entry && $to && $p->entry_type === 'call' && $entry->ticket?->client_id !== null && $this->hasPendingCallAction((int) $entry->id)) {
+            // moveEntryContract refuses this before any other check; approve() leaves the move pending.
+            $effect = 'A staged action on this call is awaiting approval, so approving refuses this move and leaves it pending; approve or deny that action first.';
+        } elseif (! $entry || ! $to || (int) $entry->ticket_id !== (int) $p->ticket_id
             || $this->loggedContractId($entry, $p->entry_type) !== $this->stagedFrom($p) || $this->movedSince($p)) {
             $effect = 'The entry changed since this move was staged, or it or the new contract is gone, so approving refuses the move as stale.';
         } elseif ((int) $to->client_id !== (int) Ticket::whereKey($p->ticket_id)->value('client_id')) {
@@ -426,6 +438,11 @@ class TimeEntryContractMoveService
         $id = $ledger ?? $entry->contract_id;
 
         return $id === null ? null : (int) $id;
+    }
+
+    private function hasPendingCallAction(int $callId): bool
+    {
+        return PhoneCallActionProposal::where('phone_call_id', $callId)->where('state', 'pending')->exists();
     }
 
     public function deny(int $id, User $approver): array

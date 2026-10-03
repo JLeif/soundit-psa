@@ -249,6 +249,9 @@ class TicketContractChangeModalTest extends TestCase
         $page->assertSee('Change and move');
         $page->assertSee('Change contract only');
         $page->assertSee('stays on the contract it was logged against', false);
+        // diff:5: the banner claims a debit only onto an hours-prepay contract.
+        $page->assertDontSee('each one is credited back to', false);
+        $page->assertSee('only when the new contract is hours-prepay, debited from it', false);
         $page->assertSee('id="ticketContractSelect"', false);
         $this->assertDoesNotMatchRegularExpression('/<select name="contract_id"[^>]*onchange/', $page->getContent(), 'the contract select no longer submits on change');
     }

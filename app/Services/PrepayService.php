@@ -916,7 +916,7 @@ class PrepayService
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
             $report['body'] = fn (float $h, string $drew = '') => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
                 .($from?->name ?? 'no contract').' to '.$target->name.$drew.': '.$reason;
-            $body = $report['body']($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : 0));
+            $body = $report['body']($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600));
             $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
                 'author_id' => $by->id,
