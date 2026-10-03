@@ -3269,6 +3269,8 @@ class IntegrationsController extends Controller
                     .' could not be linked to an asset, so '.($assetsSkipped === 1 ? 'its' : 'their')
                     .' Tactical data is not reaching any asset — where an asset for the machine does exist, any Tactical panel on it belongs to a different agent record. See the sync log for the reason on each.';
 
+                $skipNote .= self::retiredSkipNote($result->details);
+
                 $message .= $skipNote;
             }
 
@@ -3303,6 +3305,33 @@ class IntegrationsController extends Controller
         } catch (\Throwable $e) {
             return back()->with('error', "Tactical device sync failed: {$e->getMessage()}");
         }
+    }
+
+    /**
+     * Name the retired (soft-deleted) assets that blocked a Tactical create, so
+     * "0 new assets" explains itself. Rows come from the sync's capped
+     * details['assets_skipped_retired']; the soft_deleted_conflict counter is the
+     * total, and any excess is reported as not listed rather than dropped. Each
+     * row's wording, restorability included, is TacticalDeviceSyncService's.
+     *
+     * @param  array<string, mixed>  $details
+     */
+    private static function retiredSkipNote(array $details): string
+    {
+        $rows = $details['assets_skipped_retired'] ?? [];
+        if ($rows === []) {
+            return '';
+        }
+
+        $total = max(count($rows), (int) ($details['assets_skipped_reasons']['soft_deleted_conflict'] ?? 0));
+        $lines = array_map(
+            [\App\Services\Tactical\TacticalDeviceSyncService::class, 'describeRetiredSkip'],
+            $rows,
+        );
+        $unlisted = $total - count($rows);
+
+        return ' '.$total.' of them matched a retired (soft-deleted) asset: '.implode('; ', $lines)
+            .($unlisted > 0 ? "; +{$unlisted} more not listed" : '').'.';
     }
 
     public function syncTacticalScripts()
