@@ -86,7 +86,7 @@ class StampEntryContractsTest extends TestCase
         $this->assertMatchesRegularExpression('/\|\s*notes\s*\|\s*3\s*\|\s*1\s*\|\s*1\s*\|\s*1\s*\|\s*0\s*\|/', $out);
         $this->assertMatchesRegularExpression('/\|\s*calls\s*\|\s*1\s*\|\s*1\s*\|\s*0\s*\|\s*0\s*\|\s*0\s*\|/', $out);
         $this->assertStringContainsString("MISMATCH ticket_notes #{$this->ids['mismatch']->id}: stamp contract {$this->ids['b']->id}, ledger contract {$this->ids['a']->id} (left as is)", $out);
-        $this->assertStringContainsString("clients with >1 active contract and no default: 2 (ids: {$this->ids['ticket']->client_id}, {$this->ids['other']->id})", $out);
+        $this->assertStringContainsString("clients with >1 active contract and no valid default: 2 (ids: {$this->ids['ticket']->client_id}, {$this->ids['other']->id})", $out);
     }
 
     public function test_b2_real_run_stamps_nulls_only_leaves_mismatch_and_money_unchanged_then_is_idempotent(): void

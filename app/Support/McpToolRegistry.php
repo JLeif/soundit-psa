@@ -645,7 +645,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'update_ticket',
-            'description' => 'Update the current ticket subject, description, priority, type, or ITIL taxonomy category immediately. The server derives the ticket client from ticket_id, validates the same ticket edit rules as the web form, and writes an action audit row. Requires an explicit token grant.',
+            'description' => 'Update the current ticket subject, description, priority, type, ITIL taxonomy category, or contract immediately. Changing contract_id changes the ticket only and moves no money: time already logged stays on the contract it was logged against, and the response lists entries_on_other_contracts (move each with move_time_entry_contract if it belongs on the new contract). The server derives the ticket client from ticket_id, validates the same ticket edit rules as the web form, and writes an action audit row. Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -674,6 +674,10 @@ class McpToolRegistry
                     'category_id' => [
                         'type' => ['integer', 'null'],
                         'description' => 'Optional ITIL taxonomy category node id — sets/changes the category whose SOP surfaces on get_ticket_detail. Must be an ACTIVE node (get it from the taxonomy read tools); a retired or unknown node is rejected. Pass null to clear (Uncategorized). An agent-set category is authoritative — triage will not overwrite it.',
+                    ],
+                    'contract_id' => [
+                        'type' => ['integer', 'null'],
+                        'description' => 'Optional. Must be an ACTIVE contract of this ticket\'s client (list_client_contracts); null clears it. Changes the ticket only: earlier time stays where it was logged.',
                     ],
                     'reason' => [
                         'type' => 'string',
@@ -1626,6 +1630,8 @@ class McpToolRegistry
             self::createTicketFromCallTool(),
             self::setCallBillableTool(),
             self::setCallBillableTool(true),
+            self::moveTimeEntryContractTool(),
+            self::moveTimeEntryContractTool(true),
             self::blockCallerTool(),
             self::blockCallerTool(true),
             self::allowCallerTool(),
@@ -1657,6 +1663,33 @@ class McpToolRegistry
                     'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
                 ],
                 'required' => ['phone_call_id', 'billable', 'reason'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /**
+     * move_time_entry_contract MOVES MONEY (card I3EvQKUV PR 2, ruling Q9): it runs
+     * PrepayService::moveEntryContract, which credits the entry's hours back to its
+     * contract and debits them from the new one. Same grant contract as
+     * set_call_billable: default-ungranted, a bare or :staged grant holds.
+     *
+     * @return array<string, mixed>
+     */
+    public static function moveTimeEntryContractTool(bool $internal = false): array
+    {
+        return [
+            'name' => $internal ? 'stage_move_time_entry_contract' : 'move_time_entry_contract',
+            'description' => 'Move one time entry (a ticket note with time, or a phone call) to another contract of the same client. THIS MOVES PREPAY MONEY: the entry\'s hours are credited back to the contract it was logged against (a visible credit in that contract\'s history) and debited from the new contract. The ledger is append-only: nothing is deleted. contract_id must be an ACTIVE contract of the ticket\'s client (call list_client_contracts); time never moves to another client. update_ticket with contract_id changes only the ticket and moves no time; use this tool for each entry that should follow. Default-ungranted including legacy tokens. Bare or :staged grants hold for staff approval on the ticket page; only explicit :immediate executes now. A held move is refused as stale at approval if the entry\'s contract changed.',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'entry_type' => ['type' => 'string', 'enum' => ['note', 'call']],
+                    'entry_id' => ['type' => 'integer', 'minimum' => 1, 'description' => 'The ticket note id or phone call id.'],
+                    'contract_id' => ['type' => 'integer', 'minimum' => 1, 'description' => 'Must be an active contract of this ticket\'s client.'],
+                    'reason' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 800],
+                ],
+                'required' => ['entry_type', 'entry_id', 'contract_id', 'reason'],
                 'additionalProperties' => false,
             ],
         ];

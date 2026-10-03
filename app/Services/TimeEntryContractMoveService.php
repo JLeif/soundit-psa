@@ -1,0 +1,293 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\ContractStatus;
+use App\Models\Contract;
+use App\Models\PhoneCall;
+use App\Models\PhoneCallActionProposal;
+use App\Models\PrepayTransaction;
+use App\Models\Ticket;
+use App\Models\TicketNote;
+use App\Models\TimeEntryMoveProposal;
+use App\Models\User;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * The ticket-level face of PrepayService::moveEntryContract (card I3EvQKUV PR 2,
+ * SPEC §4): which time entries a contract change offers to move, the
+ * change-and-move the modal submits, and the held agent move (ruling Q9).
+ */
+class TimeEntryContractMoveService
+{
+    public function __construct(private PrepayService $prepay) {}
+
+    /**
+     * The ticket's time entries as the modal and update_ticket list them: billable
+     * notes with time and billable calls with a duration, with the contract each is
+     * logged against (its ledger row's, else its stamp) and whether it may be moved.
+     *
+     * @return Collection<int, array<string, mixed>>
+     */
+    public function entries(Ticket $ticket, ?int $toContractId = null): Collection
+    {
+        $notes = TicketNote::where('ticket_id', $ticket->id)->where('is_billable', true)
+            ->where('time_minutes', '>', 0)->with('author')->orderBy('noted_at')->orderBy('id')->get();
+        $calls = PhoneCall::where('ticket_id', $ticket->id)->where('is_billable', true)
+            ->with('answeredBy')->orderBy('started_at')->orderBy('id')->get()
+            ->filter(fn (PhoneCall $c) => ($c->effectiveDurationSeconds() ?? 0) > 0);
+
+        $noteRows = PrepayTransaction::whereIn('ticket_note_id', $notes->pluck('id'))->get()->keyBy('ticket_note_id');
+        $callRows = PrepayTransaction::whereIn('phone_call_id', $calls->pluck('id'))->get()->keyBy('phone_call_id');
+        $pendingCalls = PhoneCallActionProposal::whereIn('phone_call_id', $calls->pluck('id'))->where('state', 'pending')
+            ->pluck('phone_call_id')->flip();
+        $pendingMoves = TimeEntryMoveProposal::where('ticket_id', $ticket->id)->where('state', 'pending')->get()
+            ->mapWithKeys(fn ($p) => [$p->entry_type.':'.$p->entry_id => true]);
+
+        $rows = collect();
+        foreach ($notes as $note) {
+            $row = $noteRows->get($note->id);
+            $rows->push($this->row('note', $note->id, mb_substr(trim(strip_tags((string) $note->body)), 0, 60), $note->noted_at ?? $note->created_at,
+                $note->author?->name, round($note->time_minutes / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId));
+        }
+        foreach ($calls as $call) {
+            $row = $callRows->get($call->id);
+            $label = 'Phone call: '.($call->direction?->value ?? 'call');
+            $rows->push($this->row('call', $call->id, $label, $call->started_at ?? $call->created_at,
+                $call->answeredBy?->name, round(($call->effectiveDurationSeconds() ?? 0) / 3600, 2), $row, $call->contract_id,
+                isset($pendingCalls[$call->id]), isset($pendingMoves['call:'.$call->id]), $toContractId));
+        }
+
+        $contracts = Contract::withTrashed()->whereIn('id', $rows->pluck('contract_id')->filter()->unique())->get()->keyBy('id');
+
+        return $rows->sortBy('date')->values()->map(function (array $r) use ($contracts) {
+            $c = $r['contract_id'] ? $contracts->get($r['contract_id']) : null;
+            $r['contract_name'] = $c?->name;
+            $r['contract_prepay'] = (bool) ($c?->has_prepay && ! $c?->prepay_as_amount);
+
+            return $r;
+        });
+    }
+
+    private function row(string $type, int $id, string $label, $date, ?string $by, float $hours, ?PrepayTransaction $ledger,
+        $stamp, bool $pendingCallAction, bool $pendingMove, ?int $toContractId): array
+    {
+        $contractId = $ledger ? (int) $ledger->contract_id : ($stamp === null ? null : (int) $stamp);
+        $locked = match (true) {
+            $pendingCallAction => 'Locked: a staged billable action is awaiting approval',
+            $pendingMove => 'Locked: a staged contract move is awaiting approval',
+            $toContractId !== null && $contractId === $toContractId => 'Already on the new contract',
+            default => null,
+        };
+
+        return [
+            'type' => $type, 'id' => $id, 'label' => $type === 'note' ? 'Note: '.($label !== '' ? $label : 'time entry') : $label,
+            'date' => $date, 'by' => $by, 'hours' => $hours, 'ledger_hours' => $ledger ? abs((float) $ledger->hours) : 0.0,
+            'contract_id' => $contractId, 'locked' => $locked,
+        ];
+    }
+
+    /**
+     * Entries logged against a contract other than the ticket's (update_ticket's
+     * entries_on_other_contracts).
+     *
+     * @return list<array{type: string, id: int, minutes: int, contract_id: ?int}>
+     */
+    public function entriesOnOtherContracts(Ticket $ticket): array
+    {
+        return $this->entries($ticket)
+            ->filter(fn ($r) => $r['contract_id'] !== ($ticket->contract_id === null ? null : (int) $ticket->contract_id))
+            ->map(fn ($r) => ['type' => $r['type'], 'id' => $r['id'], 'minutes' => (int) round($r['hours'] * 60), 'contract_id' => $r['contract_id']])
+            ->values()->all();
+    }
+
+    /**
+     * Change the ticket's contract and, when entries are ticked, move each through
+     * moveEntryContract (one transaction per entry, after the ticket change commits).
+     * The ticket change alone moves no money.
+     *
+     * @param  list<array{type: string, id: int}>  $moves
+     * @return array{moved: int, hours: float, errors: list<string>}
+     */
+    public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
+    {
+        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)->first();
+        if ($contractId !== null && ! $to) {
+            throw new \InvalidArgumentException("Contract {$contractId} is not a contract of this ticket's client.");
+        }
+        if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {
+            throw new \InvalidArgumentException('Entries can only be moved to an active contract.');
+        }
+        if ($moves !== [] && trim((string) $reason) === '') {
+            throw new \InvalidArgumentException('A reason is required to move time entries.');
+        }
+
+        $old = $ticket->contract;
+        if ((int) $ticket->contract_id !== (int) $contractId) {
+            DB::transaction(function () use ($ticket, $contractId, $old, $to, $by) {
+                app(TicketService::class)->updateTicket($ticket, ['contract_id' => $contractId]);
+                $body = 'Ticket contract changed from '.($old?->name ?? 'none').' to '.($to?->name ?? 'none')
+                    .'. Time already logged stays on the contract it was logged against.';
+                TicketNote::create([
+                    'ticket_id' => $ticket->id, 'author_id' => $by->id, 'body' => $body,
+                    'body_html' => \App\Helpers\MarkdownRenderer::render($body),
+                    'note_type' => \App\Enums\NoteType::System, 'is_private' => true, 'noted_at' => now(),
+                ]);
+            });
+        }
+
+        $moved = 0;
+        $hours = 0.0;
+        $errors = [];
+        foreach ($moves as $move) {
+            $entry = $this->entry($ticket, $move['type'] ?? '', (int) ($move['id'] ?? 0));
+            if (! $entry) {
+                $errors[] = 'Entry '.($move['type'] ?? '?').' #'.(int) ($move['id'] ?? 0).' is not a time entry on this ticket.';
+
+                continue;
+            }
+            try {
+                $result = $this->prepay->moveEntryContract($entry, $to, (string) $reason, $by);
+                $moved++;
+                $hours += $result['hours'];
+            } catch (\InvalidArgumentException $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+
+        return ['moved' => $moved, 'hours' => round($hours, 4), 'errors' => $errors];
+    }
+
+    public function entry(Ticket $ticket, string $type, int $id): TicketNote|PhoneCall|null
+    {
+        return match ($type) {
+            'note' => TicketNote::where('ticket_id', $ticket->id)->whereKey($id)->first(),
+            'call' => PhoneCall::where('ticket_id', $ticket->id)->whereKey($id)->first(),
+            default => null,
+        };
+    }
+
+    /**
+     * move_time_entry_contract / stage_move_time_entry_contract (ruling Q9). The
+     * controller's mode gate has already downgraded a non-:immediate grant to staged.
+     * Staged writes one pending proposal and moves nothing; approval re-validates.
+     *
+     * @param  array<string, mixed>  $arguments
+     * @return array<string, mixed>
+     */
+    public function agentMove(array $arguments, string $actor, bool $staged): array
+    {
+        if (\App\Support\TechnicianConfig::killSwitchEngaged()) {
+            return ['error' => 'Technician kill-switch engaged.'];
+        }
+        $allowed = ['entry_type', 'entry_id', 'contract_id', 'reason'];
+        if (array_diff(array_keys($arguments), $allowed) !== []) {
+            return ['error' => 'move_time_entry_contract accepts only: '.implode(', ', $allowed).'.'];
+        }
+        $type = $arguments['entry_type'] ?? null;
+        $id = $arguments['entry_id'] ?? null;
+        $contractId = $arguments['contract_id'] ?? null;
+        $reason = $arguments['reason'] ?? null;
+        if (! in_array($type, ['note', 'call'], true) || ! is_int($id) || $id < 1 || ! is_int($contractId) || $contractId < 1
+            || ! is_string($reason) || trim($reason) === '' || mb_strlen($reason) > 800) {
+            return ['error' => 'entry_type (note|call), positive integer entry_id and contract_id, and a reason (1-800 characters) are required.'];
+        }
+
+        $entry = $type === 'note' ? TicketNote::find($id) : PhoneCall::find($id);
+        $ticket = $entry?->ticket;
+        if (! $entry || ! $ticket) {
+            return ['error' => "No {$type} {$id} on a ticket."];
+        }
+        $refusal = $this->moveRefusal($ticket, $entry, $type, $contractId);
+        if ($refusal !== null) {
+            return ['error' => $refusal, 'error_code' => 'contract_not_allowed'];
+        }
+        $from = $this->loggedContractId($entry, $type);
+
+        if (! $staged) {
+            $by = User::find(\App\Support\TechnicianConfig::requiredAiActorUserId());
+            try {
+                $result = $this->prepay->moveEntryContract($entry, Contract::findOrFail($contractId), $reason, $by);
+            } catch (\InvalidArgumentException $e) {
+                return ['error' => $e->getMessage()];
+            }
+
+            return ['success' => true, 'staged' => false, 'ticket_id' => $ticket->id] + $result
+                + ['message' => 'Time entry moved: credited back to its contract and debited from the new one.'];
+        }
+
+        $hash = hash('sha256', json_encode([$type, $id, $from, $contractId, trim($reason)], JSON_THROW_ON_ERROR));
+        $proposal = TimeEntryMoveProposal::firstOrCreate(
+            ['content_hash' => $hash, 'state' => 'pending', 'drafted_by' => $actor],
+            ['entry_type' => $type, 'entry_id' => $id, 'ticket_id' => $ticket->id, 'from_contract_id' => $from,
+                'to_contract_id' => $contractId, 'reason' => trim($reason)],
+        );
+
+        return [
+            'success' => true, 'staged' => true, 'proposal_id' => $proposal->id, 'ticket_id' => $ticket->id,
+            'entry_type' => $type, 'entry_id' => $id, 'from_contract_id' => $from, 'to_contract_id' => $contractId,
+            'message' => 'Move held for staff approval on the ticket page; no prepay hours moved.',
+        ];
+    }
+
+    /** Approve a held move: re-validated now, and refused as stale if the entry's contract changed. */
+    public function approve(TimeEntryMoveProposal $proposal, User $approver): array
+    {
+        return DB::transaction(function () use ($proposal, $approver) {
+            $p = TimeEntryMoveProposal::whereKey($proposal->id)->lockForUpdate()->first();
+            if (! $p || $p->state !== 'pending') {
+                return ['error' => 'Proposal already handled or not found.'];
+            }
+            $entry = $p->entry_type === 'note' ? TicketNote::find($p->entry_id) : PhoneCall::find($p->entry_id);
+            $stale = ! $entry || (int) $entry->ticket_id !== (int) $p->ticket_id
+                || $this->loggedContractId($entry, $p->entry_type) !== ($p->from_contract_id === null ? null : (int) $p->from_contract_id);
+            if ($stale) {
+                $p->update(['state' => 'stale', 'handled_at' => now(), 'approved_by' => $approver->id]);
+
+                return ['error' => 'The entry changed since this move was staged; nothing moved. Re-stage it if it is still wanted.'];
+            }
+            $p->update(['state' => 'done', 'handled_at' => now(), 'approved_by' => $approver->id]);
+            try {
+                $result = $this->prepay->moveEntryContract($entry, Contract::withTrashed()->findOrFail($p->to_contract_id),
+                    $p->reason.' (staged by '.$p->drafted_by.')', $approver);
+            } catch (\InvalidArgumentException $e) {
+                $p->update(['state' => 'stale']);
+
+                return ['error' => $e->getMessage()];
+            }
+
+            return ['success' => true] + $result;
+        });
+    }
+
+    private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string
+    {
+        $active = Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
+            ->where('status', ContractStatus::Active)->exists();
+        if (! $active) {
+            return "contract_id must be an ACTIVE contract of this ticket's client; contract {$contractId} is not. Call list_client_contracts for valid ids.";
+        }
+        if ($this->loggedContractId($entry, $type) === $contractId) {
+            return "That {$type} is already on contract {$contractId}.";
+        }
+
+        return null;
+    }
+
+    private function loggedContractId(TicketNote|PhoneCall $entry, string $type): ?int
+    {
+        $ledger = PrepayTransaction::where($type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->value('contract_id');
+        $id = $ledger ?? $entry->contract_id;
+
+        return $id === null ? null : (int) $id;
+    }
+
+    public function deny(int $id, User $approver): array
+    {
+        $changed = TimeEntryMoveProposal::whereKey($id)->where('state', 'pending')
+            ->update(['state' => 'denied', 'handled_at' => now(), 'approved_by' => $approver->id]);
+
+        return $changed ? ['success' => true, 'message' => 'Time entry move denied; nothing moved.'] : ['error' => 'Proposal already handled or not found.'];
+    }
+}

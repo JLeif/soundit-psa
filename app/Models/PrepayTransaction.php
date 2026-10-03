@@ -26,6 +26,8 @@ class PrepayTransaction extends Model
         'invoice_date',
         'expiry_date',
         'expired_transaction_id',
+        'moved_ticket_note_id',
+        'moved_phone_call_id',
     ];
 
     protected function casts(): array
@@ -97,8 +99,14 @@ class PrepayTransaction extends Model
                 PrepayTransactionSource::Expiration->value,
                 PrepayTransactionSource::TransferOut->value,
                 PrepayTransactionSource::TransferIn->value,
+                PrepayTransactionSource::EntryMovedOut->value,
             ])->orWhereNull('source');
-        });
+        })
+            // A debit whose entry moved to another contract (card I3EvQKUV PR 2) is
+            // reversed by its EntryMovedOut credit; the work is consumed on the new
+            // contract, so neither row counts here.
+            ->whereNull('moved_ticket_note_id')
+            ->whereNull('moved_phone_call_id');
     }
 
     /**

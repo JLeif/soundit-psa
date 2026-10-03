@@ -153,7 +153,12 @@ class PrepayExpirationService
             return [];
         }
 
+        // A moved entry's detached debit and its EntryMovedOut credit cancel out and
+        // never take part in FIFO (card I3EvQKUV PR 2): the replay is the one the
+        // contract would have had if the time had never been logged on it.
         $txns = $contract->prepayTransactions()
+            ->whereNull('moved_ticket_note_id')
+            ->whereNull('moved_phone_call_id')
             ->orderByRaw('COALESCE(date, created_at) asc')
             ->orderBy('id')
             ->get();

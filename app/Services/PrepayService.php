@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\ContractStatus;
 use App\Enums\InvoiceStatus;
 use App\Enums\PrepayTransactionSource;
 use App\Models\Contract;
@@ -454,14 +455,15 @@ class PrepayService
     /**
      * Create or update a prepay debit from a ticket note's billable time.
      */
-    public function debitFromTicketNote(TicketNote $note): ?PrepayTransaction
+    public function debitFromTicketNote(TicketNote $note, bool $statusRetry = false): ?PrepayTransaction
     {
         if (! $note->exists || $note->getKey() === null) {
             return null;
         }
 
         $alertContract = null;
-        $txn = DB::transaction(function () use ($note, &$alertContract) {
+        $retry = false;
+        $txn = DB::transaction(function () use ($note, &$alertContract, &$retry) {
             // Lock order: note -> existing prepay transaction -> contract.
             $lockedNote = TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
             if (! $lockedNote || $lockedNote->trashed() || ! $lockedNote->is_billable || $lockedNote->time_minutes <= 0) {
@@ -500,6 +502,13 @@ class PrepayService
             if (! $existing) {
                 $contract = $this->stampedOrResolvedNoteContract($note, $ticket);
                 if (! $contract) {
+                    return null;
+                }
+                // #4931: re-checked under the contract's own lock at debit time.
+                $contract = $this->lockedActiveContract($contract, (int) $ticket->client_id, 'ticket_note_id', $note->id);
+                if (! $contract) {
+                    $retry = true;
+
                     return null;
                 }
             }
@@ -580,6 +589,12 @@ class PrepayService
 
             return $txn;
         });
+
+        if ($retry && ! $statusRetry) {
+            // The contract stopped being active between resolution and debit (#4931): the
+            // note re-resolves once, on committed state (its stale stamp no longer validates).
+            return $this->debitFromTicketNote($note, true);
+        }
 
         // Check alert threshold after transaction commits; a soft-deleted ledger contract
         // still takes the difference but is never alerted on.
@@ -749,6 +764,225 @@ class PrepayService
         return $released;
     }
 
+    /**
+     * Move one time entry's contract (card I3EvQKUV PR 2, SPEC §4, LEDGER-SHAPE.md).
+     *
+     * Append-only (ruling Q4): no ledger row is deleted or re-created. The entry's
+     * existing debit row stays on the old contract with its hours, date, description
+     * and contract unchanged; only its entry link moves to moved_ticket_note_id /
+     * moved_phone_call_id. A new EntryMovedOut credit on the old contract reverses it,
+     * and a new debit linked to the entry is written on $to when $to is hours prepay.
+     * Every later edit, unbill, delete or re-debit finds the entry's row by its link,
+     * so it acts on $to only and never touches the old pair.
+     *
+     * Refused (InvalidArgumentException, nothing written) when $to is not an active
+     * contract of the ticket's client, when the entry is already on $to, when its
+     * ledger row is on another client's contract (ruling Q5), or when a staged action
+     * on the entry is awaiting approval. An entry with no ledger row moves its stamp
+     * only; the ordinary debit path then runs after commit, as on any entry edit.
+     *
+     * Lock order: entry -> prepay_transaction -> contracts in ascending id.
+     *
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool}
+     */
+    public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by): array
+    {
+        $reason = trim($reason);
+        if ($reason === '') {
+            throw new \InvalidArgumentException('A reason is required to move a time entry.');
+        }
+
+        $isNote = $entry instanceof TicketNote;
+        $type = $isNote ? 'note' : 'call';
+        $key = $isNote ? 'ticket_note_id' : 'phone_call_id';
+        $movedKey = $isNote ? 'moved_ticket_note_id' : 'moved_phone_call_id';
+        $alert = [];
+
+        $result = DB::transaction(function () use ($entry, $to, $reason, $by, $isNote, $type, $key, $movedKey, &$alert) {
+            $locked = $isNote
+                ? TicketNote::withTrashed()->whereKey($entry->id)->lockForUpdate()->first()
+                : PhoneCall::whereKey($entry->id)->lockForUpdate()->first();
+            if (! $locked || ($isNote && $locked->trashed())) {
+                throw new \InvalidArgumentException("That {$type} no longer exists.");
+            }
+            $ticket = $locked->ticket;
+            if (! $ticket || $ticket->client_id === null) {
+                throw new \InvalidArgumentException("That {$type} is not on a client's ticket.");
+            }
+            if (! $isNote && $this->hasPendingCallAction($locked->id)) {
+                throw new \InvalidArgumentException('A staged action on this call is awaiting approval; approve or deny it first.');
+            }
+
+            $row = PrepayTransaction::where($key, $locked->id)->first();
+            if ($row) {
+                $row = PrepayTransaction::whereKey($row->id)->lockForUpdate()->first();
+            }
+
+            $fromId = $row ? (int) $row->contract_id : ($locked->contract_id === null ? null : (int) $locked->contract_id);
+            $ids = array_values(array_unique(array_filter([$fromId, (int) $to->id])));
+            sort($ids);
+            $contracts = Contract::withTrashed()->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+
+            $target = $contracts->get($to->id);
+            if (! $target || $target->trashed() || $target->status !== ContractStatus::Active
+                || (int) $target->client_id !== (int) $ticket->client_id) {
+                throw new \InvalidArgumentException("Contract {$to->id} is not an active contract of this ticket's client.");
+            }
+            if ($fromId === (int) $target->id) {
+                throw new \InvalidArgumentException("That {$type} is already on {$target->name}.");
+            }
+            $from = $fromId === null ? null : $contracts->get($fromId);
+
+            $hours = 0.0;
+            if ($row) {
+                if (! $from || (int) $from->client_id !== (int) $target->client_id) {
+                    // Ruling Q5: time stays on the old client's contracts.
+                    throw new \InvalidArgumentException("That {$type}'s time is on another client's contract; it stays there.");
+                }
+                if ($row->hours === null) {
+                    throw new \InvalidArgumentException("That {$type}'s ledger row is not in hours.");
+                }
+                $hours = abs((float) $row->hours);
+
+                // Detach: the original debit stays on the old contract, unchanged.
+                PrepayTransaction::whereKey($row->id)->update([$key => null, $movedKey => $locked->id]);
+                PrepayTransaction::create([
+                    'contract_id' => $from->id,
+                    'source' => PrepayTransactionSource::EntryMovedOut,
+                    $movedKey => $locked->id,
+                    'user_id' => $by->id,
+                    'date' => now(),
+                    'hours' => $hours,
+                    'description' => mb_substr("Moved to {$target->name}: ".($row->description ?? $row->source?->label() ?? ''), 0, 255),
+                    'note' => mb_substr($reason, 0, 255),
+                ]);
+                $from->decrement('prepay_used', $hours);
+                $from->increment('prepay_balance', $hours);
+                $alert[] = $from;
+
+                if ($this->hoursPrepayOrNull($target)) {
+                    $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
+                    PrepayTransaction::create([
+                        'contract_id' => $target->id,
+                        'source' => $isNote ? PrepayTransactionSource::TicketTime : PrepayTransactionSource::PhoneCallTime,
+                        $key => $locked->id,
+                        'user_id' => $isNote ? $locked->author_id : $locked->answered_by,
+                        'date' => $isNote ? ($locked->noted_at ?? $locked->created_at) : ($locked->started_at ?? $locked->created_at),
+                        'hours' => -$hours,
+                        'description' => $isNote ? "Ticket #{$ticket->id}: {$subject}" : "Phone call on Ticket #{$ticket->id}: {$subject}",
+                    ]);
+                    $target->increment('prepay_used', $hours);
+                    $target->decrement('prepay_balance', $hours);
+                    $alert[] = $target;
+                }
+            }
+
+            // Query-builder stamp: a move is not an edit and must not re-enter the observers.
+            ($isNote ? TicketNote::withTrashed() : PhoneCall::query())->whereKey($locked->id)
+                ->update(['contract_id' => $target->id, 'contract_held_at' => null]);
+
+            $changes = [
+                'entry_type' => $type,
+                'entry_id' => $locked->id,
+                'ticket_id' => $ticket->id,
+                'hours' => $hours,
+                'ledger' => $row !== null,
+                'reason' => $reason,
+                'from_contract_id' => $fromId,
+                'from_contract' => $from?->name,
+                'to_contract_id' => $target->id,
+                'to_contract' => $target->name,
+            ];
+            foreach (array_filter([$from, $target]) as $contract) {
+                ContractActivity::create([
+                    'contract_id' => $contract->id,
+                    'user_id' => $by->id,
+                    'action' => $contract->id === $target->id ? 'entry_moved_in' : 'entry_moved_out',
+                    'changes' => $changes,
+                    'created_at' => now(),
+                ]);
+            }
+
+            $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
+            $body = 'Moved '.$what.' time ('.number_format($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : 0), 2).' h) from '
+                .($from?->name ?? 'no contract').' to '.$target->name.': '.$reason;
+            TicketNote::create([
+                'ticket_id' => $ticket->id,
+                'author_id' => $by->id,
+                'body' => $body,
+                'body_html' => \App\Helpers\MarkdownRenderer::render($body),
+                'note_type' => \App\Enums\NoteType::System,
+                'is_private' => true,
+                'noted_at' => now(),
+            ]);
+
+            Log::info('[Prepay] Time entry contract moved', [
+                $key => $locked->id,
+                'from_contract_id' => $fromId,
+                'to_contract_id' => $target->id,
+                'hours' => $hours,
+                'ledger' => $row !== null,
+                'user_id' => $by->id,
+            ]);
+
+            return [
+                'entry_type' => $type,
+                'entry_id' => (int) $locked->id,
+                'from_contract_id' => $fromId,
+                'to_contract_id' => (int) $target->id,
+                'hours' => $hours,
+                'ledger' => $row !== null,
+            ];
+        });
+
+        if (! $result['ledger']) {
+            // No ledger row moved: the entry is now stamped on $to, and the ordinary debit
+            // path decides (billable time on an hours-prepay $to is debited there).
+            $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
+            if ($fresh) {
+                $isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh);
+            }
+        }
+
+        foreach ($alert as $contract) {
+            $contract->refresh();
+            if (! $contract->trashed() && $contract->has_prepay) {
+                app(PrepayAlertService::class)->checkThreshold($contract);
+            }
+        }
+
+        return $result;
+    }
+
+    private function hasPendingCallAction(int $callId): bool
+    {
+        return \App\Models\PhoneCallActionProposal::where('phone_call_id', $callId)->where('state', 'pending')->exists();
+    }
+
+    /**
+     * #4931: the debit target re-read under its own row lock, at debit time. Null when
+     * it is no longer an active contract of the ticket's client (expired, cancelled,
+     * soft-deleted or moved since it was resolved), so an inactive contract is never
+     * drawn down. The caller then re-resolves once after its transaction: the stale
+     * stamp fails ContractResolver's active check, so the entry goes to the ticket or
+     * client default, or is held under "Needs contract" when that is ambiguous.
+     */
+    private function lockedActiveContract(Contract $contract, int $clientId, string $entryKey, int $entryId): ?Contract
+    {
+        $locked = Contract::whereKey($contract->id)->lockForUpdate()->first();
+        if ($locked && $locked->status === ContractStatus::Active && (int) $locked->client_id === $clientId) {
+            return $locked;
+        }
+
+        Log::info('[Prepay] Debit target not active at debit', [
+            $entryKey => $entryId,
+            'contract_id' => $contract->id,
+            'status' => $locked?->status?->value,
+        ]);
+
+        return null;
+    }
+
     private function hoursPrepayOrNull(?Contract $contract): ?Contract
     {
         if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
@@ -834,18 +1068,42 @@ class PrepayService
     /**
      * Create or update a prepay debit from a phone call's billable duration.
      */
-    public function debitFromPhoneCall(PhoneCall $call): ?PrepayTransaction
+    public function debitFromPhoneCall(PhoneCall $call, bool $statusRetry = false): ?PrepayTransaction
     {
         $ticket = $call->ticket;
 
-        if (! $ticket) {
+        if (! $ticket || ! $call->exists) {
             return null;
         }
 
-        // Every unledgered call re-resolves here, so a stamp that no longer validates is
-        // never debited (r1 diff:4); ledgered time stays where it was debited.
-        if ($call->exists && ! PrepayTransaction::where('phone_call_id', $call->id)->exists()) {
-            if (! $this->stampPhoneCallContract($call)) {
+        $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
+        $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
+
+        $alertContract = null;
+        $retry = false;
+        $txn = DB::transaction(function () use ($call, $ticket, $description, &$alertContract, &$retry) {
+            // Lock the parent call row first so concurrent debits for one call queue
+            // here. Without it, under InnoDB's default REPEATABLE READ a locking read
+            // that finds no prepay row takes only a gap lock, both racers can hold
+            // that gap lock, and their INSERTs then deadlock. The unique index is the
+            // backstop for any writer that skips this lock.
+            $locked = PhoneCall::whereKey($call->id)->lockForUpdate()->first();
+            if (! $locked) {
+                return null;
+            }
+            // The stamp and hold marker are read and written only under the call lock,
+            // as the note path does (#4922): a racing debit cannot re-mark a call that
+            // another debit has just ledgered.
+            foreach (['contract_id', 'contract_held_at'] as $key) {
+                $call->setAttribute($key, $locked->getAttribute($key));
+                $call->syncOriginalAttribute($key);
+            }
+
+            $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+
+            // Every unledgered call re-resolves here, so a stamp that no longer validates is
+            // never debited (r1 diff:4); ledgered time stays where it was debited.
+            if (! $existing && ! $this->stampPhoneCallContract($call)) {
                 $resolution = app(ContractResolver::class)->forEntry($ticket);
                 if ($resolution->isAmbiguous()) {
                     // The marker releaseHeldDebits() re-runs when the ambiguity ends (r1 diff:1, r2).
@@ -857,37 +1115,37 @@ class PrepayService
                     ]);
                 }
             }
-        }
+            if ($existing && $call->contract_held_at !== null) {
+                // A ledgered call is not held (#4922).
+                PhoneCall::whereKey($call->id)->update(['contract_held_at' => null]);
+                $call->setAttribute('contract_held_at', null);
+                $call->syncOriginalAttribute('contract_held_at');
+            }
 
-        $contract = $this->resolveContractForPhoneCall($call);
+            $contract = $this->resolveContractForPhoneCall($call);
+            if (! $contract) {
+                return null;
+            }
+            $alertContract = $contract;
 
-        if (! $contract) {
-            return null;
-        }
+            $durationSeconds = $call->effectiveDurationSeconds();
+            if (! $call->is_billable || ! $durationSeconds || $durationSeconds <= 0) {
+                $this->reverseDebitForPhoneCall($call);
 
-        $durationSeconds = $call->effectiveDurationSeconds();
-        if (! $call->is_billable || ! $durationSeconds || $durationSeconds <= 0) {
-            $this->reverseDebitForPhoneCall($call);
+                return null;
+            }
 
-            return null;
-        }
-
-        $hours = round($durationSeconds / 3600, 4);
-        $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
-        $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
-
-        $alertContract = $contract;
-        $txn = DB::transaction(function () use ($contract, $call, $ticket, $hours, $description, &$alertContract) {
-            // Lock the parent call row first so concurrent debits for one call queue
-            // here. Without it, under InnoDB's default REPEATABLE READ a locking read
-            // that finds no prepay row takes only a gap lock, both racers can hold
-            // that gap lock, and their INSERTs then deadlock. The unique index is the
-            // backstop for any writer that skips this lock.
-            PhoneCall::whereKey($call->id)->lockForUpdate()->first();
-
-            $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
+            $hours = round($durationSeconds / 3600, 4);
 
             if (! $existing) {
+                // #4931: a new debit re-checks its contract under the contract's own lock.
+                $contract = $this->lockedActiveContract($contract, (int) $ticket->client_id, 'phone_call_id', $call->id);
+                if (! $contract) {
+                    $retry = true;
+                    $alertContract = null;
+
+                    return null;
+                }
                 try {
                     $txn = PrepayTransaction::create([
                         'contract_id' => $contract->id,
@@ -963,6 +1221,12 @@ class PrepayService
 
             return $txn;
         });
+
+        if ($retry && ! $statusRetry) {
+            // The contract stopped being active between resolution and debit (#4931): the
+            // stale stamp was cleared, so the call re-resolves once, on committed state.
+            return $this->debitFromPhoneCall($call, true);
+        }
 
         if ($alertContract) {
             $alertContract->refresh();
@@ -1074,7 +1338,16 @@ class PrepayService
     {
         $field = $contract->prepay_as_amount ? 'amount' : 'hours';
 
+        // An EntryMovedOut credit gives back hours a moved entry consumed (card I3EvQKUV
+        // PR 2): it reverses usage, it is not a purchase, so it nets against prepay_used
+        // rather than adding to prepay_total — the columns a reverse used to leave.
         $credits = (float) $contract->prepayTransactions()
+            ->where($field, '>', 0)
+            ->where(fn ($q) => $q->where('source', '!=', PrepayTransactionSource::EntryMovedOut)->orWhereNull('source'))
+            ->sum($field);
+
+        $movedBack = (float) $contract->prepayTransactions()
+            ->where('source', PrepayTransactionSource::EntryMovedOut)
             ->where($field, '>', 0)
             ->sum($field);
 
@@ -1090,13 +1363,14 @@ class PrepayService
             ->where($field, '<', 0)
             ->sum($field));
 
-        $consumed = round($debits - $expired, 4);
+        $consumed = round($debits - $expired - $movedBack, 4);
+        $balance = round($credits + $movedBack - $debits, 4);
 
         $contract->update([
             'prepay_total' => $credits,
             'prepay_used' => $consumed,
             'prepay_expired' => $expired,
-            'prepay_balance' => round($credits - $debits, 4),
+            'prepay_balance' => $balance,
         ]);
 
         Log::info('[Prepay] Balance recalculated from ledger', [
@@ -1104,7 +1378,7 @@ class PrepayService
             'total' => $credits,
             'used' => $consumed,
             'expired' => $expired,
-            'balance' => round($credits - $debits, 4),
+            'balance' => $balance,
         ]);
     }
 

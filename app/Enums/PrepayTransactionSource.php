@@ -17,6 +17,10 @@ enum PrepayTransactionSource: string
     // destination. Always created as a pair by PrepayService::transfer().
     case TransferOut = 'transfer_out';
     case TransferIn = 'transfer_in';
+    // A time entry moved to another contract of the same client (card I3EvQKUV PR 2):
+    // the credit on the old contract that reverses the entry's detached debit row.
+    // It returns consumption, so it is not a purchase (recalculateBalanceLocked).
+    case EntryMovedOut = 'entry_moved_out';
 
     public function label(): string
     {
@@ -31,11 +35,12 @@ enum PrepayTransactionSource: string
             self::Expiration => 'Expiration',
             self::TransferOut => 'Transfer Out',
             self::TransferIn => 'Transfer In',
+            self::EntryMovedOut => 'Time Moved Out',
         };
     }
 
     public function isCredit(): bool
     {
-        return in_array($this, [self::HaloSync, self::InvoiceDeposit, self::ManualCredit, self::TransferIn]);
+        return in_array($this, [self::HaloSync, self::InvoiceDeposit, self::ManualCredit, self::TransferIn, self::EntryMovedOut]);
     }
 }
