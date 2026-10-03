@@ -877,7 +877,7 @@ class PrepayService
         $description = "Phone call on Ticket #{$ticket->id}: {$subject}";
 
         $alertContract = $contract;
-        $txn = DB::transaction(function () use ($contract, $call, $hours, $description, &$alertContract) {
+        $txn = DB::transaction(function () use ($contract, $call, $ticket, $hours, $description, &$alertContract) {
             // Lock the parent call row first so concurrent debits for one call queue
             // here. Without it, under InnoDB's default REPEATABLE READ a locking read
             // that finds no prepay row takes only a gap lock, both racers can hold
@@ -911,10 +911,14 @@ class PrepayService
                 // Lock order remains call -> prepay transaction -> contract.
                 $originalContract = $existing->contract()->lockForUpdate()->first();
                 $alertContract = $originalContract;
+                // A call relinked to another client's ticket keeps its time on the old client's
+                // contract (card I3EvQKUV); that contract's ledger keeps its own description (#4924).
+                $ledgerClientId = Contract::withTrashed()->whereKey($existing->contract_id)->value('client_id');
+                $sameClient = $ledgerClientId !== null && (int) $ticket->client_id === (int) $ledgerClientId;
                 $oldHours = abs((float) $existing->hours);
                 $existing->update([
                     'hours' => -$hours,
-                    'description' => $description,
+                    'description' => $sameClient ? $description : $existing->description,
                     'date' => $call->started_at ?? $call->created_at,
                 ]);
 
