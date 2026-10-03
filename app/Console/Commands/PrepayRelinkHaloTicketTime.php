@@ -16,9 +16,13 @@ use RuntimeException;
  * This command reads an id-only map exported from Halo (halo action id -> halo ticket
  * id + actionnumber) and fills ticket_note_id on those rows.
  *
- * It writes ONLY prepay_transactions.ticket_note_id, and only where it is NULL. Hours,
- * dates, descriptions, users and contract balances are never touched. A row is linked
- * only when every check passes:
+ * It writes ONLY prepay_transactions.ticket_note_id, and only where it is NULL. Once a row
+ * is linked, every later sync of the note runs PrepayService::debitFromTicketNote() on it:
+ * a non-billable or zero-time note reverses the row, a note with other time re-sets its
+ * hours and moves the contract balance by the difference, and a note stamped to another
+ * contract leaves the row refused. That sync may also re-set the row's date and description
+ * from the note and its ticket; this command does not check those. A row is linked only
+ * when every check passes:
  *   - the map has exactly one row for the action id (no-map otherwise);
  *   - that map row's halo ticket id equals tickets.halo_id of the "Ticket #<id>" in the
  *     description; a missing ticket or a NULL halo_id also counts as ticket-mismatch;
@@ -27,6 +31,10 @@ use RuntimeException;
  *     soft-deleted notes (no-note / multi-note); a soft-deleted match is refused
  *     (trashed-note): linking to a deleted note would hand the row to the note-delete
  *     reversal path;
+ *   - the note is billable (not-billable otherwise; NULL counts as not billable), its
+ *     time_minutes > 0 and, as hours rounded to 4 places, equal to the row's debit
+ *     (time-mismatch otherwise), and its contract stamp is NULL or the row's contract
+ *     (stamp-mismatch otherwise);
  *   - no other prepay row already holds that note, through ticket_note_id or
  *     moved_ticket_note_id (already-linked-note), and no other candidate in this run
  *     targets it (duplicate-target: all of them are refused);
@@ -39,10 +47,11 @@ use RuntimeException;
  * file (ptx id -> note id linked) is written before the first update and the command
  * refuses if the path exists. Rollback, per entry:
  *   UPDATE prepay_transactions SET ticket_note_id = NULL WHERE id = <ptx> AND ticket_note_id = <note>;
- * Inside one transaction, each update first re-checks under lock that no row holds the note
- * through ticket_note_id or moved_ticket_note_id, and is guarded on ticket_note_id IS NULL
- * and phone_call_id IS NULL; if the note is held or a guarded update hits no row, the whole
- * run rolls back.
+ * Inside one transaction, each update first locks the note and the row and re-checks the
+ * note checks above (live, billable, time, stamp), then re-checks under lock that no row
+ * holds the note through ticket_note_id or moved_ticket_note_id, and is guarded on
+ * ticket_note_id IS NULL and phone_call_id IS NULL; if a re-check fails, the note is held or
+ * a guarded update hits no row, the whole run rolls back.
  *
  * Output is counts and ledger row ids only: no subjects, names or descriptions.
  * Running it against production (dry run included) needs Charlie's go for that run.
@@ -66,7 +75,7 @@ class PrepayRelinkHaloTicketTime extends Command
     /** Refusal classes, in report order. */
     public const CLASSES = [
         'excluded', 'no-map', 'ticket-mismatch', 'client-mismatch', 'no-note', 'multi-note',
-        'trashed-note', 'already-linked-note', 'duplicate-target',
+        'trashed-note', 'not-billable', 'time-mismatch', 'stamp-mismatch', 'already-linked-note', 'duplicate-target',
     ];
 
     protected $signature = 'prepay:relink-halo-ticket-time
@@ -147,7 +156,7 @@ class PrepayRelinkHaloTicketTime extends Command
             ->whereNull('ticket_note_id')
             ->whereNull('phone_call_id')
             ->orderBy('id')
-            ->get(['id', 'contract_id', 'description']);
+            ->get(['id', 'contract_id', 'hours', 'description']);
 
         foreach ($rows as $row) {
             if (! preg_match('/\[(\d+)\]$/', (string) $row->description, $m)) {
@@ -190,7 +199,7 @@ class PrepayRelinkHaloTicketTime extends Command
             $notes = DB::table('ticket_notes')
                 ->where('ticket_id', $ticket->id)
                 ->where('halo_note_id', $entry['actionnumber'])
-                ->get(['id', 'deleted_at']);
+                ->get(['id', 'deleted_at', 'is_billable', 'time_minutes', 'contract_id']);
             if ($notes->count() !== 1) {
                 $refused[$notes->isEmpty() ? 'no-note' : 'multi-note'][] = $ptxId;
 
@@ -198,6 +207,12 @@ class PrepayRelinkHaloTicketTime extends Command
             }
             if ($notes[0]->deleted_at !== null) {
                 $refused['trashed-note'][] = $ptxId;
+
+                continue;
+            }
+            $refusal = $this->noteRefusal($notes[0], $row);
+            if ($refusal !== null) {
+                $refused[$refusal][] = $ptxId;
 
                 continue;
             }
@@ -256,6 +271,13 @@ class PrepayRelinkHaloTicketTime extends Command
         try {
             DB::transaction(function () use ($links) {
                 foreach ($links as $ptxId => $noteId) {
+                    // Lock order as in debitFromTicketNote(): note, then prepay rows.
+                    $note = DB::table('ticket_notes')->where('id', $noteId)->lockForUpdate()
+                        ->first(['id', 'deleted_at', 'is_billable', 'time_minutes', 'contract_id']);
+                    $row = DB::table('prepay_transactions')->where('id', $ptxId)->lockForUpdate()->first(['contract_id', 'hours']);
+                    if ($note === null || $note->deleted_at !== null || $row === null || $this->noteRefusal($note, $row) !== null) {
+                        throw new RuntimeException("Ptx {$ptxId} or note {$noteId} no longer passes the planning checks; rolled back, no ledger row was changed.");
+                    }
                     $holder = DB::table('prepay_transactions')
                         ->where(fn ($q) => $q->where('ticket_note_id', $noteId)->orWhere('moved_ticket_note_id', $noteId))
                         ->lockForUpdate()
@@ -283,6 +305,28 @@ class PrepayRelinkHaloTicketTime extends Command
         $this->line('linked: '.count($links).'. Rollback file written first.');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * The refusal class for linking a live note to a ledger row, or null. Once linked, a sync
+     * of the note runs debitFromTicketNote() on the row: a non-billable or zero-time note
+     * reverses it, other time re-prices it and moves the balance, and a stamp to another
+     * contract leaves it refused.
+     */
+    private function noteRefusal(object $note, object $row): ?string
+    {
+        if (! $note->is_billable) {
+            return 'not-billable';
+        }
+        $minutes = (int) $note->time_minutes;
+        if ($minutes <= 0 || -round($minutes / 60, 4) !== round((float) $row->hours, 4)) {
+            return 'time-mismatch';
+        }
+        if ($note->contract_id !== null && (int) $note->contract_id !== (int) $row->contract_id) {
+            return 'stamp-mismatch';
+        }
+
+        return null;
     }
 
     /** @return array<int, array{halo_ticket_id: int, actionnumber: int}> keyed by halo action id */

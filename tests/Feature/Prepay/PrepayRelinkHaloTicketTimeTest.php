@@ -46,13 +46,14 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
             'prepay_as_amount' => false, 'prepay_total' => 10, 'prepay_used' => 0, 'prepay_balance' => 10,
         ];
         $cp = Contract::create($base + ['client_id' => $p->id, 'name' => 'Synthetic P prepay']);
+        $cp2 = Contract::create($base + ['client_id' => $p->id, 'name' => 'Synthetic P second prepay']);
 
         $tp = Ticket::factory()->create(['client_id' => $p->id, 'subject' => 'Synthetic P ticket']);
         $tq = Ticket::factory()->create(['client_id' => $q->id, 'subject' => 'Synthetic Q ticket']);
         DB::table('tickets')->where('id', $tp->id)->update(['halo_id' => 9001]);
         DB::table('tickets')->where('id', $tq->id)->update(['halo_id' => 9002]);
 
-        $note = fn (int $ticketId, int $seq, ?string $deletedAt = null) => DB::table('ticket_notes')->insertGetId([
+        $note = fn (int $ticketId, int $seq, ?string $deletedAt = null, array $extra = []) => DB::table('ticket_notes')->insertGetId($extra + [
             'ticket_id' => $ticketId, 'halo_note_id' => $seq, 'body' => 'Synthetic', 'is_billable' => true,
             'time_minutes' => 30, 'noted_at' => '2026-01-05 10:00:00', 'created_at' => now(), 'updated_at' => now(),
             'deleted_at' => $deletedAt,
@@ -67,6 +68,10 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
             'multi_a' => $note($tp->id, 7),
             'multi_b' => $note($tp->id, 7),
             'q' => $note($tq->id, 1),
+            'unbillable' => $note($tp->id, 9, null, ['is_billable' => null]),
+            'zero' => $note($tp->id, 10, null, ['time_minutes' => 0]),
+            'longer' => $note($tp->id, 11, null, ['time_minutes' => 45]),
+            'stamped' => $note($tp->id, 12, null, ['contract_id' => $cp2->id]),
         ];
 
         $row = fn (string $desc, array $extra = []) => DB::table('prepay_transactions')->insertGetId($extra + [
@@ -86,6 +91,10 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
             'multi' => $row("Ticket #{$tp->id}: Synthetic P ticket [70010]"),
             'holder' => $row("Ticket #{$tp->id}: Synthetic P ticket", ['ticket_note_id' => $this->notes['used']]),
             'no_suffix' => $row('Synthetic manual entry'),
+            'not_billable' => $row("Ticket #{$tp->id}: Synthetic P ticket [70012]"),
+            'zero_time' => $row("Ticket #{$tp->id}: Synthetic P ticket [70013]"),
+            'time_mismatch' => $row("Ticket #{$tp->id}: Synthetic P ticket [70014]"),
+            'stamp_mismatch' => $row("Ticket #{$tp->id}: Synthetic P ticket [70015]"),
         ];
         // The documented default exclusion (card I3EvQKUV) is a fixed ledger id.
         $this->ptx['excluded_default'] = $row("Ticket #{$tp->id}: Synthetic P ticket [70008]", ['id' => 2653]);
@@ -101,6 +110,10 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
             [70008, 9001, 6, 0.5, 0.0],
             [70009, 9001, 4, 0.5, 0.0],
             [70010, 9001, 7, 0.5, 0.0],
+            [70012, 9001, 9, 0.5, 0.0],
+            [70013, 9001, 10, 0.5, 0.0],
+            [70014, 9001, 11, 0.5, 0.0],
+            [70015, 9001, 12, 0.5, 0.0],
         ]);
     }
 
@@ -159,7 +172,7 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame($before, $this->ledger());
         $this->assertFileDoesNotExist($this->dir.'/rollback.json');
         $this->assertStringContainsString('DRY RUN: nothing will be written', $out);
-        $this->assertStringContainsString('candidates: 10', $out);
+        $this->assertStringContainsString('candidates: 14', $out);
         $this->assertStringContainsString('would link: 1', $out);
     }
 
@@ -198,7 +211,7 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(0, $exit, $out);
         $this->assertSame($snap, $this->ledger());
         $this->assertStringContainsString('linking: 0', $out);
-        $this->assertStringContainsString('candidates: 9', $out);
+        $this->assertStringContainsString('candidates: 13', $out);
         $this->assertSame([], json_decode(file_get_contents($this->dir.'/rollback-2.json'), true)['links']);
     }
 
@@ -260,6 +273,33 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
     {
         [, $out] = $this->commit();
         $this->assertRefused('trashed', 'trashed-note', $out);
+    }
+
+    /** A later sync of a non-billable note would reverse the row (NULL is not billable). */
+    public function test_refuses_a_note_that_is_not_billable(): void
+    {
+        [, $out] = $this->commit();
+        $this->assertRefused('not_billable', 'not-billable', $out);
+    }
+
+    /** A later sync of a zero-time note would reverse the row. */
+    public function test_refuses_a_note_with_no_time(): void
+    {
+        [, $out] = $this->commit();
+        $this->assertRefused('zero_time', 'time-mismatch', $out);
+    }
+
+    /** A later sync of a 45-minute note would re-price a 0.5h row and move the balance. */
+    public function test_refuses_a_note_whose_time_differs_from_the_row(): void
+    {
+        [, $out] = $this->commit();
+        $this->assertRefused('time_mismatch', 'time-mismatch', $out);
+    }
+
+    public function test_refuses_a_note_stamped_to_another_contract(): void
+    {
+        [, $out] = $this->commit();
+        $this->assertRefused('stamp_mismatch', 'stamp-mismatch', $out);
     }
 
     public function test_refuses_a_note_already_linked_to_another_ledger_row(): void
@@ -343,6 +383,26 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame($this->notes['link'], $this->noteOf('link'));
         $this->assertNull(DB::table('prepay_transactions')->where('id', $holder)->value('ticket_note_id'));
         $this->assertSame($moved, (int) DB::table('prepay_transactions')->where('id', $holder)->value('moved_ticket_note_id'));
+    }
+
+    public function test_a_note_made_non_billable_after_planning_aborts_the_whole_write(): void
+    {
+        // Simulate an edit of the planned note once the write transaction has begun.
+        $note = $this->notes['link'];
+        $fired = false;
+        Event::listen(TransactionBeginning::class, function () use (&$fired, $note) {
+            if (! $fired) {
+                $fired = true;
+                DB::table('ticket_notes')->where('id', $note)->update(['is_billable' => false]);
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertTrue($fired);
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Ptx {$this->ptx['link']} or note {$note} no longer passes the planning checks; rolled back, no ledger row was changed.", $out);
+        $this->assertNull($this->noteOf('link'));
     }
 
     public function test_a_note_taken_by_another_row_after_planning_aborts_the_whole_write(): void
