@@ -286,7 +286,7 @@ class PrepayRelinkHaloTicketTime extends Command
     }
 
     /** @return array<int, array{halo_ticket_id: int, actionnumber: int}> keyed by halo action id */
-    public static function loadMap(string $path): array
+    private function loadMap(string $path): array
     {
         $raw = is_readable($path) ? file_get_contents($path) : false;
         if ($raw === false) {
