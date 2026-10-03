@@ -100,6 +100,7 @@ class PrepayBackfillFromHalo extends Command
         $contractSummaries = [];
         $unmapped = [];
         $verifySkipped = [];
+        $clientMismatch = [];
 
         foreach ($haloContractIds as $haloContractId) {
             $contract = $contractMap->get($haloContractId);
@@ -141,6 +142,12 @@ class PrepayBackfillFromHalo extends Command
             $totalCreated += $result['created'];
             $totalSkipped += $result['skipped'];
             $totalHours += $result['hours'];
+            array_push($clientMismatch, ...$result['client_mismatch']);
+        }
+
+        // #5067: rows whose local ticket belongs to another client were not imported.
+        if (! empty($clientMismatch)) {
+            $this->warn('client_mismatch: '.count($clientMismatch).' rows not imported (ticket client differs from contract client); Halo action ids: '.implode(', ', $clientMismatch));
         }
 
         // Report unmapped contracts
@@ -204,7 +211,7 @@ class PrepayBackfillFromHalo extends Command
         $clientMap,
         bool $dryRun,
     ): array {
-        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0];
+        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0, 'client_mismatch' => []];
 
         // Existing dedup: check for action IDs already imported
         // We store halo action_id in description as [action_id] for unlinked,
@@ -258,6 +265,14 @@ class PrepayBackfillFromHalo extends Command
             // Try to find local ticket and note
             $localTicket = $ticketMap->get($haloTicketId);
             $localNote = $noteMap->get($actionId);
+
+            // #5067: never debit one client's contract for another client's ticket, nor copy
+            // that ticket's subject into this contract's ledger.
+            if ($localTicket && (int) $localTicket->client_id !== (int) $contract->client_id) {
+                $result['client_mismatch'][] = $actionId;
+
+                continue;
+            }
 
             if ($localNote) {
                 $ticketSubject = $localTicket
