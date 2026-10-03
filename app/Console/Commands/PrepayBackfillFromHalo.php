@@ -9,6 +9,7 @@ use App\Services\PrepayService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 
 class PrepayBackfillFromHalo extends Command
 {
@@ -17,6 +18,7 @@ class PrepayBackfillFromHalo extends Command
         {--contract= : Only process a specific local contract ID}
         {--halo-contract= : Only process a specific Halo contract ID}
         {--verified-only : Only import contracts where CSV total matches prepay_used}
+        {--map= : Path to the halo-action-map/v1 JSON file (#5067), to match note-linked debits to Halo actions}
         {--csv= : Path to CSV file (default: base_path Client_Time Log _Detailed_ (1).csv)}';
 
     protected $description = 'Backfill prepay debit transactions from Halo CSV export of actionprepayhours data';
@@ -30,6 +32,16 @@ class PrepayBackfillFromHalo extends Command
 
         if (! file_exists($csvPath)) {
             $this->error("CSV file not found: {$csvPath}");
+
+            return self::FAILURE;
+        }
+
+        // #5067: halo-action-map/v1 (halo action id -> halo ticket id + actionnumber). Only a map
+        // attributes a debit whose ledger row holds a ticket note to its Halo action.
+        try {
+            $haloMap = $this->option('map') ? PrepayRelinkHaloTicketTime::loadMap((string) $this->option('map')) : [];
+        } catch (RuntimeException $e) {
+            $this->error($e->getMessage());
 
             return self::FAILURE;
         }
@@ -101,6 +113,7 @@ class PrepayBackfillFromHalo extends Command
         $unmapped = [];
         $verifySkipped = [];
         $clientMismatch = [];
+        $unattributed = [];
 
         foreach ($haloContractIds as $haloContractId) {
             $contract = $contractMap->get($haloContractId);
@@ -125,7 +138,7 @@ class PrepayBackfillFromHalo extends Command
             }
 
             $rows = $csvRows->get($haloContractId, collect());
-            $result = $this->processContractRows($contract, $rows, $ticketMap, $noteMap, $clientMap, $dryRun);
+            $result = $this->processContractRows($contract, $rows, $ticketMap, $noteMap, $clientMap, $haloMap, $dryRun);
 
             if ($result['created'] > 0 || $result['skipped'] > 0) {
                 $contractSummaries[] = [
@@ -143,11 +156,16 @@ class PrepayBackfillFromHalo extends Command
             $totalSkipped += $result['skipped'];
             $totalHours += $result['hours'];
             array_push($clientMismatch, ...$result['client_mismatch']);
+            array_push($unattributed, ...$result['unattributed']);
         }
 
         // #5067: rows whose local ticket belongs to another client were not imported.
         if (! empty($clientMismatch)) {
             $this->warn('client_mismatch: '.count($clientMismatch).' rows not imported (ticket client differs from contract client); Halo action ids: '.implode(', ', $clientMismatch));
+        }
+
+        if (! empty($unattributed)) {
+            $this->warn('unattributed: '.count($unattributed).' rows not imported (a ticket_time row on this contract holds a note with a Halo action number on the same ticket, and --map has no entry for the action on that ticket); Halo action ids: '.implode(', ', $unattributed));
         }
 
         // Report unmapped contracts
@@ -209,9 +227,10 @@ class PrepayBackfillFromHalo extends Command
         $ticketMap,
         $noteMap,
         $clientMap,
+        array $haloMap,
         bool $dryRun,
     ): array {
-        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0, 'client_mismatch' => []];
+        $result = ['created' => 0, 'linked' => 0, 'unlinked' => 0, 'skipped' => 0, 'hours' => 0, 'client_mismatch' => [], 'unattributed' => []];
 
         // Existing dedup: check for action IDs already imported
         // We store halo action_id in description as [action_id] for unlinked,
@@ -231,15 +250,31 @@ class PrepayBackfillFromHalo extends Command
             }
         }
 
-        // Every ticket_time row, linked or not: unlinked imports end in [action_id], and rows that
-        // prepay:relink-halo-ticket-time later linked (#5067) keep that description.
+        // Unlinked imports end in [action_id]. Only rows that hold no note, through ticket_note_id or
+        // moved_ticket_note_id, are read: an app-written description ends in free ticket-subject text.
         PrepayTransaction::where('contract_id', $contract->id)
             ->where('source', PrepayTransactionSource::TicketTime)
+            ->whereNull('ticket_note_id')
+            ->whereNull('moved_ticket_note_id')
             ->pluck('description')
             ->each(function ($desc) use (&$existingActionIds) {
                 if (preg_match('/\[(\d+)\]$/', (string) $desc, $m)) {
                     $existingActionIds[(int) $m[1]] = true;
                 }
+            });
+
+        // #5067: notes with a Halo action number held by this contract's ticket_time rows, per local
+        // ticket (prepay:relink-halo-ticket-time links such rows). Matched to actions through --map.
+        $heldNotes = [];
+        DB::table('prepay_transactions')
+            ->join('ticket_notes', fn ($j) => $j->on('ticket_notes.id', '=', 'prepay_transactions.ticket_note_id')
+                ->orOn('ticket_notes.id', '=', 'prepay_transactions.moved_ticket_note_id'))
+            ->where('prepay_transactions.contract_id', $contract->id)
+            ->where('prepay_transactions.source', PrepayTransactionSource::TicketTime->value)
+            ->whereNotNull('ticket_notes.halo_note_id')
+            ->get(['ticket_notes.ticket_id', 'ticket_notes.halo_note_id'])
+            ->each(function ($n) use (&$heldNotes) {
+                $heldNotes[(int) $n->ticket_id][(int) $n->halo_note_id] = true;
             });
 
         $this->info("  {$contract->name} (halo={$contract->halo_id}): {$rows->count()} CSV rows, {$result['skipped']} existing...");
@@ -265,6 +300,21 @@ class PrepayBackfillFromHalo extends Command
             // Try to find local ticket and note
             $localTicket = $ticketMap->get($haloTicketId);
             $localNote = $noteMap->get($actionId);
+
+            // #5067: a row that holds a note (relinked, then perhaps edited or moved) counts for its
+            // action only through --map, never through the description that a note edit rewrites.
+            $entry = $haloMap[$actionId] ?? null;
+            $mapTicket = $entry ? $ticketMap->get($entry['halo_ticket_id']) : null;
+            if ($mapTicket && isset($heldNotes[(int) $mapTicket->id][$entry['actionnumber']])) {
+                $result['skipped']++;
+
+                continue;
+            }
+            if ($localTicket && isset($heldNotes[(int) $localTicket->id]) && ($entry === null || $entry['halo_ticket_id'] !== $haloTicketId)) {
+                $result['unattributed'][] = $actionId;
+
+                continue;
+            }
 
             // #5067: never debit one client's contract for another client's ticket, nor copy
             // that ticket's subject into this contract's ledger.
