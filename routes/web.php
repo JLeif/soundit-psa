@@ -622,6 +622,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/api/tickets/search', [TicketController::class, 'apiSearch'])->name('api.tickets.search');
     Route::get('/api/clients/{client}/contacts', [ClientController::class, 'contacts'])->name('api.clients.contacts');
     Route::get('/api/clients/{client}/assets', [ClientController::class, 'assets'])->name('api.clients.assets');
+    Route::get('/api/clients/{client}/active-contracts', [ClientController::class, 'activeContracts'])->name('api.clients.active-contracts');
 
     // Assets (top-level)
     Route::get('/assets', [AssetController::class, 'indexAll'])->name('assets.index');

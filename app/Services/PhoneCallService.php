@@ -1374,7 +1374,7 @@ class PhoneCallService
      * to the canonical TicketService::createTicket with a null createdBy so the
      * TicketObserver runs triage exactly as it does for an auto-created email.
      */
-    public function createTicketFromCall(PhoneCall $call): Ticket
+    public function createTicketFromCall(PhoneCall $call, mixed $contractId = null): Ticket
     {
         $caller = $call->caller_identified_name
             ?: $call->person?->fullName
@@ -1393,6 +1393,10 @@ class PhoneCallService
             'description' => $call->call_summary
                 ?: $call->cleaned_transcript
                 ?: 'Inbound phone call — see linked call for transcript.',
+            // Optional (card I3EvQKUV PR 3); createTicket refuses one that is not an
+            // active contract of the call's client. Omitted, the client rules apply. The
+            // link below stamps the call from the new ticket's contract (spec §3).
+            'contract_id' => $contractId,
         ];
 
         $ticket = app(TicketService::class)->createTicket($ticketData, null);

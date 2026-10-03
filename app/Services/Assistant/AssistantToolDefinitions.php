@@ -327,6 +327,7 @@ class AssistantToolDefinitions
                             'description' => 'Priority: 1=Critical, 2=High, 3=Normal, 4=Low. Default 3 if not specified.',
                             'enum' => [1, 2, 3, 4],
                         ],
+                        'contract_id' => \App\Support\McpToolRegistry::createContractIdProperty(),
                     ],
                     'required' => ['subject', 'description'],
                 ],

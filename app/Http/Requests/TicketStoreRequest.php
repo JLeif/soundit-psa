@@ -2,8 +2,10 @@
 
 namespace App\Http\Requests;
 
+use App\Enums\ContractStatus;
 use App\Enums\TicketPriority;
 use App\Enums\TicketType;
+use App\Models\Contract;
 use App\Models\TicketCategory;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -65,6 +67,30 @@ class TicketStoreRequest extends FormRequest
             ],
             'assignee_id' => ['nullable', 'exists:users,id'],
             'due_at' => ['nullable', 'date'],
+            // Card I3EvQKUV PR 3: an ACTIVE contract of the chosen client, the closure
+            // InvoiceStoreRequest uses for ownership plus the active check. Blank = let the
+            // server apply the client default / only active contract (TicketService).
+            'contract_id' => [
+                'nullable',
+                function (string $attribute, $value, $fail): void {
+                    if (blank($value)) {
+                        return;
+                    }
+
+                    $clientId = $this->input('client_id');
+                    $isActiveOfClient = is_scalar($value) && ctype_digit((string) $value)
+                        && is_scalar($clientId) && ctype_digit((string) $clientId)
+                        && Contract::query()
+                            ->whereKey((int) $value)
+                            ->where('client_id', (int) $clientId)
+                            ->where('status', ContractStatus::Active)
+                            ->exists();
+
+                    if (! $isActiveOfClient) {
+                        $fail('The selected contract is not an active contract of this client.');
+                    }
+                },
+            ],
         ];
     }
 

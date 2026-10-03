@@ -552,6 +552,34 @@ class ClientController extends Controller
         ]));
     }
 
+    /**
+     * The new-ticket form's Contract picker (card I3EvQKUV PR 3, mockup 4): this client's
+     * ACTIVE contracts only (ContractStatus::Active, not soft-deleted), with is_default
+     * marking the client default ContractResolver would take. A stale default marks none.
+     */
+    public function activeContracts(Client $client): JsonResponse
+    {
+        $resolution = app(\App\Services\ContractResolver::class)->forClient($client->id);
+        $defaultId = $resolution->isResolved() && $resolution->rule === \App\Services\ContractResolver::RULE_CLIENT_DEFAULT
+            ? $resolution->contract->id : null;
+
+        $contracts = \App\Models\Contract::query()
+            ->where('client_id', $client->id)
+            ->where('status', \App\Enums\ContractStatus::Active)
+            ->orderBy('name')
+            ->get(['id', 'name', 'type', 'prepay_balance', 'prepay_as_amount']);
+
+        return response()->json($contracts->map(fn ($c) => [
+            'id' => $c->id,
+            'name' => $c->name,
+            'type' => $c->type?->value,
+            'type_label' => $c->type?->label(),
+            'prepay_balance' => $c->prepay_balance,
+            'prepay_unit' => $c->prepay_balance === null ? null : ($c->prepay_as_amount ? 'dollars' : 'hours'),
+            'is_default' => $c->id === $defaultId,
+        ])->values());
+    }
+
     public function assets(Client $client): JsonResponse
     {
         $assets = $client->assets()

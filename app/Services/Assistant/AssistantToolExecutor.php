@@ -1159,7 +1159,10 @@ class AssistantToolExecutor
                 'ticket_id' => $ticket->id,
                 'display_id' => $ticket->display_id,
                 'url' => route('tickets.show', $ticket),
-            ];
+            ] + (\App\Services\TicketService::contractOutcomeOf($ticket)?->toArray() ?? []);
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            // Card I3EvQKUV PR 3: TicketService refused the contract before writing anything.
+            return $e->toolRefusal();
         } catch (\InvalidArgumentException $e) {
             return ['error' => $e->getMessage()];
         } catch (\Throwable $e) {
@@ -1982,11 +1985,19 @@ class AssistantToolExecutor
             ->limit($limit)
             ->get();
 
+        // Card I3EvQKUV PR 3: flag the client default an agent would get by omitting
+        // contract_id. Only when it is still an active contract of this client, the same
+        // check ContractResolver applies; a stale column marks nothing.
+        $default = app(\App\Services\ContractResolver::class)->forClient((int) $this->clientId);
+        $defaultId = $default->isResolved() && $default->rule === \App\Services\ContractResolver::RULE_CLIENT_DEFAULT
+            ? $default->contract->id : null;
+
         return [
             'count' => $contracts->count(),
             'client_id' => $this->clientId,
             'contracts' => $contracts->map(fn (Contract $c) => [
                 'id' => $c->id,
+                'is_default' => $defaultId !== null && $c->id === $defaultId,
                 'name' => $c->name,
                 'type' => $c->type?->value,
                 'type_label' => $c->type?->label(),

@@ -66,6 +66,9 @@ final class StaffWorkflow
                     if ($ticket->isUnverifiedContactIntake() && ! $ticket->notes()->where('contact_intake_origin', true)
                         ->whereNull('contact_intake_verified_at')->exists()) {
                         $ticket->forceFill(['contact_intake_verified_at' => now()])->saveQuietly();
+                        // Card I3EvQKUV PR 3: a contact-intake ticket gets its contract (and that
+                        // contract's SLA) only now that staff verified it.
+                        app(\App\Services\TicketService::class)->assignContractAtVerification($ticket);
                     }
                     break;
                 default:

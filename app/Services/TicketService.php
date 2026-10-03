@@ -23,12 +23,64 @@ use Illuminate\Support\Facades\DB;
 
 class TicketService
 {
+    /**
+     * The contract outcome of each ticket this process created, keyed weakly by the
+     * Ticket instance createTicket() returned (card I3EvQKUV PR 3). Read it with
+     * contractOutcomeOf(); nothing is persisted.
+     *
+     * @var \WeakMap<Ticket, TicketContractOutcome>|null
+     */
+    private static ?\WeakMap $contractOutcomes = null;
+
     public function __construct(
         private readonly NotificationService $notificationService,
     ) {}
 
+    /**
+     * THE contract rule for a new ticket (card I3EvQKUV PR 3, spec §7), enforced in this
+     * one place for every creating surface. A supplied contract_id must be an ACTIVE
+     * contract of $clientId, otherwise ContractNotAllowedException (an
+     * InvalidArgumentException: "contract_id <id> is not an active contract of this
+     * client"). Omitted (absent, null or ''), ContractResolver's client rules apply:
+     * the client default, else the only active contract, else none; several active
+     * and no default leaves it unset (ambiguous). Writes nothing.
+     */
+    public function contractForNewTicket(mixed $clientId, mixed $contractId): TicketContractOutcome
+    {
+        $resolver = app(ContractResolver::class);
+        $client = is_numeric($clientId) && (int) $clientId > 0 ? (int) $clientId : null;
+
+        if ($contractId !== null && $contractId !== '') {
+            $picked = is_int($contractId) || (is_string($contractId) && ctype_digit($contractId))
+                ? (int) $contractId : null;
+            if ($picked === null || $picked <= 0 || $client === null) {
+                throw ContractNotAllowedException::for($contractId);
+            }
+            $resolution = $resolver->forEntry(new Ticket(['client_id' => $client]), $picked);
+            if (! $resolution->isResolved()) {
+                throw ContractNotAllowedException::for($contractId);
+            }
+
+            return TicketContractOutcome::fromResolution($resolution);
+        }
+
+        return $client === null
+            ? TicketContractOutcome::fromResolution(ContractResolution::none())
+            : TicketContractOutcome::fromResolution($resolver->forClient($client));
+    }
+
+    /** The contract outcome createTicket() recorded for this ticket instance, or null. */
+    public static function contractOutcomeOf(Ticket $ticket): ?TicketContractOutcome
+    {
+        return self::$contractOutcomes[$ticket] ?? null;
+    }
+
     public function createTicket(array $data, ?int $createdByUserId): Ticket
     {
+        // Contract first (card I3EvQKUV PR 3): a refused contract_id writes nothing.
+        $outcome = $this->contractForNewTicket($data['client_id'] ?? null, $data['contract_id'] ?? null);
+        $data['contract_id'] = $outcome->contract?->id;
+
         // Callers may hand us either a TicketPriority instance (e.g. the portal
         // controller) or its scalar backing value; normalise both. Native
         // enum from() only accepts string|int and throws a TypeError on an instance.
@@ -42,8 +94,9 @@ class TicketService
         $data['opened_at'] = now();
         $data['priority_order'] = $priority->sortOrder();
 
-        // Resolve SLA deadlines from contract terms (if any)
-        $contract = ! empty($data['contract_id']) ? Contract::find($data['contract_id']) : null;
+        // Resolve SLA deadlines from contract terms (if any); for an intake ticket this is
+        // the client default or only active contract (Q2).
+        $contract = $outcome->contract;
 
         if (empty($data['due_at'])) {
             $resolutionHours = $contract?->slaResolutionHours($priority);
@@ -63,7 +116,44 @@ class TicketService
             }
         }
 
-        return Ticket::create($data);
+        $ticket = Ticket::create($data);
+        self::$contractOutcomes ??= new \WeakMap;
+        self::$contractOutcomes[$ticket] = $outcome;
+
+        return $ticket;
+    }
+
+    /**
+     * A contact-intake ticket gets no contract until staff verify it (card I3EvQKUV
+     * PR 3, spec §7). At verification it takes the same client rules createTicket()
+     * applies, and SLA deadlines from that contract when none are set yet. A ticket
+     * that already has a contract, or no client, is left as it is.
+     */
+    public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
+    {
+        if ($ticket->contract_id !== null || $ticket->client_id === null) {
+            return null;
+        }
+
+        $outcome = $this->contractForNewTicket($ticket->client_id, null);
+        $contract = $outcome->contract;
+        if ($contract === null) {
+            return $outcome;
+        }
+
+        $ticket->contract_id = $contract->id;
+        $priority = $ticket->priority instanceof TicketPriority ? $ticket->priority : TicketPriority::tryFrom((string) $ticket->priority);
+        if ($priority !== null) {
+            if ($ticket->due_at === null && ($hours = $contract->slaResolutionHours($priority))) {
+                $ticket->due_at = now()->addHours($hours);
+            }
+            if ($ticket->response_due_at === null && ($hours = $contract->slaResponseHours($priority))) {
+                $ticket->response_due_at = now()->addHours($hours);
+            }
+        }
+        $ticket->save();
+
+        return $outcome;
     }
 
     public function updateTicket(Ticket $ticket, array $data): Ticket

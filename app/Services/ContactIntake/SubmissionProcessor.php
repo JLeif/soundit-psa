@@ -76,6 +76,9 @@ final class SubmissionProcessor
             $createsTicket = ! $ticket;
             $body = $this->body($data);
             if (! $ticket) {
+                // No contract here (card I3EvQKUV PR 3): an unverified contact-intake ticket
+                // gets none until staff verify it, when StaffWorkflow runs the same client
+                // rules createTicket() applies (TicketService::assignContractAtVerification).
                 $ticket = new Ticket([
                     'client_id' => $clientId, 'contact_id' => $personId,
                     'subject' => 'Web form inquiry', 'description' => $body,

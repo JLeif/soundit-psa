@@ -999,9 +999,16 @@ PROMPT;
      * newly-created one, or the existing ticket a vendor-notification burst
      * was deduplicated onto (see the early-return branch below).
      */
-    public function autoCreateTicketFromEmail(Email $email): Ticket
+    /**
+     * @param  mixed  $contractId  optional contract for a NEW ticket (card I3EvQKUV PR 3);
+     *                             TicketService::createTicket refuses one that is not an
+     *                             active contract of the email's client. Omitted, the
+     *                             client rules apply. Ignored when an existing ticket is
+     *                             returned (already linked, or a vendor burst).
+     */
+    public function autoCreateTicketFromEmail(Email $email, mixed $contractId = null): Ticket
     {
-        return DB::transaction(function () use ($email): Ticket {
+        return DB::transaction(function () use ($email, $contractId): Ticket {
             // Callers may hold a stale resolved-but-unticketed model. Serialize
             // creation and linking on the durable email row, not that snapshot.
             $locked = Email::whereKey($email->getKey())->lockForUpdate()->firstOrFail();
@@ -1016,11 +1023,11 @@ PROMPT;
                 }
             }
 
-            return $this->createTicketFromLockedEmail($locked);
+            return $this->createTicketFromLockedEmail($locked, $contractId);
         });
     }
 
-    private function createTicketFromLockedEmail(Email $email): Ticket
+    private function createTicketFromLockedEmail(Email $email, mixed $contractId = null): Ticket
     {
         $isMeshDeliveryRequest = MeshEmailParser::isMeshDeliveryRequest($email);
         $isZorusUnblockRequest = ZorusEmailParser::isZorusUnblockRequest($email);
@@ -1060,6 +1067,7 @@ PROMPT;
             'contact_id' => $email->person_id,
             'priority' => TicketPriority::P3->value,
             'source' => TicketSource::Email->value,
+            'contract_id' => $contractId,
         ];
 
         if ($isMeshDeliveryRequest) {

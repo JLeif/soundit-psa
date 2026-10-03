@@ -109,10 +109,16 @@ class TicketController extends Controller
 
     public function store(TicketStoreRequest $request)
     {
-        $ticket = $this->ticketService->createTicket(
-            $request->validated(),
-            auth()->id(),
-        );
+        try {
+            $ticket = $this->ticketService->createTicket(
+                $request->validated(),
+                auth()->id(),
+            );
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            // The request rule passed but the contract stopped being active before the
+            // write (card I3EvQKUV PR 3): nothing was written; show it on the field.
+            return back()->withInput()->withErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
+        }
 
         return redirect()->route('tickets.show', $ticket)
             ->with('success', "Ticket {$ticket->display_id} created.");
