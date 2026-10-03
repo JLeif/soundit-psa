@@ -896,11 +896,21 @@ class StaffTacticalAdminToolExecutor
         $status = $result->errors > 0 ? 'error' : 'executed';
         $this->auditAttempt($tool, $status, $clientId, $contentHash, 'Tactical device sync complete: '.$result->summary().'.', $actorLabel);
 
+        // Skips are not errors, but a caller told only "0 created" cannot tell
+        // a quiet fleet from agents the sync refused to create assets for. The
+        // counts, reasons and the (capped) retired-asset list ride both returns;
+        // assets_skipped_reasons.soft_deleted_conflict is the retired total.
+        $skips = [
+            'assets_skipped' => (int) ($result->details['assets_skipped'] ?? 0),
+            'assets_skipped_reasons' => $result->details['assets_skipped_reasons'] ?? [],
+            'assets_skipped_retired' => $result->details['assets_skipped_retired'] ?? [],
+        ];
+
         if ($result->errors > 0) {
             return [
                 'error' => $result->summary(),
                 'errors' => $result->errorMessages,
-            ];
+            ] + $skips;
         }
 
         return [
@@ -909,7 +919,7 @@ class StaffTacticalAdminToolExecutor
             'created' => $result->created,
             'updated' => $result->updated,
             'deactivated' => $result->deactivated,
-        ];
+        ] + $skips;
     }
 
     /** @return array<string, mixed> */

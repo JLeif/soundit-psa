@@ -62,6 +62,22 @@ class TacticalSyncDevices extends Command
             foreach ($result->details['assets_skipped_reasons'] ?? [] as $reason => $count) {
                 $this->warn("  - {$reason}: {$count}");
             }
+
+            // Name each retired asset that blocked a create. The list is capped
+            // in the service; the soft_deleted_conflict count above is the total.
+            $retired = $result->details['assets_skipped_retired'] ?? [];
+            if ($retired !== []) {
+                $this->warn('Retired (soft-deleted) assets blocking a create:');
+
+                foreach ($retired as $row) {
+                    $this->warn('  - '.TacticalDeviceSyncService::describeRetiredSkip($row));
+                }
+
+                $unlisted = (int) ($result->details['assets_skipped_reasons']['soft_deleted_conflict'] ?? 0) - count($retired);
+                if ($unlisted > 0) {
+                    $this->warn("  - +{$unlisted} more not listed");
+                }
+            }
         }
 
         return $result->errors > 0 ? self::FAILURE : self::SUCCESS;

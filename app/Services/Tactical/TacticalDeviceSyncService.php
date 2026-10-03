@@ -30,6 +30,15 @@ class TacticalDeviceSyncService
     private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
 
     /**
+     * How many soft_deleted_conflict skips are itemised in
+     * details['assets_skipped_retired']. The list is a sample for the operator,
+     * not the count: details['assets_skipped_reasons']['soft_deleted_conflict']
+     * stays the true total, so a consumer that sees more skips than rows says
+     * the list is partial.
+     */
+    public const RETIRED_SKIP_LIST_LIMIT = 20;
+
+    /**
      * The widest real UTC offset is +14:00. createFromFormat's 'P' accepts far more
      * than that without complaint and builds a Carbon whose timezone name carries a
      * NUL byte, which then throws a ValueError on the next timezone-sensitive call.
@@ -1170,6 +1179,10 @@ class TacticalDeviceSyncService
         if ($conflict) {
             $this->countSkippedAsset($result, $conflict->trashed() ? 'soft_deleted_conflict' : 'hostname_conflict');
 
+            if ($conflict->trashed()) {
+                $this->recordRetiredSkip($result, $conflict, $hostname);
+            }
+
             Log::info('[TacticalSync] Skipped asset creation — hostname already exists for this client', [
                 'agent' => $hostname,
                 'asset_id' => $conflict->id,
@@ -1231,6 +1244,67 @@ class TacticalDeviceSyncService
         $reasons = $result->details['assets_skipped_reasons'] ?? [];
         $reasons[$reason] = ($reasons[$reason] ?? 0) + 1;
         $result->details['assets_skipped_reasons'] = $reasons;
+    }
+
+    /**
+     * Name the retired (soft-deleted) asset that blocked a create, so a run that
+     * reports "0 assets" says which record is in the way.
+     *
+     * One row per skip, in skip order, capped at RETIRED_SKIP_LIST_LIMIT; the
+     * soft_deleted_conflict counter carries the full total. Two hostnames are
+     * kept because they can differ: the conflict lookup matches the agent's
+     * hostname against the asset's hostname OR its name, case-insensitively.
+     *  - agent_hostname: what Tactical reported for the skipped agent;
+     *  - asset_hostname: the retired asset's own hostname column (may be null
+     *    when the match was on name).
+     * restorable is Asset::restoreRefusal() === null, the rule restore_asset and
+     * the asset page's restore apply; a merge tombstone is retired but is not
+     * restorable, and carries the survivor in merged_into_asset_id.
+     */
+    private function recordRetiredSkip(SyncResult $result, Asset $conflict, string $agentHostname): void
+    {
+        $rows = $result->details['assets_skipped_retired'] ?? [];
+
+        if (count($rows) >= self::RETIRED_SKIP_LIST_LIMIT) {
+            return;
+        }
+
+        $rows[] = [
+            'asset_id' => $conflict->id,
+            'agent_hostname' => $agentHostname,
+            'asset_hostname' => $conflict->hostname,
+            'restorable' => $conflict->restoreRefusal() === null,
+            'merged_into_asset_id' => $conflict->merged_into_asset_id,
+        ];
+
+        $result->details['assets_skipped_retired'] = $rows;
+    }
+
+    /**
+     * One operator-facing line for an assets_skipped_retired row, shared by the
+     * Integrations banner and tactical:sync-devices so the two cannot word the
+     * same row differently. Restorability is read from the row's own flag
+     * (Asset::restoreRefusal() at collection time), never re-derived here.
+     *
+     * @param  array{asset_id: int, agent_hostname: string, asset_hostname: ?string, restorable: bool, merged_into_asset_id: ?int}  $row
+     */
+    public static function describeRetiredSkip(array $row): string
+    {
+        $line = "asset #{$row['asset_id']} ({$row['agent_hostname']}";
+
+        $assetHostname = $row['asset_hostname'] ?? null;
+        if ($assetHostname !== null && strcasecmp($assetHostname, $row['agent_hostname']) !== 0) {
+            $line .= ", asset hostname {$assetHostname}";
+        }
+        $line .= ')';
+
+        if ($row['restorable']) {
+            return $line.' — restorable from its asset page';
+        }
+
+        return $row['merged_into_asset_id'] !== null
+            ? $line." — merged into asset #{$row['merged_into_asset_id']}, cannot be restored"
+            : $line.' — cannot be restored';
     }
 
     /**
