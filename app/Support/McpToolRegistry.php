@@ -43,6 +43,21 @@ class McpToolRegistry
     ];
 
     /**
+     * PSA-registered tools that render on another integration's card, by EXACT name
+     * (display only: grants are stored and checked by tool name, and each keeps its
+     * source group's tier and sensitive flag). Exact names, never a name pattern: a
+     * pattern would silently move any future PSA tool whose name happens to match, and
+     * could merge a sensitive tool into the target card's non-sensitive tier (#4969).
+     * The BenjiPays reads are routed separately by their anchored `benjipays_` prefix.
+     *
+     * @var array<string, string>
+     */
+    public const PSA_TOOLS_ON_OTHER_CARDS = [
+        // Teams chat image reader (card 2Cj3kOsy, Charlie's correction).
+        'get_teams_message_attachment' => 'teams',
+    ];
+
+    /**
      * @return array<string, array{label: string, sensitive: bool, tools: array<int, array{name: string, description: string}>}>
      */
     public static function groups(): array
@@ -225,13 +240,16 @@ class McpToolRegistry
                         // The BenjiPays reads are registered in psa_read (same grant
                         // gate and sensitive Reads tier) but render under their own
                         // BenjiPays card, not PSA Core. Display only: grants are by
-                        // tool name. Without this, the prefix arm in
+                        // tool name. Without this, the anchored `benjipays_` arm in
                         // integrationForToolName() would never be consulted for them.
-                        // Likewise the Teams image reader sits in psa_raw_file (its own sensitive
-                        // "Attachment content" tier and shield) but renders on the Teams & Operator
-                        // card beside its Chet siblings (card 2Cj3kOsy, Charlie's correction).
-                        $routed = $integration === 'psa' ? self::integrationForToolName((string) $tool['name']) : $integration;
-                        $target = in_array($routed, ['benjipays', 'teams'], true) ? $routed : $integration;
+                        // Any other PSA tool moves card only if named exactly in
+                        // PSA_TOOLS_ON_OTHER_CARDS (the Teams image reader, card 2Cj3kOsy).
+                        $name = (string) $tool['name'];
+                        $target = $integration;
+                        if ($integration === 'psa') {
+                            $target = self::PSA_TOOLS_ON_OTHER_CARDS[$name]
+                                ?? (self::integrationForToolName($name) === 'benjipays' ? 'benjipays' : $integration);
+                        }
                         $push($target, $tierKey, $tierLabel, true, $order, $tool);
                     }
 
