@@ -28,8 +28,8 @@ use RuntimeException;
  * from the note and its ticket; this command does not check those. A row is linked only
  * when every check passes:
  *   - the map has exactly one row for the action id (no-map otherwise);
- *   - that row's timetakenAdjusted converts to whole minutes under ADJUSTMENT RULE below
- *     (bad-adjustment otherwise);
+ *   - that row's timetakenAdjusted (and, in a v2 map, timetaken and prepayHours) converts to
+ *     whole minutes under ADJUSTMENT RULE below (bad-adjustment otherwise);
  *   - that map row's halo ticket id equals tickets.halo_id of the "Ticket #<id>" in the
  *     description; a missing ticket or a NULL halo_id also counts as ticket-mismatch;
  *   - the ticket's client_id equals the contract's client_id (client-mismatch otherwise);
@@ -39,8 +39,9 @@ use RuntimeException;
  *     reversal path;
  *   - the note is billable (not-billable otherwise; NULL counts as not billable); its
  *     time_adjustment_minutes is NULL or already equal to the map's adjustment
- *     (adjustment-mismatch otherwise); time_minutes + the map's adjustment is > 0 and, as
- *     hours rounded to 4 places, equal to the row's debit (time-mismatch otherwise); and
+ *     (adjustment-mismatch otherwise); time_minutes + the map's adjustment is not negative
+ *     (below-zero otherwise), is > 0 and, as hours rounded to 4 places, equals the row's
+ *     debit (time-mismatch otherwise); and
  *     its contract stamp is NULL or the row's contract (stamp-mismatch otherwise);
  *   - no other prepay row already holds that note, through ticket_note_id or
  *     moved_ticket_note_id (already-linked-note), and no other candidate in this run
@@ -56,6 +57,15 @@ use RuntimeException;
  * written as hours to 4 places is within 0.003 min of it (13 min = 0.2167 h -> 13.002 ->
  * 13), so the rule accepts a 4-place export and refuses a genuine fraction of a minute.
  * A zero adjustment leaves the note's column NULL.
+ *
+ * MAP: halo-action-map/v1, or halo-action-map/v2, which adds prepayHours, chargeHours,
+ * isBillable and optionally chargeProcessed (int or null). Group A (Charlie's ruling relayed
+ * by Jeeves 2026-10-03 14:42 PT): where a v2 row's prepayHours is below timetaken +
+ * timetakenAdjusted, Halo drew only prepayHours from prepay and charged the rest, so the
+ * adjustment carried is prepayHours - timetaken in whole minutes (negative when the prepay
+ * part is below timetaken). The note then prices at the prepay part alone, and the charged
+ * part is never drawn from prepay. Each such row is listed after the counts with its Halo
+ * numbers and the note's body length.
  *
  * --dry-run is the default. A write needs --commit and --rollback-file=<new path>; the
  * file (format prepay-relink-rollback/v2: ptx id -> note id linked, and for each note whose
@@ -94,10 +104,17 @@ class PrepayRelinkHaloTicketTime extends Command
 
     public const MAP_COLUMNS = ['halo_action_id', 'halo_ticket_id', 'actionnumber', 'timetaken', 'timetakenAdjusted'];
 
+    /** v2 adds Halo's prepay/charge split; a trailing chargeProcessed column is optional. */
+    public const MAP_FORMAT_V2 = 'halo-action-map/v2';
+
+    public const MAP_COLUMNS_V2 = [...self::MAP_COLUMNS, 'prepayHours', 'chargeHours', 'isBillable'];
+
+    public const MAP_COLUMN_PROCESSED = 'chargeProcessed';
+
     /** Refusal classes, in report order. */
     public const CLASSES = [
         'excluded', 'no-map', 'bad-adjustment', 'ticket-mismatch', 'client-mismatch', 'no-note', 'multi-note',
-        'trashed-note', 'not-billable', 'adjustment-mismatch', 'time-mismatch', 'stamp-mismatch',
+        'trashed-note', 'not-billable', 'adjustment-mismatch', 'below-zero', 'time-mismatch', 'stamp-mismatch',
         'already-linked-note', 'duplicate-target',
     ];
 
@@ -166,17 +183,18 @@ class PrepayRelinkHaloTicketTime extends Command
             return self::FAILURE;
         }
 
-        [$candidates, $links, $refused] = $this->plan($map, $excluded);
+        [$candidates, $links, $refused, $partial] = $this->plan($map, $excluded);
 
         $this->line(($commit ? 'COMMIT' : 'DRY RUN: nothing will be written').'. Map rows: '.count($map).'.');
         $this->line('candidates: '.$candidates);
         $this->line(($commit ? 'linking: ' : 'would link: ').count($links));
         $this->line(($commit ? 'linking with an adjustment: ' : 'would link with an adjustment: ')
-            .count(array_filter($links, fn (array $l) => $l['adj'] > 0)));
+            .count(array_filter($links, fn (array $l) => $l['adj'] !== 0)));
         foreach (self::CLASSES as $class) {
             $ids = $refused[$class];
             $this->line("{$class}: ".count($ids).($ids ? ' (ptx ids: '.implode(', ', $ids).')' : ''));
         }
+        $this->reportPartial($partial, $links, $refused);
 
         if (! $commit) {
             return self::SUCCESS;
@@ -186,15 +204,15 @@ class PrepayRelinkHaloTicketTime extends Command
     }
 
     /**
-     * @return array{0: int, 1: array<int, array{note: int, adj: int, prior: ?int}>, 2: array<string, list<int>>}
-     *                                                                                                            candidate count, ptx id => link (note id, map adjustment minutes, the note's adjustment
-     *                                                                                                            when planned), refused ptx ids per class
+     * Returns: the candidate count; ptx id => link (note id, adjustment minutes to carry, the
+     * note's adjustment when planned); refused ptx ids per class; and the group-A report rows.
      */
     private function plan(array $map, array $excluded): array
     {
         $refused = array_fill_keys(self::CLASSES, []);
         $targets = [];
         $plans = [];
+        $partial = [];
         $candidates = 0;
 
         $rows = DB::table('prepay_transactions')
@@ -223,6 +241,9 @@ class PrepayRelinkHaloTicketTime extends Command
                 $refused['no-map'][] = $ptxId;
 
                 continue;
+            }
+            if ($entry['partial'] !== null) {
+                $partial[$ptxId] = $entry['partial'] + ['body_length' => null];
             }
             if ($entry['adj'] === null) {
                 $refused['bad-adjustment'][] = $ptxId;
@@ -255,6 +276,10 @@ class PrepayRelinkHaloTicketTime extends Command
                 $refused[$notes->isEmpty() ? 'no-note' : 'multi-note'][] = $ptxId;
 
                 continue;
+            }
+            if (isset($partial[$ptxId])) {
+                // The length only: the note text never reaches the output.
+                $partial[$ptxId]['body_length'] = (int) mb_strlen((string) DB::table('ticket_notes')->where('id', $notes[0]->id)->value('body'));
             }
             if ($notes[0]->deleted_at !== null) {
                 $refused['trashed-note'][] = $ptxId;
@@ -298,7 +323,36 @@ class PrepayRelinkHaloTicketTime extends Command
             }
         }
 
-        return [$candidates, $links, $refused];
+        return [$candidates, $links, $refused, $partial];
+    }
+
+    /**
+     * Group A (#5067 r3, Charlie's ruling relayed 2026-10-03 14:42 PT): rows where Halo drew
+     * only part of the action from prepay. One line per row: ptx id, outcome and Halo's
+     * numbers, plus the matched note's body LENGTH; never the text.
+     *
+     * @param  array<int, array{timetaken: float, prepay: float, charge: float, processed: ?int, body_length: ?int}>  $partial
+     */
+    private function reportPartial(array $partial, array $links, array $refused): void
+    {
+        $this->line('partial-prepay rows: '.count($partial));
+        $classOf = [];
+        foreach ($refused as $class => $ids) {
+            foreach ($ids as $id) {
+                $classOf[$id] = $class;
+            }
+        }
+        $h = fn (float $v) => rtrim(rtrim(number_format($v, 4, '.', ''), '0'), '.');
+        foreach ($partial as $ptxId => $p) {
+            $this->line(sprintf(
+                '  ptx %d: %s; timetaken %s h, prepay %s h, charge %s h, processed %s, note body length %s',
+                $ptxId,
+                isset($links[$ptxId]) ? 'link, adjustment '.$links[$ptxId]['adj'].' min' : 'refused '.($classOf[$ptxId] ?? 'unknown'),
+                $h($p['timetaken']), $h($p['prepay']), $h($p['charge']),
+                $p['processed'] === null ? 'n/a' : (string) $p['processed'],
+                $p['body_length'] === null ? 'n/a' : (string) $p['body_length'],
+            ));
+        }
     }
 
     /** @param array<int, array{note: int, adj: int, prior: ?int}> $links */
@@ -313,7 +367,7 @@ class PrepayRelinkHaloTicketTime extends Command
         }
         $adjustments = [];
         foreach ($links as $link) {
-            if ($link['adj'] > 0 && $link['prior'] === null) {
+            if ($link['adj'] !== 0 && $link['prior'] === null) {
                 $adjustments[(string) $link['note']] = ['prior' => null, 'set' => $link['adj']];
             }
         }
@@ -360,7 +414,7 @@ class PrepayRelinkHaloTicketTime extends Command
                     }
                     // Query builder, not the model: setting the adjustment must not run the note
                     // observers (the row's hours already equal the note's priced minutes).
-                    if ($link['adj'] > 0 && $link['prior'] === null) {
+                    if ($link['adj'] !== 0 && $link['prior'] === null) {
                         $set = DB::table('ticket_notes')->where('id', $noteId)->whereNull('time_adjustment_minutes')
                             ->update(['time_adjustment_minutes' => $link['adj']]);
                         if ($set !== 1) {
@@ -456,7 +510,11 @@ class PrepayRelinkHaloTicketTime extends Command
             return 'adjustment-mismatch';
         }
         $minutes = (int) $note->time_minutes + $adj;
-        if ($minutes <= 0 || -round($minutes / 60, 4) !== round((float) $row->hours, 4)) {
+        // A reduction may bring the priced sum down to the prepay part, never below zero.
+        if ($minutes < 0) {
+            return 'below-zero';
+        }
+        if ($minutes === 0 || -round($minutes / 60, 4) !== round((float) $row->hours, 4)) {
             return 'time-mismatch';
         }
         if ($note->contract_id !== null && (int) $note->contract_id !== (int) $row->contract_id) {
@@ -492,21 +550,43 @@ class PrepayRelinkHaloTicketTime extends Command
             throw new RuntimeException('Map file not readable.');
         }
         $doc = json_decode($raw, true);
-        if (! is_array($doc) || ($doc['format'] ?? null) !== self::MAP_FORMAT || ($doc['columns'] ?? null) !== self::MAP_COLUMNS || ! is_array($doc['rows'] ?? null)) {
-            throw new RuntimeException('Map file is not '.self::MAP_FORMAT.' with columns '.implode(',', self::MAP_COLUMNS).'.');
+        $format = is_array($doc) ? ($doc['format'] ?? null) : null;
+        $columns = is_array($doc) ? ($doc['columns'] ?? null) : null;
+        $v2 = $format === self::MAP_FORMAT_V2
+            && ($columns === self::MAP_COLUMNS_V2 || $columns === [...self::MAP_COLUMNS_V2, self::MAP_COLUMN_PROCESSED]);
+        if (! ($v2 || ($format === self::MAP_FORMAT && $columns === self::MAP_COLUMNS)) || ! is_array($doc['rows'] ?? null)) {
+            throw new RuntimeException('Map file is not '.self::MAP_FORMAT.' with columns '.implode(',', self::MAP_COLUMNS)
+                .', nor '.self::MAP_FORMAT_V2.' with columns '.implode(',', self::MAP_COLUMNS_V2).'[,'.self::MAP_COLUMN_PROCESSED.'].');
         }
+        $width = count($columns);
 
         $map = [];
         $dupes = [];
         foreach ($doc['rows'] as $i => $r) {
-            if (! is_array($r) || count($r) !== count(self::MAP_COLUMNS) || ! is_int($r[0]) || ! is_int($r[1]) || ! is_int($r[2])) {
+            if (! is_array($r) || count($r) !== $width || ! is_int($r[0]) || ! is_int($r[1]) || ! is_int($r[2])
+                || ($v2 && (! $this->isNumber($r[3]) || ! $this->isNumber($r[5]) || ! $this->isNumber($r[6])))
+                || ($width === 9 && $r[8] !== null && ! is_int($r[8]))) {
                 throw new RuntimeException("Map row {$i} is malformed.");
             }
             if (isset($map[$r[0]])) {
                 $dupes[$r[0]] = true;
             }
-            // A timetakenAdjusted that is not whole minutes leaves adj null: its rows report as bad-adjustment.
-            $map[$r[0]] = ['halo_ticket_id' => $r[1], 'actionnumber' => $r[2], 'adj' => self::adjustmentMinutes($r[4])];
+            // A value that is not whole minutes leaves adj null: its rows report as bad-adjustment.
+            $adj = self::adjustmentMinutes($r[4]);
+            $partial = null;
+            if ($v2) {
+                // Group A: Halo drew only prepayHours from prepay and charged the rest. The note
+                // then carries prepay - timetaken, so it prices at the prepay part alone.
+                $taken = self::adjustmentMinutes($r[3]);
+                $prepay = self::adjustmentMinutes($r[5]);
+                if ($taken === null || $prepay === null) {
+                    $adj = null;
+                } elseif ($adj !== null && $prepay < $taken + $adj) {
+                    $adj = $prepay - $taken;
+                    $partial = ['timetaken' => (float) $r[3], 'prepay' => (float) $r[5], 'charge' => (float) $r[6], 'processed' => $width === 9 ? $r[8] : null];
+                }
+            }
+            $map[$r[0]] = ['halo_ticket_id' => $r[1], 'actionnumber' => $r[2], 'adj' => $adj, 'partial' => $partial];
         }
         // An action id mapped twice is ambiguous: drop it, so its rows report as no-map.
         foreach (array_keys($dupes) as $actionId) {
@@ -514,6 +594,11 @@ class PrepayRelinkHaloTicketTime extends Command
         }
 
         return $map;
+    }
+
+    private function isNumber(mixed $v): bool
+    {
+        return is_int($v) || is_float($v);
     }
 
     /** @return array<int, true> */

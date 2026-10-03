@@ -68,6 +68,17 @@ class HaloTimeAdjustmentTest extends TestCase
         $this->assertEqualsWithDelta(10 - 0.7167, (float) $this->contract->fresh()->prepay_balance, 0.006); // the balance column holds 2 places
     }
 
+    public function test_a_negative_adjustment_prices_the_prepay_part_only(): void
+    {
+        // Group A: 60 min of note time, of which 15 min was drawn from prepay.
+        $note = $this->note(60, -45);
+
+        $txn = app(PrepayService::class)->debitFromTicketNote($note);
+
+        $this->assertSame(-0.25, (float) $txn->hours);
+        $this->assertEqualsWithDelta(9.75, (float) $this->contract->fresh()->prepay_balance, 0.006);
+    }
+
     public function test_a_native_note_without_an_adjustment_prices_its_time_alone(): void
     {
         $txn = app(PrepayService::class)->debitFromTicketNote($this->note(30, null));

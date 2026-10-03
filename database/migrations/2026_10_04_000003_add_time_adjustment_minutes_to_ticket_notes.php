@@ -7,8 +7,8 @@ use Illuminate\Support\Facades\Schema;
 /**
  * #5067 r3: billable minutes added to time_minutes when the note's time is priced for
  * prepay (TicketNote::pricedMinutes()). Set only by prepay:relink-halo-ticket-time, from
- * Halo's timetakenAdjusted; a native note leaves it NULL, which prices as 0. Signed so a
- * later ruling can carry a reduction; the relink writes only positive values today.
+ * Halo's timetakenAdjusted, or negative where Halo drew only part of the action from prepay
+ * (prepayHours - timetaken); a native note leaves it NULL, which prices as 0.
  */
 return new class extends Migration
 {

@@ -707,4 +707,134 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(20, $this->adjustmentOf($note));
         $this->assertSame($note, $this->linkedTo($ptx));
     }
+
+    // ── r3 group A: Halo drew only part of the action from prepay (map v2 prepayHours) ──
+
+    /** @param list<list<mixed>> $rows v2 rows; $processed adds the optional chargeProcessed column */
+    private function writeMapV2(array $rows, bool $processed = false): void
+    {
+        $columns = ['halo_action_id', 'halo_ticket_id', 'actionnumber', 'timetaken', 'timetakenAdjusted', 'prepayHours', 'chargeHours', 'isBillable'];
+        file_put_contents($this->mapPath, json_encode([
+            'format' => 'halo-action-map/v2',
+            'columns' => $processed ? [...$columns, 'chargeProcessed'] : $columns,
+            'rows' => $rows,
+        ]));
+    }
+
+    /** A 60-minute note, 1.0 h timetaken, of which Halo drew 0.25 h from prepay and charged 0.75 h. */
+    private function partial(int $noteMinutes = 60, bool $processed = true): array
+    {
+        [$ptx, $note] = $this->adjusted(30, 70030, $noteMinutes, -0.25, 0.0, ['body' => 'Synthetic partial body']);
+        $rows = [[70001, 9001, 1, 0.5, 0.0, 0.5, 0.0, 1], [70030, 9001, 30, 1.0, 0.0, 0.25, 0.75, 1]];
+        if ($processed) {
+            $rows[0][] = null;
+            $rows[1][] = 1;
+        }
+        $this->writeMapV2($rows, $processed);
+
+        return [$ptx, $note];
+    }
+
+    public function test_a_partial_prepay_row_links_with_a_negative_adjustment_and_no_ledger_change(): void
+    {
+        [$ptx, $note] = $this->partial();
+        $ledger = $this->ledger();
+        $balances = $this->contractState();
+
+        [, $dry] = $this->run5067();
+        $this->assertStringContainsString('would link: 2', $dry);
+        $this->assertStringContainsString('would link with an adjustment: 1', $dry);
+        $this->assertStringContainsString('partial-prepay rows: 1', $dry);
+        $this->assertStringContainsString("  ptx {$ptx}: link, adjustment -45 min; timetaken 1 h, prepay 0.25 h, charge 0.75 h, processed 1, note body length 22", $dry);
+        $this->assertStringNotContainsString('Synthetic partial body', $dry);
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(-45, $this->adjustmentOf($note));
+        $this->assertSame(15, TicketNote::findOrFail($note)->pricedMinutes());
+        foreach ($ledger as $i => $row) {
+            if ($row['id'] === $ptx) {
+                $ledger[$i]['ticket_note_id'] = $note;
+            } elseif ($row['id'] === $this->ptx['link']) {
+                $ledger[$i]['ticket_note_id'] = $this->notes['link'];
+            }
+        }
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($balances, $this->contractState());
+        $this->assertSame([(string) $note => ['prior' => null, 'set' => -45]],
+            json_decode(file_get_contents($this->dir.'/rollback.json'), true)['adjustments']);
+
+        // A later ordinary save prices the prepay part only: the row keeps 0.25 h.
+        $model = TicketNote::findOrFail($note);
+        $model->body = 'Synthetic edited';
+        $model->save();
+        $this->assertSame(-0.25, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+        $this->assertSame($balances, $this->contractState());
+
+        // Rollback restores NULL.
+        $this->assertSame(0, Artisan::call('prepay:relink-halo-ticket-time', ['--rollback' => $this->dir.'/rollback.json']));
+        $this->assertNull($this->adjustmentOf($note));
+        $this->assertNull($this->linkedTo($ptx));
+    }
+
+    public function test_a_partial_prepay_reduction_below_zero_is_refused(): void
+    {
+        // The note holds 10 min against Halo's 60: 10 - 45 would price below zero.
+        [$ptx, $note] = $this->partial(10);
+        [, $out] = $this->commit();
+        $this->ptx['below'] = $ptx;
+        $this->assertRefused('below', 'below-zero', $out);
+        $this->assertNull($this->adjustmentOf($note));
+        $this->assertStringContainsString("  ptx {$ptx}: refused below-zero;", $out);
+    }
+
+    public function test_a_v2_map_without_charge_processed_prints_n_a_and_links_full_prepay_rows_as_r3(): void
+    {
+        // Row 70020: prepay = timetaken + adjusted (no partial), so the r3 rule applies.
+        [$ptx, $note] = $this->adjusted(20, 70020, 30, -0.7167, 0.2167);
+        [$pptx] = $this->adjusted(30, 70030, 60, -0.25, 0.0);
+        $this->writeMapV2([
+            [70001, 9001, 1, 0.5, 0.0, 0.5, 0.0, 1],
+            [70020, 9001, 20, 0.5, 0.2167, 0.7167, 0.0, 1],
+            [70030, 9001, 30, 1.0, 0.0, 0.25, 0.75, 1],
+        ]);
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertSame(13, $this->adjustmentOf($note));
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertStringContainsString('partial-prepay rows: 1', $out);
+        $this->assertStringContainsString("  ptx {$pptx}: link, adjustment -45 min; timetaken 1 h, prepay 0.25 h, charge 0.75 h, processed n/a, note body length 9", $out);
+    }
+
+    public function test_a_v1_map_reports_no_partial_rows_and_ignores_no_prepay_split(): void
+    {
+        // Same ledger row as group A, but a v1 map has no prepayHours: 60 min != 0.25 h.
+        [$ptx] = $this->adjusted(30, 70030, 60, -0.25, 0.0);
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertStringContainsString('partial-prepay rows: 0', $out);
+        $this->ptx['v1'] = $ptx;
+        $this->assertRefused('v1', 'time-mismatch', $out);
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+    }
+
+    public function test_a_v2_map_with_a_bad_column_list_is_refused(): void
+    {
+        file_put_contents($this->mapPath, json_encode([
+            'format' => 'halo-action-map/v2',
+            'columns' => ['halo_action_id', 'halo_ticket_id', 'actionnumber', 'timetaken', 'timetakenAdjusted'],
+            'rows' => [[70001, 9001, 1, 0.5, 0.0]],
+        ]));
+        $before = $this->ledger();
+
+        [$exit] = $this->commit();
+
+        $this->assertSame(1, $exit);
+        $this->assertSame($before, $this->ledger());
+    }
 }
