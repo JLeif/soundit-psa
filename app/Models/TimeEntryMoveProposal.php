@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * A held agent move of one time entry's contract (card I3EvQKUV PR 2, ruling Q9),
- * awaiting a staff approval on the ticket page.
+ * awaiting a staff approval or denial in the technician cockpit.
  */
 class TimeEntryMoveProposal extends Model
 {

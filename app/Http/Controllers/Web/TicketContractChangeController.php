@@ -11,7 +11,7 @@ use Illuminate\Http\Request;
 
 /**
  * The ticket page's contract-change modal (card I3EvQKUV PR 2, SPEC §4, mockup 3)
- * and the approval of held agent moves (ruling Q9).
+ * and the technician cockpit's approval or denial of held agent moves (ruling Q9).
  */
 class TicketContractChangeController extends Controller
 {

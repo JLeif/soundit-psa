@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Held agent moves of a time entry's contract (card I3EvQKUV PR 2, ruling Q9):
  * stage_move_time_entry_contract writes one pending row; a staff user approves
- * or denies it on the ticket page, and approval re-validates before any money
+ * or denies it in the technician cockpit, and approval re-validates before any money
  * moves. No FKs on the entry: stale evidence survives a deleted target, and
  * approval re-checks existence. Additive and reversible.
  */

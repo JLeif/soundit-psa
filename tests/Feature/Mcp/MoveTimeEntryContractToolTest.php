@@ -272,6 +272,99 @@ class MoveTimeEntryContractToolTest extends TestCase
         $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'));
     }
 
+    /**
+     * diff:16: the immediate result and the tool description claim a debit on the new contract
+     * only when one is written there, on approvalEffect()'s branches: ledgered to prepay,
+     * ledgered to non-prepay, unledgered to non-prepay (nothing drawn).
+     */
+    public function test_immediate_result_and_description_claim_a_debit_only_onto_hours_prepay(): void
+    {
+        foreach ([false, true] as $internal) {
+            $description = \App\Support\McpToolRegistry::moveTimeEntryContractTool($internal)['description'];
+            $this->assertStringNotContainsString('and debited from the new contract.', $description);
+            $this->assertStringContainsString('and, only when the new contract is hours-prepay, debited from it; a new contract that is not hours-prepay is debited nothing', $description);
+        }
+
+        $token = McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract:immediate']);
+        $managed = $this->contract($this->ticket->client, 'Synthetic Managed M', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $second = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 30, 'noted_at' => now(),
+        ]);
+
+        $toPrepay = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args()));
+        $this->assertTrue($toPrepay['ledger']);
+        $this->assertSame('Time entry moved. It credited 0.75h back to Synthetic Block A and debited 0.75h from Synthetic Project B.', $toPrepay['message']);
+        $this->assertSame($this->b->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->sole()->contract_id, 'the stated debit exists');
+
+        $toManaged = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $second->id, 'contract_id' => $managed->id])));
+        $this->assertTrue($toManaged['ledger']);
+        $this->assertSame('Time entry moved. It credited 0.50h back to Synthetic Block A; Synthetic Managed M is not an hours-prepay contract, so nothing was debited.', $toManaged['message']);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $second->id)->count(), 'no debit was written');
+
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $unledgered = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 15, 'noted_at' => now(),
+        ]);
+        $c = $this->contract($this->ticket->client, 'Synthetic Managed N', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $plain = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $unledgered->id, 'contract_id' => $c->id])));
+        $this->assertFalse($plain['ledger']);
+        $this->assertSame('Time entry moved. It had no prepay ledger row and no prepay hours were drawn.', $plain['message']);
+        $this->assertStringNotContainsString('debited', $plain['message']);
+    }
+
+    /** diff:15: held moves are approved or denied in the technician cockpit, not on the ticket page. */
+    public function test_staged_move_names_the_technician_cockpit(): void
+    {
+        foreach ([false, true] as $internal) {
+            $description = \App\Support\McpToolRegistry::moveTimeEntryContractTool($internal)['description'];
+            $this->assertStringContainsString('Bare or :staged grants hold for staff approval in the technician cockpit;', $description);
+            $this->assertStringNotContainsString('ticket page', $description);
+        }
+        $held = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract', $this->args()));
+        $this->assertTrue($held['staged']);
+        $this->assertStringContainsString('Move held for staff approval in the technician cockpit; no prepay hours moved.', $held['message']);
+        $this->assertStringNotContainsString('ticket page', $held['message']);
+
+        // The cockpit is where the approve control renders.
+        $this->actingAs(User::factory()->create(['role' => 'admin', 'is_active' => true]));
+        $this->assertStringContainsString(route('time-entry-moves.approve', $held['proposal_id']), view('cockpit.partials.time-entry-moves')->render());
+
+        foreach (['app/Models/TimeEntryMoveProposal.php', 'app/Support/McpToolRegistry.php', 'app/Services/TimeEntryContractMoveService.php',
+            'database/migrations/2026_10_04_000002_create_time_entry_move_proposals_table.php'] as $file) {
+            $this->assertStringNotContainsString('on the ticket page', file_get_contents(base_path($file)), $file.' names the cockpit');
+        }
+    }
+
+    /**
+     * c1:v2:1: the cockpit preview applies approval's ticket-client check. After the ticket moves
+     * to another client, the card says approval refuses the move as stale, and approval does.
+     */
+    public function test_cockpit_preview_refuses_a_target_off_the_tickets_current_client(): void
+    {
+        $managed = $this->contract($this->ticket->client, 'Synthetic Managed M', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $token = McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']);
+        $pair = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args()));
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $unledgered = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 30, 'noted_at' => now(),
+        ]);
+        $draw = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $unledgered->id])));
+        $moves = app(\App\Services\TimeEntryContractMoveService::class);
+        $this->assertStringStartsWith('Approving credits 0.75h back', $moves->approvalEffect(TimeEntryMoveProposal::find($pair['proposal_id'])), 'precondition');
+
+        $other = Client::create(['name' => 'Synthetic Other']);
+        \Illuminate\Support\Facades\DB::table('tickets')->where('id', $this->ticket->id)->update(['client_id' => $other->id, 'contract_id' => null]);
+
+        $refusal = "Synthetic Project B is not a contract of the ticket's current client, so approving refuses the move as stale. Nothing has moved yet.";
+        $this->assertSame($refusal, $moves->approvalEffect(TimeEntryMoveProposal::find($pair['proposal_id'])));
+        $this->assertSame($refusal, $moves->approvalEffect(TimeEntryMoveProposal::find($draw['proposal_id'])));
+
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $this->actingAs($admin)->post(route('time-entry-moves.approve', $pair['proposal_id']))->assertSessionHas('error');
+        $this->assertSame('stale', TimeEntryMoveProposal::find($pair['proposal_id'])->state, 'approval refuses it as stale, as the card said');
+        $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'));
+    }
+
     /** contract-s1:8: moved A -> C -> A since staging is still a change, so approval refuses it as stale. */
     public function test_held_move_goes_stale_after_a_round_trip(): void
     {

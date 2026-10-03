@@ -180,7 +180,9 @@ class TimeEntryContractMoveService
             try {
                 $result = $this->prepay->moveEntryContract($entry, $to, (string) $reason, $by);
                 $moved++;
-                $hours += $result['hours'];
+                // A ledgered move reports the hours it moved; an unledgered one, the hours its
+                // follow-on debit drew (from the ledger row written), not 0.
+                $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
             } catch (\InvalidArgumentException $e) {
                 $errors[] = $e->getMessage();
             }
@@ -243,7 +245,7 @@ class TimeEntryContractMoveService
                 return ['error' => $e->getMessage()];
             }
 
-            $message = 'Time entry moved: credited back to its contract and debited from the new one.';
+            $message = 'Time entry moved. '.$this->ledgeredMoveStatement($result);
             if (! $result['ledger']) {
                 $drawn = PrepayTransaction::where($type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->first();
                 $message = $drawn
@@ -264,7 +266,7 @@ class TimeEntryContractMoveService
         );
 
         $draw = $this->stagedDrawHours($entry, $type, $contractId);
-        $message = 'Move held for staff approval on the ticket page; no prepay hours moved.';
+        $message = 'Move held for staff approval in the technician cockpit; no prepay hours moved.';
         if ($draw > 0) {
             $message .= ' On approval: '.self::drawStatement($draw, (string) Contract::find($contractId)?->name, false);
         }
@@ -320,6 +322,26 @@ class TimeEntryContractMoveService
         return ['success' => true] + $result;
     }
 
+    /**
+     * The done move's statement for an entry that had a ledger row, on approvalEffect()'s
+     * branches: the credit back to the old contract, and the debit on the new one only when a
+     * debit linked to the entry was written there (moveEntryContract writes it only when the
+     * new contract is hours prepay).
+     *
+     * @param  array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool}  $result
+     */
+    private function ledgeredMoveStatement(array $result): string
+    {
+        $name = fn (?int $id) => $id === null ? 'no contract' : (Contract::withTrashed()->find($id)?->name ?? "contract {$id}");
+        $hours = number_format($result['hours'], 2).'h';
+        $debited = PrepayTransaction::where($result['entry_type'] === 'note' ? 'ticket_note_id' : 'phone_call_id', $result['entry_id'])
+            ->where('contract_id', $result['to_contract_id'])->exists();
+
+        return 'It credited '.$hours.' back to '.$name($result['from_contract_id'])
+            .($debited ? ' and debited '.$hours.' from '.$name($result['to_contract_id']).'.'
+                : '; '.$name($result['to_contract_id']).' is not an hours-prepay contract, so nothing was debited.');
+    }
+
     private function stagedFrom(TimeEntryMoveProposal $p): ?int
     {
         return $p->from_contract_id === null ? null : (int) $p->from_contract_id;
@@ -349,6 +371,10 @@ class TimeEntryContractMoveService
         if (! $entry || ! $to || (int) $entry->ticket_id !== (int) $p->ticket_id
             || $this->loggedContractId($entry, $p->entry_type) !== $this->stagedFrom($p) || $this->movedSince($p)) {
             $effect = 'The entry changed since this move was staged, or it or the new contract is gone, so approving refuses the move as stale.';
+        } elseif ((int) $to->client_id !== (int) Ticket::whereKey($p->ticket_id)->value('client_id')) {
+            // moveEntryContract's own check: the new contract must belong to the ticket's
+            // current client; approve() turns that refusal into a stale resolution.
+            $effect = $to->name." is not a contract of the ticket's current client, so approving refuses the move as stale.";
         } elseif ($to->trashed() || $to->status !== ContractStatus::Active) {
             $effect = $to->name.' is no longer an active contract, so approving refuses the move.';
         } elseif ($ledger && (! $from || (int) $from->client_id !== (int) $to->client_id)) {

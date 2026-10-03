@@ -1671,7 +1671,8 @@ class McpToolRegistry
     /**
      * move_time_entry_contract MOVES MONEY (card I3EvQKUV PR 2, ruling Q9): it runs
      * PrepayService::moveEntryContract, which credits the entry's hours back to its
-     * contract and debits them from the new one. Same grant contract as
+     * contract and debits them from the new one only when that one is hours prepay. Held
+     * moves are approved or denied in the technician cockpit. Same grant contract as
      * set_call_billable: default-ungranted, a bare or :staged grant holds.
      *
      * @return array<string, mixed>
@@ -1680,7 +1681,7 @@ class McpToolRegistry
     {
         return [
             'name' => $internal ? 'stage_move_time_entry_contract' : 'move_time_entry_contract',
-            'description' => 'Move one time entry (a ticket note with time, or a phone call) to another contract of the same client. THIS MOVES PREPAY MONEY: the entry\'s hours are credited back to the contract it was logged against (a visible credit in that contract\'s history) and debited from the new contract. An entry with NO prepay ledger row yet (e.g. billable time logged on a non-prepay contract) has nothing to credit back: moving it onto an hours-prepay contract draws its hours from that contract right after the move (the result states the hours drawn and the contract; a staged result states draw_hours_on_approval). If this time was already invoiced by hand, untick billable instead of moving. The ledger is append-only: nothing is deleted. contract_id must be an ACTIVE contract of the ticket\'s client (call list_client_contracts); time never moves to another client. update_ticket with contract_id changes only the ticket and moves no time; use this tool for each entry that should follow. Default-ungranted including legacy tokens. Bare or :staged grants hold for staff approval on the ticket page; only explicit :immediate executes now. A held move is refused as stale at approval if the entry\'s contract changed.',
+            'description' => 'Move one time entry (a ticket note with time, or a phone call) to another contract of the same client. THIS MOVES PREPAY MONEY: the entry\'s hours are credited back to the contract it was logged against (a visible credit in that contract\'s history) and, only when the new contract is hours-prepay, debited from it; a new contract that is not hours-prepay is debited nothing (the result states which). An entry with NO prepay ledger row yet (e.g. billable time logged on a non-prepay contract) has nothing to credit back: moving it onto an hours-prepay contract draws its hours from that contract right after the move (the result states the hours drawn and the contract; a staged result states draw_hours_on_approval). If this time was already invoiced by hand, untick billable instead of moving. The ledger is append-only: nothing is deleted. contract_id must be an ACTIVE contract of the ticket\'s client (call list_client_contracts); time never moves to another client. update_ticket with contract_id changes only the ticket and moves no time; use this tool for each entry that should follow. Default-ungranted including legacy tokens. Bare or :staged grants hold for staff approval in the technician cockpit; only explicit :immediate executes now. A held move is refused as stale at approval if the entry\'s contract changed.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [

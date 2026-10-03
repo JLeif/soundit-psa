@@ -786,7 +786,10 @@ class PrepayService
      * before the contracts are, with the locked entry, its row and the contract it is on
      * now; it refuses by throwing InvalidArgumentException, and nothing is written.
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool}
+     * drawn_hours is what that follow-on debit drew (0 for a ledgered move, or when nothing was
+     * drawn); the move's system note and ContractActivity rows then report it in place of 0.
+     *
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: float}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -800,8 +803,9 @@ class PrepayService
         $key = $isNote ? 'ticket_note_id' : 'phone_call_id';
         $movedKey = $isNote ? 'moved_ticket_note_id' : 'moved_phone_call_id';
         $alert = [];
+        $report = [];
 
-        $result = DB::transaction(function () use ($entry, $to, $reason, $by, $guard, $isNote, $type, $key, $movedKey, &$alert) {
+        $result = DB::transaction(function () use ($entry, $to, $reason, $by, $guard, $isNote, $type, $key, $movedKey, &$alert, &$report) {
             $locked = $isNote
                 ? TicketNote::withTrashed()->whereKey($entry->id)->lockForUpdate()->first()
                 : PhoneCall::whereKey($entry->id)->lockForUpdate()->first();
@@ -900,19 +904,20 @@ class PrepayService
                 'to_contract' => $target->name,
             ];
             foreach (array_filter([$from, $target]) as $contract) {
-                ContractActivity::create([
+                $report['activity_ids'][] = ContractActivity::create([
                     'contract_id' => $contract->id,
                     'user_id' => $by->id,
                     'action' => $contract->id === $target->id ? 'entry_moved_in' : 'entry_moved_out',
                     'changes' => $changes,
                     'created_at' => now(),
-                ]);
+                ])->id;
             }
 
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
-            $body = 'Moved '.$what.' time ('.number_format($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : 0), 2).' h) from '
-                .($from?->name ?? 'no contract').' to '.$target->name.': '.$reason;
-            TicketNote::create([
+            $report['body'] = fn (float $h, string $drew = '') => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
+                .($from?->name ?? 'no contract').' to '.$target->name.$drew.': '.$reason;
+            $body = $report['body']($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : 0));
+            $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
                 'author_id' => $by->id,
                 'body' => $body,
@@ -920,7 +925,7 @@ class PrepayService
                 'note_type' => \App\Enums\NoteType::System,
                 'is_private' => true,
                 'noted_at' => now(),
-            ]);
+            ])->id;
 
             Log::info('[Prepay] Time entry contract moved', [
                 $key => $locked->id,
@@ -941,12 +946,15 @@ class PrepayService
             ];
         });
 
+        $result['drawn_hours'] = 0.0;
         if (! $result['ledger']) {
             // No ledger row moved: the entry is now stamped on $to, and the ordinary debit
             // path decides (billable time on an hours-prepay $to is debited there).
             $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
-            if ($fresh) {
-                $isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh);
+            $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
+            if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
+                $result['drawn_hours'] = abs((float) $drawn->hours);
+                $this->reportMoveDraw($report, $drawn, $result['drawn_hours']);
             }
         }
 
@@ -958,6 +966,24 @@ class PrepayService
         }
 
         return $result;
+    }
+
+    /**
+     * An unledgered move's follow-on debit drew $hours: the move's system note and its
+     * ContractActivity rows, written before the debit existed, report that draw (the hours
+     * and the contract of the ledger row written) in place of 0.
+     */
+    private function reportMoveDraw(array $report, PrepayTransaction $drawn, float $hours): void
+    {
+        $name = Contract::withTrashed()->find($drawn->contract_id)?->name ?? "contract {$drawn->contract_id}";
+        $body = $report['body']($hours, '; it had no prepay ledger row, so '.number_format($hours, 2).'h was drawn from '.$name);
+        // Query builder: a report correction is not an edit and must not re-enter the observers.
+        TicketNote::whereKey($report['note_id'])->update(['body' => $body, 'body_html' => \App\Helpers\MarkdownRenderer::render($body)]);
+        foreach (ContractActivity::whereKey($report['activity_ids'] ?? [])->get() as $activity) {
+            $activity->update(['changes' => array_merge($activity->changes ?? [], [
+                'hours' => $hours, 'drawn_hours' => $hours, 'drawn_contract_id' => (int) $drawn->contract_id,
+            ])]);
+        }
     }
 
     private function hasPendingCallAction(int $callId): bool

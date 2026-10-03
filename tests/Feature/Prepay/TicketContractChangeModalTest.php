@@ -126,6 +126,59 @@ class TicketContractChangeModalTest extends TestCase
         $this->assertEquals(9.25, (float) $this->b->fresh()->prepay_balance);
     }
 
+    /**
+     * diff:17: an unledgered move that draws reports the hours actually drawn (the ledger row
+     * written) on the web flash, the system note and the ContractActivity rows, not 0.00 h,
+     * for a note and a call; a ledgered move keeps its moved figure.
+     */
+    public function test_unledgered_move_reports_the_hours_drawn(): void
+    {
+        $managed = Contract::create([
+            'client_id' => $this->ticket->client_id, 'name' => 'Synthetic Managed M', 'type' => 'managed', 'status' => 'active',
+            'start_date' => '2026-01-01',
+        ]);
+        $ledgered = $this->note(45);
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $note = $this->note(30);
+        $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+            'call_uuid' => 'synthetic-draw', 'direction' => 'inbound', 'from_number' => '+15555550144',
+            'status' => 'completed', 'is_billable' => true, 'duration' => 720, 'started_at' => now(), 'ticket_id' => $this->ticket->id,
+        ]));
+        app(\App\Services\PrepayService::class)->debitFromPhoneCall($call);
+        $this->assertSame($managed->id, $call->fresh()->contract_id, 'precondition: the call is stamped on the non-prepay contract');
+        $this->assertSame(0, PrepayTransaction::whereIn('ticket_note_id', [$note->id])->orWhere('phone_call_id', $call->id)->count(), 'precondition: no ledger rows');
+
+        $this->actingAs($this->user)
+            ->patch(route('tickets.contract.update', $this->ticket), [
+                'contract_id' => $this->b->id, 'move' => ['note:'.$note->id, 'call:'.$call->id], 'move_reason' => 'Synthetic reclassification',
+            ])->assertSessionHas('success', 'Ticket contract updated. Moved 2 time entries (0.70 h).');
+
+        $this->assertEquals(-0.5, (float) PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
+        $this->assertEquals(-0.2, (float) PrepayTransaction::where('phone_call_id', $call->id)->sole()->hours);
+        $this->assertEquals(9.3, (float) $this->b->fresh()->prepay_balance, 'the reported 0.70 h is what B lost');
+
+        $system = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->orderBy('id')->pluck('body')->all();
+        $this->assertSame([
+            "Moved note #{$note->id} time (0.50 h) from Synthetic Managed M to Synthetic Project B; it had no prepay ledger row, so 0.50h was drawn from Synthetic Project B: Synthetic reclassification",
+            "Moved phone call #{$call->id} time (0.20 h) from Synthetic Managed M to Synthetic Project B; it had no prepay ledger row, so 0.20h was drawn from Synthetic Project B: Synthetic reclassification",
+        ], $system);
+
+        $activity = \App\Models\ContractActivity::where('action', 'like', 'entry_moved%')->orderBy('id')->get()
+            ->map(fn ($a) => [$a->contract_id, $a->action, $a->changes['entry_type'], $a->changes['hours'], $a->changes['drawn_hours'] ?? null])->all();
+        $this->assertEquals([
+            [$managed->id, 'entry_moved_out', 'note', 0.5, 0.5], [$this->b->id, 'entry_moved_in', 'note', 0.5, 0.5],
+            [$managed->id, 'entry_moved_out', 'call', 0.2, 0.2], [$this->b->id, 'entry_moved_in', 'call', 0.2, 0.2],
+        ], $activity);
+
+        // A ledgered move keeps its figure: the hours it moved, with no draw clause.
+        $this->actingAs($this->user)
+            ->patch(route('tickets.contract.update', $this->ticket), [
+                'contract_id' => $this->b->id, 'move' => ['note:'.$ledgered->id], 'move_reason' => 'Synthetic reclassification',
+            ])->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.75 h).');
+        $this->assertSame("Moved note #{$ledgered->id} time (0.75 h) from Synthetic Block A to Synthetic Project B: Synthetic reclassification",
+            TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->orderByDesc('id')->value('body'));
+    }
+
     /** An entry on another ticket cannot be smuggled into the move list. */
     public function test_entry_from_another_ticket_is_not_moved(): void
     {
