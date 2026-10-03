@@ -7,6 +7,7 @@ use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalDeviceSyncService;
 use App\Support\TacticalConfig;
 use Illuminate\Console\Command;
+use Symfony\Component\Console\Formatter\OutputFormatter;
 
 class TacticalSyncDevices extends Command
 {
@@ -63,19 +64,22 @@ class TacticalSyncDevices extends Command
                 $this->warn("  - {$reason}: {$count}");
             }
 
-            // Name each retired asset that blocked a create. The list is capped
-            // in the service; the soft_deleted_conflict count above is the total.
+            // Name each retired asset that blocked a create, one row per asset.
+            // The list is capped in the service; soft_deleted_conflict above
+            // counts devices, and assets_skipped_retired_total counts the
+            // distinct retired assets, listed or not. Hostnames are escaped:
+            // warn() wraps the text in console markup without escaping it.
             $retired = $result->details['assets_skipped_retired'] ?? [];
             if ($retired !== []) {
                 $this->warn('Retired (soft-deleted) assets blocking a create:');
 
                 foreach ($retired as $row) {
-                    $this->warn('  - '.TacticalDeviceSyncService::describeRetiredSkip($row));
+                    $this->warn('  - '.OutputFormatter::escape(TacticalDeviceSyncService::describeRetiredSkip($row)));
                 }
 
-                $unlisted = (int) ($result->details['assets_skipped_reasons']['soft_deleted_conflict'] ?? 0) - count($retired);
+                $unlisted = max(count($retired), (int) ($result->details['assets_skipped_retired_total'] ?? 0)) - count($retired);
                 if ($unlisted > 0) {
-                    $this->warn("  - +{$unlisted} more not listed");
+                    $this->warn("  - +{$unlisted} more asset".($unlisted === 1 ? '' : 's').' not listed');
                 }
             }
         }

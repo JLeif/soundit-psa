@@ -30,13 +30,23 @@ class TacticalDeviceSyncService
     private const BOOT_TIME_EPOCH_FLOOR = 1_000_000_000;
 
     /**
-     * How many soft_deleted_conflict skips are itemised in
-     * details['assets_skipped_retired']. The list is a sample for the operator,
-     * not the count: details['assets_skipped_reasons']['soft_deleted_conflict']
-     * stays the true total, so a consumer that sees more skips than rows says
-     * the list is partial.
+     * How many retired ASSETS are itemised in details['assets_skipped_retired'].
+     * The list holds one row per retired asset, not per skip, and is a sample
+     * for the operator, not the count. Two totals stay true past the cap:
+     * details['assets_skipped_reasons']['soft_deleted_conflict'] counts skipped
+     * agents (devices), and details['assets_skipped_retired_total'] counts the
+     * distinct retired assets that blocked them, so a consumer that sees more
+     * assets than rows says the list is partial.
      */
     public const RETIRED_SKIP_LIST_LIMIT = 20;
+
+    /**
+     * Retired asset ids already seen in a run, per SyncResult, so the asset
+     * total keeps counting distinct assets after the list is full.
+     *
+     * @var \WeakMap<SyncResult, array<int, true>>|null
+     */
+    private ?\WeakMap $retiredSeen = null;
 
     /**
      * The widest real UTC offset is +14:00. createFromFormat's 'P' accepts far more
@@ -1250,20 +1260,47 @@ class TacticalDeviceSyncService
      * Name the retired (soft-deleted) asset that blocked a create, so a run that
      * reports "0 assets" says which record is in the way.
      *
-     * One row per skip, in skip order, capped at RETIRED_SKIP_LIST_LIMIT; the
-     * soft_deleted_conflict counter carries the full total. Two hostnames are
-     * kept because they can differ: the conflict lookup matches the agent's
-     * hostname against the asset's hostname OR its name, case-insensitively.
-     *  - agent_hostname: what Tactical reported for the skipped agent;
+     * One row per retired asset, in first-skip order, capped at
+     * RETIRED_SKIP_LIST_LIMIT. A second agent blocked by an asset already listed
+     * bumps that row's skipped_agents instead of adding a row, so repeats cannot
+     * use up the cap. details['assets_skipped_retired_total'] counts distinct
+     * retired assets, listed or not; the soft_deleted_conflict counter counts
+     * agents. Two hostnames are kept because they can differ: the conflict
+     * lookup matches the agent's hostname against the asset's hostname OR its
+     * name, case-insensitively.
+     *  - agent_hostname: what Tactical reported for the FIRST agent skipped
+     *    against this asset;
      *  - asset_hostname: the retired asset's own hostname column (may be null
      *    when the match was on name).
-     * restorable is Asset::restoreRefusal() === null, the rule restore_asset and
-     * the asset page's restore apply; a merge tombstone is retired but is not
-     * restorable, and carries the survivor in merged_into_asset_id.
+     * restorable is Asset::restoreRefusal() === null, the rule the restore_asset
+     * tool applies; a merge tombstone is retired but is not restorable, and
+     * carries the survivor in merged_into_asset_id.
+     * still_linked is whether the retired asset still carries a
+     * tactical_asset_id. The link query above only adopts assets with no
+     * tactical_asset_id, so restoring such an asset does not link the skipped
+     * agent to it: the next sync finds it live and skips as hostname_conflict.
      */
     private function recordRetiredSkip(SyncResult $result, Asset $conflict, string $agentHostname): void
     {
+        $this->retiredSeen ??= new \WeakMap;
+        $seen = $this->retiredSeen[$result] ?? [];
+        $firstSkip = ! isset($seen[$conflict->id]);
+        $seen[$conflict->id] = true;
+        $this->retiredSeen[$result] = $seen;
+        $result->details['assets_skipped_retired_total'] = count($seen);
+
         $rows = $result->details['assets_skipped_retired'] ?? [];
+
+        if (! $firstSkip) {
+            foreach ($rows as $i => $row) {
+                if ($row['asset_id'] === $conflict->id) {
+                    $rows[$i]['skipped_agents']++;
+                    $result->details['assets_skipped_retired'] = $rows;
+                }
+            }
+
+            return;
+        }
 
         if (count($rows) >= self::RETIRED_SKIP_LIST_LIMIT) {
             return;
@@ -1275,6 +1312,8 @@ class TacticalDeviceSyncService
             'asset_hostname' => $conflict->hostname,
             'restorable' => $conflict->restoreRefusal() === null,
             'merged_into_asset_id' => $conflict->merged_into_asset_id,
+            'still_linked' => $conflict->tactical_asset_id !== null,
+            'skipped_agents' => 1,
         ];
 
         $result->details['assets_skipped_retired'] = $rows;
@@ -1286,19 +1325,29 @@ class TacticalDeviceSyncService
      * same row differently. Restorability is read from the row's own flag
      * (Asset::restoreRefusal() at collection time), never re-derived here.
      *
-     * @param  array{asset_id: int, agent_hostname: string, asset_hostname: ?string, restorable: bool, merged_into_asset_id: ?int}  $row
+     * @param  array{asset_id: int, agent_hostname: string, asset_hostname: ?string, restorable: bool, merged_into_asset_id: ?int, still_linked?: bool, skipped_agents?: int}  $row
      */
     public static function describeRetiredSkip(array $row): string
     {
-        $line = "asset #{$row['asset_id']} ({$row['agent_hostname']}";
+        $line = "asset #{$row['asset_id']} (agent hostname {$row['agent_hostname']}";
+
+        $others = (int) ($row['skipped_agents'] ?? 1) - 1;
+        if ($others > 0) {
+            $line .= " and {$others} more agent".($others === 1 ? '' : 's');
+        }
 
         $assetHostname = $row['asset_hostname'] ?? null;
-        if ($assetHostname !== null && strcasecmp($assetHostname, $row['agent_hostname']) !== 0) {
+        if ($assetHostname !== null && $assetHostname !== '' && strcasecmp($assetHostname, $row['agent_hostname']) !== 0) {
             $line .= ", asset hostname {$assetHostname}";
         }
         $line .= ')';
 
         if ($row['restorable']) {
+            if ($row['still_linked'] ?? false) {
+                return $line.' — restorable from its asset page, but it still carries a Tactical agent link, so restoring it alone will not link '
+                    .($others > 0 ? 'these agents' : 'this agent').' to it';
+            }
+
             return $line.' — restorable from its asset page';
         }
 

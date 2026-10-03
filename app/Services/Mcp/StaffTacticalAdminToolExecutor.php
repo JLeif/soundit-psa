@@ -898,12 +898,20 @@ class StaffTacticalAdminToolExecutor
 
         // Skips are not errors, but a caller told only "0 created" cannot tell
         // a quiet fleet from agents the sync refused to create assets for. The
-        // counts, reasons and the (capped) retired-asset list ride both returns;
-        // assets_skipped_reasons.soft_deleted_conflict is the retired total.
+        // counts, reasons and the (capped) retired-asset list ride both returns.
+        // assets_skipped_reasons.soft_deleted_conflict counts skipped devices;
+        // assets_skipped_retired_total counts the distinct retired assets, and
+        // assets_skipped_retired_truncated says the list holds fewer of them.
+        // The reasons map is an object even when empty: json_encode would
+        // otherwise emit [] for no skips and {...} for some.
+        $retired = $result->details['assets_skipped_retired'] ?? [];
+        $retiredTotal = max(count($retired), (int) ($result->details['assets_skipped_retired_total'] ?? 0));
         $skips = [
             'assets_skipped' => (int) ($result->details['assets_skipped'] ?? 0),
-            'assets_skipped_reasons' => $result->details['assets_skipped_reasons'] ?? [],
-            'assets_skipped_retired' => $result->details['assets_skipped_retired'] ?? [],
+            'assets_skipped_reasons' => (object) ($result->details['assets_skipped_reasons'] ?? []),
+            'assets_skipped_retired' => $retired,
+            'assets_skipped_retired_total' => $retiredTotal,
+            'assets_skipped_retired_truncated' => $retiredTotal > count($retired),
         ];
 
         if ($result->errors > 0) {
@@ -6157,7 +6165,7 @@ class StaffTacticalAdminToolExecutor
     {
         return self::tool(
             'tactical_sync_devices_now',
-            'Run the existing Tactical device sync wrapper for one PSA client mapping. Requires explicit grant, reason, kill-switch, dedup, and server-derived client scope.',
+            'Run the existing Tactical device sync wrapper for one PSA client mapping. Requires explicit grant, reason, kill-switch, dedup, and server-derived client scope. The return counts devices the sync did not link to an asset (assets_skipped, with assets_skipped_reasons as an object keyed by reason) and lists the retired assets that blocked a create in assets_skipped_retired, one row per asset. That list is capped at '.TacticalDeviceSyncService::RETIRED_SKIP_LIST_LIMIT.' rows: assets_skipped_retired_total is the number of distinct retired assets and assets_skipped_retired_truncated is true when the list is incomplete. A row with still_linked true is a retired asset that still carries a Tactical agent link; restoring it does not link the skipped agent to it.',
             self::reasonProperties(),
             ['reason'],
         );
