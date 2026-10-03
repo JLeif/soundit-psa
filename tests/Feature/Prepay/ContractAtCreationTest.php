@@ -285,6 +285,29 @@ class ContractAtCreationTest extends TestCase
         $this->assertSame($live->id, Ticket::sole()->contract_id);
     }
 
+    public function test_web_request_closure_refuses_foreign_inactive_and_malformed_contracts_by_itself(): void
+    {
+        // The FormRequest rule on its own (the controller's catch is a second line).
+        $other = Client::create(['name' => 'Synthetic Other']);
+        $foreign = $this->contract('Synthetic Foreign', [], $other);
+        $expired = $this->contract('Synthetic Expired', ['status' => 'expired']);
+        $live = $this->contract('Synthetic Live');
+
+        $fails = function (mixed $contractId): bool {
+            $data = $this->data(['contract_id' => $contractId]);
+            $request = \App\Http\Requests\TicketStoreRequest::create('/tickets', 'POST', $data);
+
+            return \Illuminate\Support\Facades\Validator::make($data, $request->rules())->errors()->has('contract_id');
+        };
+
+        $this->assertTrue($fails($foreign->id));
+        $this->assertTrue($fails($expired->id));
+        $this->assertTrue($fails('7abc'));
+        $this->assertFalse($fails($live->id));
+        $this->assertFalse($fails((string) $live->id));
+        $this->assertFalse($fails(null));
+    }
+
     public function test_web_form_blank_contract_takes_the_client_rules(): void
     {
         $default = $this->contract('Synthetic Default');
