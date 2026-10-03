@@ -90,6 +90,23 @@
                     </select>
                 </div>
 
+                {{-- Contract (AJAX; card I3EvQKUV PR 3, mockup 4): this client's ACTIVE contracts,
+                     prefilled with the client default or the only active contract. Blank lets
+                     the server apply those same rules; several and no default leaves it unset. --}}
+                <div class="col-md-3" id="contractGroup">
+                    <label for="contract_id" class="form-label">Contract</label>
+                    <select name="contract_id" id="contract_id"
+                            class="form-select @error('contract_id') is-invalid @enderror"
+                            data-old="{{ old('contract_id') }}"
+                            aria-describedby="contractHint" disabled>
+                        <option value="">Choose a client first</option>
+                    </select>
+                    @error('contract_id')
+                        <div class="invalid-feedback">{{ $message }}</div>
+                    @enderror
+                    <div class="form-text" id="contractHint">Only the chosen client's active contracts are listed.</div>
+                </div>
+
                 {{-- Asset (AJAX) --}}
                 <div class="col-md-3" id="assetGroup">
                     <label for="asset_id" class="form-label">Asset</label>
@@ -174,11 +191,90 @@ document.addEventListener('DOMContentLoaded', function() {
     const dueAtInput = document.getElementById('due_at');
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
-    // Client change → load contacts and assets
+    const contractSelect = document.getElementById('contract_id');
+    const contractHint = document.getElementById('contractHint');
+    const contractHintDefault = contractHint.textContent;
+    // One hint per picker state (review r1 context:8, contract-s1:4): only a state that shows
+    // a contract says new time goes to it.
+    const contractHints = {
+        chosen: "Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.",
+        none: 'This client has no active contracts, so the ticket is created without one.',
+        failed: "Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.",
+    };
+
+    function contractOption(value, text) {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = text;
+        return opt;
+    }
+
+    function contractLabel(c) {
+        let label = c.name + (c.is_default ? ' · default' : '');
+        if (c.prepay_balance !== null && c.prepay_balance !== undefined) {
+            label += ' · ' + Number(c.prepay_balance).toFixed(2) + (c.prepay_unit === 'dollars' ? ' $ prepay' : ' h prepay');
+        } else if (c.type_label) {
+            label += ' · ' + c.type_label;
+        }
+        return label;
+    }
+
+    // Card I3EvQKUV PR 3: fill the Contract picker from the client's active contracts.
+    function loadContracts(clientId, preferId) {
+        contractSelect.innerHTML = '';
+        contractHint.textContent = contractHintDefault;
+        contractHint.classList.remove('text-warning-emphasis');
+        if (!clientId) {
+            contractSelect.appendChild(contractOption('', 'Choose a client first'));
+            contractSelect.disabled = true;
+            return;
+        }
+
+        fetch('/api/clients/' + clientId + '/active-contracts', {
+            headers: { 'X-CSRF-TOKEN': csrfToken, 'Accept': 'application/json' }
+        })
+        .then(r => { if (!r.ok) { throw new Error('contracts'); } return r.json(); })
+        .then(contracts => {
+            if (clientSelect.value !== String(clientId)) {
+                return; // the client changed while this loaded
+            }
+            contractSelect.innerHTML = '';
+            if (contracts.length === 0) {
+                contractSelect.appendChild(contractOption('', 'None: no active contracts'));
+                contractHint.textContent = contractHints.none;
+                contractSelect.disabled = true;
+                return;
+            }
+            const fallback = contracts.find(c => c.is_default) || (contracts.length === 1 ? contracts[0] : null);
+            if (!fallback) {
+                contractSelect.appendChild(contractOption('', 'No contract — time logged without one is held as “Needs contract”'));
+                contractHint.textContent = 'No default: this client has ' + contracts.length
+                    + ' active contracts. Pick one now; time logged on this ticket without a contract is held as “Needs contract” until one is chosen.';
+                contractHint.classList.add('text-warning-emphasis');
+            } else {
+                contractHint.textContent = contractHints.chosen;
+            }
+            contracts.forEach(c => contractSelect.appendChild(contractOption(String(c.id), contractLabel(c))));
+            const preferred = preferId && contracts.some(c => String(c.id) === String(preferId)) ? String(preferId) : null;
+            contractSelect.value = preferred || (fallback ? String(fallback.id) : '');
+            contractSelect.disabled = false;
+        })
+        .catch(function() {
+            // Leave it blank and disabled: the server then applies the client default or
+            // the only active contract when the ticket is created.
+            contractSelect.innerHTML = '';
+            contractSelect.appendChild(contractOption('', 'Contracts could not be loaded'));
+            contractHint.textContent = contractHints.failed;
+            contractSelect.disabled = true;
+        });
+    }
+
+    // Client change → load contacts, assets and contracts
     clientSelect.addEventListener('change', function() {
         const clientId = this.value;
         contactSelect.innerHTML = '<option value="">-- None --</option>';
         assetSelect.innerHTML = '<option value="">-- None --</option>';
+        loadContracts(clientId, null);
 
         if (!clientId) {
             contactSelect.disabled = true;
@@ -262,6 +358,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Set initial due date on page load
     if (!dueAtInput.value) {
         updateDueDate();
+    }
+
+    // A form re-shown after a validation error keeps its client: reload its contracts
+    // and keep the contract that was submitted.
+    if (clientSelect.value) {
+        loadContracts(clientSelect.value, contractSelect.dataset.old || null);
     }
 });
 </script>

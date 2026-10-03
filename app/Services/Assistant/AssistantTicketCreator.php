@@ -32,7 +32,7 @@ class AssistantTicketCreator
         $priorityKey = is_numeric($priorityLevel) ? (int) $priorityLevel : 3;
         $priority = $priorityMap[$priorityKey] ?? 'p3';
 
-        return [
+        $payload = [
             'client_id' => $clientId,
             'subject' => $subject,
             'description' => $description,
@@ -40,6 +40,15 @@ class AssistantTicketCreator
             'type' => TicketType::ServiceRequest->value,
             'source' => TicketSource::Assistant->value,
         ];
+
+        // Optional contract (card I3EvQKUV PR 3). Carried as given: TicketService decides
+        // whether it is an active contract of this client. Not ticket identity, so the
+        // content hash below ignores it, as it does category_id.
+        if (array_key_exists('contract_id', $input) && $input['contract_id'] !== null) {
+            $payload['contract_id'] = $input['contract_id'];
+        }
+
+        return $payload;
     }
 
     public function create(?int $clientId, array $input, ?int $createdByUserId): Ticket

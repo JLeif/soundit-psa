@@ -217,6 +217,14 @@ class StaffPsaActionToolExecutor
             $payload['category_id'] = $categoryId;
         }
 
+        // Contract (card I3EvQKUV PR 3): refused BEFORE dedup, so a bad contract_id never
+        // reads as an idempotent success. The content hash ignores it (not ticket identity).
+        try {
+            $this->ticketService->contractForNewTicket($clientId, $payload['contract_id'] ?? null);
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return $e->toolRefusal();
+        }
+
         $contentHash = $this->ticketCreator->contentHashFromPayload($payload);
         $existing = $this->alreadyCreatedTicketLog($clientId, $contentHash);
         if ($existing !== null) {
@@ -245,7 +253,51 @@ class StaffPsaActionToolExecutor
             'display_id' => $ticket->display_id,
             'url' => route('tickets.show', $ticket),
             'message' => 'Ticket created.',
-        ];
+        ] + $this->createdContractBlock($ticket);
+    }
+
+    /**
+     * The contract block a create response reports (card I3EvQKUV PR 3): the outcome
+     * TicketService::createTicket recorded for this ticket.
+     *
+     * @return array<string, mixed>
+     */
+    private function createdContractBlock(Ticket $ticket): array
+    {
+        $outcome = \App\Services\TicketService::contractOutcomeOf($ticket);
+        if ($outcome !== null) {
+            return $outcome->toArray();
+        }
+
+        // A ticket this call did not create (an email already ticketed, a vendor
+        // burst linked to an open ticket): report the ticket's own contract.
+        return $this->existingTicketContractBlock($ticket);
+    }
+
+    /**
+     * The contract block for an EXISTING ticket (idempotent replay, a linked email):
+     * ContractResolver::forEntry($ticket), the resolution a new time entry on it gets,
+     * in the same shape as a fresh create (r2, review r1 diff:8). The stored
+     * tickets.contract_id (null included) is added as ticket_contract_id only when it
+     * differs from the resolved contract's id.
+     *
+     * @return array<string, mixed>
+     */
+    private function existingTicketContractBlock(?Ticket $ticket): array
+    {
+        if ($ticket === null) {
+            return \App\Services\TicketContractOutcome::fromResolution(\App\Services\ContractResolution::none())->toArray();
+        }
+
+        $resolution = app(\App\Services\ContractResolver::class)->forEntry($ticket);
+        $block = \App\Services\TicketContractOutcome::fromResolution($resolution)->toArray();
+
+        $stored = $ticket->contract_id === null ? null : (int) $ticket->contract_id;
+        if ($stored !== $resolution->contract?->id) {
+            $block['ticket_contract_id'] = $stored;
+        }
+
+        return $block;
     }
 
     /** @return array<string, mixed> */
@@ -325,6 +377,14 @@ class StaffPsaActionToolExecutor
         ];
         if (array_key_exists('contract_id', $validated)) {
             $response['contract_id'] = $updated->contract_id;
+            // Card I3EvQKUV PR 3: the same contract block create responses carry. An
+            // explicit id is "picked"; null clears the ticket contract.
+            $response += $updated->contract_id === null
+                ? ['contract' => null, 'contract_rule' => 'none']
+                : [
+                    'contract' => ['id' => (int) $updated->contract_id, 'name' => \App\Models\Contract::withTrashed()->whereKey($updated->contract_id)->value('name'), 'rule' => \App\Services\ContractResolver::RULE_PICKED],
+                    'contract_rule' => \App\Services\ContractResolver::RULE_PICKED,
+                ];
             $response['entries_on_other_contracts'] = app(\App\Services\TimeEntryContractMoveService::class)->entriesOnOtherContracts($updated);
             $response['message'] = 'Ticket updated. No time moved: entries_on_other_contracts stay where they were logged; move one with move_time_entry_contract.';
         }
@@ -2184,29 +2244,16 @@ class StaffPsaActionToolExecutor
         if (! $email) {
             return ['error' => 'Email item not found'];
         }
+        $contractId = $arguments['contract_id'] ?? null;
 
-        $ticket = DB::transaction(function () use ($email, $actorLabel, $reason): Ticket|array {
-            $email = Email::whereKey($email->id)->lockForUpdate()->firstOrFail();
-            if ($email->ticket_id !== null) {
-                return ['error' => 'Email already linked to ticket #'.$email->ticket_id.'.', 'ticket_id' => $email->ticket_id];
-            }
-            if ($email->client_id === null) {
-                return ['error' => 'Email has no resolved client; resolve the sender before creating a ticket.'];
-            }
-            $ticket = $this->email->autoCreateTicketFromEmail($email);
-            $this->auditEntityExecution(
-                'create_ticket_from_email',
-                'email',
-                (int) $email->id,
-                $ticket->client_id,
-                $actorLabel,
-                $this->mutationContentHash('create_ticket_from_email', (int) $email->id, ['ticket_id' => $ticket->id], $reason),
-                'Email #'.$email->id.' created/linked ticket #'.$ticket->id.': '.$reason,
-                TechnicianConfig::requiredAiActorUserId(),
-            );
-
-            return $ticket;
-        });
+        try {
+            $ticket = DB::transaction(function () use ($email, $actorLabel, $reason, $contractId): Ticket|array {
+                return $this->createTicketFromEmailLocked($email, $actorLabel, $reason, $contractId);
+            });
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            // Thrown by TicketService::contractForNewTicket before any write; nothing to keep.
+            return $e->toolRefusal();
+        }
 
         if (is_array($ticket)) {
             return $ticket;
@@ -2218,7 +2265,35 @@ class StaffPsaActionToolExecutor
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
             'message' => 'Ticket created or linked from email.',
-        ];
+        ] + $this->createdContractBlock($ticket);
+    }
+
+    /** @return Ticket|array<string, mixed> */
+    private function createTicketFromEmailLocked(Email $email, string $actorLabel, string $reason, mixed $contractId): Ticket|array
+    {
+        $email = Email::whereKey($email->id)->lockForUpdate()->firstOrFail();
+        if ($email->ticket_id !== null) {
+            return ['error' => 'Email already linked to ticket #'.$email->ticket_id.'.', 'ticket_id' => $email->ticket_id];
+        }
+        if ($email->client_id === null) {
+            return ['error' => 'Email has no resolved client; resolve the sender before creating a ticket.'];
+        }
+        // Card I3EvQKUV PR 3: a supplied contract is checked against the email's client
+        // up front, so a refusal never depends on which create path runs below.
+        $this->ticketService->contractForNewTicket($email->client_id, $contractId);
+        $ticket = $this->email->autoCreateTicketFromEmail($email, $contractId);
+        $this->auditEntityExecution(
+            'create_ticket_from_email',
+            'email',
+            (int) $email->id,
+            $ticket->client_id,
+            $actorLabel,
+            $this->mutationContentHash('create_ticket_from_email', (int) $email->id, ['ticket_id' => $ticket->id], $reason),
+            'Email #'.$email->id.' created/linked ticket #'.$ticket->id.': '.$reason,
+            TechnicianConfig::requiredAiActorUserId(),
+        );
+
+        return $ticket;
     }
 
     /**
@@ -2363,8 +2438,17 @@ class StaffPsaActionToolExecutor
             return ['error' => 'Phone call was already followed up on by a technician (followed_up_at is set) — it may have been dismissed as spam. Refusing to create a ticket; clear the follow-up state first if this is a genuine new request.'];
         }
 
-        $ticket = DB::transaction(function () use ($call, $actorLabel, $reason): Ticket {
-            $ticket = $this->phoneCallService->createTicketFromCall($call);
+        // Card I3EvQKUV PR 3: refused before anything is written; the call takes the
+        // picked contract too (PhoneCallService::createTicketFromCall stamps it).
+        $contractId = $arguments['contract_id'] ?? null;
+        try {
+            $this->ticketService->contractForNewTicket($call->client_id, $contractId);
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return $e->toolRefusal();
+        }
+
+        $ticket = DB::transaction(function () use ($call, $actorLabel, $reason, $contractId): Ticket {
+            $ticket = $this->phoneCallService->createTicketFromCall($call, $contractId);
             $this->auditEntityExecution(
                 'create_ticket_from_call',
                 'phone_call',
@@ -2384,8 +2468,9 @@ class StaffPsaActionToolExecutor
             'phone_call_id' => $call->id,
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
+            'call_contract_id' => PhoneCall::whereKey($call->id)->value('contract_id'),
             'message' => 'Ticket created from phone call.',
-        ];
+        ] + $this->createdContractBlock($ticket);
     }
 
     /** @return Asset|array<string, string> */
@@ -3547,7 +3632,7 @@ class StaffPsaActionToolExecutor
             'display_id' => $ticket?->display_id,
             'url' => $ticket ? route('tickets.show', $ticket) : null,
             'message' => 'Already created identical create_ticket recently; no new ticket was created.',
-        ];
+        ] + $this->existingTicketContractBlock($ticket);
     }
 
     /** @return array<string, mixed> */

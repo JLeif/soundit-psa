@@ -625,6 +625,22 @@ class McpToolRegistry
         ];
     }
 
+    /**
+     * The one-line contract_id description every ticket-creating agent tool carries
+     * (card I3EvQKUV PR 3, spec §7). The portal create_ticket has no contract_id (Q8).
+     */
+    public const CREATE_CONTRACT_ID_DESCRIPTION = 'Optional. Must be an active contract of this ticket\'s client; omit it and the server uses the client\'s default contract, else its only active contract, else none — the response says which. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied, and the response\'s contract block is authoritative.';
+
+    /**
+     * The contract_id property of a ticket-creating tool schema.
+     *
+     * @return array{type: array<int, string>, description: string}
+     */
+    public static function createContractIdProperty(): array
+    {
+        return ['type' => ['integer', 'null'], 'description' => self::CREATE_CONTRACT_ID_DESCRIPTION];
+    }
+
     /** @return array<string, mixed> */
     public static function createTicketTool(): array
     {
@@ -651,6 +667,7 @@ class McpToolRegistry
                         'type' => ['integer', 'null'],
                         'description' => 'Optional ITIL taxonomy category node id — sets the category whose SOP surfaces on get_ticket_detail. Must be an ACTIVE node (get ids from the list_ticket_categories tool); a retired or unknown node is rejected. Omit or pass null to create the ticket uncategorized. A category set here is authoritative — triage will not overwrite it.',
                     ],
+                    'contract_id' => self::createContractIdProperty(),
                     'reason' => [
                         'type' => 'string',
                         'description' => 'Specific client evidence for creating this ticket now.',
@@ -1371,7 +1388,7 @@ class McpToolRegistry
     {
         return [
             'name' => 'list_client_contracts',
-            'description' => 'List a client\'s contracts (coverage summary rows: id, name, type, status, start/end dates, SLA flag, and linked asset/person/license counts). Read-only; pricing and financial fields are not exposed. Requires an explicit token grant.',
+            'description' => 'List a client\'s contracts (coverage summary rows: id, is_default (the client default contract a create_ticket without contract_id takes), name, type, status, start/end dates, SLA flag, and linked asset/person/license counts). Read-only; pricing and financial fields are not exposed. Requires an explicit token grant.',
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
@@ -1869,6 +1886,7 @@ class McpToolRegistry
                 'type' => 'object',
                 'properties' => [
                     'email_id' => ['type' => 'integer', 'description' => 'The email item ID to create a ticket from. Must already have a resolved client_id.'],
+                    'contract_id' => self::createContractIdProperty(),
                     'reason' => ['type' => 'string', 'description' => 'Specific reason a new ticket (rather than linking to an existing one) is the right action for this email.'],
                 ],
                 'required' => ['email_id', 'reason'],
@@ -1921,6 +1939,7 @@ class McpToolRegistry
                 'type' => 'object',
                 'properties' => [
                     'phone_call_id' => ['type' => 'integer', 'description' => 'The phone call ID to create a ticket from. Must already have a resolved client_id.'],
+                    'contract_id' => self::createContractIdProperty(),
                     'reason' => ['type' => 'string', 'description' => 'Specific reason a new ticket (rather than linking to an existing one) is the right action for this call.'],
                 ],
                 'required' => ['phone_call_id', 'reason'],
