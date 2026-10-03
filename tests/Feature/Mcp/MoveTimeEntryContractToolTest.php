@@ -210,4 +210,83 @@ class MoveTimeEntryContractToolTest extends TestCase
         $this->assertSame('contract_not_allowed', $r['error_code'] ?? null);
         $this->assertSame($this->b->id, $this->ticket->fresh()->contract_id);
     }
+
+    /** context:1: update_ticket's contract change draws no held "Needs contract" entry, as its message says. */
+    public function test_update_ticket_contract_id_leaves_held_entries_undrawn(): void
+    {
+        $this->ticket->update(['contract_id' => null]);
+        $held = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 30, 'noted_at' => now(),
+        ]);
+        $this->assertNotNull($held->fresh()->contract_held_at, 'precondition: held (two active contracts, no default)');
+
+        $r = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['update_ticket']), 'update_ticket',
+            ['ticket_id' => $this->ticket->id, 'contract_id' => $this->b->id]));
+
+        $this->assertTrue($r['success'] ?? false, json_encode($r));
+        $this->assertStringContainsString('No time moved', $r['message']);
+        $this->assertFalse(PrepayTransaction::where('ticket_note_id', $held->id)->exists(), 'nothing drawn');
+        $this->assertNotNull($held->fresh()->contract_held_at, 'still held');
+        $this->assertEquals(10, (float) $this->b->fresh()->prepay_balance);
+    }
+
+    /** diff:14: the cockpit card states what approving each held move does. */
+    public function test_cockpit_card_states_each_moves_effect(): void
+    {
+        $advice = 'If this time was already invoiced by hand, untick billable instead of moving.';
+        $managed = $this->contract($this->ticket->client, 'Synthetic Managed M', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $unledgered = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 30, 'noted_at' => now(),
+        ]);
+        $token = McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']);
+        $draw = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $unledgered->id])));
+        $pair = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args()));
+        $noDebit = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['contract_id' => $managed->id])));
+
+        $moves = app(\App\Services\TimeEntryContractMoveService::class);
+        $this->assertSame('It has no prepay ledger row, so the move will draw 0.50h from Synthetic Project B. '.$advice.' Nothing has moved yet.',
+            $moves->approvalEffect(TimeEntryMoveProposal::find($draw['proposal_id'])));
+        $this->assertSame('Approving credits 0.75h back to Synthetic Block A and debits 0.75h from Synthetic Project B. Nothing has moved yet.',
+            $moves->approvalEffect(TimeEntryMoveProposal::find($pair['proposal_id'])));
+        $this->assertSame('Approving credits 0.75h back to Synthetic Block A; Synthetic Managed M is not an hours-prepay contract, so nothing is debited. Nothing has moved yet.',
+            $moves->approvalEffect(TimeEntryMoveProposal::find($noDebit['proposal_id'])));
+
+        $this->actingAs(User::factory()->create(['role' => 'admin', 'is_active' => true]));
+        $html = view('cockpit.partials.time-entry-moves')->render();
+        $this->assertStringContainsString('will draw 0.50h from Synthetic Project B. '.$advice, $html);
+        $this->assertStringContainsString('Synthetic Managed M is not an hours-prepay contract, so nothing is debited.', $html);
+        $this->assertStringNotContainsString('debits them from the new one', $html);
+    }
+
+    /** contract-s3:12: a new contract gone since staging leaves the proposal stale, not pending behind a 500. */
+    public function test_approval_with_a_deleted_target_goes_stale(): void
+    {
+        $held = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract', $this->args()));
+        \Illuminate\Support\Facades\DB::table('contracts')->where('id', $this->b->id)->delete();
+
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $this->actingAs($admin)->post(route('time-entry-moves.approve', $held['proposal_id']))
+            ->assertRedirect()->assertSessionHas('error', 'The entry or the new contract no longer exists; nothing moved.');
+        $this->assertSame('stale', TimeEntryMoveProposal::find($held['proposal_id'])->state);
+        $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'));
+    }
+
+    /** contract-s1:8: moved A -> C -> A since staging is still a change, so approval refuses it as stale. */
+    public function test_held_move_goes_stale_after_a_round_trip(): void
+    {
+        $c = $this->contract($this->ticket->client, 'Synthetic C');
+        $held = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract', $this->args()));
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $prepay = app(\App\Services\PrepayService::class);
+        $prepay->moveEntryContract($this->note, $c, 'Staff moved it', $admin);
+        $prepay->moveEntryContract($this->note->fresh(), $this->a, 'Staff moved it back', $admin);
+        $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'), 'back on the staged contract');
+
+        $this->actingAs($admin)->post(route('time-entry-moves.approve', $held['proposal_id']))
+            ->assertSessionHas('error', 'The entry changed since this move was staged; nothing moved. Re-stage it if it is still wanted.');
+        $this->assertSame('stale', TimeEntryMoveProposal::find($held['proposal_id'])->state);
+        $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $this->note->id)->value('contract_id'));
+        $this->assertEquals(10, (float) $this->b->fresh()->prepay_balance);
+    }
 }

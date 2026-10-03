@@ -192,6 +192,26 @@ class TicketObserver
         $ticket->forgetSuppliedDescriptionHtml();
     }
 
+    /** Set while a ticket-only contract change saves; see withoutHeldRelease(). */
+    private static bool $suppressHeldRelease = false;
+
+    /**
+     * Run a ticket save whose contract change moves no time (the modal's "Change contract
+     * only" and MCP update_ticket, which both say so): it does not release the client's
+     * held "Needs contract" entries (card I3EvQKUV PR 2). updated() runs synchronously
+     * inside the save, so the flag covers exactly that save.
+     */
+    public static function withoutHeldRelease(callable $fn): mixed
+    {
+        $previous = self::$suppressHeldRelease;
+        self::$suppressHeldRelease = true;
+        try {
+            return $fn();
+        } finally {
+            self::$suppressHeldRelease = $previous;
+        }
+    }
+
     public function updated(Ticket $ticket): void
     {
         // A ticket given its own contract, or moved to another client whose contracts may
@@ -199,7 +219,7 @@ class TicketObserver
         // for its (new) client once the change is committed (card I3EvQKUV r2).
         // The release is client-wide; entries on other tickets that still resolve
         // AMBIGUOUS stay held.
-        $contractSet = $ticket->wasChanged('contract_id') && $ticket->contract_id !== null;
+        $contractSet = $ticket->wasChanged('contract_id') && $ticket->contract_id !== null && ! self::$suppressHeldRelease;
         if (($contractSet || $ticket->wasChanged('client_id')) && $ticket->client_id !== null) {
             $clientId = (int) $ticket->client_id;
             $ticketId = (int) $ticket->id;

@@ -122,5 +122,12 @@ document.addEventListener('DOMContentLoaded', function () {
         rows.forEach((r) => { r.querySelector('.js-cc-move').checked = false; });
         reason.required = false;
     });
+    // Enter in a field must never submit through "Change contract only" (the form's first
+    // submit button, whose click unticks every entry): from the reason it submits the move.
+    form.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+        e.preventDefault();
+        if (e.target === reason && !moveBtn.disabled) form.requestSubmit(moveBtn);
+    });
     form.addEventListener('submit', () => { form.dataset.submitting = '1'; });
 });

@@ -135,7 +135,7 @@ class TimeEntryContractMoveService
     /**
      * Change the ticket's contract and, when entries are ticked, move each through
      * moveEntryContract (one transaction per entry, after the ticket change commits).
-     * The ticket change alone moves no money.
+     * The ticket change alone moves no money, and releases no held "Needs contract" entry.
      *
      * @param  list<array{type: string, id: int}>  $moves
      * @return array{moved: int, hours: float, errors: list<string>}
@@ -156,7 +156,7 @@ class TimeEntryContractMoveService
         $old = $ticket->contract;
         if ((int) $ticket->contract_id !== (int) $contractId) {
             DB::transaction(function () use ($ticket, $contractId, $old, $to, $by) {
-                app(TicketService::class)->updateTicket($ticket, ['contract_id' => $contractId]);
+                \App\Observers\TicketObserver::withoutHeldRelease(fn () => app(TicketService::class)->updateTicket($ticket, ['contract_id' => $contractId]));
                 $body = 'Ticket contract changed from '.($old?->name ?? 'none').' to '.($to?->name ?? 'none')
                     .'. Time already logged stays on the contract it was logged against.';
                 TicketNote::create([
@@ -276,34 +276,96 @@ class TimeEntryContractMoveService
         ];
     }
 
-    /** Approve a held move: re-validated now, and refused as stale if the entry's contract changed. */
+    /**
+     * Approve a held move. The stale check and the claim run as moveEntryContract's guard,
+     * under the entry and ledger-row locks and in its one transaction, so they see the entry
+     * as it is moved, and its after-commit debit and alerts really run after commit. Stale
+     * when the entry left the ticket, is on another contract than staged, or was moved at
+     * all since staging (A -> C -> A included).
+     */
     public function approve(TimeEntryMoveProposal $proposal, User $approver): array
     {
-        return DB::transaction(function () use ($proposal, $approver) {
-            $p = TimeEntryMoveProposal::whereKey($proposal->id)->lockForUpdate()->first();
-            if (! $p || $p->state !== 'pending') {
-                return ['error' => 'Proposal already handled or not found.'];
-            }
-            $entry = $p->entry_type === 'note' ? TicketNote::find($p->entry_id) : PhoneCall::find($p->entry_id);
-            $stale = ! $entry || (int) $entry->ticket_id !== (int) $p->ticket_id
-                || $this->loggedContractId($entry, $p->entry_type) !== ($p->from_contract_id === null ? null : (int) $p->from_contract_id);
-            if ($stale) {
-                $p->update(['state' => 'stale', 'handled_at' => now(), 'approved_by' => $approver->id]);
+        $p = TimeEntryMoveProposal::find($proposal->id);
+        if (! $p || $p->state !== 'pending') {
+            return ['error' => 'Proposal already handled or not found.'];
+        }
+        $stale = fn (string $message) => TimeEntryMoveProposal::whereKey($p->id)->where('state', 'pending')
+            ->update(['state' => 'stale', 'handled_at' => now(), 'approved_by' => $approver->id])
+            ? ['error' => $message] : ['error' => 'Proposal already handled or not found.'];
+        $entry = $p->entry_type === 'note' ? TicketNote::find($p->entry_id) : PhoneCall::find($p->entry_id);
+        $to = Contract::withTrashed()->find($p->to_contract_id);
+        if (! $entry || ! $to) {
+            return $stale('The entry or the new contract no longer exists; nothing moved.');
+        }
 
-                return ['error' => 'The entry changed since this move was staged; nothing moved. Re-stage it if it is still wanted.'];
-            }
-            $p->update(['state' => 'done', 'handled_at' => now(), 'approved_by' => $approver->id]);
-            try {
-                $result = $this->prepay->moveEntryContract($entry, Contract::withTrashed()->findOrFail($p->to_contract_id),
-                    $p->reason.' (staged by '.$p->drafted_by.')', $approver);
-            } catch (\InvalidArgumentException $e) {
-                $p->update(['state' => 'stale']);
+        $handled = false;
+        $guard = function (TicketNote|PhoneCall $locked, ?PrepayTransaction $row, ?int $fromId) use ($p, $approver, &$handled) {
+            $claim = TimeEntryMoveProposal::whereKey($p->id)->lockForUpdate()->first();
+            if (! $claim || $claim->state !== 'pending') {
+                $handled = true;
 
-                return ['error' => $e->getMessage()];
+                throw new \InvalidArgumentException('Proposal already handled or not found.');
             }
+            if ((int) $locked->ticket_id !== (int) $p->ticket_id || $fromId !== $this->stagedFrom($p) || $this->movedSince($p)) {
+                throw new \InvalidArgumentException('The entry changed since this move was staged; nothing moved. Re-stage it if it is still wanted.');
+            }
+            $claim->update(['state' => 'done', 'handled_at' => now(), 'approved_by' => $approver->id]);
+        };
+        try {
+            $result = $this->prepay->moveEntryContract($entry, $to, $p->reason.' (staged by '.$p->drafted_by.')', $approver, $guard);
+        } catch (\InvalidArgumentException $e) {
+            return $handled ? ['error' => $e->getMessage()] : $stale($e->getMessage());
+        }
 
-            return ['success' => true] + $result;
-        });
+        return ['success' => true] + $result;
+    }
+
+    private function stagedFrom(TimeEntryMoveProposal $p): ?int
+    {
+        return $p->from_contract_id === null ? null : (int) $p->from_contract_id;
+    }
+
+    /** Whether the entry was moved after the proposal was staged. */
+    private function movedSince(TimeEntryMoveProposal $p): bool
+    {
+        return \App\Models\ContractActivity::where('action', 'entry_moved_in')
+            ->where('changes->entry_type', $p->entry_type)->where('changes->entry_id', (int) $p->entry_id)
+            ->where('created_at', '>=', $p->created_at)->exists();
+    }
+
+    /**
+     * What approving a held move does, as the cockpit card states it: the refusal, the
+     * credit/debit pair for an entry with a ledger row (no debit when the new contract is
+     * not hours prepay), or the draw for one without, with the invoiced advice.
+     */
+    public function approvalEffect(TimeEntryMoveProposal $p): string
+    {
+        $entry = $p->entry_type === 'note' ? TicketNote::find($p->entry_id) : PhoneCall::find($p->entry_id);
+        $to = Contract::withTrashed()->find($p->to_contract_id);
+        $toPrepay = $to && $to->has_prepay && ! $to->prepay_as_amount;
+        $ledger = $entry ? PrepayTransaction::where($p->entry_type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->first() : null;
+        $from = $ledger ? Contract::withTrashed()->find($ledger->contract_id) : null;
+
+        if (! $entry || ! $to || (int) $entry->ticket_id !== (int) $p->ticket_id
+            || $this->loggedContractId($entry, $p->entry_type) !== $this->stagedFrom($p) || $this->movedSince($p)) {
+            $effect = 'The entry changed since this move was staged, or it or the new contract is gone, so approving refuses the move as stale.';
+        } elseif ($to->trashed() || $to->status !== ContractStatus::Active) {
+            $effect = $to->name.' is no longer an active contract, so approving refuses the move.';
+        } elseif ($ledger && (! $from || (int) $from->client_id !== (int) $to->client_id)) {
+            $effect = "Its time is on another client's contract, so approving refuses the move.";
+        } elseif ($ledger && $ledger->hours === null) {
+            $effect = 'Its ledger row is not in hours, so approving refuses the move.';
+        } elseif ($ledger) {
+            $hours = number_format(abs((float) $ledger->hours), 2).'h';
+            $effect = 'Approving credits '.$hours.' back to '.$from->name
+                .($toPrepay ? ' and debits '.$hours.' from '.$to->name.'.' : '; '.$to->name.' is not an hours-prepay contract, so nothing is debited.');
+        } elseif ($toPrepay && ($draw = $this->drawHoursIfMoved($entry, null)) > 0) {
+            $effect = self::drawStatement($draw, $to->name, false);
+        } else {
+            $effect = 'It has no prepay ledger row; approving draws no prepay hours.';
+        }
+
+        return $effect.' Nothing has moved yet.';
     }
 
     private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string

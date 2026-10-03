@@ -781,11 +781,14 @@ class PrepayService
      * on the entry is awaiting approval. An entry with no ledger row moves its stamp
      * only; the ordinary debit path then runs after commit, as on any entry edit.
      *
-     * Lock order: entry -> prepay_transaction -> contracts in ascending id.
+     * Lock order: entry -> prepay_transaction -> contracts in ascending id. $guard, when
+     * given, runs inside the transaction once the entry and its ledger row are locked and
+     * before the contracts are, with the locked entry, its row and the contract it is on
+     * now; it refuses by throwing InvalidArgumentException, and nothing is written.
      *
      * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool}
      */
-    public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by): array
+    public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
         $reason = trim($reason);
         if ($reason === '') {
@@ -798,7 +801,7 @@ class PrepayService
         $movedKey = $isNote ? 'moved_ticket_note_id' : 'moved_phone_call_id';
         $alert = [];
 
-        $result = DB::transaction(function () use ($entry, $to, $reason, $by, $isNote, $type, $key, $movedKey, &$alert) {
+        $result = DB::transaction(function () use ($entry, $to, $reason, $by, $guard, $isNote, $type, $key, $movedKey, &$alert) {
             $locked = $isNote
                 ? TicketNote::withTrashed()->whereKey($entry->id)->lockForUpdate()->first()
                 : PhoneCall::whereKey($entry->id)->lockForUpdate()->first();
@@ -819,6 +822,9 @@ class PrepayService
             }
 
             $fromId = $row ? (int) $row->contract_id : ($locked->contract_id === null ? null : (int) $locked->contract_id);
+            if ($guard) {
+                $guard($locked, $row, $fromId);
+            }
             $ids = array_values(array_unique(array_filter([$fromId, (int) $to->id])));
             sort($ids);
             $contracts = Contract::withTrashed()->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');

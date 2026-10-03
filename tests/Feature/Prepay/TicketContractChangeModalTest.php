@@ -78,6 +78,32 @@ class TicketContractChangeModalTest extends TestCase
             TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body);
     }
 
+    /** context:1: "Change contract only" draws no held "Needs contract" entry either. */
+    public function test_change_contract_only_leaves_held_entries_undrawn(): void
+    {
+        $this->ticket->update(['contract_id' => null]);
+        $held = $this->note(30);
+        $this->assertNotNull($held->fresh()->contract_held_at, 'precondition: held (two active contracts, no default)');
+
+        $this->actingAs($this->user)
+            ->patch(route('tickets.contract.update', $this->ticket), ['contract_id' => $this->b->id, 'change_only' => '1'])
+            ->assertSessionHas('success', 'Ticket contract updated.');
+
+        $this->assertSame($this->b->id, $this->ticket->fresh()->contract_id);
+        $this->assertFalse(PrepayTransaction::where('ticket_note_id', $held->id)->exists(), 'nothing drawn');
+        $this->assertNotNull($held->fresh()->contract_held_at, 'still held');
+        $this->assertEquals(10, (float) $this->b->fresh()->prepay_balance);
+    }
+
+    /** contract-s1:10: Enter never submits through "Change contract only", which unticks every entry. */
+    public function test_enter_in_the_reason_submits_the_move_not_change_only(): void
+    {
+        $js = file_get_contents(public_path('js/ticket-contract-change.js'));
+        $this->assertStringContainsString("form.addEventListener('keydown', (e) => {", $js);
+        $this->assertStringContainsString("if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;", $js);
+        $this->assertStringContainsString('if (e.target === reason && !moveBtn.disabled) form.requestSubmit(moveBtn);', $js);
+    }
+
     /** Ticked entries move through moveEntryContract; a tick without a reason is refused whole. */
     public function test_change_and_move_ticked_entries_needs_a_reason(): void
     {
