@@ -35,6 +35,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 class ClientController extends Controller
@@ -644,7 +645,20 @@ class ClientController extends Controller
 
         // Choosing a default releases the debits held as "Needs contract"; re-submitting
         // the same default retries any still held.
-        $released = $newId === null ? 0 : $prepay->releaseHeldDebits($client->id);
+        // A release failure must not turn a committed default into a 500 (#4920): it is
+        // caught and logged exactly as the Contract and Ticket release paths do.
+        $released = 0;
+        if ($newId !== null) {
+            try {
+                $released = $prepay->releaseHeldDebits($client->id);
+            } catch (\Throwable $e) {
+                Log::warning('[Prepay] Held debits release failed', [
+                    'client_id' => $client->id,
+                    'default_contract_id' => $newId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
         if ($oldId === $newId && $released === 0) {
             return redirect()->route('clients.show', $client);
         }

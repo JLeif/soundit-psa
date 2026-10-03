@@ -421,6 +421,10 @@ class McpStaffController extends Controller
         // mode gate then holds a bare or :staged grant for cockpit approval.
         'set_call_billable',
         'stage_set_call_billable',
+        // Prepay move between contracts (card I3EvQKUV PR 2): routing only, same
+        // held grant contract as set_call_billable.
+        'move_time_entry_contract',
+        'stage_move_time_entry_contract',
         'block_caller',
         'stage_block_caller',
         'allow_caller',

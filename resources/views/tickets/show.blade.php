@@ -874,10 +874,13 @@
                         <tr>
                             <th class="text-muted">Contract</th>
                             <td>
-                                <form method="POST" action="{{ route('tickets.update', $ticket) }}" class="d-inline">
+                                {{-- A change with time entries on the ticket opens the contract-change modal (card I3EvQKUV PR 2);
+                                     with none, it submits as before. Earlier time never moves without a tick. --}}
+                                <form method="POST" action="{{ route('tickets.contract.update', $ticket) }}" class="d-inline" id="ticketContractForm">
                                     @csrf
                                     @method('PATCH')
-                                    <select name="contract_id" class="form-select form-select-sm" onchange="this.form.submit()" style="max-width: 200px;">
+                                    <select name="contract_id" id="ticketContractSelect" class="form-select form-select-sm" style="max-width: 200px;"
+                                            data-current="{{ $ticket->contract_id }}" aria-label="Ticket contract">
                                         <option value="">None</option>
                                         @foreach($ticket->client?->contracts ?? [] as $ct)
                                             <option value="{{ $ct->id }}" {{ $ticket->contract_id == $ct->id ? 'selected' : '' }}>
@@ -1347,9 +1350,11 @@
 </div>
 @endif
 
+@include('tickets._contract-change-modal')
 @endsection
 
 @push('scripts')
+<script src="{{ asset('js/ticket-contract-change.js') }}?v={{ filemtime(public_path('js/ticket-contract-change.js')) }}"></script>
 <script src="{{ asset('js/ticket-actions.js') }}?v={{ filemtime(public_path('js/ticket-actions.js')) }}"></script>
 <script src="{{ asset('js/ticket-ai-chat.js') }}?v={{ filemtime(public_path('js/ticket-ai-chat.js')) }}"></script>
 <script>document.body.dataset.clientId = '{{ $ticket->client_id }}';</script>

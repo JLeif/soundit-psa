@@ -206,6 +206,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/tickets', [TicketController::class, 'store'])->name('tickets.store');
     Route::get('/tickets/{ticket}', [TicketController::class, 'show'])->name('tickets.show');
     Route::patch('/tickets/{ticket}', [TicketController::class, 'update'])->name('tickets.update');
+    Route::patch('/tickets/{ticket}/contract', [\App\Http\Controllers\Web\TicketContractChangeController::class, 'update'])->name('tickets.contract.update');
     Route::patch('/tickets/{ticket}/status', [TicketController::class, 'updateStatus'])->name('tickets.update-status');
     Route::post('/tickets/{ticket}/assets', [TicketController::class, 'linkAsset'])->name('tickets.linkAsset');
     Route::delete('/tickets/{ticket}/assets/{asset}', [TicketController::class, 'unlinkAsset'])->name('tickets.unlinkAsset');
@@ -818,6 +819,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/cockpit/phone-call-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\PhoneCallResolutionController::class, 'deny'])->name('phone-call-resolutions.deny')->middleware('throttle:30,1');
     Route::post('/cockpit/phone-call-actions/{proposal}/approve', [\App\Http\Controllers\Web\PhoneCallActionController::class, 'approve'])->name('phone-call-actions.approve')->middleware('throttle:30,1');
     Route::post('/cockpit/phone-call-actions/{proposal}/deny', [\App\Http\Controllers\Web\PhoneCallActionController::class, 'deny'])->name('phone-call-actions.deny')->middleware('throttle:30,1');
+    Route::post('/cockpit/time-entry-moves/{proposal}/approve', [\App\Http\Controllers\Web\TicketContractChangeController::class, 'approve'])->name('time-entry-moves.approve')->middleware('throttle:30,1');
+    Route::post('/cockpit/time-entry-moves/{proposal}/deny', [\App\Http\Controllers\Web\TicketContractChangeController::class, 'deny'])->name('time-entry-moves.deny')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/approve', [\App\Http\Controllers\Web\EmailResolutionController::class, 'approve'])->name('email-resolutions.approve')->middleware('throttle:30,1');
     Route::post('/cockpit/email-resolutions/{proposal}/deny', [\App\Http\Controllers\Web\EmailResolutionController::class, 'deny'])->name('email-resolutions.deny')->middleware('throttle:30,1');
 

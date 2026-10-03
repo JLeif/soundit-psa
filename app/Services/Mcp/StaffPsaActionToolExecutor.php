@@ -169,6 +169,8 @@ class StaffPsaActionToolExecutor
             // resolve_phone_call does, so a bare grant cannot execute now.
             'set_call_billable', 'stage_set_call_billable' => app(PhoneCallActionService::class)
                 ->execute(PhoneCallActionService::ACTION_BILLABLE, $arguments, $actorLabel, $name === 'stage_set_call_billable'),
+            'move_time_entry_contract', 'stage_move_time_entry_contract' => app(\App\Services\TimeEntryContractMoveService::class)
+                ->agentMove($arguments, $actorLabel, $name === 'stage_move_time_entry_contract'),
             'block_caller', 'stage_block_caller' => app(PhoneCallActionService::class)
                 ->execute(PhoneCallActionService::ACTION_BLOCK, $arguments, $actorLabel, $name === 'stage_block_caller'),
             'allow_caller', 'stage_allow_caller' => app(PhoneCallActionService::class)
@@ -263,6 +265,18 @@ class StaffPsaActionToolExecutor
         if (is_array($validated) && isset($validated['error'])) {
             return $validated;
         }
+        // contract_id changes the ticket only (card I3EvQKUV PR 2): an ACTIVE contract of
+        // this ticket's client, or null. Earlier time stays where it was logged.
+        if (array_key_exists('contract_id', $validated ?? []) && $validated['contract_id'] !== null) {
+            $contractOk = \App\Models\Contract::whereKey((int) $validated['contract_id'])->where('client_id', $ticket->client_id)
+                ->where('status', \App\Enums\ContractStatus::Active)->exists();
+            if (! $contractOk) {
+                return [
+                    'error' => "contract_id must be an ACTIVE contract of this ticket's client; contract {$validated['contract_id']} is not. Call list_client_contracts for valid ids.",
+                    'error_code' => 'contract_not_allowed',
+                ];
+            }
+        }
         if ($validated === []) {
             return ['error' => 'update_ticket requires at least one editable field'];
         }
@@ -272,15 +286,18 @@ class StaffPsaActionToolExecutor
             'description' => $ticket->description,
             'priority' => $ticket->priority?->value,
             'type' => $ticket->type?->value,
+            'contract_id' => $ticket->contract_id,
         ];
 
         $updated = DB::transaction(function () use ($ticket, $validated, $actorLabel, $reason, $before): Ticket {
-            $updated = $this->ticketService->updateTicket($ticket, $validated);
+            // "No time moved" (below) holds for held "Needs contract" entries too.
+            $updated = \App\Observers\TicketObserver::withoutHeldRelease(fn () => $this->ticketService->updateTicket($ticket, $validated));
             $after = [
                 'subject' => $updated->subject,
                 'description' => $updated->description,
                 'priority' => $updated->priority?->value,
                 'type' => $updated->type?->value,
+                'contract_id' => $updated->contract_id,
             ];
             $diff = $this->fieldDiff($before, $after);
             $summary = 'Ticket updated'.($reason ? ': '.$reason : '.');
@@ -300,12 +317,19 @@ class StaffPsaActionToolExecutor
             return $updated;
         });
 
-        return [
+        $response = [
             'success' => true,
             'ticket_id' => $updated->id,
             'ticket_display_id' => $updated->display_id,
             'message' => 'Ticket updated.',
         ];
+        if (array_key_exists('contract_id', $validated)) {
+            $response['contract_id'] = $updated->contract_id;
+            $response['entries_on_other_contracts'] = app(\App\Services\TimeEntryContractMoveService::class)->entriesOnOtherContracts($updated);
+            $response['message'] = 'Ticket updated. No time moved: entries_on_other_contracts stay where they were logged; move one with move_time_entry_contract.';
+        }
+
+        return $response;
     }
 
     /** @return array<string, mixed> */
@@ -3271,10 +3295,10 @@ class StaffPsaActionToolExecutor
     /** @return array<string, mixed>|null */
     private function validateTicketUpdatePayload(array $arguments): ?array
     {
-        $allowed = ['ticket_id', 'subject', 'description', 'priority', 'type', 'category_id', 'reason'];
+        $allowed = ['ticket_id', 'subject', 'description', 'priority', 'type', 'category_id', 'contract_id', 'reason'];
         $unexpected = array_values(array_diff(array_keys($arguments), $allowed));
         if ($unexpected !== []) {
-            return ['error' => 'update_ticket accepts only subject, description, priority, type, and category_id'];
+            return ['error' => 'update_ticket accepts only subject, description, priority, type, category_id, and contract_id'];
         }
 
         $validator = Validator::make($arguments, [
@@ -3287,6 +3311,7 @@ class StaffPsaActionToolExecutor
             // clears it. category_source is stamped by TicketObserver (System on
             // this no-auth-web-user surface), never from tool input.
             'category_id' => ['sometimes', 'nullable', Rule::exists('ticket_categories', 'id')->where('is_active', true)],
+            'contract_id' => ['sometimes', 'nullable', 'integer'],
             'reason' => ['sometimes', 'nullable', 'string'],
         ]);
 

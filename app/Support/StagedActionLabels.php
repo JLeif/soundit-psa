@@ -50,6 +50,7 @@ class StagedActionLabels
         'stage_resolve_email_item' => 'Resolve email sender backlog',
         'stage_resolve_phone_call' => 'Resolve phone call identity',
         'stage_set_call_billable' => 'Call billability change',
+        'stage_move_time_entry_contract' => 'Time entry contract move',
         'stage_block_caller' => 'Block caller',
         'stage_allow_caller' => 'Allow caller',
         'direct_close' => 'Closed directly',

@@ -102,6 +102,7 @@
 @include('cockpit.partials.email-resolutions')
 @include('cockpit.partials.phone-call-resolutions')
 @include('cockpit.partials.phone-call-actions')
+@include('cockpit.partials.time-entry-moves')
 @include('cockpit.partials.scheduled-results')
 <div
     class="cockpit-shell"

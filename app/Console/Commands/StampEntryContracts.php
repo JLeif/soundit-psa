@@ -63,7 +63,7 @@ class StampEntryContracts extends Command
         $this->line("ledger rows on soft-deleted contracts: {$trashedLedger} (stamped; the contract row is kept)");
 
         $ambiguous = $this->ambiguousClientIds();
-        $this->line('clients with >1 active contract and no default: '.count($ambiguous).(count($ambiguous) ? ' (ids: '.implode(', ', $ambiguous).')' : ''));
+        $this->line('clients with >1 active contract and no valid default: '.count($ambiguous).(count($ambiguous) ? ' (ids: '.implode(', ', $ambiguous).')' : ''));
 
         if ($dryRun) {
             return self::SUCCESS;
@@ -165,7 +165,14 @@ class StampEntryContracts extends Command
             ->join('clients', 'clients.id', '=', 'contracts.client_id')
             ->where('contracts.status', ContractStatus::Active->value)
             ->whereNull('contracts.deleted_at')
-            ->whereNull('clients.default_contract_id')
+            // A default counts only while it is an active, live contract of this client,
+            // matching ContractResolver::forClient (#4918): a stale default (expired,
+            // cancelled, soft-deleted or another client's) is treated as unset.
+            ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('contracts as d')
+                ->whereColumn('d.id', 'clients.default_contract_id')
+                ->whereColumn('d.client_id', 'clients.id')
+                ->where('d.status', ContractStatus::Active->value)
+                ->whereNull('d.deleted_at'))
             ->groupBy('contracts.client_id')
             ->havingRaw('COUNT(*) > 1')
             ->orderBy('contracts.client_id')

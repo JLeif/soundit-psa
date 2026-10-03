@@ -55,6 +55,7 @@ class McpToolModes
         'stage_resolve_email_item' => 'resolve_email_item',
         'stage_resolve_phone_call' => 'resolve_phone_call',
         'stage_set_call_billable' => 'set_call_billable',
+        'stage_move_time_entry_contract' => 'move_time_entry_contract',
         'stage_block_caller' => 'block_caller',
         'stage_allow_caller' => 'allow_caller',
         'propose_merge' => 'merge_ticket',
@@ -101,6 +102,8 @@ class McpToolModes
         // catalog's bulk "Grant shown" click on the intake tier — holds for
         // approval; immediate execution takes the explicit `:immediate` grant.
         'set_call_billable',
+        // Moves prepay hours between contracts (card I3EvQKUV PR 2, ruling Q9).
+        'move_time_entry_contract',
         'block_caller',
         'allow_caller',
     ];
@@ -128,6 +131,7 @@ class McpToolModes
         // resolves every unlisted tool to immediate) must not acquire an
         // approval-free prepay move or caller block just because this landed.
         'set_call_billable',
+        'move_time_entry_contract',
         'block_caller',
         'allow_caller',
         'merge_ticket',

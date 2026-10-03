@@ -626,6 +626,10 @@ class CippStagedPasswordResetTest extends TestCase
             'partial' => 'phone-call-actions',
             'label_evidence' => 'StagedActionLabels::humanLabel($type)',
         ],
+        'stage_move_time_entry_contract' => [
+            'partial' => 'time-entry-moves',
+            'label_evidence' => 'StagedActionLabels::humanLabel($type)',
+        ],
     ];
 
     /**
@@ -640,6 +644,7 @@ class CippStagedPasswordResetTest extends TestCase
         'stage_set_call_billable' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
         'stage_block_caller' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
         'stage_allow_caller' => ['route' => 'phone-call-actions.approve', 'action' => \App\Http\Controllers\Web\PhoneCallActionController::class.'@approve'],
+        'stage_move_time_entry_contract' => ['route' => 'time-entry-moves.approve', 'action' => \App\Http\Controllers\Web\TicketContractChangeController::class.'@approve'],
     ];
 
     public function test_every_staged_action_type_has_its_own_cockpit_badge(): void

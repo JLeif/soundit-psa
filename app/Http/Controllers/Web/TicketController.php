@@ -195,6 +195,8 @@ class TicketController extends Controller
             // toAppTz() reads the setting on every call; the full timeline resolves it once.
             'timelineTz' => \App\Support\AppTimezone::get(),
             'timelinePage' => $timelinePage,
+            // The contract-change modal's entries (card I3EvQKUV PR 2).
+            'contractEntries' => app(\App\Services\TimeEntryContractMoveService::class)->entries($ticket),
             'users' => User::active()->orderBy('name')->get(['id', 'name']),
             'statuses' => TicketStatus::cases(),
             'priorities' => TicketPriority::cases(),
