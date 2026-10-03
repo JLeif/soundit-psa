@@ -49,14 +49,15 @@ class TimeEntryContractMoveService
         foreach ($notes as $note) {
             $row = $noteRows->get($note->id);
             $rows->push($this->row('note', $note->id, mb_substr(trim(strip_tags((string) $note->body)), 0, 60), $note->noted_at ?? $note->created_at,
-                $note->author?->name, round($note->time_minutes / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId));
+                $note->author?->name, round($note->time_minutes / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId,
+                $this->drawHoursIfMoved($note, $row)));
         }
         foreach ($calls as $call) {
             $row = $callRows->get($call->id);
             $label = 'Phone call: '.($call->direction?->value ?? 'call');
             $rows->push($this->row('call', $call->id, $label, $call->started_at ?? $call->created_at,
                 $call->answeredBy?->name, round(($call->effectiveDurationSeconds() ?? 0) / 3600, 2), $row, $call->contract_id,
-                isset($pendingCalls[$call->id]), isset($pendingMoves['call:'.$call->id]), $toContractId));
+                isset($pendingCalls[$call->id]), isset($pendingMoves['call:'.$call->id]), $toContractId, $this->drawHoursIfMoved($call, $row)));
         }
 
         $contracts = Contract::withTrashed()->whereIn('id', $rows->pluck('contract_id')->filter()->unique())->get()->keyBy('id');
@@ -71,7 +72,7 @@ class TimeEntryContractMoveService
     }
 
     private function row(string $type, int $id, string $label, $date, ?string $by, float $hours, ?PrepayTransaction $ledger,
-        $stamp, bool $pendingCallAction, bool $pendingMove, ?int $toContractId): array
+        $stamp, bool $pendingCallAction, bool $pendingMove, ?int $toContractId, float $drawHours): array
     {
         $contractId = $ledger ? (int) $ledger->contract_id : ($stamp === null ? null : (int) $stamp);
         $locked = match (true) {
@@ -84,9 +85,38 @@ class TimeEntryContractMoveService
         return [
             'type' => $type, 'id' => $id, 'label' => $type === 'note' ? 'Note: '.($label !== '' ? $label : 'time entry') : $label,
             'date' => $date, 'by' => $by, 'hours' => $hours, 'ledger_hours' => $ledger ? abs((float) $ledger->hours) : 0.0,
-            'contract_id' => $contractId, 'locked' => $locked,
+            'contract_id' => $contractId, 'locked' => $locked, 'ledger' => $ledger !== null, 'draw_hours' => $drawHours,
         ];
     }
+
+    /**
+     * Hours the ordinary debit path draws, right after the move commits, from an
+     * hours-prepay target for an entry that has NO ledger row yet (Jeeves 2026-10-02
+     * 21:38 PT: the move keeps that follow-on debit and must state it). Zero when the
+     * entry has a ledger row (that move is the credit/debit pair), is not billable,
+     * carries no time, or is an unverified contact-intake note (never debited).
+     */
+    public function drawHoursIfMoved(TicketNote|PhoneCall $entry, ?PrepayTransaction $ledger): float
+    {
+        if ($ledger !== null || ! $entry->is_billable) {
+            return 0.0;
+        }
+        if ($entry instanceof TicketNote) {
+            return $entry->isUnverifiedContactIntake() || $entry->time_minutes <= 0 ? 0.0 : round($entry->time_minutes / 60, 4);
+        }
+        $seconds = $entry->effectiveDurationSeconds() ?? 0;
+
+        return $seconds > 0 ? round($seconds / 3600, 4) : 0.0;
+    }
+
+    /** The modal's and the verb's statement of that draw. */
+    public static function drawStatement(float $hours, string $contractName, bool $done): string
+    {
+        return ($done ? 'It had no prepay ledger row, so it drew ' : 'It has no prepay ledger row, so the move will draw ')
+            .number_format($hours, 2).'h from '.$contractName.'. '.self::INVOICED_ADVICE;
+    }
+
+    public const INVOICED_ADVICE = 'If this time was already invoiced by hand, untick billable instead of moving.';
 
     /**
      * Entries logged against a contract other than the ticket's (update_ticket's
@@ -213,8 +243,17 @@ class TimeEntryContractMoveService
                 return ['error' => $e->getMessage()];
             }
 
-            return ['success' => true, 'staged' => false, 'ticket_id' => $ticket->id] + $result
-                + ['message' => 'Time entry moved: credited back to its contract and debited from the new one.'];
+            $message = 'Time entry moved: credited back to its contract and debited from the new one.';
+            if (! $result['ledger']) {
+                $drawn = PrepayTransaction::where($type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->first();
+                $message = $drawn
+                    ? 'Time entry moved. '.self::drawStatement(abs((float) $drawn->hours),
+                        Contract::withTrashed()->find($drawn->contract_id)?->name ?? "contract {$drawn->contract_id}", true)
+                    : 'Time entry moved. It had no prepay ledger row and no prepay hours were drawn.';
+                $result['drawn_hours'] = $drawn ? abs((float) $drawn->hours) : 0.0;
+            }
+
+            return ['success' => true, 'staged' => false, 'ticket_id' => $ticket->id] + $result + ['message' => $message];
         }
 
         $hash = hash('sha256', json_encode([$type, $id, $from, $contractId, trim($reason)], JSON_THROW_ON_ERROR));
@@ -224,10 +263,16 @@ class TimeEntryContractMoveService
                 'to_contract_id' => $contractId, 'reason' => trim($reason)],
         );
 
+        $draw = $this->stagedDrawHours($entry, $type, $contractId);
+        $message = 'Move held for staff approval on the ticket page; no prepay hours moved.';
+        if ($draw > 0) {
+            $message .= ' On approval: '.self::drawStatement($draw, (string) Contract::find($contractId)?->name, false);
+        }
+
         return [
             'success' => true, 'staged' => true, 'proposal_id' => $proposal->id, 'ticket_id' => $ticket->id,
             'entry_type' => $type, 'entry_id' => $id, 'from_contract_id' => $from, 'to_contract_id' => $contractId,
-            'message' => 'Move held for staff approval on the ticket page; no prepay hours moved.',
+            'draw_hours_on_approval' => $draw, 'message' => $message,
         ];
     }
 
@@ -273,6 +318,18 @@ class TimeEntryContractMoveService
         }
 
         return null;
+    }
+
+    /** Hours an approved move would draw for an entry with no ledger row onto an hours-prepay contract. */
+    private function stagedDrawHours(TicketNote|PhoneCall $entry, string $type, int $contractId): float
+    {
+        $target = Contract::find($contractId);
+        if (! $target || ! $target->has_prepay || $target->prepay_as_amount) {
+            return 0.0;
+        }
+        $ledger = PrepayTransaction::where($type === 'note' ? 'ticket_note_id' : 'phone_call_id', $entry->id)->first();
+
+        return $this->drawHoursIfMoved($entry, $ledger);
     }
 
     private function loggedContractId(TicketNote|PhoneCall $entry, string $type): ?int

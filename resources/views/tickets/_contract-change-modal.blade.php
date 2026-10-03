@@ -26,7 +26,8 @@
                 <div class="alert alert-info small">
                     Time already logged <strong>stays on the contract it was logged against</strong>. New time on this ticket will use
                     <strong class="js-cc-to-name"></strong>. Tick any entries that belong on the new contract: each one is credited back to
-                    its contract and debited from the new one, and both contracts' history records the move.
+                    its contract and debited from the new one, and both contracts' history records the move. An entry with no prepay ledger row
+                    is drawn from the new contract if that contract is hours-prepay; the row says so before you move it.
                 </div>
                 <div class="table-responsive">
                     <table class="table table-sm align-middle mb-3">
@@ -37,7 +38,8 @@
                             @foreach($contractEntries as $entry)
                                 @php($key = $entry['type'].':'.$entry['id'])
                                 <tr class="js-cc-row {{ $entry['locked'] ? 'text-muted' : '' }}" data-contract="{{ $entry['contract_id'] }}"
-                                    data-hours="{{ $entry['ledger_hours'] }}" data-locked="{{ $entry['locked'] ? '1' : '0' }}">
+                                    data-hours="{{ $entry['ledger_hours'] }}" data-locked="{{ $entry['locked'] ? '1' : '0' }}"
+                                    data-ledger="{{ $entry['ledger'] ? '1' : '0' }}" data-draw-hours="{{ $entry['draw_hours'] }}">
                                     <td>
                                         <input type="checkbox" class="form-check-input js-cc-move" name="move[]" value="{{ $key }}"
                                                id="ccMove{{ str_replace(':', '', $key) }}" @disabled($entry['locked'])

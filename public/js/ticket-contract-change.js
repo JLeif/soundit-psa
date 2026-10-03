@@ -17,6 +17,9 @@ document.addEventListener('DOMContentLoaded', function () {
     const prepay = JSON.parse(modalEl.dataset.prepay || '{}');
     const rows = Array.from(modalEl.querySelectorAll('.js-cc-row'));
     const fmt = (h) => (Math.round(h * 100) / 100).toFixed(2);
+    // Jeeves 2026-10-02 21:38 PT: an entry with no ledger row moving onto an hours-prepay
+    // contract is drawn right after the move; the row must say so before it is moved.
+    const INVOICED_ADVICE = 'If this time was already invoiced by hand, untick billable instead of moving.';
     let toId = '';
 
     function el(tag, cls, text) {
@@ -36,6 +39,8 @@ document.addEventListener('DOMContentLoaded', function () {
             const effect = r.querySelector('.js-cc-effect');
             const from = r.dataset.contract;
             const hours = parseFloat(r.dataset.hours || '0');
+            const ledgered = r.dataset.ledger === '1';
+            const draw = parseFloat(r.dataset.drawHours || '0');
             if (r.dataset.locked === '1') {
                 return;
             }
@@ -43,6 +48,16 @@ document.addEventListener('DOMContentLoaded', function () {
             effect.textContent = '';
             if (!box.checked) {
                 effect.textContent = 'stays';
+                return;
+            }
+            if (!ledgered) {
+                if (prepay[toId] && draw > 0) {
+                    effect.append(el('span', 'text-danger fw-semibold', 'will draw ' + fmt(draw) + 'h from ' + prepay[toId].name),
+                        el('br'), el('span', 'text-muted', INVOICED_ADVICE));
+                    deltas[toId] = (deltas[toId] || 0) - draw;
+                } else {
+                    effect.textContent = 'moves (no prepay)';
+                }
                 return;
             }
             if (hours > 0 && prepay[from]) {

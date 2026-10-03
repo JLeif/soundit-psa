@@ -111,6 +111,41 @@ class TicketContractChangeModalTest extends TestCase
         $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $foreign->id)->sole()->contract_id);
     }
 
+    /**
+     * Jeeves 2026-10-02 21:38 PT: a row with NO ledger row states the prepay draw the move
+     * makes. The effect text is built client-side, so the server-side facts it reads (data-ledger,
+     * data-draw-hours) are asserted on the rendered row, and the statement itself in the JS.
+     */
+    public function test_unledgered_row_states_the_prepay_draw(): void
+    {
+        $managed = Contract::create([
+            'client_id' => $this->ticket->client_id, 'name' => 'Synthetic Managed M', 'type' => 'managed', 'status' => 'active',
+            'start_date' => '2026-01-01',
+        ]);
+        $ledgered = $this->note(45);
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $unledgered = $this->note(30);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $unledgered->id)->count(), 'precondition: no ledger row');
+
+        $html = $this->actingAs($this->user)->get(route('tickets.show', $this->ticket))->assertOk()->getContent();
+        $row = fn (TicketNote $n) => preg_match('/<tr class="js-cc-row[^"]*"([^>]*)>\s*<td>\s*<input[^>]*value="note:'.$n->id.'"/s', $html, $m) ? $m[1] : '';
+        $this->assertStringContainsString('data-ledger="0"', $row($unledgered));
+        $this->assertStringContainsString('data-draw-hours="0.5"', $row($unledgered));
+        $this->assertStringContainsString('data-contract="'.$managed->id.'"', $row($unledgered));
+        $this->assertStringContainsString('data-ledger="1"', $row($ledgered));
+        $this->assertStringContainsString('data-draw-hours="0"', $row($ledgered), 'a ledgered row is the credit/debit pair, not a draw');
+        $this->assertStringContainsString('"'.$this->b->id.'":{"name":"Synthetic Project B"', html_entity_decode($html), 'the target prepay contract name the JS names');
+
+        $js = file_get_contents(public_path('js/ticket-contract-change.js'));
+        $this->assertStringContainsString("'will draw ' + fmt(draw) + 'h from ' + prepay[toId].name", $js);
+        $this->assertStringContainsString("'If this time was already invoiced by hand, untick billable instead of moving.'", $js);
+        $this->assertStringContainsString("el('br'), el('span', 'text-muted', INVOICED_ADVICE)", $js, 'the advice is shown in the row, not only declared');
+        $this->assertStringContainsString("r.dataset.ledger === '1'", $js);
+        $this->assertMatchesRegularExpression('/if \(!ledgered\) \{\s*if \(prepay\[toId\] && draw > 0\) \{\s*effect\.append\(el\(\'span\', \'text-danger fw-semibold\', \'will draw \'/', $js,
+            'the no-ledger-row branch is the one that states the draw');
+        $this->assertStringContainsString('r.dataset.drawHours', $js);
+    }
+
     /** U1 + M5: the modal renders the entries with their states; without entries the list is empty. */
     public function test_modal_renders_entries_and_locks(): void
     {

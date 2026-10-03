@@ -148,6 +148,50 @@ class MoveTimeEntryContractToolTest extends TestCase
         $this->assertEquals(10, (float) $this->a->fresh()->prepay_balance);
     }
 
+    /**
+     * Jeeves 2026-10-02 21:38 PT: the verb states the prepay draw for an entry with no ledger
+     * row moving onto an hours-prepay contract, in its description and in its staged and
+     * immediate results: hours, target contract, and the already-invoiced advice.
+     */
+    public function test_unledgered_move_states_the_prepay_draw(): void
+    {
+        $advice = 'If this time was already invoiced by hand, untick billable instead of moving.';
+        foreach ([false, true] as $internal) {
+            $description = \App\Support\McpToolRegistry::moveTimeEntryContractTool($internal)['description'];
+            $this->assertStringContainsString('NO prepay ledger row', $description);
+            $this->assertStringContainsString('draws its hours from that contract right after the move', $description);
+            $this->assertStringContainsString($advice, $description);
+        }
+
+        $managed = $this->contract($this->ticket->client, 'Synthetic Managed M', ['prepay_total' => null, 'prepay_used' => null, 'prepay_balance' => null]);
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $note = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'is_billable' => true, 'time_minutes' => 30, 'noted_at' => now(),
+        ]);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count(), 'precondition: no ledger row');
+        $args = $this->args(['entry_id' => $note->id]);
+
+        $staged = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract', $args));
+        $this->assertTrue($staged['staged']);
+        $this->assertSame(0.5, $staged['draw_hours_on_approval']);
+        $this->assertStringContainsString('On approval: It has no prepay ledger row, so the move will draw 0.50h from Synthetic Project B. '.$advice, $staged['message']);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count(), 'staging draws nothing');
+
+        // The ledgered entry's staged result states no draw: its move is the credit/debit pair.
+        $pair = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']), 'move_time_entry_contract', $this->args()));
+        $this->assertEquals(0, $pair['draw_hours_on_approval']);
+        $this->assertStringNotContainsString('will draw', $pair['message']);
+
+        TimeEntryMoveProposal::query()->update(['state' => 'denied']);
+        $now = $this->toolResult($this->callTool(McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract:immediate']), 'move_time_entry_contract', $args));
+        $this->assertFalse($now['staged']);
+        $this->assertFalse($now['ledger']);
+        $this->assertSame(0.5, $now['drawn_hours']);
+        $this->assertSame('Time entry moved. It had no prepay ledger row, so it drew 0.50h from Synthetic Project B. '.$advice, $now['message']);
+        $this->assertSame($this->b->id, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->contract_id, 'the stated draw happened');
+        $this->assertEquals(9.5, (float) $this->b->fresh()->prepay_balance);
+    }
+
     /** SPEC §9 C4: update_ticket contract_id changes the ticket, moves no money, lists the entries. */
     public function test_update_ticket_contract_id_moves_no_money(): void
     {
