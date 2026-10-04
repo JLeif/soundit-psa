@@ -96,6 +96,10 @@ class McpToolSurface
             \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable() ? McpToolRegistry::tacticalAdminTools() : [],
             ChetDataSurfaceTools::generalTools(),
             OperatorBridgeTools::definitions(),
+            // HelpDesk Buttons report (card c5JaSetu): live only when the portal
+            // credentials a sign-in needs are stored; otherwise it classifies as
+            // unavailable_config. Declares its own required client_id.
+            HdbPortalConfig::isConfigured() ? McpToolRegistry::hdbReportTools() : [],
         );
     }
 

@@ -384,6 +384,7 @@ class McpToolRegistryTest extends TestCase
         $expectedCard = [
             'get_ticket_attachment' => 'psa',
             'get_teams_message_attachment' => 'teams',
+            'get_hdb_report' => 'psa',
         ];
         $this->assertSame(array_keys($expectedCard), McpToolRegistry::RAW_FILE_CONTENT_TOOLS, 'a new raw-file tool needs its card pinned here');
 

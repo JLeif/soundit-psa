@@ -114,7 +114,13 @@ class McpToolsListResilienceTest extends TestCase
         // there while onboarding is off — +1 x 2 assemblies = +2 flat, independent
         // of catalog size. (An enabled instance pays the integration switch, key and
         // six defaults on top; still flat.)
-        $this->assertLessThanOrEqual(100, count($queries), $sql);
+        //
+        // Raised 100 -> 102 for get_hdb_report (card c5JaSetu): HdbPortalConfig::
+        // isConfigured() is consulted in liveGeneralToolDefinitions(), which tools/list
+        // assembles twice. Unconfigured it short-circuits after the single hdb_email
+        // read — +1 x 2 assemblies = +2 flat, independent of catalog size. (A configured
+        // instance pays the encrypted hdb_password read on top: +2 more, still flat.)
+        $this->assertLessThanOrEqual(102, count($queries), $sql);
     }
 
     public function test_tools_list_repairs_dynamic_cipp_schema_before_publishing(): void

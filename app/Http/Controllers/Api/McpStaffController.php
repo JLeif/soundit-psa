@@ -1291,6 +1291,10 @@ class McpStaffController extends Controller
             if (in_array($name, ['get_ticket_tool_history', 'get_ticket_timeline'], true)) {
                 $tool = $name === 'get_ticket_timeline' ? \App\Services\Mcp\TicketTimelineTool::class : \App\Services\Mcp\TicketToolHistoryTool::class;
                 $result = app($tool)->execute($arguments, $clientId);
+            } elseif ($name === \App\Services\Mcp\HdbReportTool::NAME) {
+                // Card c5JaSetu: client_id was lifted out above; the tool fences the
+                // ticket to it before the report client is called.
+                $result = app(\App\Services\Mcp\HdbReportTool::class)->execute($arguments, $clientId);
             } elseif ($name === \App\Services\Mcp\PsaVersionTool::NAME) {
                 $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === \App\Services\Mcp\BenjiPaysForecastTool::NAME) {
