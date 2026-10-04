@@ -837,4 +837,127 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(1, $exit);
         $this->assertSame($before, $this->ledger());
     }
+
+    // ── r3 rework: rollback refuses other options and a link that changed since the run ──
+
+    private function rollbackRun(array $args = []): array
+    {
+        $exit = Artisan::call('prepay:relink-halo-ticket-time', ['--rollback' => $this->dir.'/rollback.json'] + $args);
+
+        return [$exit, Artisan::output()];
+    }
+
+    public function test_rollback_refuses_dry_run_exclude_and_rollback_file_and_writes_nothing(): void
+    {
+        [$ptx, $note] = $this->adjusted(20, 70020, 30, -0.7167, 0.2167);
+        $this->commit();
+        $ledger = $this->ledger();
+
+        foreach ([['--dry-run' => true], ['--exclude' => '1'], ['--rollback-file' => $this->dir.'/other.json']] as $extra) {
+            [$exit, $out] = $this->rollbackRun($extra);
+
+            $this->assertSame(1, $exit, $out);
+            $this->assertStringContainsString('--rollback takes no --map, --commit, --dry-run, --exclude or --rollback-file.', $out);
+            $this->assertSame($ledger, $this->ledger());
+            $this->assertSame(13, $this->adjustmentOf($note));
+            $this->assertSame($note, $this->linkedTo($ptx));
+        }
+        $this->assertFileDoesNotExist($this->dir.'/other.json');
+    }
+
+    public function test_rollback_refuses_a_row_re_priced_since_the_run_and_changes_nothing(): void
+    {
+        [$ptx, $note] = $this->adjusted(20, 70020, 30, -0.7167, 0.2167);
+        $this->commit();
+        // An ordinary edit re-prices the linked row: 60 + 13 = 73 min.
+        $model = TicketNote::findOrFail($note);
+        $model->time_minutes = 60;
+        $model->save();
+        $this->assertSame(-1.2167, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+        $ledger = $this->ledger();
+        $balances = $this->contractState();
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Ptx {$ptx} or note {$note} no longer matches the rollback file (link, contract or hours)", $out);
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($balances, $this->contractState());
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(13, $this->adjustmentOf($note));
+        // The earlier link in the same file was unlinked inside the transaction, then rolled back.
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+    }
+
+    public function test_rollback_refuses_a_note_another_row_holds_since_the_run(): void
+    {
+        [$ptx, $note] = $this->adjusted(20, 70020, 30, -0.7167, 0.2167);
+        $this->commit();
+        $other = DB::table('prepay_transactions')->insertGetId($this->ledgerRow('Synthetic moved entry', ['moved_ticket_note_id' => $note]));
+        $ledger = $this->ledger();
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Note {$note} for ptx {$ptx} is also held by ptx {$other}; rollback undone, nothing was changed.", $out);
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame(13, $this->adjustmentOf($note));
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+    }
+
+    public function test_rollback_locks_each_note_before_its_ledger_row(): void
+    {
+        $this->adjusted(20, 70020, 30, -0.7167, 0.2167);
+        $this->commit();
+        $tables = [];
+        DB::listen(function ($q) use (&$tables) {
+            if (preg_match('/(ticket_notes|prepay_transactions)/', $q->sql, $m)) {
+                $tables[] = $m[1];
+            }
+        });
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(0, $exit, $out);
+        // Per link: note lock, row lock, holder check, unlink; then the adjusted note's restore.
+        $this->assertSame([
+            'ticket_notes', 'prepay_transactions', 'prepay_transactions', 'prepay_transactions',
+            'ticket_notes', 'prepay_transactions', 'prepay_transactions', 'prepay_transactions', 'ticket_notes',
+        ], $tables);
+    }
+
+    public function test_a_partial_prepay_notes_time_cannot_be_changed_by_an_edit(): void
+    {
+        [$ptx, $note] = $this->partial();
+        $this->commit();
+        $balances = $this->contractState();
+        $user = User::factory()->create();
+
+        // Lowering the time (priced 40 - 45 < 0 would reverse the row) or raising it is refused.
+        foreach (['40m', '2h'] as $time) {
+            $this->actingAs($user)->put(route('tickets.notes.update', [$this->scenarioTicketId(), $note]), [
+                'body' => 'Synthetic edited', 'note_type' => 'note', 'time' => $time, 'is_billable' => '1',
+            ])->assertSessionHas('error');
+        }
+        // A model edit keeps the time too.
+        $model = TicketNote::findOrFail($note);
+        $model->time_minutes = 40;
+        $model->save();
+
+        $this->assertSame(60, (int) TicketNote::findOrFail($note)->time_minutes);
+        $this->assertSame(-45, $this->adjustmentOf($note));
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(-0.25, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+        $this->assertSame($balances, $this->contractState());
+
+        // The edit form's round trip of the unchanged time still saves.
+        $this->actingAs($user)->put(route('tickets.notes.update', [$this->scenarioTicketId(), $note]), [
+            'body' => 'Synthetic edited again', 'note_type' => 'note', 'time' => TicketNote::findOrFail($note)->formatted_time, 'is_billable' => '1',
+        ])->assertSessionHasNoErrors();
+
+        $this->assertSame('Synthetic edited again', TicketNote::findOrFail($note)->body);
+        $this->assertTrue((bool) TicketNote::findOrFail($note)->is_billable);
+        $this->assertSame(-0.25, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+        $this->assertSame($balances, $this->contractState());
+    }
 }

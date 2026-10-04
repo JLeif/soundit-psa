@@ -157,7 +157,8 @@ class TicketNote extends Model
      * Minutes this note bills against prepay: time_minutes plus time_adjustment_minutes
      * (#5067 r3; NULL counts as 0). The adjustment is written only by
      * prepay:relink-halo-ticket-time and is deliberately not mass assignable, so an
-     * ordinary edit of the note's time keeps it. formatted_time shows time_minutes alone:
+     * ordinary edit of the note's time keeps it; a negative adjustment (group A) also fixes
+     * the note's time (TicketNoteObserver::saving()). formatted_time shows time_minutes alone:
      * the edit form round-trips that value into time_minutes.
      */
     public function pricedMinutes(): int

@@ -64,18 +64,23 @@ use RuntimeException;
  * timetakenAdjusted, Halo drew only prepayHours from prepay and charged the rest, so the
  * adjustment carried is prepayHours - timetaken in whole minutes (negative when the prepay
  * part is below timetaken). The note then prices at the prepay part alone, and the charged
- * part is never drawn from prepay. Each such row is listed after the counts with its Halo
+ * part is never drawn from prepay; an ordinary edit cannot then change the note's time (see
+ * TicketNoteObserver::saving()). Each such row is listed after the counts with its Halo
  * numbers and the note's body length.
  *
  * --dry-run is the default. A write needs --commit and --rollback-file=<new path>; the
- * file (format prepay-relink-rollback/v2: ptx id -> note id linked, and for each note whose
- * adjustment was written its prior value and the value set) is written before the first
- * update and the command refuses if the path exists. --rollback=<that file> undoes a run in
- * one transaction, per entry:
+ * file (format prepay-relink-rollback/v2: ptx id -> note id linked, each linked row's
+ * contract id and hours, and for each note whose adjustment was written its prior value and
+ * the value set) is written before the first update and the command refuses if the path
+ * exists. --rollback=<that file> takes no other option (--dry-run included: it is refused,
+ * not ignored) and undoes a run in one transaction. Per link it locks the note, then the row
+ * (debitFromTicketNote()'s order), and refuses unless the row is still linked to the note at
+ * the recorded contract and hours and no other row holds the note through ticket_note_id or
+ * moved_ticket_note_id; then:
  *   UPDATE prepay_transactions SET ticket_note_id = NULL WHERE id = <ptx> AND ticket_note_id = <note>;
  *   UPDATE ticket_notes SET time_adjustment_minutes = <prior> WHERE id = <note> AND time_adjustment_minutes = <set>;
- * and rolls back entirely if either guarded update hits no row. It runs no note sync, so
- * no ledger amount moves.
+ * It rolls back entirely if a check fails or either guarded update hits no row. It runs no
+ * note sync, so no ledger amount moves.
  * Inside one transaction, each link first locks the note and the row and re-checks the
  * note checks above (live, billable, adjustment, time, stamp) and that the note's
  * adjustment is still the prior value recorded, then re-checks under lock that no row
@@ -139,8 +144,9 @@ class PrepayRelinkHaloTicketTime extends Command
     {
         $undo = (string) $this->option('rollback');
         if ($undo !== '') {
-            if ($this->option('commit') || (string) $this->option('map') !== '') {
-                $this->error('--rollback takes no --map or --commit.');
+            if ($this->option('commit') || $this->option('dry-run') || (string) $this->option('map') !== ''
+                || trim((string) $this->option('exclude')) !== '' || (string) $this->option('rollback-file') !== '') {
+                $this->error('--rollback takes no --map, --commit, --dry-run, --exclude or --rollback-file.');
 
                 return self::FAILURE;
             }
@@ -204,8 +210,9 @@ class PrepayRelinkHaloTicketTime extends Command
     }
 
     /**
-     * Returns: the candidate count; ptx id => link (note id, adjustment minutes to carry, the
-     * note's adjustment when planned); refused ptx ids per class; and the group-A report rows.
+     * Returns: the candidate count; ptx id => link (note id, the row's contract id and hours,
+     * adjustment minutes to carry, the note's adjustment when planned); refused ptx ids per
+     * class; and the group-A report rows.
      */
     private function plan(array $map, array $excluded): array
     {
@@ -295,6 +302,8 @@ class PrepayRelinkHaloTicketTime extends Command
 
             $targets[$ptxId] = (int) $notes[0]->id;
             $plans[$ptxId] = [
+                'contract' => (int) $row->contract_id,
+                'hours' => round((float) $row->hours, 4),
                 'adj' => $entry['adj'],
                 'prior' => $notes[0]->time_adjustment_minutes === null ? null : (int) $notes[0]->time_adjustment_minutes,
             ];
@@ -355,7 +364,7 @@ class PrepayRelinkHaloTicketTime extends Command
         }
     }
 
-    /** @param array<int, array{note: int, adj: int, prior: ?int}> $links */
+    /** @param array<int, array{note: int, contract: int, hours: float, adj: int, prior: ?int}> $links */
     private function write(array $links, string $rollbackPath): int
     {
         // Mode 'x' creates the file and fails if it exists, so a rollback file is never replaced.
@@ -374,6 +383,7 @@ class PrepayRelinkHaloTicketTime extends Command
         $payload = json_encode([
             'format' => self::ROLLBACK_FORMAT,
             'links' => (object) array_map(fn (array $l) => $l['note'], $links),
+            'rows' => (object) array_map(fn (array $l) => ['contract' => $l['contract'], 'hours' => $l['hours']], $links),
             'adjustments' => (object) $adjustments,
         ], JSON_PRETTY_PRINT);
         $ok = fwrite($handle, $payload."\n") !== false && fflush($handle);
@@ -393,6 +403,7 @@ class PrepayRelinkHaloTicketTime extends Command
                     $row = DB::table('prepay_transactions')->where('id', $ptxId)->lockForUpdate()->first(['contract_id', 'hours']);
                     $current = $note?->time_adjustment_minutes === null ? null : (int) $note->time_adjustment_minutes;
                     if ($note === null || $note->deleted_at !== null || $row === null || $current !== $link['prior']
+                        || (int) $row->contract_id !== $link['contract'] || round((float) $row->hours, 4) !== $link['hours']
                         || $this->noteRefusal($note, $row, $link['adj']) !== null) {
                         throw new RuntimeException("Ptx {$ptxId} or note {$noteId} no longer passes the planning checks; rolled back, no ledger row was changed.");
                     }
@@ -435,30 +446,35 @@ class PrepayRelinkHaloTicketTime extends Command
     }
 
     /**
-     * Undo a committed run from its rollback file, in one transaction: unlink each ledger row
-     * still linked to the recorded note, and restore each recorded note adjustment that still
-     * holds the value the run set. Any guarded update that hits no row rolls the whole undo
-     * back. Writes through the query builder, so no note sync runs and no ledger amount moves.
+     * Undo a committed run from its rollback file, in one transaction. Per link, under the note
+     * lock then the row lock: refuse unless the row is still linked to the recorded note at the
+     * recorded contract and hours and no other row holds the note; then unlink it and restore
+     * the note's recorded adjustment where it still holds the value the run set. A failed check
+     * or a guarded update that hits no row rolls the whole undo back. Writes through the query
+     * builder, so no note sync runs and no ledger amount moves.
      */
     private function rollback(string $path): int
     {
         $raw = is_readable($path) ? file_get_contents($path) : false;
         $doc = $raw === false ? null : json_decode($raw, true);
         if (! is_array($doc) || ($doc['format'] ?? null) !== self::ROLLBACK_FORMAT
-            || ! is_array($doc['links'] ?? null) || ! is_array($doc['adjustments'] ?? null)) {
+            || ! is_array($doc['links'] ?? null) || ! is_array($doc['adjustments'] ?? null) || ! is_array($doc['rows'] ?? null)) {
             $this->error('Rollback file is not '.self::ROLLBACK_FORMAT.'.');
 
             return self::FAILURE;
         }
         foreach ($doc['links'] as $ptx => $note) {
-            if (! ctype_digit((string) $ptx) || ! is_int($note)) {
+            $r = $doc['rows'][$ptx] ?? null;
+            if (! ctype_digit((string) $ptx) || ! is_int($note) || ! is_array($r) || ! is_int($r['contract'] ?? null)
+                || ! (is_int($r['hours'] ?? null) || is_float($r['hours'] ?? null))) {
                 $this->error('Rollback file has a malformed link entry.');
 
                 return self::FAILURE;
             }
         }
         foreach ($doc['adjustments'] as $note => $a) {
-            if (! ctype_digit((string) $note) || ! is_array($a) || ! array_key_exists('prior', $a) || ! is_int($a['set'] ?? null)
+            if (! ctype_digit((string) $note) || ! in_array((int) $note, $doc['links'], true)
+                || ! is_array($a) || ! array_key_exists('prior', $a) || ! is_int($a['set'] ?? null)
                 || ($a['prior'] !== null && ! is_int($a['prior']))) {
                 $this->error('Rollback file has a malformed adjustment entry.');
 
@@ -469,17 +485,36 @@ class PrepayRelinkHaloTicketTime extends Command
         try {
             DB::transaction(function () use ($doc) {
                 foreach ($doc['links'] as $ptxId => $noteId) {
-                    $n = DB::table('prepay_transactions')->where('id', (int) $ptxId)->where('ticket_note_id', $noteId)
+                    $ptxId = (int) $ptxId;
+                    $recorded = $doc['rows'][$ptxId];
+                    // Lock order as in debitFromTicketNote(): note, then prepay rows.
+                    $note = DB::table('ticket_notes')->where('id', $noteId)->lockForUpdate()->first(['id']);
+                    $row = DB::table('prepay_transactions')->where('id', $ptxId)->lockForUpdate()->first(['ticket_note_id', 'contract_id', 'hours']);
+                    if ($note === null || $row === null || $row->ticket_note_id === null || (int) $row->ticket_note_id !== $noteId
+                        || (int) $row->contract_id !== $recorded['contract']
+                        || round((float) $row->hours, 4) !== round((float) $recorded['hours'], 4)) {
+                        throw new RuntimeException("Ptx {$ptxId} or note {$noteId} no longer matches the rollback file (link, contract or hours); rollback undone, nothing was changed.");
+                    }
+                    $holder = DB::table('prepay_transactions')
+                        ->where('id', '!=', $ptxId)
+                        ->where(fn ($q) => $q->where('ticket_note_id', $noteId)->orWhere('moved_ticket_note_id', $noteId))
+                        ->lockForUpdate()
+                        ->value('id');
+                    if ($holder !== null) {
+                        throw new RuntimeException("Note {$noteId} for ptx {$ptxId} is also held by ptx {$holder}; rollback undone, nothing was changed.");
+                    }
+                    $n = DB::table('prepay_transactions')->where('id', $ptxId)->where('ticket_note_id', $noteId)
                         ->update(['ticket_note_id' => null]);
                     if ($n !== 1) {
                         throw new RuntimeException("Ptx {$ptxId} is no longer linked to note {$noteId}; rollback undone, nothing was changed.");
                     }
-                }
-                foreach ($doc['adjustments'] as $noteId => $a) {
-                    $n = DB::table('ticket_notes')->where('id', (int) $noteId)->where('time_adjustment_minutes', $a['set'])
-                        ->update(['time_adjustment_minutes' => $a['prior']]);
-                    if ($n !== 1) {
-                        throw new RuntimeException("Note {$noteId} no longer holds the adjustment this run set; rollback undone, nothing was changed.");
+                    $a = $doc['adjustments'][$noteId] ?? null;
+                    if ($a !== null) {
+                        $n = DB::table('ticket_notes')->where('id', $noteId)->where('time_adjustment_minutes', $a['set'])
+                            ->update(['time_adjustment_minutes' => $a['prior']]);
+                        if ($n !== 1) {
+                            throw new RuntimeException("Note {$noteId} no longer holds the adjustment this run set; rollback undone, nothing was changed.");
+                        }
                     }
                 }
             });
