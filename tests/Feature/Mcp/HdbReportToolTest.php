@@ -43,6 +43,8 @@ class HdbReportToolTest extends TestCase
     // Deliberately synthetic; never an id copied from a client ticket.
     private const PRESS = 'deadbeef-0000-4000-8000-0000000000c5';
 
+    private const SIBLING_PRESS = 'deadbeef-0000-4000-8000-0000000000c6';
+
     private const IP_FILTER_NOTICE = 'Your IP address is not on the account IP Filter whitelist.';
 
     protected function setUp(): void
@@ -268,15 +270,18 @@ class HdbReportToolTest extends TestCase
     }
 
     /**
-     * #1360: a removed note has withdrawn its link. The ticket cache still
-     * names the press, so a tool that fetched by the ticket (fetch() with the
-     * cache) instead of by the live note would succeed here.
+     * #1360: a removed note has withdrawn its link. A live sibling note on the
+     * same ticket carries another press and the ticket cache names it, so a
+     * tool that fetched by the ticket cache instead of by the named live note
+     * would return a report here; so would an authorizer that let a trashed
+     * note authorize.
      */
     public function test_a_soft_deleted_note_is_refused_even_though_the_ticket_cache_still_names_the_press(): void
     {
         $ticket = $this->helpdeskTicket();
         $note = $this->note($ticket);
-        $this->cacheOnTicket($ticket);
+        $this->note($ticket, self::SIBLING_PRESS);
+        $this->cacheOnTicket($ticket, self::SIBLING_PRESS);
         $note->delete();
         $this->assertSoftDeleted($note);
         $this->fakeWholeReport();
@@ -292,6 +297,9 @@ class HdbReportToolTest extends TestCase
     {
         $ticket = $this->helpdeskTicket();
         $plain = $this->note($ticket, null);
+        // A live keyed sibling the cache points at: fetching by the cache
+        // rather than by the named note would succeed.
+        $this->note($ticket);
         $this->cacheOnTicket($ticket);
         $this->fakeWholeReport();
 
