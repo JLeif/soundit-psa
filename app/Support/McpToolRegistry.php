@@ -1284,7 +1284,8 @@ class McpToolRegistry
     /**
      * HelpDesk Buttons report reads (card c5JaSetu). Registered in the
      * psa_raw_file tier (explicit grant only) and published live only when the
-     * HDB portal credentials are configured ({@see McpToolSurface}).
+     * HDB portal credentials are configured and the Tier2Tickets / HelpDesk
+     * Buttons integration is switched on ({@see McpToolSurface}).
      *
      * @return array<int, array<string, mixed>>
      */

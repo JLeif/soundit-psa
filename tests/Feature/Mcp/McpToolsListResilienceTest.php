@@ -119,7 +119,8 @@ class McpToolsListResilienceTest extends TestCase
         // isConfigured() is consulted in liveGeneralToolDefinitions(), which tools/list
         // assembles twice. Unconfigured it short-circuits after the single hdb_email
         // read — +1 x 2 assemblies = +2 flat, independent of catalog size. (A configured
-        // instance pays the encrypted hdb_password read on top: +2 more, still flat.)
+        // instance pays the encrypted hdb_password read and then the t2t_enabled
+        // switch read on top: +4 more, still flat.)
         $this->assertLessThanOrEqual(102, count($queries), $sql);
     }
 

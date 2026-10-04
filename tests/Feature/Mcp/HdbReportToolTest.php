@@ -594,4 +594,34 @@ class HdbReportToolTest extends TestCase
         $this->assertStringStartsWith('Tool not allowed for this token: get_hdb_report', (string) $r->json('result.content.0.text'));
         Http::assertNothingSent();
     }
+
+    /**
+     * OFF=OFF (C-47): the portal credentials sit on the Tier2Tickets / HelpDesk
+     * Buttons card, so switching that integration off unpublishes the tool even
+     * with the credentials still saved, and no sign-in is attempted.
+     */
+    public function test_with_the_integration_switched_off_it_is_not_live_even_with_portal_credentials_saved(): void
+    {
+        $ticket = $this->helpdeskTicket();
+        $note = $this->note($ticket);
+        $this->fakeWholeReport();
+        $args = ['client_id' => $ticket->client_id, 'ticket_id' => $ticket->id, 'note_id' => $note->id];
+        $this->assertTrue(HdbPortalConfig::isConfigured());
+
+        Setting::setValue('t2t_enabled', '0');
+
+        $out = $this->decoded($this->mcp('tools/call', ['name' => 'search_tools', 'arguments' => ['query' => 'helpdesk']]));
+        $this->assertSame('unavailable_config', collect($out['matches'])->firstWhere('name', HdbReportTool::NAME)['grant_state'] ?? null);
+        $this->assertNotContains(HdbReportTool::NAME, array_column($this->mcp('tools/list', [])->json('result.tools'), 'name'));
+
+        $r = $this->callTool($args);
+        $r->assertOk();
+        $this->assertTrue($r->json('result.isError'));
+        $this->assertStringStartsWith('Tool not allowed for this token: get_hdb_report', (string) $r->json('result.content.0.text'));
+        Http::assertNothingSent();
+
+        // Positive control: switched back on, the same token lists it again.
+        Setting::setValue('t2t_enabled', '1');
+        $this->assertContains(HdbReportTool::NAME, array_column($this->mcp('tools/list', [])->json('result.tools'), 'name'));
+    }
 }
