@@ -40,6 +40,9 @@ class McpToolRegistry
         'get_ticket_attachment',
         // Teams chat images (card 2Cj3kOsy): same return shape, same posture.
         'get_teams_message_attachment',
+        // HelpDesk Buttons report + desktop screenshot (card c5JaSetu): the
+        // screenshot is an end user's desktop, returned in the same shape.
+        \App\Services\Mcp\HdbReportTool::NAME,
     ];
 
     /**
@@ -99,6 +102,8 @@ class McpToolRegistry
             // mislabelled tier is how an operator grants a capability believing it is a read).
             $rawFileNames = array_flip(self::RAW_FILE_CONTENT_TOOLS);
             $rawFileContent = array_values(array_filter(array_merge($client, $general), fn (array $t): bool => isset($rawFileNames[$t['name']])));
+            // get_hdb_report is registered nowhere else, so it joins this tier directly.
+            $rawFileContent = array_merge($rawFileContent, self::shape(self::hdbReportTools()));
             $client = array_values(array_filter($client, fn (array $t): bool => ! isset($rawFileNames[$t['name']])));
             // The Teams image reader is registered with its Chet siblings (general) but is a
             // raw-file read too, so it moves to the same sensitive tier (card 2Cj3kOsy).
@@ -1274,6 +1279,19 @@ class McpToolRegistry
             self::unlinkAssetUserTool(),
             self::setPrimaryAssetUserTool(),
         ];
+    }
+
+    /**
+     * HelpDesk Buttons report reads (card c5JaSetu). Registered in the
+     * psa_raw_file tier (explicit grant only) and published live only when the
+     * HDB portal credentials are configured and the Tier2Tickets / HelpDesk
+     * Buttons integration is switched on ({@see McpToolSurface}).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function hdbReportTools(): array
+    {
+        return [\App\Services\Mcp\HdbReportTool::definition()];
     }
 
     /**
