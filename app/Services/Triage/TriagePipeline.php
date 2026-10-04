@@ -3,6 +3,7 @@
 namespace App\Services\Triage;
 
 use App\Enums\NoteType;
+use App\Enums\PrepayTransactionSource;
 use App\Enums\TicketStatus;
 use App\Models\PhoneCall;
 use App\Models\Ticket;
@@ -485,11 +486,20 @@ class TriagePipeline
             ]);
         }
 
-        // Update ticket notes that defaulted to billable=true before classification
+        // Update ticket notes that defaulted to billable=true before classification.
+        // #5067 r4: a Halo-imported note (halo_note_id set) that a Halo prepay ledger row holds
+        // through ticket_note_id is skipped. Its billability is Halo's (restored by
+        // prepay:relink-halo-ticket-time), and a flip to 0 here would make debitFromTicketNote()
+        // reverse the prepay draw Halo recorded.
         $notes = TicketNote::automationVisible()->where('ticket_id', $ticket->id)
             ->where('is_billable', '!=', $shouldBeBillable)
             ->whereNotNull('time_minutes')
             ->where('time_minutes', '>', 0)
+            ->where(fn ($q) => $q->whereNull('halo_note_id')->orWhereNotExists(
+                fn ($held) => $held->from('prepay_transactions')
+                    ->whereColumn('prepay_transactions.ticket_note_id', 'ticket_notes.id')
+                    ->whereIn('prepay_transactions.source', [PrepayTransactionSource::HaloSync->value, PrepayTransactionSource::TicketTime->value]),
+            ))
             ->get();
 
         if ($notes->isNotEmpty()) {

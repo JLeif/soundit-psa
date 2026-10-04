@@ -37,7 +37,9 @@ use RuntimeException;
  *     soft-deleted notes (no-note / multi-note); a soft-deleted match is refused
  *     (trashed-note): linking to a deleted note would hand the row to the note-delete
  *     reversal path;
- *   - the note is billable (not-billable otherwise; NULL counts as not billable); its
+ *   - the note is billable, or (r4) the map is v2 and its isBillable is 1, in which case the
+ *     link also sets the note's is_billable to 1 (not-billable otherwise: a v2 isBillable of
+ *     0, or a v1 map, which carries no flag; NULL counts as not billable); its
  *     time_adjustment_minutes is NULL or already equal to the map's adjustment
  *     (adjustment-mismatch otherwise); time_minutes + the map's adjustment is not negative
  *     (below-zero otherwise), is > 0 and, as hours rounded to 4 places, equals the row's
@@ -68,25 +70,34 @@ use RuntimeException;
  * TicketNoteObserver::saving()). Each such row is listed after the counts with its Halo
  * numbers and the note's body length.
  *
+ * BILLABLE FLAG (r4, Jeeves's ruling on card 6ac170d6, 2026-10-03): the importer wrote Halo's
+ * timed notes with is_billable 0, while Halo marks the action billable. When a v2 map row's
+ * isBillable is 1 and the matched note's is_billable is 0 or NULL, the link restores it to 1
+ * in the same transaction; the dry run counts these as "would flip billable". No other note
+ * is touched.
+ *
  * --dry-run is the default. A write needs --commit and --rollback-file=<new path>; the
- * file (format prepay-relink-rollback/v2: ptx id -> note id linked, each linked row's
- * contract id and hours, and for each note whose adjustment was written its prior value and
- * the value set) is written before the first update and the command refuses if the path
- * exists. --rollback=<that file> takes no other option (--dry-run included: it is refused,
+ * file (format prepay-relink-rollback/v3: ptx id -> note id linked, each linked row's
+ * contract id and hours, for each note whose adjustment was written its prior value and
+ * the value set, and for each note whose billable flag was set its prior flag and the 1 set)
+ * is written before the first update and the command refuses if the path exists. --rollback
+ * also loads a v2 file, which has no billable section. --rollback=<that file> takes no other option (--dry-run included: it is refused,
  * not ignored) and undoes a run in one transaction. Per link it locks the note, then the row
  * (debitFromTicketNote()'s order), and refuses unless the row is still linked to the note at
  * the recorded contract and hours and no other row holds the note through ticket_note_id or
  * moved_ticket_note_id; then:
  *   UPDATE prepay_transactions SET ticket_note_id = NULL WHERE id = <ptx> AND ticket_note_id = <note>;
  *   UPDATE ticket_notes SET time_adjustment_minutes = <prior> WHERE id = <note> AND time_adjustment_minutes = <set>;
+ *   UPDATE ticket_notes SET is_billable = <prior> WHERE id = <note> AND is_billable = 1;
  * It rolls back entirely if a check fails or either guarded update hits no row. It runs no
  * note sync, so no ledger amount moves.
  * Inside one transaction, each link first locks the note and the row and re-checks the
  * note checks above (live, billable, adjustment, time, stamp) and that the note's
- * adjustment is still the prior value recorded, then re-checks under lock that no row
+ * adjustment and billable flag are still the prior values recorded, then re-checks under lock that no row
  * holds the note through ticket_note_id or moved_ticket_note_id, and is guarded on
- * ticket_note_id IS NULL and phone_call_id IS NULL; the adjustment is written in the same
- * transaction, guarded on its prior value. If a re-check fails, the note is held or a
+ * ticket_note_id IS NULL and phone_call_id IS NULL; the adjustment and the billable flag
+ * are written in the same transaction, each guarded on its prior value, through the query
+ * builder so no note observer or sync runs between the link and the flip. If a re-check fails, the note is held or a
  * guarded update hits no row, the whole run rolls back.
  *
  * Output is counts and ledger row ids only: no subjects, names or descriptions.
@@ -126,7 +137,10 @@ class PrepayRelinkHaloTicketTime extends Command
     /** See ADJUSTMENT RULE in the class docblock. */
     public const ADJUSTMENT_TOLERANCE_MINUTES = 0.01;
 
-    public const ROLLBACK_FORMAT = 'prepay-relink-rollback/v2';
+    public const ROLLBACK_FORMAT = 'prepay-relink-rollback/v3';
+
+    /** A v2 file (r3: no billable section) still loads for --rollback. */
+    public const ROLLBACK_FORMAT_V2 = 'prepay-relink-rollback/v2';
 
     private const NOTE_COLUMNS = ['id', 'deleted_at', 'is_billable', 'time_minutes', 'time_adjustment_minutes', 'contract_id'];
 
@@ -196,6 +210,8 @@ class PrepayRelinkHaloTicketTime extends Command
         $this->line(($commit ? 'linking: ' : 'would link: ').count($links));
         $this->line(($commit ? 'linking with an adjustment: ' : 'would link with an adjustment: ')
             .count(array_filter($links, fn (array $l) => $l['adj'] !== 0)));
+        $this->line(($commit ? 'flipping billable: ' : 'would flip billable: ')
+            .count(array_filter($links, fn (array $l) => $l['flip'])));
         foreach (self::CLASSES as $class) {
             $ids = $refused[$class];
             $this->line("{$class}: ".count($ids).($ids ? ' (ptx ids: '.implode(', ', $ids).')' : ''));
@@ -293,7 +309,7 @@ class PrepayRelinkHaloTicketTime extends Command
 
                 continue;
             }
-            $refusal = $this->noteRefusal($notes[0], $row, $entry['adj']);
+            $refusal = $this->noteRefusal($notes[0], $row, $entry['adj'], $entry['billable']);
             if ($refusal !== null) {
                 $refused[$refusal][] = $ptxId;
 
@@ -306,6 +322,10 @@ class PrepayRelinkHaloTicketTime extends Command
                 'hours' => round((float) $row->hours, 4),
                 'adj' => $entry['adj'],
                 'prior' => $notes[0]->time_adjustment_minutes === null ? null : (int) $notes[0]->time_adjustment_minutes,
+                // r4: the map's isBillable = 1 restores a flag the import lost (0 or NULL).
+                'flip' => ! $notes[0]->is_billable,
+                'billable_prior' => self::rawFlag($notes[0]->is_billable),
+                'map_billable' => $entry['billable'],
             ];
         }
 
@@ -375,9 +395,13 @@ class PrepayRelinkHaloTicketTime extends Command
             return self::FAILURE;
         }
         $adjustments = [];
+        $billable = [];
         foreach ($links as $link) {
             if ($link['adj'] !== 0 && $link['prior'] === null) {
                 $adjustments[(string) $link['note']] = ['prior' => null, 'set' => $link['adj']];
+            }
+            if ($link['flip']) {
+                $billable[(string) $link['note']] = ['prior' => $link['billable_prior'], 'set' => 1];
             }
         }
         $payload = json_encode([
@@ -385,6 +409,7 @@ class PrepayRelinkHaloTicketTime extends Command
             'links' => (object) array_map(fn (array $l) => $l['note'], $links),
             'rows' => (object) array_map(fn (array $l) => ['contract' => $l['contract'], 'hours' => $l['hours']], $links),
             'adjustments' => (object) $adjustments,
+            'billable' => (object) $billable,
         ], JSON_PRETTY_PRINT);
         $ok = fwrite($handle, $payload."\n") !== false && fflush($handle);
         fclose($handle);
@@ -403,8 +428,9 @@ class PrepayRelinkHaloTicketTime extends Command
                     $row = DB::table('prepay_transactions')->where('id', $ptxId)->lockForUpdate()->first(['contract_id', 'hours']);
                     $current = $note?->time_adjustment_minutes === null ? null : (int) $note->time_adjustment_minutes;
                     if ($note === null || $note->deleted_at !== null || $row === null || $current !== $link['prior']
+                        || self::rawFlag($note->is_billable) !== $link['billable_prior']
                         || (int) $row->contract_id !== $link['contract'] || round((float) $row->hours, 4) !== $link['hours']
-                        || $this->noteRefusal($note, $row, $link['adj']) !== null) {
+                        || $this->noteRefusal($note, $row, $link['adj'], $link['map_billable']) !== null) {
                         throw new RuntimeException("Ptx {$ptxId} or note {$noteId} no longer passes the planning checks; rolled back, no ledger row was changed.");
                     }
                     $holder = DB::table('prepay_transactions')
@@ -432,6 +458,18 @@ class PrepayRelinkHaloTicketTime extends Command
                             throw new RuntimeException("Guarded adjustment update matched {$set} notes for note {$noteId}; rolled back, no ledger row was changed.");
                         }
                     }
+                    // r4: restore Halo's billable flag in the same transaction, guarded on the prior
+                    // value (is_billable <=> prior). Query builder again: no note sync runs between
+                    // the link and the flip, so debitFromTicketNote() never sees the linked row on a
+                    // non-billable note.
+                    if ($link['flip']) {
+                        $q = DB::table('ticket_notes')->where('id', $noteId);
+                        $link['billable_prior'] === null ? $q->whereNull('is_billable') : $q->where('is_billable', $link['billable_prior']);
+                        $flipped = $q->update(['is_billable' => 1]);
+                        if ($flipped !== 1) {
+                            throw new RuntimeException("Guarded billable update matched {$flipped} notes for note {$noteId}; rolled back, no ledger row was changed.");
+                        }
+                    }
                 }
             });
         } catch (\Throwable $e) {
@@ -457,12 +495,16 @@ class PrepayRelinkHaloTicketTime extends Command
     {
         $raw = is_readable($path) ? file_get_contents($path) : false;
         $doc = $raw === false ? null : json_decode($raw, true);
-        if (! is_array($doc) || ($doc['format'] ?? null) !== self::ROLLBACK_FORMAT
-            || ! is_array($doc['links'] ?? null) || ! is_array($doc['adjustments'] ?? null) || ! is_array($doc['rows'] ?? null)) {
-            $this->error('Rollback file is not '.self::ROLLBACK_FORMAT.'.');
+        $format = is_array($doc) ? ($doc['format'] ?? null) : null;
+        if (! in_array($format, [self::ROLLBACK_FORMAT, self::ROLLBACK_FORMAT_V2], true)
+            || ! is_array($doc['links'] ?? null) || ! is_array($doc['adjustments'] ?? null) || ! is_array($doc['rows'] ?? null)
+            || ($format === self::ROLLBACK_FORMAT && ! is_array($doc['billable'] ?? null))) {
+            $this->error('Rollback file is not '.self::ROLLBACK_FORMAT.' or '.self::ROLLBACK_FORMAT_V2.'.');
 
             return self::FAILURE;
         }
+        // A v2 file predates the billable flip: it has nothing to restore.
+        $doc['billable'] ??= [];
         foreach ($doc['links'] as $ptx => $note) {
             $r = $doc['rows'][$ptx] ?? null;
             if (! ctype_digit((string) $ptx) || ! is_int($note) || ! is_array($r) || ! is_int($r['contract'] ?? null)
@@ -477,6 +519,15 @@ class PrepayRelinkHaloTicketTime extends Command
                 || ! is_array($a) || ! array_key_exists('prior', $a) || ! is_int($a['set'] ?? null)
                 || ($a['prior'] !== null && ! is_int($a['prior']))) {
                 $this->error('Rollback file has a malformed adjustment entry.');
+
+                return self::FAILURE;
+            }
+        }
+        foreach ($doc['billable'] as $note => $b) {
+            if (! ctype_digit((string) $note) || ! in_array((int) $note, $doc['links'], true)
+                || ! is_array($b) || ! array_key_exists('prior', $b) || ($b['set'] ?? null) !== 1
+                || ! in_array($b['prior'], [null, 0], true)) {
+                $this->error('Rollback file has a malformed billable entry.');
 
                 return self::FAILURE;
             }
@@ -516,6 +567,16 @@ class PrepayRelinkHaloTicketTime extends Command
                             throw new RuntimeException("Note {$noteId} no longer holds the adjustment this run set; rollback undone, nothing was changed.");
                         }
                     }
+                    // r4: restore the note's prior billable flag where it still holds the 1 this run set.
+                    // The row is unlinked first, so no sync can see a linked row on a non-billable note.
+                    $b = $doc['billable'][$noteId] ?? null;
+                    if ($b !== null) {
+                        $n = DB::table('ticket_notes')->where('id', $noteId)->where('is_billable', $b['set'])
+                            ->update(['is_billable' => $b['prior']]);
+                        if ($n !== 1) {
+                            throw new RuntimeException("Note {$noteId} no longer holds the billable flag this run set; rollback undone, nothing was changed.");
+                        }
+                    }
                 }
             });
         } catch (\Throwable $e) {
@@ -524,7 +585,8 @@ class PrepayRelinkHaloTicketTime extends Command
             return self::FAILURE;
         }
 
-        $this->line('unlinked: '.count($doc['links']).'; adjustments restored: '.count($doc['adjustments']).'.');
+        $this->line('unlinked: '.count($doc['links']).'; adjustments restored: '.count($doc['adjustments'])
+            .'; billable flags restored: '.count($doc['billable']).'.');
 
         return self::SUCCESS;
     }
@@ -536,9 +598,11 @@ class PrepayRelinkHaloTicketTime extends Command
      * priced minutes reverses it, other priced minutes re-price it and move the balance, and
      * a stamp to another contract leaves it refused.
      */
-    private function noteRefusal(object $note, object $row, int $adj): ?string
+    private function noteRefusal(object $note, object $row, int $adj, ?bool $mapBillable): ?string
     {
-        if (! $note->is_billable) {
+        // r4: a note the map marks billable (v2 isBillable = 1) is planned for a flip to 1;
+        // isBillable = 0, or a v1 map that carries no flag, keeps the refusal.
+        if (! $note->is_billable && $mapBillable !== true) {
             return 'not-billable';
         }
         if ($note->time_adjustment_minutes !== null && (int) $note->time_adjustment_minutes !== $adj) {
@@ -557,6 +621,12 @@ class PrepayRelinkHaloTicketTime extends Command
         }
 
         return null;
+    }
+
+    /** A note's is_billable as read through the query builder: NULL, 0 or 1. */
+    private static function rawFlag(mixed $v): ?int
+    {
+        return $v === null ? null : ((int) $v === 0 ? 0 : 1);
     }
 
     /**
@@ -600,6 +670,7 @@ class PrepayRelinkHaloTicketTime extends Command
         foreach ($doc['rows'] as $i => $r) {
             if (! is_array($r) || count($r) !== $width || ! is_int($r[0]) || ! is_int($r[1]) || ! is_int($r[2])
                 || ($v2 && (! $this->isNumber($r[3]) || ! $this->isNumber($r[5]) || ! $this->isNumber($r[6])))
+                || ($v2 && $r[7] !== 0 && $r[7] !== 1)
                 || ($width === 9 && $r[8] !== null && ! is_int($r[8]))) {
                 throw new RuntimeException("Map row {$i} is malformed.");
             }
@@ -621,7 +692,9 @@ class PrepayRelinkHaloTicketTime extends Command
                     $partial = ['timetaken' => (float) $r[3], 'prepay' => (float) $r[5], 'charge' => (float) $r[6], 'processed' => $width === 9 ? $r[8] : null];
                 }
             }
-            $map[$r[0]] = ['halo_ticket_id' => $r[1], 'actionnumber' => $r[2], 'adj' => $adj, 'partial' => $partial];
+            // isBillable: true/false from a v2 map; null from v1, which carries no flag (no flip).
+            $map[$r[0]] = ['halo_ticket_id' => $r[1], 'actionnumber' => $r[2], 'adj' => $adj, 'partial' => $partial,
+                'billable' => $v2 ? $r[7] === 1 : null];
         }
         // An action id mapped twice is ambiguous: drop it, so its rows report as no-map.
         foreach (array_keys($dupes) as $actionId) {
