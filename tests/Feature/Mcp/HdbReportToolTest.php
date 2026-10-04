@@ -333,6 +333,12 @@ class HdbReportToolTest extends TestCase
             $this->assertStringContainsString("Unsupported MCP argument(s): {$key}", (string) $r->json('result.content.0.text'));
         }
         Http::assertNothingSent();
+
+        // Behind the boundary too: the tool itself never reads a press id from
+        // its input, so a stray one cannot authorize an unkeyed note.
+        $direct = app(HdbReportTool::class)->execute(['ticket_id' => $ticket->id, 'note_id' => $plain->id, 'press_id' => self::PRESS], $ticket->client_id);
+        $this->assertSame('no_keyed_note', $direct['refusal'] ?? null);
+        Http::assertNothingSent();
     }
 
     public function test_an_unverified_contact_intake_ticket_is_refused_like_get_ticket_attachment(): void
