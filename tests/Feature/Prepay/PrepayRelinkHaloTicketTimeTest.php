@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -201,9 +202,10 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('id', $this->ptx['link'])->value('hours'));
 
         $rollback = json_decode(file_get_contents($this->dir.'/rollback.json'), true);
-        $this->assertSame('prepay-relink-rollback/v2', $rollback['format']);
+        $this->assertSame('prepay-relink-rollback/v3', $rollback['format']);
         $this->assertSame([(string) $this->ptx['link'] => $this->notes['link']], $rollback['links']);
         $this->assertSame([], $rollback['adjustments']);
+        $this->assertSame([], $rollback['billable']);
         $this->assertNull(DB::table('ticket_notes')->where('id', $this->notes['link'])->value('time_adjustment_minutes'));
     }
 
@@ -686,7 +688,7 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $out = Artisan::output();
 
         $this->assertSame(0, $exit, $out);
-        $this->assertStringContainsString('unlinked: 2; adjustments restored: 1.', $out);
+        $this->assertStringContainsString('unlinked: 2; adjustments restored: 1; billable flags restored: 0.', $out);
         $this->assertNull($this->adjustmentOf($note));
         $this->assertSame($ledger, $this->ledger());
         $this->assertSame($notes, DB::table('ticket_notes')->orderBy('id')->get()->map(fn ($r) => (array) $r)->all());
@@ -959,5 +961,278 @@ class PrepayRelinkHaloTicketTimeTest extends TestCase
         $this->assertTrue((bool) TicketNote::findOrFail($note)->is_billable);
         $this->assertSame(-0.25, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
         $this->assertSame($balances, $this->contractState());
+    }
+
+    // ── r4: the link restores Halo's billable flag (map v2 isBillable) on the matched note ──
+
+    /**
+     * A 30-minute note on the scenario ticket (halo_note_id 40) with is_billable $flag, a 0.5 h
+     * ledger row for Halo action 70040, and a v2 map giving that action isBillable $mapBillable.
+     * Returns [ptx id, note id].
+     */
+    private function flipScenario(?int $flag = 0, int $mapBillable = 1, bool $v2 = true): array
+    {
+        [$ptx, $note] = $this->adjusted(40, 70040, 30, -0.5, 0.0, ['is_billable' => $flag]);
+        if ($v2) {
+            $this->writeMapV2([[70001, 9001, 1, 0.5, 0.0, 0.5, 0.0, 1], [70040, 9001, 40, 0.5, 0.0, 0.5, 0.0, $mapBillable]]);
+        }
+
+        return [$ptx, $note];
+    }
+
+    private function flagOf(int $noteId): ?int
+    {
+        $v = DB::table('ticket_notes')->where('id', $noteId)->value('is_billable');
+
+        return $v === null ? null : (int) $v;
+    }
+
+    private function notesTable(): array
+    {
+        return DB::table('ticket_notes')->orderBy('id')->get()->map(fn ($r) => (array) $r)->all();
+    }
+
+    public function test_a_billable_map_row_flips_a_non_billable_note_and_links_with_no_balance_change(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $ledger = $this->ledger();
+        $balances = $this->contractState();
+
+        [, $dry] = $this->run5067();
+        $this->assertStringContainsString('would link: 2', $dry);
+        $this->assertStringContainsString('would flip billable: 1', $dry);
+        $this->assertSame(0, $this->flagOf($note));
+        $this->assertNull($this->linkedTo($ptx));
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertStringContainsString('flipping billable: 1', $out);
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(1, $this->flagOf($note));
+        // The already-billable note links without a flip.
+        $this->assertSame(1, $this->flagOf($this->notes['link']));
+        foreach ($ledger as $i => $row) {
+            if ($row['id'] === $ptx) {
+                $ledger[$i]['ticket_note_id'] = $note;
+            } elseif ($row['id'] === $this->ptx['link']) {
+                $ledger[$i]['ticket_note_id'] = $this->notes['link'];
+            }
+        }
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($balances, $this->contractState());
+        $rollback = json_decode(file_get_contents($this->dir.'/rollback.json'), true);
+        $this->assertSame('prepay-relink-rollback/v3', $rollback['format']);
+        $this->assertSame([(string) $note => ['prior' => 0, 'set' => 1]], $rollback['billable']);
+    }
+
+    public function test_a_null_flag_is_flipped_and_recorded_as_null(): void
+    {
+        [$ptx, $note] = $this->flipScenario(null);
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(1, $this->flagOf($note));
+        $this->assertSame([(string) $note => ['prior' => null, 'set' => 1]],
+            json_decode(file_get_contents($this->dir.'/rollback.json'), true)['billable']);
+    }
+
+    public static function priorFlags(): array
+    {
+        return ['zero' => [0], 'null' => [null]];
+    }
+
+    #[DataProvider('priorFlags')]
+    public function test_rollback_restores_the_flag_and_the_link(?int $flag): void
+    {
+        [$ptx, $note] = $this->flipScenario($flag);
+        $ledger = $this->ledger();
+        $notes = $this->notesTable();
+        $balances = $this->contractState();
+        $this->commit();
+        $this->assertSame(1, $this->flagOf($note));
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertStringContainsString('unlinked: 2; adjustments restored: 0; billable flags restored: 1.', $out);
+        $this->assertSame($flag, $this->flagOf($note));
+        $this->assertNull($this->linkedTo($ptx));
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($notes, $this->notesTable());
+        $this->assertSame($balances, $this->contractState());
+    }
+
+    public function test_rollback_changes_nothing_when_the_flag_moved_since_the_run(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $this->commit();
+        DB::table('ticket_notes')->where('id', $note)->update(['is_billable' => 0]);
+        $ledger = $this->ledger();
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Note {$note} no longer holds the billable flag this run set; rollback undone, nothing was changed.", $out);
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+    }
+
+    public function test_a_v2_rollback_file_from_r3_still_loads(): void
+    {
+        $this->commit();
+        $doc = json_decode(file_get_contents($this->dir.'/rollback.json'), true);
+        unset($doc['billable']);
+        $doc['format'] = 'prepay-relink-rollback/v2';
+        file_put_contents($this->dir.'/rollback.json', json_encode($doc));
+
+        [$exit, $out] = $this->rollbackRun();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertStringContainsString('unlinked: 1; adjustments restored: 0; billable flags restored: 0.', $out);
+        $this->assertNull($this->noteOf('link'));
+    }
+
+    public function test_a_map_row_marked_not_billable_is_refused_and_the_flag_is_kept(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0, 0);
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->ptx['map_not_billable'] = $ptx;
+        $this->assertRefused('map_not_billable', 'not-billable', $out);
+        $this->assertStringContainsString('flipping billable: 0', $out);
+        $this->assertSame(0, $this->flagOf($note));
+        $this->assertSame([], json_decode(file_get_contents($this->dir.'/rollback.json'), true)['billable']);
+    }
+
+    public function test_a_v1_map_flips_nothing_and_still_refuses_a_non_billable_note(): void
+    {
+        // adjusted() writes a v1 map: it carries no isBillable.
+        [$ptx, $note] = $this->flipScenario(0, 1, false);
+        [, $dry] = $this->run5067();
+        $this->assertStringContainsString('would flip billable: 0', $dry);
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->ptx['v1_flag'] = $ptx;
+        $this->assertRefused('v1_flag', 'not-billable', $out);
+        $this->assertSame(0, $this->flagOf($note));
+        $this->assertSame($this->notes['link'], $this->noteOf('link'));
+    }
+
+    public function test_a_v2_map_with_an_is_billable_that_is_not_0_or_1_is_refused(): void
+    {
+        foreach ([true, 2, null, '1'] as $bad) {
+            $this->writeMapV2([[70001, 9001, 1, 0.5, 0.0, 0.5, 0.0, $bad]]);
+            $before = $this->ledger();
+
+            [$exit, $out] = $this->commit($this->dir.'/rb-'.bin2hex(random_bytes(3)).'.json');
+
+            $this->assertSame(1, $exit, $out);
+            $this->assertStringContainsString('Map row 0 is malformed.', $out);
+            $this->assertSame($before, $this->ledger());
+        }
+    }
+
+    /** Ordering (card ruling): no note observer or sync may run between the link and the flip. */
+    public function test_the_link_and_flip_run_no_model_event_or_prepay_sync(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $events = [];
+        Event::listen('eloquent.*', function (string $name) use (&$events) {
+            $events[] = $name;
+        });
+        $sql = [];
+        DB::listen(function ($q) use (&$sql) {
+            if (preg_match('/^update\s+[`"]?(ticket_notes|prepay_transactions)[`"]?/i', $q->sql, $m)) {
+                $sql[] = $m[1];
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertSame(0, $exit, $out);
+        $this->assertSame([], array_values(array_filter($events, fn ($e) => str_contains($e, 'TicketNote') || str_contains($e, 'PrepayTransaction'))));
+        // Per link: the guarded link, then (for the flipped note only) the guarded flip.
+        $this->assertSame(['prepay_transactions', 'prepay_transactions', 'ticket_notes'], $sql);
+        $this->assertSame(1, $this->flagOf($note));
+        $this->assertSame($note, $this->linkedTo($ptx));
+    }
+
+    public function test_the_next_ordinary_save_of_a_flipped_note_keeps_the_linked_debit(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $this->commit();
+        $balances = $this->contractState();
+
+        $model = TicketNote::findOrFail($note);
+        $model->body = 'Synthetic edited body';
+        $model->save();
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+
+        $this->actingAs(User::factory()->create())->put(route('tickets.notes.update', [$this->scenarioTicketId(), $note]), [
+            'body' => 'Synthetic edited again', 'note_type' => 'note', 'time' => $model->fresh()->formatted_time, 'is_billable' => '1',
+        ])->assertSessionHasNoErrors();
+
+        $this->assertSame(1, $this->flagOf($note));
+        $this->assertSame($note, $this->linkedTo($ptx));
+        $this->assertSame(1, DB::table('prepay_transactions')->where('ticket_note_id', $note)->count());
+        $this->assertSame(-0.5, (float) DB::table('prepay_transactions')->where('id', $ptx)->value('hours'));
+        $this->assertSame($balances, $this->contractState());
+    }
+
+    public static function racedFlags(): array
+    {
+        return ['set to 1' => [1], 'set to NULL' => [null]];
+    }
+
+    /** The flag changes between the scan and the write: the under-lock re-check aborts the whole run. */
+    #[DataProvider('racedFlags')]
+    public function test_a_flag_changed_after_planning_aborts_the_whole_write(?int $raced): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $fired = false;
+        Event::listen(TransactionBeginning::class, function () use (&$fired, $note, $raced) {
+            if (! $fired) {
+                $fired = true;
+                DB::table('ticket_notes')->where('id', $note)->update(['is_billable' => $raced]);
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertTrue($fired);
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Ptx {$ptx} or note {$note} no longer passes the planning checks; rolled back, no ledger row was changed.", $out);
+        $this->assertNull($this->linkedTo($ptx));
+        $this->assertNull($this->noteOf('link'));
+        // The racing write ran inside the transaction, so the rollback undid it too.
+        $this->assertSame(0, $this->flagOf($note));
+    }
+
+    /** The flag changes just before the flip UPDATE: its prior-value guard hits no row and the run rolls back. */
+    public function test_a_flag_changed_at_the_flip_aborts_the_whole_write(): void
+    {
+        [$ptx, $note] = $this->flipScenario(0);
+        $fired = false;
+        DB::connection()->beforeExecuting(function (string $sql) use (&$fired, $note) {
+            if (! $fired && preg_match('/^update [`"]ticket_notes[`"] set [`"]is_billable[`"]/i', $sql)) {
+                $fired = true;
+                DB::table('ticket_notes')->where('id', $note)->update(['is_billable' => null]);
+            }
+        });
+
+        [$exit, $out] = $this->commit();
+
+        $this->assertTrue($fired);
+        $this->assertSame(1, $exit, $out);
+        $this->assertStringContainsString("Guarded billable update matched 0 notes for note {$note}; rolled back, no ledger row was changed.", $out);
+        $this->assertNull($this->linkedTo($ptx));
+        $this->assertNull($this->noteOf('link'));
     }
 }
