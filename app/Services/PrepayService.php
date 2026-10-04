@@ -466,7 +466,9 @@ class PrepayService
         $txn = DB::transaction(function () use ($note, &$alertContract, &$retry) {
             // Lock order: note -> existing prepay transaction -> contract.
             $lockedNote = TicketNote::withTrashed()->whereKey($note->id)->lockForUpdate()->first();
-            if (! $lockedNote || $lockedNote->trashed() || ! $lockedNote->is_billable || $lockedNote->time_minutes <= 0) {
+            // Priced minutes include the note's time adjustment (#5067 r3): the zero check uses
+            // the same sum the debit is priced at.
+            if (! $lockedNote || $lockedNote->trashed() || ! $lockedNote->is_billable || $lockedNote->pricedMinutes() <= 0) {
                 $this->reverseDebitForTicketNote($note);
 
                 return null;
@@ -479,7 +481,7 @@ class PrepayService
                 return null;
             }
 
-            $hours = round($note->time_minutes / 60, 4);
+            $hours = round($note->pricedMinutes() / 60, 4);
 
             // A missing-key locking read can gap-lock unrelated new notes on InnoDB.
             $existing = PrepayTransaction::where('ticket_note_id', $note->id)->first();
@@ -916,7 +918,7 @@ class PrepayService
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
             $report['body'] = fn (float $h, string $drew = '') => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
                 .($from?->name ?? 'no contract').' to '.$target->name.$drew.': '.$reason;
-            $body = $report['body']($hours > 0 ? $hours : ($isNote ? ($locked->time_minutes ?? 0) / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600));
+            $body = $report['body']($hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600));
             $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
                 'author_id' => $by->id,

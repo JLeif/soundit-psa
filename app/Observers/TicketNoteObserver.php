@@ -25,6 +25,12 @@ class TicketNoteObserver
         if ($note->exists && $note->getRawOriginal('contact_intake_origin')) {
             $note->contact_intake_origin = true;
         }
+        // #5067 r3 group A: a negative time adjustment prices the note at the part of a Halo
+        // action drawn from prepay (the rest was charged outside it). A new time would move that
+        // draw with no defined split, so an ordinary edit cannot change such a note's time.
+        if ($note->exists && (int) $note->getRawOriginal('time_adjustment_minutes') < 0 && $note->isDirty('time_minutes')) {
+            $note->time_minutes = $note->getOriginal('time_minutes');
+        }
         // Provenance is stamped ONLY by the intake writer (SubmissionProcessor), never by
         // ticket state: a staff, system or inbound-email note on an unverified intake ticket
         // is not visitor text (r1 diff:2/7/8). Containment applies while unverified; after
@@ -51,7 +57,7 @@ class TicketNoteObserver
      */
     private function stampContract(TicketNote $note): void
     {
-        if ($note->contract_id !== null || ! $note->time_minutes || $note->time_minutes <= 0) {
+        if ($note->contract_id !== null || $note->pricedMinutes() <= 0) {
             return;
         }
 
@@ -100,7 +106,8 @@ class TicketNoteObserver
 
     private function syncPrepayDebit(TicketNote $note): void
     {
-        if ($note->isUnverifiedContactIntake() || (! $note->time_minutes && ! $note->wasChanged('time_minutes'))) {
+        // Priced minutes (#5067 r3): a zero-minute note carrying a time adjustment has a debit to sync.
+        if ($note->isUnverifiedContactIntake() || ($note->pricedMinutes() <= 0 && ! $note->wasChanged('time_minutes'))) {
             return;
         }
 
