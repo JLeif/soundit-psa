@@ -1573,10 +1573,15 @@ class StaffMeshAdminToolExecutor
      * reapable, so it would open a hole and hold it until the daily reaper
      * happened to run.
      *
+     * `$absentIsPermanent` is false for the edit verb, which refuses an absent
+     * key before calling this. The empty-value refusal then leaves out
+     * "omit the parameter for a permanent rule", because on that verb the
+     * caller would be refused for following it (G-14).
+     *
      * @param  array<string, mixed>  $arguments
      * @return array{expires_at: \Illuminate\Support\Carbon|null}|array{error: string}
      */
-    private function requestedExpiry(array $arguments): array
+    private function requestedExpiry(array $arguments, bool $absentIsPermanent = true): array
     {
         if (! array_key_exists('expires_at', $arguments)) {
             return ['expires_at' => null];
@@ -1594,7 +1599,8 @@ class StaffMeshAdminToolExecutor
         // guessing which of the three answers it was is exactly the class of
         // guess this method exists to stop.
         if ($value === null || (is_string($value) && trim($value) === '')) {
-            return ['error' => 'expires_at was empty; give an ISO-8601 date or datetime for a rule that expires, or the word "never" for a rule that never expires. Omit the parameter entirely for a permanent rule'];
+            return ['error' => 'expires_at was empty; give an ISO-8601 date or datetime for a rule that expires, or the word "never" for a rule that never expires.'
+                .($absentIsPermanent ? ' Omit the parameter entirely for a permanent rule' : '')];
         }
 
         if (! is_string($value)) {
@@ -2626,7 +2632,7 @@ class StaffMeshAdminToolExecutor
             return ['error' => $message];
         }
 
-        $expiry = $this->requestedExpiry($arguments);
+        $expiry = $this->requestedExpiry($arguments, absentIsPermanent: false);
         if (isset($expiry['error'])) {
             $this->auditAttempt($tool, 'rejected', $clientId, $ticket, $this->contentHash($tool, $clientId, 'guard', $arguments), $expiry['error'], $actorLabel);
 
@@ -2859,7 +2865,7 @@ class StaffMeshAdminToolExecutor
 
             return ['error' => $message];
         }
-        $expiry = $this->requestedExpiry($arguments);
+        $expiry = $this->requestedExpiry($arguments, absentIsPermanent: false);
         if (isset($expiry['error'])) {
             $message = $expiry['error'].' No upstream call was made and nothing was changed; stage a new proposal with a valid expiry.';
             $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);

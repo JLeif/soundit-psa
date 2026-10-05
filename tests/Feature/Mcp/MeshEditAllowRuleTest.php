@@ -401,6 +401,34 @@ class MeshEditAllowRuleTest extends TestCase
         ];
     }
 
+    /**
+     * G-14: the empty-value refusal is shared with the create verb, where an
+     * omitted key means PERMANENT. This verb refuses an omitted key, so the
+     * refusal must not tell the caller to omit it. It names "never" instead.
+     */
+    public function test_an_empty_expiry_refusal_does_not_tell_the_caller_to_omit_the_key(): void
+    {
+        $this->configureMesh();
+        $fixture = $this->fixture();
+        $this->tracked($fixture);
+        $write = $this->mockWrite();
+        $write->shouldNotReceive('patchRule');
+
+        foreach (['', '   ', null] as $value) {
+            $error = $this->decodedResult($this->callTool(
+                $this->token(['mesh_edit_allow_rule:staged']),
+                'mesh_edit_allow_rule',
+                $this->editArgs($fixture, ['expires_at' => $value]),
+            ))['error'] ?? '';
+
+            $this->assertStringContainsString('expires_at was empty', $error);
+            $this->assertStringContainsString('the word "never"', $error);
+            $this->assertStringNotContainsStringIgnoringCase('omit', $error, 'the edit verb refuses an omitted expires_at, so its refusal must not advise omitting it');
+        }
+
+        $this->assertSame(0, TechnicianRun::count());
+    }
+
     public function test_reason_and_ticket_are_required(): void
     {
         $this->configureMesh();
