@@ -177,6 +177,10 @@ class StaffPsaActionToolExecutor
                 ->execute(PhoneCallActionService::ACTION_ALLOW, $arguments, $actorLabel, $name === 'stage_allow_caller'),
             'mark_call_followed_up', 'retry_call_transcription' => app(PhoneCallActionService::class)
                 ->execute($name, $arguments, $actorLabel, false),
+            // Card XUiMXNEH: scope is the run's drafting token, never the client scope
+            // argument, so $clientId is deliberately not passed.
+            WithdrawStagedActionTool::NAME => app(WithdrawStagedActionTool::class)
+                ->execute($arguments, $tokenLabel, $actorLabel),
             default => ['error' => "Unknown PSA action tool: {$name}"],
         };
         TicketToolActivityContext::current()?->finish($result);

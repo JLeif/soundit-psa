@@ -46,6 +46,9 @@ class CockpitQuery
      */
     public const DIRECT_CLOSE_WINDOW_HOURS = 48;
 
+    /** How far back the "withdrawn by drafter" lane looks (card XUiMXNEH). Self-clearing. */
+    public const DRAFTER_WITHDRAWAL_WINDOW_HOURS = 48;
+
     /**
      * The states that mean "a human still owes this a decision" — the single
      * definition of PENDING. Everything the away operator should see on the nav
@@ -282,6 +285,26 @@ class CockpitQuery
             ->whereHas('ticket', fn ($q) => $q->where('status', TicketStatus::Closed->value))
             ->with(['ticket.client', 'ticket.categoryNode.parent.parent'])
             ->orderByDesc('created_at')
+            ->get();
+    }
+
+    /**
+     * Proposals the drafting token withdrew itself (withdraw_staged_action, card
+     * XUiMXNEH) within the recent window. Shown so a card that left the approval queue
+     * without an operator's click does not simply vanish, and so it reads as "Withdrawn
+     * by drafter: <reason>", never as Denied. Keyed on proposed_meta.withdrawn_by, which
+     * only that path writes: the other Withdrawn writers (the ticket-closed auto-withdraw
+     * and a refused scheduled admission) record no drafter reason to show. Informational
+     * — NOT folded into counts()/pendingCount(): nothing is pending. Newest first.
+     */
+    public function recentDrafterWithdrawals(): Collection
+    {
+        return TechnicianRun::query()
+            ->where('state', TechnicianRunState::Withdrawn->value)
+            ->where('proposed_meta->withdrawn_by', 'drafter')
+            ->where('updated_at', '>=', now()->subHours(self::DRAFTER_WITHDRAWAL_WINDOW_HOURS))
+            ->with(['ticket.client'])
+            ->orderByDesc('updated_at')
             ->get();
     }
 
