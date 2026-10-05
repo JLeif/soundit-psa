@@ -92,6 +92,15 @@ class SignalEventTypes
                 'core' => false,
                 'routable' => true,
             ],
+            // Card K3VEcxtw. NOT routable on purpose: SignalRouter::route() returns
+            // before reading any route, so no operator route, 'all' route or relay-
+            // matrix cell can deliver a watch to anyone. AssetWatchEvaluator delivers
+            // each fire to its owner's own MCP destination only.
+            'asset.watch_fired' => [
+                'label' => 'Asset watch fired (owner only)',
+                'core' => false,
+                'routable' => false,
+            ],
             'system.test' => [
                 'label' => 'System test',
                 'core' => true,

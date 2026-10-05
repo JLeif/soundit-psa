@@ -104,6 +104,22 @@ class McpTokensController extends Controller
                 SignalDestination::query()
                     ->where('mcp_token_label', $old)
                     ->update(['mcp_token_label' => $new]);
+
+                // Asset watches (card K3VEcxtw) are owned by the label, so they and
+                // their owner-only destination follow the rename too.
+                SignalDestination::query()
+                    ->where('mcp_token_label', $new)
+                    ->where('label', \App\Services\Assets\AssetWatchEvaluator::destinationLabel($old))
+                    ->update(['label' => \App\Services\Assets\AssetWatchEvaluator::destinationLabel($new)]);
+                \App\Models\AssetWatch::query()->where('owner', $old)->get()
+                    ->each(function (\App\Models\AssetWatch $watch) use ($new): void {
+                        $watch->forceFill([
+                            'owner' => $new,
+                            'active_key' => $watch->active_key !== null
+                                ? \App\Models\AssetWatch::activeKeyFor($new, (int) $watch->asset_id, (string) $watch->state)
+                                : null,
+                        ])->save();
+                    });
             });
 
             $this->audit($request, 'token/rename', $new, ['from' => $old]);

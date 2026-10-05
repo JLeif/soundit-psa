@@ -16,6 +16,14 @@ class SignalHub
         'client_id',
         'destination_id',
         'transcript_unusable',
+        // asset.watch_fired (card K3VEcxtw): the observation behind the fire, so
+        // the owner can judge it. A null value is not scalar and is dropped below,
+        // so last_seen/age_seconds are absent when the payload carried no last_seen.
+        'watch_id',
+        'state',
+        'last_seen',
+        'age_seconds',
+        'observed_by',
     ];
 
     public function __construct(

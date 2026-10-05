@@ -8,6 +8,7 @@ use App\Models\Asset;
 use App\Models\Client;
 use App\Models\TacticalAsset;
 use App\Models\TechnicianRun;
+use App\Services\Assets\AssetWatchEvaluator;
 use App\Services\SyncResult;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -620,6 +621,16 @@ class TacticalDeviceSyncService
             $queuedAgentStatus = collect();
         }
 
+        // Assets with an armed watch (card K3VEcxtw), read once so an unwatched
+        // fleet costs one query. observe() never throws; this read is guarded the
+        // same way as the pre-scan above because losing it costs a fire, not the sync.
+        try {
+            $watchedAssetIds = app(AssetWatchEvaluator::class)->watchedAssetIds();
+        } catch (\Throwable $e) {
+            Log::warning('[TacticalSync] Failed to read asset watches', ['error' => $this->safeFailure($e, 'asset watch read')]);
+            $watchedAssetIds = [];
+        }
+
         foreach ($agents as $agent) {
             $agentId = $agent['agent_id'] ?? null;
             if (! $agentId) {
@@ -764,6 +775,18 @@ class TacticalDeviceSyncService
                     }
 
                 });
+
+                // Asset watches (card K3VEcxtw) see the SAME value this run wrote to
+                // rmm_online, after the refresh committed, through the one evaluator
+                // the poller also uses.
+                if ($tacticalAsset->asset_id && isset($watchedAssetIds[(int) $tacticalAsset->asset_id])) {
+                    app(AssetWatchEvaluator::class)->observe(
+                        (int) $tacticalAsset->asset_id,
+                        $this->rmmOnlineFromStatus($tacticalAsset->status),
+                        $tacticalAsset->last_seen_at,
+                        'sync',
+                    );
+                }
 
                 DB::transaction(function () use ($tacticalAsset, $agent, $psaClientId) {
                     DB::table('clients')->where('id', $psaClientId)->lockForUpdate()->first();
@@ -1440,7 +1463,7 @@ class TacticalDeviceSyncService
      * staleness escape anywhere (isRmmDataStale gates only a TRUE flag), so it
      * is only ever written for a status we know means out of contact.
      */
-    private function rmmOnlineFromStatus(?string $status): ?bool
+    public function rmmOnlineFromStatus(?string $status): ?bool
     {
         return match ($status) {
             'online' => true,

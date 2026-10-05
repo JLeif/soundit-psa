@@ -138,6 +138,21 @@ Schedule::command('tactical:sync-devices')
         && \App\Models\Client::whereNotNull('tactical_site_id')->exists()
         && \App\Support\TacticalConfig::deviceSyncDue());
 
+// Asset watches (card K3VEcxtw). The poller reads GET agents/{id}/ for WATCHED
+// assets only, every minute, bounded by asset_watch.poll_max_agents; with no armed
+// watch it returns before any request. The expiry pass marks lapsed watches
+// expired (firing never depends on it: the evaluator refuses a lapsed watch).
+Schedule::command('assets:poll-watched')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->when(fn () => \App\Support\TacticalConfig::isEnabled()
+        && \App\Models\AssetWatch::query()->armed()->exists());
+
+Schedule::command('assets:expire-watches')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping();
+
 // Tactical RMM script library sync — daily (only if enabled)
 Schedule::command('tactical:sync-scripts')
     ->dailyAt('05:35')

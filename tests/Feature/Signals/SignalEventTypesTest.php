@@ -29,6 +29,7 @@ class SignalEventTypesTest extends TestCase
             'tactical.alert_created',
             'signal.delivery_failed',
             'digest.daily',
+            'asset.watch_fired',
             'system.test',
         ], array_keys($types));
 
@@ -36,7 +37,10 @@ class SignalEventTypesTest extends TestCase
         $this->assertFalse(SignalEventTypes::has('agent.nope'));
         $this->assertTrue(SignalEventTypes::routable('ticket.created'));
         $this->assertFalse(SignalEventTypes::routable('system.test'));
-        $this->assertSame(['system.test'], array_keys(array_filter($types, fn (array $type) => ! $type['routable'])));
+        // asset.watch_fired (card K3VEcxtw) is delivered to its watch owner only,
+        // never through a route, so it is not routable.
+        $this->assertFalse(SignalEventTypes::routable('asset.watch_fired'));
+        $this->assertSame(['asset.watch_fired', 'system.test'], array_keys(array_filter($types, fn (array $type) => ! $type['routable'])));
 
         $this->assertSame([
             'ticket.created',

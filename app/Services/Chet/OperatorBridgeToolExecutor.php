@@ -510,7 +510,7 @@ class OperatorBridgeToolExecutor
             // inbox_id is the DELIVERY (one per matching route/step/destination for this
             // token label); event_id is the OCCURRENCE (signal_events.id), the only
             // correct dedupe key for a consumer. Card qptZ5IKH.
-            return [
+            $signal = [
                 'inbox_id' => $row->id,
                 'event_id' => (int) $row->event_id,
                 'event' => $payload['event'] ?? null,
@@ -518,6 +518,14 @@ class OperatorBridgeToolExecutor
                 'category' => $payload['category'] ?? null,
                 'occurred_at' => $payload['occurred_at'] ?? null,
             ];
+
+            // asset.watch_fired rows (card K3VEcxtw) carry the observation behind
+            // the fire; other rows are unchanged.
+            if (isset($payload['watch']) && is_array($payload['watch'])) {
+                $signal['watch'] = $payload['watch'];
+            }
+
+            return $signal;
         })->all();
 
         return [
