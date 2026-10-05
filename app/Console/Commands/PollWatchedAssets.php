@@ -40,9 +40,13 @@ class PollWatchedAssets extends Command
     {
         $assetIds = AssetWatch::query()
             ->armed()
-            ->selectRaw('asset_id, MIN(COALESCE(last_checked_at, created_at)) as checked')
+            // Never-checked first, then the oldest check, then id: a fair rotation
+            // when more assets are watched than one run may read.
+            ->selectRaw('asset_id, MAX(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) as never_checked, MIN(last_checked_at) as checked')
             ->groupBy('asset_id')
+            ->orderByDesc('never_checked')
             ->orderBy('checked')
+            ->orderBy('asset_id')
             ->limit(max(1, (int) config('asset_watch.poll_max_agents', 25)))
             ->pluck('asset_id')
             ->map(fn ($id): int => (int) $id)
