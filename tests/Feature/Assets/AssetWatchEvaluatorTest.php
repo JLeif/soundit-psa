@@ -449,6 +449,28 @@ class AssetWatchEvaluatorTest extends TestCase
         $this->assertSame(1, $this->evaluator()->observe($asset->id, false, null, 'poll', $listReadAt->copy()->addSeconds(90)));
     }
 
+    /**
+     * The sync's list read and the poller's live read are both scheduled every
+     * minute and routinely fall in the same wall-clock second, so read order must
+     * hold below one second.
+     */
+    public function test_an_older_observation_from_the_same_second_does_not_fire_an_offline_watch(): void
+    {
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $id = $this->watch(self::OWNER_A, $client->id, $asset->id, 'offline');
+
+        // The poller reads it online at .70...
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll', Carbon::parse('2026-03-02T10:00:00.700000Z')));
+        // ...then the sync applies the 'offline' from its list read at .10 of the same second.
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, false, null, 'sync', Carbon::parse('2026-03-02T10:00:00.100000Z')));
+        $this->assertTrue($this->watchRow($id)->last_observed_state);
+        $this->assertCount(0, $this->inboxFor(self::OWNER_A));
+
+        // A newer offline read in the same second still fires.
+        $this->assertSame(1, $this->evaluator()->observe($asset->id, false, null, 'poll', Carbon::parse('2026-03-02T10:00:00.900000Z')));
+    }
+
     public function test_an_older_offline_observation_does_not_rearm_a_repeat_online_watch(): void
     {
         $client = $this->mappedClient();

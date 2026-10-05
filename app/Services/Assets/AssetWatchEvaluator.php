@@ -33,7 +33,7 @@ use Illuminate\Support\Facades\Log;
  *    false follows a recorded true.
  *
  * Observations are applied in the order they were READ, not the order they
- * arrive: last_observed_at holds the read time of the newest applied one, and
+ * arrive: last_observed_at holds the read time (to the microsecond) of the newest applied one, and
  * an older read (the sync works through a list fetched at the start of its run
  * while the poller reads live) changes nothing.
  */
@@ -142,11 +142,13 @@ class AssetWatchEvaluator
     /** Record a non-firing observation unless a newer read is already recorded; idempotent. */
     private function record(AssetWatch $watch, bool $state, CarbonInterface $observedAt): void
     {
+        $readAt = self::readAt($observedAt);
+
         AssetWatch::query()
             ->whereKey($watch->id)
             ->whereNotNull('active_key')
-            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $observedAt))
-            ->update(['last_observed_state' => $state, 'last_observed_at' => $observedAt]);
+            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $readAt))
+            ->update(['last_observed_state' => $state, 'last_observed_at' => $readAt]);
     }
 
     /**
@@ -157,11 +159,13 @@ class AssetWatchEvaluator
      */
     private function claimFire(AssetWatch $watch, bool $newState, CarbonInterface $now, CarbonInterface $observedAt): bool
     {
+        $readAt = self::readAt($observedAt);
+
         $query = AssetWatch::query()
             ->whereKey($watch->id)
             ->whereNotNull('active_key')
             ->where('expires_at', '>', $now)
-            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $observedAt));
+            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $readAt));
 
         if ($newState) {
             // online: false or unknown -> confirmed true
@@ -173,7 +177,7 @@ class AssetWatchEvaluator
 
         $update = [
             'last_observed_state' => $newState,
-            'last_observed_at' => $observedAt,
+            'last_observed_at' => $readAt,
             'fired_at' => $now,
             'fire_count' => DB::raw('fire_count + 1'),
         ];
@@ -258,6 +262,16 @@ class AssetWatchEvaluator
     public static function freshSeconds(): int
     {
         return max(1, (int) config('asset_watch.fresh_seconds', 120));
+    }
+
+    /**
+     * last_observed_at as bound for compare and write, keeping microseconds. A
+     * Carbon binding is formatted by the grammar to whole seconds, so two reads
+     * in the same second would compare equal and the older one would still apply.
+     */
+    private static function readAt(CarbonInterface $at): string
+    {
+        return $at->format('Y-m-d H:i:s.u');
     }
 
     /**

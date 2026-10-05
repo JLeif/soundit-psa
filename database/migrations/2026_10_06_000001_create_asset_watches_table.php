@@ -39,9 +39,11 @@ return new class extends Migration
             $table->timestamp('fired_at')->nullable();
             $table->unsignedInteger('fire_count')->default(0);
             $table->boolean('last_observed_state')->nullable();
-            // When the newest applied observation was READ from Tactical; an older
-            // read arriving later is ignored (see AssetWatchEvaluator).
-            $table->dateTime('last_observed_at')->nullable();
+            // When the newest applied observation was READ from Tactical, to the
+            // microsecond; an older read arriving later is ignored (see
+            // AssetWatchEvaluator). Whole seconds would let the sync's list read and
+            // the poller's live read, both run every minute, tie and both apply.
+            $table->dateTime('last_observed_at', 6)->nullable();
             $table->timestamp('last_checked_at')->nullable();
             $table->timestamp('expired_at')->nullable();
             $table->timestamp('removed_at')->nullable();
