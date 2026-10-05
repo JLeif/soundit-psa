@@ -156,6 +156,27 @@ class GraphClient
     }
 
     /**
+     * Raw contents of one message attachment:
+     * GET /users/{mailbox}/messages/{messageId}/attachments/{attachmentId}/$value.
+     *
+     * Vendor contract (https://learn.microsoft.com/en-us/graph/api/attachment-get, "Get the raw
+     * contents of a file or item attachment"): for an itemAttachment Graph returns the item in
+     * MIME format for a message, vCard for a contact and iCal for an event; a
+     * referenceAttachment answers 405. Every caller-controlled segment goes through seg(), as
+     * the calendar reads do. Errors are GraphClientException from authenticatedRequest (one
+     * token retry on 401, backoff on 429, the configured request_timeout). A 2xx is returned
+     * as-is, including an empty body; the caller decides what an empty body means.
+     */
+    public function getMessageAttachmentRaw(string $mailbox, string $messageId, string $attachmentId): string
+    {
+        $endpoint = 'users/'.self::seg($mailbox)
+            .'/messages/'.self::seg($messageId)
+            .'/attachments/'.self::seg($attachmentId).'/$value';
+
+        return (string) $this->authenticatedRequest('GET', $endpoint)->getBody();
+    }
+
+    /**
      * Calendar events in a time window (GET /users/{upn}/calendarView). Returns the flat list of
      * event resources; @odata.nextLink pagination is handled internally. Times come back in UTC
      * unless a `Prefer: outlook.timezone` header is sent — we send none (the repo stores + renders
