@@ -90,10 +90,6 @@ final class WithdrawStagedActionTool
             return ['error' => self::notFound($runId)];
         }
 
-        if ($run->state !== TechnicianRunState::AwaitingApproval) {
-            return ['error' => self::notAwaiting($runId, $run->state)];
-        }
-
         $meta = [
             'withdrawn_by' => self::WITHDRAWN_BY_DRAFTER,
             'withdrawn_by_token' => $tokenLabel,
@@ -125,8 +121,9 @@ final class WithdrawStagedActionTool
         });
 
         if (! $withdrawn) {
-            // The CAS lost: the run left awaiting_approval between the read above and the
-            // UPDATE (an approval claimed it, or it was denied). Report what it is now.
+            // The CAS is the ONLY state guard: the run was not awaiting_approval at the
+            // UPDATE (already approved, executing, scheduled, queued, terminal, or claimed
+            // by an approval after the read above). Report what it is now.
             return ['error' => self::notAwaiting($runId, TechnicianRun::find($run->id)?->state)];
         }
 
