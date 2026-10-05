@@ -341,7 +341,7 @@ class MeshEditAllowRuleTest extends TestCase
     }
 
     /**
-     * The create verb defaults an ABSENT expires_at to 90 days, which is right
+     * The create verb treats an ABSENT expires_at as PERMANENT, which is right
      * for a rule being born and wrong for one being edited: defaulting here
      * would quietly rewrite a lifetime somebody chose. There is nothing else
      * this verb changes, so an edit with no expiry is a mistake.
@@ -399,6 +399,34 @@ class MeshEditAllowRuleTest extends TestCase
             'non-string' => [90, 'expires_at must be an ISO-8601 date or datetime'],
             'out of range' => ['+100000 years', 'further away than this system can record'],
         ];
+    }
+
+    /**
+     * G-14: the empty-value refusal is shared with the create verb, where an
+     * omitted key means PERMANENT. This verb refuses an omitted key, so the
+     * refusal must not tell the caller to omit it. It names "never" instead.
+     */
+    public function test_an_empty_expiry_refusal_does_not_tell_the_caller_to_omit_the_key(): void
+    {
+        $this->configureMesh();
+        $fixture = $this->fixture();
+        $this->tracked($fixture);
+        $write = $this->mockWrite();
+        $write->shouldNotReceive('patchRule');
+
+        foreach (['', '   ', null] as $value) {
+            $error = $this->decodedResult($this->callTool(
+                $this->token(['mesh_edit_allow_rule:staged']),
+                'mesh_edit_allow_rule',
+                $this->editArgs($fixture, ['expires_at' => $value]),
+            ))['error'] ?? '';
+
+            $this->assertStringContainsString('expires_at was empty', $error);
+            $this->assertStringContainsString('the word "never"', $error);
+            $this->assertStringNotContainsStringIgnoringCase('omit', $error, 'the edit verb refuses an omitted expires_at, so its refusal must not advise omitting it');
+        }
+
+        $this->assertSame(0, TechnicianRun::count());
     }
 
     public function test_reason_and_ticket_are_required(): void
