@@ -13,6 +13,20 @@ use Illuminate\Support\Str;
 class AttachmentService
 {
     /**
+     * Byte ceiling for an attached Outlook item (forward-as-attachment) fetched through Graph
+     * $value. Checked against Graph's declared size before the fetch and against the bytes
+     * actually returned after it. File attachments arrive inline as contentBytes in the
+     * message read and carry no ceiling here.
+     */
+    public const MAX_ITEM_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+    private const FILE_ATTACHMENT = '#microsoft.graph.fileAttachment';
+
+    private const ITEM_ATTACHMENT = '#microsoft.graph.itemAttachment';
+
+    private const REFERENCE_ATTACHMENT = '#microsoft.graph.referenceAttachment';
+
+    /**
      * Store an uploaded file and create an Attachment record.
      *
      * Creates the record first to get the ID for the storage path:
@@ -200,18 +214,40 @@ class AttachmentService
         $attachments = [];
 
         foreach ($graphAttachments as $ga) {
-            // Skip item attachments (attached emails) and reference attachments
-            if (($ga['@odata.type'] ?? '') !== '#microsoft.graph.fileAttachment') {
+            $type = $ga['@odata.type'] ?? '';
+
+            if ($type === self::ITEM_ATTACHMENT) {
+                $item = $this->downloadItemAttachment($email, $graph, $mailbox, $ga);
+                if ($item !== null) {
+                    $attachments[] = $item;
+                }
+
+                continue;
+            }
+
+            if ($type === self::REFERENCE_ATTACHMENT) {
+                $attachments[] = $this->storeReferencePlaceholder($email, $ga);
+
+                continue;
+            }
+
+            if ($type !== self::FILE_ATTACHMENT) {
+                $this->warnSkipped($email, $ga, 'unsupported_type');
+
                 continue;
             }
 
             $contentBytes = $ga['contentBytes'] ?? null;
             if (! $contentBytes) {
+                $this->warnSkipped($email, $ga, 'empty_content');
+
                 continue;
             }
 
             $content = base64_decode($contentBytes);
             if ($content === false) {
+                $this->warnSkipped($email, $ga, 'undecodable_content');
+
                 continue;
             }
 
@@ -227,6 +263,118 @@ class AttachmentService
         }
 
         return $attachments;
+    }
+
+    /**
+     * An attached Outlook item ("Forward as attachment"). The message read carries no
+     * contentBytes for it, so its raw contents come from Graph $value: MIME for a message,
+     * vCard for a contact, iCal for an event (attachment-get, "Get the raw contents of a file
+     * or item attachment"). A failed or refused fetch logs a warning and stores nothing; it
+     * never fails the email.
+     *
+     * @param  array<string, mixed>  $ga
+     */
+    private function downloadItemAttachment(Email $email, GraphClient $graph, string $mailbox, array $ga): ?Attachment
+    {
+        $attachmentId = $ga['id'] ?? null;
+        if (! is_string($attachmentId) || $attachmentId === '') {
+            $this->warnSkipped($email, $ga, 'missing_attachment_id');
+
+            return null;
+        }
+
+        $declaredSize = $ga['size'] ?? null;
+        if (is_int($declaredSize) && $declaredSize > self::MAX_ITEM_ATTACHMENT_BYTES) {
+            $this->warnSkipped($email, $ga, 'over_size_ceiling', ['size_bytes' => $declaredSize]);
+
+            return null;
+        }
+
+        try {
+            $raw = $graph->getMessageAttachmentRaw($mailbox, $email->graph_id, $attachmentId);
+        } catch (\Throwable $e) {
+            $this->warnSkipped($email, $ga, 'fetch_failed', ['status' => $e->getCode()]);
+
+            return null;
+        }
+
+        if ($raw === '') {
+            $this->warnSkipped($email, $ga, 'empty_content');
+
+            return null;
+        }
+
+        if (strlen($raw) > self::MAX_ITEM_ATTACHMENT_BYTES) {
+            $this->warnSkipped($email, $ga, 'over_size_ceiling', ['size_bytes' => strlen($raw)]);
+
+            return null;
+        }
+
+        [$extension, $mimeType] = match (true) {
+            str_starts_with(ltrim($raw), 'BEGIN:VCARD') => ['vcf', 'text/vcard'],
+            str_starts_with(ltrim($raw), 'BEGIN:VCALENDAR') => ['ics', 'text/calendar'],
+            default => ['eml', 'message/rfc822'],
+        };
+
+        return $this->storeFromContent(
+            $raw,
+            $this->itemBaseName($ga['name'] ?? null).'.'.$extension,
+            $mimeType,
+            isInline: false,
+        );
+    }
+
+    /**
+     * A referenceAttachment is a link to a cloud file. Graph v1.0 returns its name, size and
+     * contentType but no link (referenceAttachment resource), and $value answers 405, so there
+     * is nothing to download. Record a visible text placeholder naming it instead of dropping it.
+     *
+     * @param  array<string, mixed>  $ga
+     */
+    private function storeReferencePlaceholder(Email $email, array $ga): Attachment
+    {
+        $name = is_string($ga['name'] ?? null) && $ga['name'] !== '' ? $ga['name'] : 'unnamed';
+
+        $this->warnSkipped($email, $ga, 'reference_not_downloaded');
+
+        return $this->storeFromContent(
+            "Linked cloud attachment (not downloaded): {$name}\n",
+            $this->itemBaseName($name).'-linked-file.txt',
+            'text/plain',
+            isInline: false,
+        );
+    }
+
+    /**
+     * Filename stem for a stored item: the slugged display name, or "forwarded-message" when
+     * the name is missing or slugs to nothing. Slashes become spaces first so basename() in
+     * sanitizeFilename() cannot cut a subject like "Q1/Q2" down to its last part.
+     */
+    private function itemBaseName(mixed $name): string
+    {
+        $slug = is_string($name)
+            ? Str::limit(Str::slug(str_replace(['/', '\\'], ' ', $name)), 100, '')
+            : '';
+
+        return trim($slug, '-') !== '' ? trim($slug, '-') : 'forwarded-message';
+    }
+
+    /**
+     * One warning per attachment that is not stored as its own bytes. Ids, type and a reason
+     * token only; no name, subject or content.
+     *
+     * @param  array<string, mixed>  $ga
+     * @param  array<string, mixed>  $extra
+     */
+    private function warnSkipped(Email $email, array $ga, string $reason, array $extra = []): void
+    {
+        Log::warning('[AttachmentService] Email attachment content not stored', [
+            'email_id' => $email->id,
+            'graph_id' => $email->graph_id,
+            'attachment_id' => is_string($ga['id'] ?? null) ? $ga['id'] : null,
+            'odata_type' => is_string($ga['@odata.type'] ?? null) ? $ga['@odata.type'] : null,
+            'reason' => $reason,
+        ] + $extra);
     }
 
     /**
