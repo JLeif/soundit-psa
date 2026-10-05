@@ -29,6 +29,7 @@ class AssetWatch extends Model
         'fired_at',
         'fire_count',
         'last_observed_state',
+        'last_observed_at',
         'last_checked_at',
         'expired_at',
         'removed_at',
@@ -44,6 +45,7 @@ class AssetWatch extends Model
             'fired_at' => 'datetime',
             'fire_count' => 'integer',
             'last_observed_state' => 'boolean',
+            'last_observed_at' => 'datetime',
             'last_checked_at' => 'datetime',
             'expired_at' => 'datetime',
             'removed_at' => 'datetime',
@@ -53,6 +55,16 @@ class AssetWatch extends Model
     public static function activeKeyFor(string $owner, int $assetId, string $state): string
     {
         return hash('sha256', $owner."\0".$assetId."\0".$state);
+    }
+
+    /**
+     * The owner a revoked token's watches are moved to. '#' and the space are
+     * outside every label McpConfig::normalizeLabel() can produce, so no later
+     * token, including one minted again with the same label, owns or lists them.
+     */
+    public static function revokedOwner(int $tokenId, string $label): string
+    {
+        return mb_substr("#revoked-{$tokenId} {$label}", 0, 255);
     }
 
     /**

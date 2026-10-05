@@ -64,6 +64,12 @@ class PollWatchedAssets extends Command
             return self::SUCCESS;
         }
 
+        // Stamp the selected assets' watches as checked BEFORE reading, whatever the
+        // read then yields, so an asset that cannot be read (unlinked, timing out,
+        // an unmapped status) goes to the back of the rotation instead of taking
+        // the head of every run.
+        AssetWatch::query()->armed()->whereIn('asset_id', $assetIds)->update(['last_checked_at' => now()]);
+
         $agents = TacticalAsset::query()
             ->whereIn('asset_id', $assetIds)
             ->pluck('agent_id', 'asset_id');
@@ -72,31 +78,62 @@ class PollWatchedAssets extends Command
         $timeout = max(1, (int) config('asset_watch.poll_timeout_seconds', 3));
         $polled = 0;
         $failed = 0;
+        $unusable = 0;
+        $unlinked = 0;
         $fired = 0;
 
         foreach ($assetIds as $assetId) {
             $agentId = $agents[$assetId] ?? null;
             if ($agentId === null || $agentId === '') {
+                $unlinked++;
+
                 continue;
             }
+
+            $observedAt = Carbon::now();
 
             try {
                 $agent = $client->getAgent((string) $agentId, timeout: $timeout);
             } catch (\Throwable $e) {
                 $failed++;
-                Log::debug('[AssetWatch] Poll read failed', ['asset_id' => $assetId, 'error' => class_basename($e)]);
+                Log::warning('[AssetWatch] Poll read failed', ['asset_id' => $assetId, 'error' => class_basename($e)]);
+
+                continue;
+            }
+
+            $rawStatus = $agent['status'] ?? null;
+            $online = $sync->rmmOnlineFromStatus(is_string($rawStatus) ? $rawStatus : null);
+            if ($online === null) {
+                $unusable++;
+                Log::warning('[AssetWatch] Poll read returned no usable status', [
+                    'asset_id' => $assetId,
+                    'status' => is_string($rawStatus) ? mb_substr($rawStatus, 0, 40) : get_debug_type($rawStatus),
+                ]);
 
                 continue;
             }
 
             $polled++;
-            $status = is_string($agent['status'] ?? null) ? $agent['status'] : null;
-            $lastSeen = $this->parseLastSeen($agent['last_seen'] ?? null);
-
-            $fired += $evaluator->observe($assetId, $sync->rmmOnlineFromStatus($status), $lastSeen, 'poll');
+            $fired += $evaluator->observe($assetId, $online, $this->parseLastSeen($agent['last_seen'] ?? null), 'poll', $observedAt);
         }
 
-        $this->info("Asset watch poll: polled {$polled}, failed {$failed}, fired {$fired}.");
+        $summary = "Asset watch poll: polled {$polled}, failed {$failed}, unusable {$unusable}, unlinked {$unlinked}, fired {$fired}.";
+        $counts = ['polled' => $polled, 'failed' => $failed, 'unusable' => $unusable, 'unlinked' => $unlinked];
+
+        // C-56: a degraded vendor read is loud. A run where every read degraded fails.
+        if ($failed + $unusable > 0 && $polled === 0) {
+            Log::error('[AssetWatch] Poll degraded: no usable read', $counts);
+            $this->error($summary);
+
+            return self::FAILURE;
+        }
+
+        if ($failed + $unusable > 0) {
+            Log::warning('[AssetWatch] Poll partially degraded', $counts);
+            $this->warn($summary);
+        } else {
+            $this->info($summary);
+        }
 
         return self::SUCCESS;
     }

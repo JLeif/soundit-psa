@@ -31,6 +31,11 @@ use Illuminate\Support\Facades\Log;
  *    nor disarms. It fires when a fresh true follows false or null.
  *  - offline watch: the last value the sync would write. It fires only when a
  *    false follows a recorded true.
+ *
+ * Observations are applied in the order they were READ, not the order they
+ * arrive: last_observed_at holds the read time of the newest applied one, and
+ * an older read (the sync works through a list fetched at the start of its run
+ * while the poller reads live) changes nothing.
  */
 class AssetWatchEvaluator
 {
@@ -56,12 +61,13 @@ class AssetWatchEvaluator
      * Evaluate every armed watch on $assetId against one observation. Never
      * throws: a watch failure must not break the sync or the poller.
      *
+     * @param  CarbonInterface|null  $observedAt  when the state was read from Tactical (the sync's list fetch, the poller's request); defaults to now
      * @return int number of watches that fired
      */
-    public function observe(int $assetId, ?bool $online, ?CarbonInterface $lastSeen, string $source): int
+    public function observe(int $assetId, ?bool $online, ?CarbonInterface $lastSeen, string $source, ?CarbonInterface $observedAt = null): int
     {
         try {
-            return $this->evaluate($assetId, $online, $lastSeen, $source);
+            return $this->evaluate($assetId, $online, $lastSeen, $source, $observedAt);
         } catch (\Throwable $e) {
             Log::warning('[AssetWatch] Evaluation failed', [
                 'asset_id' => $assetId,
@@ -73,7 +79,7 @@ class AssetWatchEvaluator
         }
     }
 
-    private function evaluate(int $assetId, ?bool $online, ?CarbonInterface $lastSeen, string $source): int
+    private function evaluate(int $assetId, ?bool $online, ?CarbonInterface $lastSeen, string $source, ?CarbonInterface $observedAt): int
     {
         if ($online === null) {
             return 0;
@@ -85,6 +91,7 @@ class AssetWatchEvaluator
         }
 
         $now = Carbon::now();
+        $observedAt ??= $now;
         $ageSeconds = $lastSeen !== null ? $now->getTimestamp() - $lastSeen->getTimestamp() : null;
         $fresh = $ageSeconds !== null && abs($ageSeconds) <= self::freshSeconds();
 
@@ -96,16 +103,20 @@ class AssetWatchEvaluator
 
             if ($watch->state === AssetWatch::STATE_ONLINE) {
                 if ($online === false) {
-                    $this->record($watch, false);
+                    $this->record($watch, false, $observedAt);
 
                     continue;
                 }
                 if (! $fresh) {
                     continue;
                 }
-                if ($this->claimFire($watch, true, $now)) {
+                if ($this->claimFire($watch, true, $now, $observedAt)) {
                     $this->deliver($watch, $asset, $lastSeen, $ageSeconds, $source);
                     $fired++;
+                } else {
+                    // Steady online is still the newest read, so an older false
+                    // arriving later cannot re-arm a repeat watch.
+                    $this->record($watch, true, $observedAt);
                 }
 
                 continue;
@@ -113,42 +124,44 @@ class AssetWatchEvaluator
 
             // offline watch
             if ($online === true) {
-                $this->record($watch, true);
+                $this->record($watch, true, $observedAt);
 
                 continue;
             }
-            if ($this->claimFire($watch, false, $now)) {
+            if ($this->claimFire($watch, false, $now, $observedAt)) {
                 $this->deliver($watch, $asset, $lastSeen, $ageSeconds, $source);
                 $fired++;
             } else {
-                $this->record($watch, false);
+                $this->record($watch, false, $observedAt);
             }
         }
 
         return $fired;
     }
 
-    /** Record a non-firing observation; idempotent. */
-    private function record(AssetWatch $watch, bool $state): void
+    /** Record a non-firing observation unless a newer read is already recorded; idempotent. */
+    private function record(AssetWatch $watch, bool $state, CarbonInterface $observedAt): void
     {
         AssetWatch::query()
             ->whereKey($watch->id)
             ->whereNotNull('active_key')
-            ->update(['last_observed_state' => $state]);
+            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $observedAt))
+            ->update(['last_observed_state' => $state, 'last_observed_at' => $observedAt]);
     }
 
     /**
      * The fire guard. One UPDATE decides: it matches only while the watch is
      * still armed, unexpired, (one-shot) unfired, and not already in $newState
-     * on the edge that fires it. A second observer of the same transition
-     * matches zero rows.
+     * on the edge that fires it, and no newer read is recorded. A second observer
+     * of the same transition, or an older read arriving late, matches zero rows.
      */
-    private function claimFire(AssetWatch $watch, bool $newState, CarbonInterface $now): bool
+    private function claimFire(AssetWatch $watch, bool $newState, CarbonInterface $now, CarbonInterface $observedAt): bool
     {
         $query = AssetWatch::query()
             ->whereKey($watch->id)
             ->whereNotNull('active_key')
-            ->where('expires_at', '>', $now);
+            ->where('expires_at', '>', $now)
+            ->where(fn ($q) => $q->whereNull('last_observed_at')->orWhere('last_observed_at', '<=', $observedAt));
 
         if ($newState) {
             // online: false or unknown -> confirmed true
@@ -160,6 +173,7 @@ class AssetWatchEvaluator
 
         $update = [
             'last_observed_state' => $newState,
+            'last_observed_at' => $observedAt,
             'fired_at' => $now,
             'fire_count' => DB::raw('fire_count + 1'),
         ];
@@ -224,7 +238,9 @@ class AssetWatchEvaluator
     /**
      * The owner's own MCP destination for watch fires: keyed by the owner's
      * token label, which is what poll_signals drains by. Created on first fire,
-     * never re-enabled here (a revoke disables it and that must stick).
+     * never re-enabled here: a revoke disables it and relabels it
+     * (McpTokensController::revoke()), so a token later minted with the same
+     * label gets a fresh destination on its first fire.
      */
     private function ownerDestination(string $owner): SignalDestination
     {

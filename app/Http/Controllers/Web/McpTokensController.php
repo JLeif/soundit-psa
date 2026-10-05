@@ -283,6 +283,7 @@ class McpTokensController extends Controller
         $token->forceFill(['revoked_at' => now()])->save();
         $this->clearPendingSignalInboxForLabel($label);
         $this->disableSignalDestinationsForRevokedLabel($request, $label);
+        $this->retireAssetWatchesForRevokedLabel($token, $label);
 
         $this->audit($request, 'token/revoke', $label, ['tools' => $tools, 'was_draft' => $wasDraft]);
 
@@ -444,6 +445,34 @@ class McpTokensController extends Controller
                     ['enabled' => false, 'reason' => 'mcp-token-revoked'],
                 );
             });
+    }
+
+    /**
+     * Asset watches (card K3VEcxtw) are owned by the bare label, and a revoked
+     * label can be minted again (McpConfig::rotateStaffToken()). So revocation
+     * ends them: armed watches are removed, so nothing is polled or fired for
+     * this token; every watch row moves off the label, so a later holder never
+     * lists them or their reasons; and the owner-only destination disabled above
+     * is relabelled, so a later holder's first fire creates a fresh destination
+     * instead of reusing the disabled one.
+     */
+    private function retireAssetWatchesForRevokedLabel(McpToken $token, string $label): void
+    {
+        DB::transaction(function () use ($token, $label): void {
+            \App\Models\AssetWatch::query()
+                ->where('owner', $label)
+                ->whereNotNull('active_key')
+                ->update(['active_key' => null, 'removed_at' => now(), 'removed_reason' => 'token-revoked']);
+            \App\Models\AssetWatch::query()
+                ->where('owner', $label)
+                ->update(['owner' => \App\Models\AssetWatch::revokedOwner((int) $token->id, $label)]);
+
+            SignalDestination::query()
+                ->where('type', 'mcp')
+                ->where('mcp_token_label', $label)
+                ->where('label', \App\Services\Assets\AssetWatchEvaluator::destinationLabel($label))
+                ->update(['label' => mb_substr(\App\Services\Assets\AssetWatchEvaluator::destinationLabel($label).' (revoked token #'.$token->id.')', 0, 255)]);
+        });
     }
 
     private function clearPendingSignalInboxForLabel(string $label): void

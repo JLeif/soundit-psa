@@ -568,6 +568,11 @@ class TacticalDeviceSyncService
 
         $fetchSucceeded = false;
 
+        // When the agent list was read: asset watches order observations by it,
+        // because the poller can read an agent live while this run is still
+        // working through the list (card K3VEcxtw).
+        $agentsReadAt = Carbon::now();
+
         try {
             $agents = $this->client->getAgents();
             $fetchSucceeded = true;
@@ -785,6 +790,7 @@ class TacticalDeviceSyncService
                         $this->rmmOnlineFromStatus($tacticalAsset->status),
                         $tacticalAsset->last_seen_at,
                         'sync',
+                        $agentsReadAt,
                     );
                 }
 

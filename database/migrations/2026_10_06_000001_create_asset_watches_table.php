@@ -29,10 +29,19 @@ return new class extends Migration
             $table->string('state', 10);
             $table->string('reason', 500);
             $table->boolean('repeat')->default(false);
-            $table->timestamp('expires_at');
+            // dateTime, NOT timestamp. On MariaDB with explicit_defaults_for_timestamp
+            // off (its default before 10.10), the first NOT NULL TIMESTAMP column with
+            // no explicit default silently gains ON UPDATE CURRENT_TIMESTAMP, and every
+            // observation updates this row, so each watch would lapse on its first
+            // poll. CI is sqlite-only and cannot see it; same ruling as the
+            // mesh_allow_rules migrations.
+            $table->dateTime('expires_at');
             $table->timestamp('fired_at')->nullable();
             $table->unsignedInteger('fire_count')->default(0);
             $table->boolean('last_observed_state')->nullable();
+            // When the newest applied observation was READ from Tactical; an older
+            // read arriving later is ignored (see AssetWatchEvaluator).
+            $table->dateTime('last_observed_at')->nullable();
             $table->timestamp('last_checked_at')->nullable();
             $table->timestamp('expired_at')->nullable();
             $table->timestamp('removed_at')->nullable();

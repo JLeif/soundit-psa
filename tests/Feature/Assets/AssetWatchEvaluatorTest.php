@@ -14,6 +14,7 @@ use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 /**
@@ -236,6 +237,38 @@ class AssetWatchEvaluatorTest extends TestCase
 
     // ------------------------------------------------------------------ poller
 
+    public function test_a_revoke_retires_the_watches_and_a_reminted_label_starts_clean_and_receives_its_fires(): void
+    {
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $old = $this->watch(self::OWNER_A, $client->id, $asset->id, 'online', ['repeat' => true]);
+        // A fire before the revoke creates the owner's destination, which the revoke disables.
+        $this->assertSame(1, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll'));
+
+        $token = \App\Models\McpToken::query()->where('label', self::OWNER_A)->sole();
+        $this->actingAs(\App\Models\User::factory()->create(['role' => 'admin']))
+            ->delete(route('settings.mcp-tokens.revoke', $token))
+            ->assertRedirect();
+
+        $row = $this->watchRow($old);
+        $this->assertSame('removed', $row->status());
+        $this->assertSame('token-revoked', $row->removed_reason);
+        $this->assertNull($row->active_key);
+        $this->assertNotSame(self::OWNER_A, $row->owner);
+        $this->assertFalse(\App\Models\AssetWatch::query()->armed()->exists(), 'nothing is left for the poller to read');
+
+        // Break-glass rotation mints the same label again.
+        $this->tokens[self::OWNER_A] = \App\Support\McpConfig::rotateStaffToken(allowedTools: self::WATCH_TOOLS, label: self::OWNER_A);
+        $this->assertSame(0, $this->callAs(self::OWNER_A, 'list_asset_watches', [])['count']);
+
+        $new = $this->watch(self::OWNER_A, $client->id, $asset->id);
+        $this->assertSame(1, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll'));
+
+        $this->assertNotSame('suppressed', SignalDelivery::query()->latest('id')->first()->status);
+        $signals = $this->callAs(self::OWNER_A, 'poll_signals', [])['signals'];
+        $this->assertSame([$new], array_map(fn (array $s) => $s['watch']['watch_id'], $signals));
+    }
+
     public function test_the_poller_is_a_no_op_with_no_watches(): void
     {
         // Tactical assets exist, but none has an ARMED watch: one is unwatched,
@@ -297,14 +330,55 @@ class AssetWatchEvaluatorTest extends TestCase
         $this->assertSame('/api/agents/AGENT-SYN-3/', $this->tacticalRequests[0]['request']->getUri()->getPath());
     }
 
-    public function test_the_poller_survives_an_unreachable_agent(): void
+    public function test_the_poller_survives_an_unreachable_agent_and_says_so_loudly(): void
     {
+        Log::spy();
         $client = $this->mappedClient();
         $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
         $id = $this->watch(self::OWNER_A, $client->id, $asset->id);
         $this->bindTactical([new Response(503, [], '')]);
-        $this->poll();
+        $this->artisan('assets:poll-watched')->assertFailed();
         $this->assertSame('active', $this->watchRow($id)->status());
+
+        Log::shouldHaveReceived('warning')->with('[AssetWatch] Poll read failed', \Mockery::on(fn ($c) => ($c['asset_id'] ?? null) === $asset->id))->once();
+        Log::shouldHaveReceived('error')->with('[AssetWatch] Poll degraded: no usable read', \Mockery::any())->once();
+    }
+
+    public function test_the_poller_does_not_count_a_read_without_a_usable_status_as_polled(): void
+    {
+        Log::spy();
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $id = $this->watch(self::OWNER_A, $client->id, $asset->id);
+        $this->bindTactical([new Response(200, [], json_encode(['agent_id' => 'AGENT-SYN-1', 'hostname' => 'WS-SYN']))]);
+
+        $this->artisan('assets:poll-watched')
+            ->expectsOutputToContain('polled 0, failed 0, unusable 1')
+            ->assertFailed();
+
+        Log::shouldHaveReceived('warning')->with('[AssetWatch] Poll read returned no usable status', \Mockery::on(fn ($c) => ($c['asset_id'] ?? null) === $asset->id && ($c['status'] ?? null) === 'null'))->once();
+        $this->assertCount(0, $this->inboxFor(self::OWNER_A));
+        $this->assertSame('active', $this->watchRow($id)->status());
+    }
+
+    public function test_an_unreadable_watched_asset_does_not_hold_the_head_of_the_rotation(): void
+    {
+        config(['asset_watch.poll_max_agents' => 1]);
+        $client = $this->mappedClient();
+        $broken = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $healthy = $this->tacticalAsset($client, 'AGENT-SYN-2', false);
+        $this->watch(self::OWNER_A, $client->id, $broken->id);
+        $this->watch(self::OWNER_A, $client->id, $healthy->id);
+
+        $this->bindTactical([new Response(503, [], '')]);
+        $this->artisan('assets:poll-watched')->assertFailed();
+        $this->assertSame('/api/agents/AGENT-SYN-1/', $this->tacticalRequests[0]['request']->getUri()->getPath());
+
+        // The failed read still counts as a check, so the next run reaches the other asset.
+        $this->bindTactical([$this->agentResponse('AGENT-SYN-2', 'online', Carbon::now()->subSeconds(10))]);
+        $this->poll();
+        $this->assertSame(['/api/agents/AGENT-SYN-2/'], array_map(fn (array $t) => $t['request']->getUri()->getPath(), $this->tacticalRequests));
+        $this->assertCount(1, $this->inboxFor(self::OWNER_A));
     }
 
     // ----------------------------------------------------- sync + poller race
@@ -351,6 +425,45 @@ class AssetWatchEvaluatorTest extends TestCase
         $this->assertCount(1, $this->inboxFor(self::OWNER_A));
         $this->assertSame(1, $this->watchRow($id)->fire_count);
         $this->assertSame('active', $this->watchRow($id)->status());
+    }
+
+    /**
+     * The sync works through an agent list read at the start of its run while the
+     * poller reads live, so an observation can arrive after a newer one.
+     */
+    public function test_an_older_observation_arriving_after_a_newer_one_does_not_fire_an_offline_watch(): void
+    {
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $id = $this->watch(self::OWNER_A, $client->id, $asset->id, 'offline');
+        $listReadAt = Carbon::now();
+
+        // The poller reads it online 30s after the sync read its list...
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll', $listReadAt->copy()->addSeconds(30)));
+        // ...then the sync reaches the agent with the 'offline' from its list.
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, false, null, 'sync', $listReadAt));
+        $this->assertTrue($this->watchRow($id)->last_observed_state);
+        $this->assertCount(0, $this->inboxFor(self::OWNER_A));
+
+        // A newer offline read still fires.
+        $this->assertSame(1, $this->evaluator()->observe($asset->id, false, null, 'poll', $listReadAt->copy()->addSeconds(90)));
+    }
+
+    public function test_an_older_offline_observation_does_not_rearm_a_repeat_online_watch(): void
+    {
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $id = $this->watch(self::OWNER_A, $client->id, $asset->id, 'online', ['repeat' => true]);
+        $t0 = Carbon::now();
+
+        $this->assertSame(1, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll', $t0));
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll', $t0->copy()->addSeconds(60)));
+        // A sync whose list was read at t0+30 still says offline for this agent.
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, false, null, 'sync', $t0->copy()->addSeconds(30)));
+        $this->assertSame(0, $this->evaluator()->observe($asset->id, true, Carbon::now(), 'poll', $t0->copy()->addSeconds(120)));
+
+        $this->assertSame(1, $this->watchRow($id)->fire_count);
+        $this->assertCount(1, $this->inboxFor(self::OWNER_A));
     }
 
     public function test_the_full_sync_fires_a_watch_and_an_unwatched_fleet_is_untouched(): void
