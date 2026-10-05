@@ -383,14 +383,21 @@ class EmailItemAttachmentTest extends TestCase
 
     public function test_redelivery_of_a_ticketed_email_does_not_store_the_item_twice(): void
     {
-        // Both responses are queued for one $expand + one $value. A second download would
-        // need a third and fourth response; the MockHandler throws on an empty queue.
+        // A second full download is queued too, so a re-download WOULD store a duplicate
+        // (an empty queue would throw inside the caught attachment read and hide it).
         $this->graph([
+            $this->expandResponse([$this->itemAttachment()]),
+            new Response(200, [], self::MIME),
             $this->expandResponse([$this->itemAttachment()]),
             new Response(200, [], self::MIME),
         ]);
         $ticket = $this->ticket();
-        $email = $this->email(['internet_message_id' => '<m1@example.test>']);
+        // The subject token makes the ticket match, so only the already-ticketed guard
+        // stands between a redelivery and a second download.
+        $email = $this->email([
+            'internet_message_id' => '<m1@example.test>',
+            'subject' => "FW: suspicious [{$ticket->display_id}]",
+        ]);
         app(EmailService::class)->linkEmailToTicket($email, $ticket);
         $this->assertSame(1, Attachment::count());
 
@@ -399,7 +406,7 @@ class EmailItemAttachmentTest extends TestCase
             'id' => 'MSG-1',
             'internetMessageId' => '<m1@example.test>',
             'from' => ['emailAddress' => ['address' => 'user@example.test', 'name' => 'User']],
-            'subject' => 'FW: suspicious',
+            'subject' => "FW: suspicious [{$ticket->display_id}]",
             'body' => ['content' => '<p>Is this legit?</p>'],
             'hasAttachments' => true,
             'receivedDateTime' => now()->toIso8601String(),
