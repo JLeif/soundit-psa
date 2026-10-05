@@ -238,11 +238,26 @@ class AssetWatchEvaluatorTest extends TestCase
 
     public function test_the_poller_is_a_no_op_with_no_watches(): void
     {
-        $this->mappedClient();
-        // An empty MockHandler throws on any request; preventStrayRequests covers Http::.
-        $this->bindTactical([]);
+        // Tactical assets exist, but none has an ARMED watch: one is unwatched,
+        // one's watch was removed, one's watch has lapsed (prune not yet run).
+        $client = $this->mappedClient();
+        $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $removed = $this->tacticalAsset($client, 'AGENT-SYN-2', false);
+        $lapsed = $this->tacticalAsset($client, 'AGENT-SYN-3', false);
+        $rid = $this->watch(self::OWNER_A, $client->id, $removed->id);
+        $this->callAs(self::OWNER_A, 'remove_asset_watch', ['watch_id' => $rid, 'reason' => 'done']);
+        $this->watch(self::OWNER_A, $client->id, $lapsed->id, 'online', ['expires_at' => Carbon::now()->addMinute()->utc()->format('Y-m-d\TH:i:s\Z')]);
+        Carbon::setTestNow(Carbon::now()->addMinutes(2));
+
+        // Responses are queued so any read WOULD be recorded by the history middleware.
+        $this->bindTactical([
+            $this->agentResponse('AGENT-SYN-1', 'online', Carbon::now()),
+            $this->agentResponse('AGENT-SYN-2', 'online', Carbon::now()),
+            $this->agentResponse('AGENT-SYN-3', 'online', Carbon::now()),
+        ]);
         $this->poll();
         $this->assertSame([], $this->tacticalRequests);
+        $this->assertCount(0, $this->inboxFor(self::OWNER_A));
     }
 
     public function test_the_poller_fetches_only_watched_agents_bounded_and_writes_no_asset_column(): void
@@ -314,6 +329,28 @@ class AssetWatchEvaluatorTest extends TestCase
         $this->assertCount(1, $this->inboxFor(self::OWNER_A));
         $this->assertSame(1, $this->watchRow($id)->fire_count);
         $this->assertSame(1, SignalEvent::query()->where('type_key', 'asset.watch_fired')->count());
+    }
+
+    /**
+     * A REPEAT watch keeps its active_key and has no fired_at guard, so only the
+     * per-transition last-state condition stops the second observer of the same
+     * wake from firing again.
+     */
+    public function test_sync_and_poller_observing_the_same_transition_fire_a_repeat_watch_once(): void
+    {
+        $client = $this->mappedClient();
+        $asset = $this->tacticalAsset($client, 'AGENT-SYN-1', false);
+        $id = $this->watch(self::OWNER_A, $client->id, $asset->id, 'online', ['repeat' => true]);
+        $seen = Carbon::now()->subSeconds(15);
+
+        $this->bindTactical([new Response(200, [], json_encode($this->listAgentsPayload($client, 'AGENT-SYN-1', 'online', $seen, $asset->hostname)))]);
+        app(TacticalDeviceSyncService::class)->syncDevices();
+        $this->bindTactical([$this->agentResponse('AGENT-SYN-1', 'online', $seen)]);
+        $this->poll();
+
+        $this->assertCount(1, $this->inboxFor(self::OWNER_A));
+        $this->assertSame(1, $this->watchRow($id)->fire_count);
+        $this->assertSame('active', $this->watchRow($id)->status());
     }
 
     public function test_the_full_sync_fires_a_watch_and_an_unwatched_fleet_is_untouched(): void
