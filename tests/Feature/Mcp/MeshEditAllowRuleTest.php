@@ -341,7 +341,7 @@ class MeshEditAllowRuleTest extends TestCase
     }
 
     /**
-     * The create verb defaults an ABSENT expires_at to 90 days, which is right
+     * The create verb treats an ABSENT expires_at as PERMANENT, which is right
      * for a rule being born and wrong for one being edited: defaulting here
      * would quietly rewrite a lifetime somebody chose. There is nothing else
      * this verb changes, so an edit with no expiry is a mistake.

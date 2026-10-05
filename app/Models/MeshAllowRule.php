@@ -47,16 +47,6 @@ class MeshAllowRule extends Model
      */
     public const STATE_REMOVED = 'removed';
 
-    /**
-     * Lifetime applied when the caller does not ask for one. It is a DEFAULT,
-     * not a ceiling: #1133 made expiry caller-chosen, so this value only
-     * decides what an omitted `expires_at` means. It is still what the PSA
-     * enforces for such a rule, and it is still sent to Mesh as `date_expiry`
-     * so the vendor portal displays the same lifetime a technician was told
-     * (#1018 criterion 4).
-     */
-    public const DEFAULT_LIFETIME_DAYS = 90;
-
     protected $fillable = [
         'client_id',
         'ticket_id',
