@@ -100,7 +100,19 @@ class StaffMeshAdminToolExecutor
         'mesh_stage_remove_allow_rule',
         'mesh_edit_allow_rule',
         'mesh_stage_edit_allow_rule',
+        self::LIST_TOOL,
     ];
+
+    /**
+     * The one READ verb on this surface (card dxWX6IBS). It reads one client's
+     * tenant through MeshWriteClient::listCustomerRules() and writes nothing:
+     * no upstream write, no PSA row, no audit attempt. It has no entry in
+     * STAGED_TO_DIRECT and none in McpToolModes' held-only or
+     * explicit-immediate lists, so it is not stageable and a grant of it is a
+     * plain name. Like every tool handles() answers for, it is reachable only
+     * through an explicit per-token grant (McpStaffController::toolAllowed()).
+     */
+    public const LIST_TOOL = 'mesh_list_allow_rules';
 
     /**
      * The complete set of keys a caller may send. Anything else is a refusal.
@@ -121,6 +133,9 @@ class StaffMeshAdminToolExecutor
         // the portal agree. The comment is the reaper's fallback identity for
         // the rule and is never edited.
         'mesh_edit_allow_rule' => ['rule_id', 'confirm_sender', 'expires_at', 'reason', 'ticket_id', 'staged'],
+        // dxWX6IBS: client_id is lifted out by the controller before dispatch,
+        // so the only key this read takes is the optional filter.
+        self::LIST_TOOL => ['sender'],
     ];
 
     /**
@@ -194,6 +209,11 @@ class StaffMeshAdminToolExecutor
          * the only queue that would close it), the sender or the allow/block
          * flag (a different rule, not an edit), and the scope fields.
          */
+        self::LIST_TOOL => [
+            'customer_id' => 'the Mesh tenant is derived from the PSA client, never supplied',
+            'mesh_customer_id' => 'the Mesh tenant is derived from the PSA client, never supplied',
+            'tenant_id' => 'the Mesh tenant is derived from the PSA client, never supplied',
+        ],
         'mesh_edit_allow_rule' => [
             'comment' => 'the comment is the reaper\'s identity for the rule and is never edited; only expires_at can change',
             'sender' => 'the sender is what the rule IS; changing it is a different rule, not an edit — confirm_sender is the typed confirmation and is checked against what Mesh holds',
@@ -257,6 +277,7 @@ class StaffMeshAdminToolExecutor
             self::stageRemoveAllowRuleTool(),
             self::editAllowRuleTool(),
             self::stageEditAllowRuleTool(),
+            self::listAllowRulesTool(),
         ];
     }
 
@@ -301,6 +322,7 @@ class StaffMeshAdminToolExecutor
             'mesh_remove_allow_rule' => $this->immediateRefused('mesh_remove_allow_rule', 'mesh_stage_remove_allow_rule', $arguments, $clientId, $actorLabel),
             'mesh_stage_edit_allow_rule' => $this->stageEditAllowRule($arguments, (int) $clientId, $actorLabel),
             'mesh_edit_allow_rule' => $this->immediateRefused('mesh_edit_allow_rule', 'mesh_stage_edit_allow_rule', $arguments, $clientId, $actorLabel),
+            self::LIST_TOOL => $this->listAllowRules($arguments, $clientId),
             default => ['error' => "Unknown Mesh admin tool: {$name}"],
         };
         // Same outcome recording as the PSA/Assistant executors: a returned
@@ -3083,6 +3105,304 @@ class StaffMeshAdminToolExecutor
         }
 
         return $shown->isSameDay($expiresAt);
+    }
+
+    /**
+     * dxWX6IBS: READ one client's Mesh allow rules, joined to the PSA's own
+     * mesh_allow_rules records, plus the PSA records that are not settled.
+     *
+     * Read-only by construction: the only upstream call is
+     * MeshWriteClient::listCustomerRules() (GET, paged), and nothing here
+     * writes a PSA row or an action-log attempt. The tenant is the PSA
+     * client's stored mesh_customer_id; no argument can name another one.
+     *
+     * Upstream row fields used (MeshWriteClient's measured representation —
+     * see its class docblock and listCustomerRules()/rowBelongsTo()): `id`,
+     * `sender`, `ab` (true = allow, MeshWriteClient::ALLOW_RULE), `active`,
+     * `comment`, `created_by`, `date_expiry`. No creation-date key has been
+     * measured on this route, so none is named: every scalar `date_*` key
+     * other than `date_expiry` is passed through verbatim under `mesh_dates`,
+     * and the PSA's own record time is `psa_recorded_at`.
+     *
+     * @return array<string, mixed>
+     */
+    private function listAllowRules(array $arguments, ?int $clientId): array
+    {
+        if ($refused = $this->refusedArgumentKeys(self::LIST_TOOL, $arguments)) {
+            return ['error' => 'These parameters are not accepted by '.self::LIST_TOOL.': '.implode('; ', $refused).'. Nothing was read.'];
+        }
+
+        $client = $clientId !== null && $clientId > 0 ? Client::find($clientId) : null;
+        if (! $client) {
+            return ['error' => 'Client not found'];
+        }
+
+        $tenant = trim((string) ($client->mesh_customer_id ?? ''));
+        if ($tenant === '') {
+            return ['error' => "{$client->name} has no Mesh customer mapping; link the client to its Mesh tenant before listing its allow rules. Nothing was read."];
+        }
+
+        $filter = null;
+        if (array_key_exists('sender', $arguments)) {
+            $filter = $this->senderFilter($arguments['sender']);
+            if (isset($filter['error'])) {
+                return ['error' => $filter['error']];
+            }
+        }
+
+        try {
+            $rows = $this->client->listCustomerRules($tenant);
+        } catch (MeshClientException $e) {
+            // The vendor's message and body never reach the caller: a Guzzle
+            // message can quote the response body, and a 400 carries the
+            // vendor's own text. The status code is the whole report.
+            $status = (int) $e->getCode();
+            $what = $status > 0
+                ? "Mesh answered the rule list read with HTTP {$status}"
+                : 'the rule list read failed without an HTTP status from Mesh';
+
+            return ['error' => "{$client->name}'s Mesh allow rules could not be read: {$what}. This is not an empty list; retry, and report it if it persists."];
+        }
+
+        // The reaper works each record against its OWN mesh_customer_id
+        // (MeshAllowRuleReaper::resolveRuleId()), whichever client holds it,
+        // not any client's current mapping. So the join is keyed on that
+        // tenant alone: a record another client stored against this tenant
+        // before a remap still decides whether a rule here is reaped, and a
+        // record this client stored against another tenant never does.
+        // psa_client_id says whose record it is.
+        $records = MeshAllowRule::query()
+            ->where('mesh_customer_id', $tenant)
+            ->orderByDesc('id')
+            ->get();
+
+        // mesh_edit_allow_rule and mesh_remove_allow_rule do not use that join.
+        // They look the record up by this client + rule id
+        // (editAllowRuleTarget(), removeAllowRuleTarget()). The same lookup is
+        // reported per rule, so a caller can tell when those verbs will call a
+        // rule foreign even though the join above found a record for it.
+        $heldRuleIds = MeshAllowRule::query()
+            ->where('client_id', $client->id)
+            ->whereNotNull('mesh_rule_id')
+            ->pluck('mesh_rule_id')
+            ->map(fn ($id): string => (string) $id)
+            ->flip();
+
+        // Unsettled records are selected more widely than the join: every one
+        // of this client's under ANY tenant, because the approval brake
+        // (unsettledAllowRule()) refuses on client + sender alone and a scope
+        // fault stores the tenant Mesh attested rather than this one; plus any
+        // client's record stored against the listed tenant.
+        $unsettledRecords = MeshAllowRule::query()
+            ->whereIn('state', [MeshAllowRule::STATE_UNRESOLVED, MeshAllowRule::STATE_REAP_FAILED])
+            ->where(fn ($q) => $q->where('client_id', $client->id)->orWhere('mesh_customer_id', $tenant))
+            ->orderByDesc('id')
+            ->get();
+
+        $rules = [];
+        $blockRules = 0;
+        $matchedRecordIds = [];
+
+        foreach ($rows as $row) {
+            $ab = $row['ab'] ?? null;
+            if ($ab === false) {
+                $blockRules++;
+
+                continue;
+            }
+
+            $sender = is_scalar($row['sender'] ?? null) ? mb_strtolower(trim((string) $row['sender'])) : '';
+            if ($filter !== null && ! $this->senderMatches($sender, $filter)) {
+                continue;
+            }
+
+            $ruleId = is_scalar($row['id'] ?? null) && trim((string) $row['id']) !== '' ? trim((string) $row['id']) : null;
+            $comment = is_scalar($row['comment'] ?? null) ? trim((string) $row['comment']) : '';
+            [$record, $matchedBy] = $this->psaRecordFor($records, $ruleId, $sender, $comment);
+            if ($record !== null) {
+                $matchedRecordIds[$record->id] = true;
+            }
+
+            $rules[] = $this->ruleView($row, $ruleId, $sender, $comment, $record, $matchedBy, $ruleId !== null && $heldRuleIds->has($ruleId));
+        }
+
+        $unsettled = [];
+        foreach ($unsettledRecords as $record) {
+            if (! in_array($record->state, [MeshAllowRule::STATE_UNRESOLVED, MeshAllowRule::STATE_REAP_FAILED], true)) {
+                continue;
+            }
+            if ($filter !== null && ! $this->senderMatches(mb_strtolower(trim((string) $record->sender)), $filter)) {
+                continue;
+            }
+
+            $unsettled[] = [
+                'psa_record_id' => $record->id,
+                'psa_client_id' => $record->client_id,
+                'stored_under_listed_tenant' => trim((string) $record->mesh_customer_id) === $tenant,
+                'state' => $record->state,
+                'sender' => (string) $record->sender,
+                'rule_id' => $record->mesh_rule_id,
+                'seen_in_mesh_list' => isset($matchedRecordIds[$record->id]),
+                'scope_proved' => (bool) $record->scope_proved,
+                'permanent' => $record->expires_at === null,
+                'expires_at' => self::expiryValue($record->expires_at),
+                'ticket_id' => $record->ticket_id,
+                'technician_run_id' => $record->technician_run_id,
+                // The stored text can hold a vendor exception message (URL,
+                // response body); only whether one is recorded is reported.
+                'last_error_recorded' => $record->last_error !== null && trim((string) $record->last_error) !== '',
+                'psa_recorded_at' => $record->created_at?->toIso8601String(),
+            ];
+        }
+
+        return [
+            'client_id' => $client->id,
+            'client_name' => (string) $client->name,
+            'sender_filter' => $filter === null ? null : ['value' => $filter['value'], 'match' => $filter['mode']],
+            'rule_count' => count($rules),
+            'rules' => $rules,
+            'block_rules_not_listed' => $blockRules,
+            'unsettled_psa_records' => $unsettled,
+        ];
+    }
+
+    /**
+     * The PSA record for one upstream row: by upstream rule id first; failing
+     * that, a record stored against the listed tenant with NO recorded rule id whose sender and
+     * comment both match (the identity findRuleByComment() resolves on), so a
+     * PSA-created rule whose id never resolved is not shown as foreign.
+     *
+     * @param  \Illuminate\Support\Collection<int, MeshAllowRule>  $records  newest first
+     * @return array{0: MeshAllowRule|null, 1: string|null}
+     */
+    private function psaRecordFor($records, ?string $ruleId, string $sender, string $comment): array
+    {
+        if ($ruleId !== null) {
+            $byId = $records->first(fn (MeshAllowRule $r): bool => $r->mesh_rule_id !== null && trim((string) $r->mesh_rule_id) === $ruleId);
+            if ($byId !== null) {
+                return [$byId, 'rule_id'];
+            }
+        }
+
+        if ($sender === '' || $comment === '') {
+            return [null, null];
+        }
+
+        $byComment = $records->first(fn (MeshAllowRule $r): bool => $r->mesh_rule_id === null
+            && strcasecmp(trim((string) $r->sender), $sender) === 0
+            && strcasecmp(trim((string) $r->comment), $comment) === 0);
+
+        return $byComment !== null ? [$byComment, 'sender_and_comment'] : [null, null];
+    }
+
+    /** @return array<string, mixed> */
+    private function ruleView(array $row, ?string $ruleId, string $sender, string $comment, ?MeshAllowRule $record, ?string $matchedBy, bool $heldByThisClient): array
+    {
+        $ab = $row['ab'] ?? null;
+        $displayed = $row['date_expiry'] ?? null;
+
+        // The PSA's reaper is the only thing that ever removes a rule (Mesh's
+        // date_expiry is display-only, measured 2026-09-01), and it works only
+        // rows with an expiry in one of these states (MeshAllowRule::scopeReapable).
+        $reapedByPsa = $record !== null
+            && $record->expires_at !== null
+            && in_array($record->state, [MeshAllowRule::STATE_ACTIVE, MeshAllowRule::STATE_UNRESOLVED, MeshAllowRule::STATE_REAP_FAILED], true);
+
+        $dates = [];
+        foreach ($row as $key => $value) {
+            if (is_string($key) && str_starts_with($key, 'date_') && $key !== 'date_expiry' && (is_scalar($value) || $value === null)) {
+                $dates[$key] = $value;
+            }
+        }
+
+        return [
+            'rule_id' => $ruleId,
+            'sender' => $sender,
+            'scope' => $sender === '' ? 'unknown' : (str_contains($sender, '@') ? 'address' : 'domain'),
+            'action' => $ab === true ? 'allow' : 'unknown',
+            'active' => is_bool($row['active'] ?? null) ? $row['active'] : null,
+            'permanent' => ! $reapedByPsa,
+            'expires_at' => $reapedByPsa ? self::expiryValue($record->expires_at) : null,
+            'mesh_displayed_expiry' => is_scalar($displayed) && trim((string) $displayed) !== '' ? trim((string) $displayed) : null,
+            'comment' => $comment,
+            'created_by' => is_scalar($row['created_by'] ?? null) && trim((string) $row['created_by']) !== '' ? trim((string) $row['created_by']) : null,
+            'mesh_dates' => $dates,
+            'psa_created' => $record !== null,
+            'psa_match' => $matchedBy,
+            'psa_record_id' => $record?->id,
+            'psa_client_id' => $record?->client_id,
+            'psa_record_held_by_this_client' => $heldByThisClient,
+            'psa_state' => $record?->state,
+            'ticket_id' => $record?->ticket_id,
+            'technician_run_id' => $record?->technician_run_id,
+            'psa_recorded_at' => $record?->created_at?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * The `sender` filter. An input with a local part (`a@b.example`) is an
+     * EXACT address match; a bare domain (`b.example`) or `@b.example` is a
+     * DOMAIN match: a rule for that domain itself, or for any address whose
+     * domain is exactly it (no subdomains). Both are case-insensitive.
+     *
+     * @return array{value?: string, mode?: string, error?: string}
+     */
+    private function senderFilter(mixed $value): array
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return ['error' => 'sender must be a non-empty email address or domain. Nothing was read.'];
+        }
+
+        $value = mb_strtolower(trim($value));
+        if (mb_strlen($value) > 255 || preg_match('/[\s,;*]/', $value) === 1 || substr_count($value, '@') > 1) {
+            return ['error' => 'sender must be one email address or one domain (no wildcards, lists or spaces). Nothing was read.'];
+        }
+
+        if (str_starts_with($value, '@')) {
+            $value = substr($value, 1);
+        }
+
+        if (str_contains($value, '@')) {
+            return ['value' => $value, 'mode' => 'exact_address'];
+        }
+
+        return $value === ''
+            ? ['error' => 'sender must be a non-empty email address or domain. Nothing was read.']
+            : ['value' => $value, 'mode' => 'domain'];
+    }
+
+    /** @param  array{value: string, mode: string}  $filter */
+    private function senderMatches(string $sender, array $filter): bool
+    {
+        if ($filter['mode'] === 'exact_address') {
+            return $sender === $filter['value'];
+        }
+
+        return $sender === $filter['value'] || str_ends_with($sender, '@'.$filter['value']);
+    }
+
+    /** @return array<string, mixed> */
+    private static function listAllowRulesTool(): array
+    {
+        return self::tool(
+            self::LIST_TOOL,
+            'Read ONE customer tenant\'s Mesh Email Security allow rules, resolved server-side from the PSA client. READ-ONLY: it lists rules and changes nothing in Mesh or the PSA. '
+            .'Per rule: rule_id (what mesh_edit_allow_rule and mesh_remove_allow_rule take), sender, scope (address or domain), action, active, comment, created_by, '
+            .'permanent / expires_at, the expiry Mesh displays, any other date_* fields Mesh returns (verbatim, under mesh_dates), and whether the PSA created it '
+            .'(psa_created, with the PSA record stored against this tenant: its psa_client_id, ticket_id, technician_run_id and state). '
+            .'psa_record_held_by_this_client says whether this client holds a PSA record with this rule_id, which is the lookup mesh_edit_allow_rule and mesh_remove_allow_rule use. When it is false they treat the rule as foreign, even where psa_created is true (a record another client stored against this tenant, or one matched by sender and comment). '
+            .'permanent is true unless the PSA holds a record with an expiry that its reaper still works; Mesh does not expire rules itself, so a rule the PSA did not create is permanent whatever date Mesh displays. '
+            .'Block rules are not listed (only counted). Also returns, as unsettled_psa_records, the PSA records that are unresolved or reap_failed: every one of this client\'s under any Mesh tenant, and any client\'s stored against this tenant (psa_client_id and stored_under_listed_tenant say which). '
+            .'A Mesh read that fails (an HTTP error or no answer) is returned as an error, never as an empty list. Requires an explicit grant.',
+            [
+                'sender' => [
+                    'type' => 'string',
+                    'description' => 'Optional filter. An email address (name@example.com) matches that exact sender only. '
+                        .'A bare domain (example.com) or @example.com matches a rule for that domain itself and every address rule at exactly that domain (not subdomains). Case-insensitive.',
+                ],
+            ],
+            [],
+        );
     }
 
     /** @return array<string, mixed> */
