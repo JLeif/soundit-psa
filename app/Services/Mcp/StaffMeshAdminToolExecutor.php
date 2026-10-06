@@ -3165,13 +3165,25 @@ class StaffMeshAdminToolExecutor
         }
 
         // The reaper works each record against its OWN mesh_customer_id
-        // (MeshAllowRuleReaper::resolveRuleId()), not the client's current
-        // mapping. A record stored against a tenant this client was mapped to
-        // before is not a record of the tenant being listed: joining it would
-        // report the reaper's verdict for rules it never touches.
+        // (MeshAllowRuleReaper::resolveRuleId()), whichever client holds it,
+        // not any client's current mapping. So the join is keyed on that
+        // tenant alone: a record another client stored against this tenant
+        // before a remap still decides whether a rule here is reaped, and a
+        // record this client stored against another tenant never does.
+        // psa_client_id says whose record it is.
         $records = MeshAllowRule::query()
-            ->where('client_id', $client->id)
             ->where('mesh_customer_id', $tenant)
+            ->orderByDesc('id')
+            ->get();
+
+        // Unsettled records are selected more widely than the join: every one
+        // of this client's under ANY tenant, because the approval brake
+        // (unsettledAllowRule()) refuses on client + sender alone and a scope
+        // fault stores the tenant Mesh attested rather than this one; plus any
+        // client's record stored against the listed tenant.
+        $unsettledRecords = MeshAllowRule::query()
+            ->whereIn('state', [MeshAllowRule::STATE_UNRESOLVED, MeshAllowRule::STATE_REAP_FAILED])
+            ->where(fn ($q) => $q->where('client_id', $client->id)->orWhere('mesh_customer_id', $tenant))
             ->orderByDesc('id')
             ->get();
 
@@ -3203,7 +3215,7 @@ class StaffMeshAdminToolExecutor
         }
 
         $unsettled = [];
-        foreach ($records as $record) {
+        foreach ($unsettledRecords as $record) {
             if (! in_array($record->state, [MeshAllowRule::STATE_UNRESOLVED, MeshAllowRule::STATE_REAP_FAILED], true)) {
                 continue;
             }
@@ -3213,6 +3225,8 @@ class StaffMeshAdminToolExecutor
 
             $unsettled[] = [
                 'psa_record_id' => $record->id,
+                'psa_client_id' => $record->client_id,
+                'stored_under_listed_tenant' => trim((string) $record->mesh_customer_id) === $tenant,
                 'state' => $record->state,
                 'sender' => (string) $record->sender,
                 'rule_id' => $record->mesh_rule_id,
@@ -3242,7 +3256,7 @@ class StaffMeshAdminToolExecutor
 
     /**
      * The PSA record for one upstream row: by upstream rule id first; failing
-     * that, a record of this client with NO recorded rule id whose sender and
+     * that, a record stored against the listed tenant with NO recorded rule id whose sender and
      * comment both match (the identity findRuleByComment() resolves on), so a
      * PSA-created rule whose id never resolved is not shown as foreign.
      *
@@ -3304,6 +3318,7 @@ class StaffMeshAdminToolExecutor
             'psa_created' => $record !== null,
             'psa_match' => $matchedBy,
             'psa_record_id' => $record?->id,
+            'psa_client_id' => $record?->client_id,
             'psa_state' => $record?->state,
             'ticket_id' => $record?->ticket_id,
             'technician_run_id' => $record?->technician_run_id,
@@ -3361,9 +3376,9 @@ class StaffMeshAdminToolExecutor
             'Read ONE customer tenant\'s Mesh Email Security allow rules, resolved server-side from the PSA client. READ-ONLY: it lists rules and changes nothing in Mesh or the PSA. '
             .'Per rule: rule_id (what mesh_edit_allow_rule and mesh_remove_allow_rule take), sender, scope (address or domain), action, active, comment, created_by, '
             .'permanent / expires_at, the expiry Mesh displays, any other date_* fields Mesh returns (verbatim, under mesh_dates), and whether the PSA created it '
-            .'(psa_created, with its ticket_id, technician_run_id and PSA record state). '
+            .'(psa_created, with the PSA record stored against this tenant: its psa_client_id, ticket_id, technician_run_id and state). '
             .'permanent is true unless the PSA holds a record with an expiry that its reaper still works; Mesh does not expire rules itself, so a rule the PSA did not create is permanent whatever date Mesh displays. '
-            .'Block rules are not listed (only counted). Also returns the PSA\'s own records for this client and its current Mesh tenant that are unresolved or reap_failed (unsettled_psa_records). '
+            .'Block rules are not listed (only counted). Also returns, as unsettled_psa_records, the PSA records that are unresolved or reap_failed: every one of this client\'s under any Mesh tenant, and any client\'s stored against this tenant (psa_client_id and stored_under_listed_tenant say which). '
             .'A Mesh read that fails (an HTTP error or no answer) is returned as an error, never as an empty list. Requires an explicit grant.',
             [
                 'sender' => [

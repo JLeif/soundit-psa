@@ -261,16 +261,17 @@ class MeshListAllowRulesTest extends TestCase
         $this->assertTrue($out['unsettled_psa_records'][0]['seen_in_mesh_list']);
     }
 
-    public function test_records_stored_against_a_previous_tenant_are_not_joined_or_listed(): void
+    public function test_this_clients_records_under_another_tenant_are_listed_as_unsettled_but_never_joined(): void
     {
         $client = $this->mappedClient();
-        // Stored against the client's previous tenant: the reaper works them there, not here.
-        $this->record($client, [
+        // A scope fault: stored against the tenant Mesh attested, not the client's mapping. The approval brake still sees it.
+        $scopeFault = $this->record($client, [
             'mesh_customer_id' => self::OTHER_TENANT, 'sender' => 'billing@vendor.example.test',
             'comment' => 'PSA allow STALE00001', 'mesh_rule_id' => null,
-            'state' => MeshAllowRule::STATE_UNRESOLVED, 'expires_at' => now()->addDays(5),
+            'state' => MeshAllowRule::STATE_UNRESOLVED, 'scope_proved' => false, 'expires_at' => null,
         ]);
-        $this->record($client, [
+        // Stored against the client's previous tenant: the reaper works it there, not here.
+        $previous = $this->record($client, [
             'mesh_customer_id' => self::OTHER_TENANT, 'sender' => 'news.example.test',
             'comment' => 'PSA allow STALE00002', 'mesh_rule_id' => 'rule-by-id',
             'state' => MeshAllowRule::STATE_REAP_FAILED, 'expires_at' => now()->subDay(),
@@ -291,7 +292,45 @@ class MeshListAllowRulesTest extends TestCase
             $this->assertTrue($rule['permanent'], $id);
             $this->assertNull($rule['expires_at'], $id);
         }
-        $this->assertSame([], $out['unsettled_psa_records']);
+        $unsettled = collect($out['unsettled_psa_records'])->keyBy('psa_record_id');
+        $this->assertEqualsCanonicalizing([$scopeFault->id, $previous->id], $unsettled->keys()->all());
+        foreach ($unsettled as $id => $entry) {
+            $this->assertFalse($entry['stored_under_listed_tenant'], (string) $id);
+            $this->assertFalse($entry['seen_in_mesh_list'], (string) $id);
+            $this->assertSame($client->id, $entry['psa_client_id'], (string) $id);
+        }
+        $this->assertFalse($unsettled[$scopeFault->id]['scope_proved']);
+    }
+
+    public function test_a_record_another_client_stored_against_the_listed_tenant_is_joined_and_attributed(): void
+    {
+        // The tenant was remapped from $previous to $client; the reaper still works $previous's records on it.
+        $previous = Client::factory()->create(['name' => 'Previous', 'mesh_customer_id' => self::OTHER_TENANT]);
+        $client = $this->mappedClient();
+        $timed = $this->record($previous, [
+            'sender' => 'billing@vendor.example.test', 'comment' => 'PSA allow PREVIOUS01',
+            'mesh_rule_id' => 'rule-prev', 'expires_at' => now()->addDays(3),
+        ]);
+        $pending = $this->record($previous, [
+            'sender' => 'news.example.test', 'comment' => 'PSA allow PREVIOUS02',
+            'state' => MeshAllowRule::STATE_UNRESOLVED,
+        ]);
+        $this->upstream = [$this->row('rule-prev', 'billing@vendor.example.test', ['comment' => 'PSA allow PREVIOUS01'])];
+
+        $out = $this->listOk($client);
+
+        $rule = $out['rules'][0];
+        $this->assertSame('rule-prev', $rule['rule_id']);
+        $this->assertTrue($rule['psa_created']);
+        $this->assertSame('rule_id', $rule['psa_match']);
+        $this->assertSame($timed->id, $rule['psa_record_id']);
+        $this->assertSame($previous->id, $rule['psa_client_id']);
+        $this->assertFalse($rule['permanent'], 'the reaper deletes it by the record\'s own tenant, whichever client holds the record');
+        $this->assertSame(now()->addDays(3)->toIso8601String(), $rule['expires_at']);
+
+        $this->assertSame([$pending->id], array_column($out['unsettled_psa_records'], 'psa_record_id'));
+        $this->assertSame($previous->id, $out['unsettled_psa_records'][0]['psa_client_id']);
+        $this->assertTrue($out['unsettled_psa_records'][0]['stored_under_listed_tenant']);
     }
 
     public function test_a_stored_last_error_is_reported_as_present_never_as_text(): void
