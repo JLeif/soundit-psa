@@ -320,15 +320,56 @@ class MeshWriteClient
     public function findRuleByComment(string $customerId, string $sender, string $comment): ?array
     {
         foreach ($this->listCustomerRules($customerId) as $row) {
-            $rowComment = is_scalar($row['comment'] ?? null) ? trim((string) $row['comment']) : '';
-            $rowSender = is_scalar($row['sender'] ?? null) ? trim((string) $row['sender']) : '';
-
-            if (strcasecmp($rowComment, $comment) === 0 && strcasecmp($rowSender, $sender) === 0) {
+            if (self::rowMatchesComment($row, $sender, $comment)) {
                 return $row;
             }
         }
 
         return null;
+    }
+
+    /**
+     * EVERY rule on the tenant carrying this sender and comment, in list
+     * order: the same match findRuleByComment() makes, without stopping at
+     * the first one.
+     *
+     * For a caller that must refuse to guess. A comment carries a random
+     * reference token, so more than one match should not happen, but if it
+     * does, the first match is not evidence that it is the rule the row
+     * recorded. The reaper's settle pass records an id only when exactly one
+     * rule matches (MeshAllowRuleReaper::settleUnexpired()).
+     *
+     * Same read and same failure behaviour as findRuleByComment(): an
+     * incomplete list read throws MeshClientException and never returns a
+     * partial list.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function findRulesByComment(string $customerId, string $sender, string $comment): array
+    {
+        $matches = [];
+
+        foreach ($this->listCustomerRules($customerId) as $row) {
+            if (self::rowMatchesComment($row, $sender, $comment)) {
+                $matches[] = $row;
+            }
+        }
+
+        return $matches;
+    }
+
+    /**
+     * The identity both comment lookups resolve on: trimmed, case-insensitive
+     * comment AND sender.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    private static function rowMatchesComment(array $row, string $sender, string $comment): bool
+    {
+        $rowComment = is_scalar($row['comment'] ?? null) ? trim((string) $row['comment']) : '';
+        $rowSender = is_scalar($row['sender'] ?? null) ? trim((string) $row['sender']) : '';
+
+        return strcasecmp($rowComment, $comment) === 0 && strcasecmp($rowSender, $sender) === 0;
     }
 
     /**

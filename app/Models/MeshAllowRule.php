@@ -110,8 +110,9 @@ class MeshAllowRule extends Model
      * query SAYS, not something a NULL-comparison rule happens to give us.
      *
      * Excluded from reaping is not abandoned (#1133): a permanent row that
-     * never settled is picked up by scopeUnsettledPermanent() below, which
-     * identifies it and never deletes it.
+     * never settled, and an unexpired dated row that never settled, are picked
+     * up by scopeUnsettledUnexpired() below, which identifies them and never
+     * deletes anything.
      */
     public function scopeReapable(Builder $query): Builder
     {
@@ -122,25 +123,35 @@ class MeshAllowRule extends Model
     }
 
     /**
-     * Permanent rows the PSA has not settled — the same two states the
+     * Unexpired rows the PSA has not settled: the same two states the
      * duplicate brake in StaffMeshAdminToolExecutor::unsettledAllowRule()
-     * matches, restricted to rows with no expiry.
+     * matches, restricted to rows that are NOT due for reaping. That means a
+     * permanent row (NULL expiry) or a dated row whose expiry is still in
+     * the future.
      *
-     * Such a row is never reaped (it has no expiry to reach) but it is not
-     * inert: while it sits unsettled the brake refuses every later allow rule
-     * for its sender, and no expiry is ever coming to clear it. The reaper
-     * records whatever upstream id it can recover for such a row — identify
-     * only, never delete — and what that settles depends on `scope_proved`: a
-     * row whose 201 proved scope was missing nothing but its id, so it goes
-     * active once the id is known; a row whose scope was never proved is not
-     * settled by an id, stays counted as unresolved, and only a human can
-     * clear it.
-     * See MeshAllowRuleReaper::settlePermanent().
+     * No reap pass selects such a row yet. A permanent row never will, and a
+     * dated one only once its expiry passes, which may be months away. But
+     * the row is not inert: while it sits unsettled, the brake refuses every
+     * later allow rule for its sender. The reaper records whatever upstream
+     * id it can recover for such a row (identify only, never delete). What
+     * that settles depends on `scope_proved`: a row whose 201 proved scope
+     * was missing nothing but its id, so it goes active once exactly one
+     * rule is known; a row whose scope was never proved is not settled by an
+     * id and stays counted as unresolved.
+     *
+     * The future-only bound is the complement of scopeReapable()'s
+     * `expires_at <= now()`: a row due for reaping is the reap pass's, never
+     * this one's, so a settle can never turn a row that should be deleted
+     * into an active one.
+     * See MeshAllowRuleReaper::settleUnexpired().
      */
-    public function scopeUnsettledPermanent(Builder $query): Builder
+    public function scopeUnsettledUnexpired(Builder $query): Builder
     {
         return $query
-            ->whereNull('expires_at')
-            ->whereIn('state', [self::STATE_UNRESOLVED, self::STATE_REAP_FAILED]);
+            ->whereIn('state', [self::STATE_UNRESOLVED, self::STATE_REAP_FAILED])
+            ->where(function (Builder $q): void {
+                $q->whereNull('expires_at')
+                    ->orWhere('expires_at', '>', now());
+            });
     }
 }

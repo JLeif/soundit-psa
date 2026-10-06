@@ -1618,7 +1618,7 @@ class MeshAddAllowRuleTest extends TestCase
         $record = $this->record(['expires_at' => null, 'mesh_rule_id' => null, 'state' => MeshAllowRule::STATE_UNRESOLVED]);
         $write = $this->mockWrite();
         // Called once: the second run reads the id off the row, not upstream.
-        $write->shouldReceive('findRuleByComment')->once()->with(self::TENANT, 'billing@vendor.example', 'PSA allow ABCDEFGHIJ')->andReturn(['id' => 'late-id']);
+        $write->shouldReceive('findRulesByComment')->once()->with(self::TENANT, 'billing@vendor.example', 'PSA allow ABCDEFGHIJ')->andReturn([['id' => 'late-id']]);
         // The caller asked for permanent. Identifying it is the whole point;
         // deleting it would be the PSA revoking a decision it was told to keep.
         $write->shouldNotReceive('deleteRule');
@@ -1657,7 +1657,7 @@ class MeshAddAllowRuleTest extends TestCase
         $record->forceFill(['last_error' => 'Mesh reported this rule was added for another tenant; check the Mesh portal and remove it by hand if the scope is wrong.'])->save();
 
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->once()->andReturn(['id' => 'late-id']);
+        $write->shouldReceive('findRulesByComment')->once()->andReturn([['id' => 'late-id']]);
         $write->shouldNotReceive('deleteRule');
 
         app(MeshAllowRuleReaper::class)->reap();
@@ -1672,7 +1672,7 @@ class MeshAddAllowRuleTest extends TestCase
         $this->configureMesh();
         $record = $this->record(['expires_at' => null, 'mesh_rule_id' => null, 'state' => MeshAllowRule::STATE_UNRESOLVED]);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->twice()->andReturn(null);
+        $write->shouldReceive('findRulesByComment')->twice()->andReturn([]);
         $write->shouldNotReceive('deleteRule');
 
         $counts = app(MeshAllowRuleReaper::class)->reap();
@@ -1706,7 +1706,7 @@ class MeshAddAllowRuleTest extends TestCase
             'scope_proved' => true,
         ]);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->once()->andReturn(['id' => 'late-id']);
+        $write->shouldReceive('findRulesByComment')->once()->andReturn([['id' => 'late-id']]);
         // Permanent means permanent: settling is identification, never removal.
         $write->shouldNotReceive('deleteRule');
 
