@@ -433,6 +433,58 @@ class MeshAddAllowRuleTest extends TestCase
     }
 
     /**
+     * Nh0dzF2T: the duplicate brake's text for a DATED unsettled row must match
+     * what the reaper now does. A scope-proved dated row is settled by the
+     * hourly identify pass (MeshAllowRuleReaper::settleUnexpired) as soon as
+     * its rule is found, so "cannot settle until its expiry passes" would send
+     * the approver away to wait months for a block that clears within the
+     * hour. A dated row whose scope was never proved still waits for expiry.
+     */
+    public function test_the_dated_unsettled_brake_says_the_next_reaper_run_settles_a_scope_proved_row(): void
+    {
+        $this->configureMesh();
+        $actor = $this->configureAiActor();
+        $fixture = $this->fixture();
+        $write = $this->mockWrite();
+        $write->shouldNotReceive('createAllowRule');
+
+        $expiry = now()->addDays(30)->startOfSecond();
+        $row = MeshAllowRule::create([
+            'client_id' => $fixture['client']->id,
+            'mesh_customer_id' => self::TENANT,
+            'sender' => 'billing@vendor.example',
+            'comment' => 'PSA allow ABCDEFGHIJ',
+            'mesh_rule_id' => null,
+            'expires_at' => $expiry,
+            'state' => MeshAllowRule::STATE_UNRESOLVED,
+            'scope_proved' => true,
+            'created_by_actor' => 'test',
+        ]);
+
+        $run = $this->stagedRun($fixture);
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+        $proved = (string) session('error');
+
+        $this->assertStringContainsString('PSA record #'.$row->id, $proved);
+        $this->assertStringContainsString('the hourly expiry job only has to IDENTIFY it, and this block clears on the next run that finds that rule in Mesh', $proved);
+        $this->assertStringNotContainsString('until its expiry', $proved);
+        $this->assertStringNotContainsString('PERMANENT', $proved);
+
+        // The same dated row WITHOUT scope proof is never settled by an id, so
+        // for it the expiry really is the next thing that can happen.
+        $row->update(['scope_proved' => false]);
+        TechnicianRun::query()->delete();
+        TechnicianActionLog::query()->delete();
+        $run = $this->stagedRun($fixture);
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+        $unproved = (string) session('error');
+
+        $this->assertStringContainsString('cannot settle that record until its expiry ('.$expiry->toIso8601String().') passes', $unproved);
+        $this->assertStringNotContainsString('only has to IDENTIFY', $unproved);
+        $this->assertSame(0, MeshAllowRule::where('state', MeshAllowRule::STATE_ACTIVE)->count());
+    }
+
+    /**
      * #1133: the staging hash carries the caller's expiry, but the 'executed'
      * audit row is written under the expiry-free base hash. Asking the
      * post-execution dedup question with the lifetime-bearing hash could never
