@@ -3176,6 +3176,18 @@ class StaffMeshAdminToolExecutor
             ->orderByDesc('id')
             ->get();
 
+        // mesh_edit_allow_rule and mesh_remove_allow_rule do not use that join.
+        // They look the record up by this client + rule id
+        // (editAllowRuleTarget(), removeAllowRuleTarget()). The same lookup is
+        // reported per rule, so a caller can tell when those verbs will call a
+        // rule foreign even though the join above found a record for it.
+        $heldRuleIds = MeshAllowRule::query()
+            ->where('client_id', $client->id)
+            ->whereNotNull('mesh_rule_id')
+            ->pluck('mesh_rule_id')
+            ->map(fn ($id): string => (string) $id)
+            ->flip();
+
         // Unsettled records are selected more widely than the join: every one
         // of this client's under ANY tenant, because the approval brake
         // (unsettledAllowRule()) refuses on client + sender alone and a scope
@@ -3211,7 +3223,7 @@ class StaffMeshAdminToolExecutor
                 $matchedRecordIds[$record->id] = true;
             }
 
-            $rules[] = $this->ruleView($row, $ruleId, $sender, $comment, $record, $matchedBy);
+            $rules[] = $this->ruleView($row, $ruleId, $sender, $comment, $record, $matchedBy, $ruleId !== null && $heldRuleIds->has($ruleId));
         }
 
         $unsettled = [];
@@ -3284,7 +3296,7 @@ class StaffMeshAdminToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function ruleView(array $row, ?string $ruleId, string $sender, string $comment, ?MeshAllowRule $record, ?string $matchedBy): array
+    private function ruleView(array $row, ?string $ruleId, string $sender, string $comment, ?MeshAllowRule $record, ?string $matchedBy, bool $heldByThisClient): array
     {
         $ab = $row['ab'] ?? null;
         $displayed = $row['date_expiry'] ?? null;
@@ -3319,6 +3331,7 @@ class StaffMeshAdminToolExecutor
             'psa_match' => $matchedBy,
             'psa_record_id' => $record?->id,
             'psa_client_id' => $record?->client_id,
+            'psa_record_held_by_this_client' => $heldByThisClient,
             'psa_state' => $record?->state,
             'ticket_id' => $record?->ticket_id,
             'technician_run_id' => $record?->technician_run_id,
@@ -3377,6 +3390,7 @@ class StaffMeshAdminToolExecutor
             .'Per rule: rule_id (what mesh_edit_allow_rule and mesh_remove_allow_rule take), sender, scope (address or domain), action, active, comment, created_by, '
             .'permanent / expires_at, the expiry Mesh displays, any other date_* fields Mesh returns (verbatim, under mesh_dates), and whether the PSA created it '
             .'(psa_created, with the PSA record stored against this tenant: its psa_client_id, ticket_id, technician_run_id and state). '
+            .'psa_record_held_by_this_client says whether this client holds a PSA record with this rule_id, which is the lookup mesh_edit_allow_rule and mesh_remove_allow_rule use. When it is false they treat the rule as foreign, even where psa_created is true (a record another client stored against this tenant, or one matched by sender and comment). '
             .'permanent is true unless the PSA holds a record with an expiry that its reaper still works; Mesh does not expire rules itself, so a rule the PSA did not create is permanent whatever date Mesh displays. '
             .'Block rules are not listed (only counted). Also returns, as unsettled_psa_records, the PSA records that are unresolved or reap_failed: every one of this client\'s under any Mesh tenant, and any client\'s stored against this tenant (psa_client_id and stored_under_listed_tenant say which). '
             .'A Mesh read that fails (an HTTP error or no answer) is returned as an error, never as an empty list. Requires an explicit grant.',
