@@ -600,8 +600,9 @@ class MeshC56ReadSitesTest extends TestCase
 
     /**
      * Also holds over ALL records together, MeshClient's own failure line
-     * included: that line logs a customer read's path as api/customers/{id}/
-     * (#5298/#5305), so the Mesh customer id is checked everywhere.
+     * included: that line logs a customer read's path as
+     * api/customers/<customer> (#5298/#5305, #5323), so the Mesh customer id
+     * is checked everywhere.
      */
     private function assertNoVendorText(string $text, string $where): void
     {

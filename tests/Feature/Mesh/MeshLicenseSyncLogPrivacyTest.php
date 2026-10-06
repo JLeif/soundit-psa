@@ -9,31 +9,45 @@ use App\Services\Mesh\MeshClientException;
 use App\Services\Mesh\MeshLicenseSyncService;
 use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Psr\Http\Message\RequestInterface;
 use Tests\TestCase;
 
 /**
- * #5298 / #5305 (card 6ac52e6f): every log record a Mesh license sync writes
- * names the client by its PSA id only. No record, at any level and from any
- * class the sync reaches (MeshLicenseSyncService, MeshClient), carries the
- * client's name, its Mesh customer id (raw, dashless or upper-cased), or the
- * vendor's body.
+ * #5298 / #5305 (card 6ac52e6f): on the paths driven here, every log record a
+ * Mesh license sync writes names the client by its PSA id only. No record
+ * captured on those paths, at any level and from any class they reach,
+ * carries the client's name, its Mesh customer id (raw, dashless or
+ * upper-cased), or the vendor's body.
+ *
+ * The paths driven (#5326): ONE mapped client per arm, with no license
+ * beforehand; the customer read failing, degraded, billing 0, or creating
+ * one license (the normal arm); and deactivateOrphaned() with nothing to
+ * deactivate. NOT driven, so not covered by the first half below: a sync that
+ * updates an existing license (quantity or status change), several mapped
+ * clients in one run, an orphaned license actually being deactivated, and
+ * the onProgress callback. A record written on one of those paths, by the
+ * service or by a model observer or hook, would not fail this test.
  *
  * Two halves:
  *
  *  1. test_every_arm_logs_the_client_by_id_only drives syncLicenses() through
  *     each arm that logs, through a real MeshClient over a scripted Guzzle,
  *     and captures every record with a MessageLogged listener. Each arm pins
- *     its COMPLETE record list (level and text), so a new record on a covered
- *     arm, a moved level or a dropped line fails here too.
+ *     its COMPLETE record list: every record's level, its whole message by
+ *     exact equality (the [MeshClient] line through its exception class) and
+ *     its context (empty), so a new record on a covered arm, a moved level,
+ *     a dropped line, a changed tail or a new context key fails here too.
+ *     The request is accounted for: the scripted handler swapped into
+ *     MeshClient by reflection must receive exactly the one customer read,
+ *     so a MeshClient that stopped using that handler fails the arm.
  *
  *  2. test_every_log_call_in_the_service_is_pinned_to_a_covering_arm scans
  *     MeshLicenseSyncService.php with PHP's tokenizer and pins the exact set
@@ -62,7 +76,7 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
     /** Body marker; a fresh suffix per process. */
     private static string $marker = '';
 
-    /** @var list<array{level: string, text: string}> */
+    /** @var list<array{level: string, message: string, context: array, text: string}> */
     private array $logged = [];
 
     /** @var list<string> the request paths the scripted Mesh received */
@@ -71,12 +85,20 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Http::preventStrayRequests();
+        // No Http::preventStrayRequests(): MeshClient sends through raw Guzzle,
+        // which that facade guard does not see (#5327). Isolation is the
+        // scripted handler itself, and each arm asserts it received the one
+        // request ($this->requested).
         if (self::$marker === '') {
             self::$marker = 'LOGPRIV-BODY-'.bin2hex(random_bytes(6));
         }
         Event::listen(MessageLogged::class, function (MessageLogged $e): void {
-            $this->logged[] = ['level' => $e->level, 'text' => $e->message.' '.json_encode($e->context)];
+            $this->logged[] = [
+                'level' => $e->level,
+                'message' => $e->message,
+                'context' => $e->context,
+                'text' => $e->message.' '.json_encode($e->context),
+            ];
         });
     }
 
@@ -85,21 +107,25 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
     /**
      * Each arm: how the scripted Mesh answers the customer read, the sync
      * counts it must produce, and the COMPLETE list of records it must log,
-     * as [level, text prefix]. '{id}' is the PSA client id.
+     * as [level, whole message], each with an empty context. The test
+     * replaces '{psa_id}' with the mapped client's PSA id (its primary key)
+     * on every row before comparing. '<customer>' is NOT substituted: it is
+     * the literal token MeshClient::logPath() writes in place of the Mesh
+     * customer id and everything after it, and it appears in the log as is.
      *
      * @return array<string, array{0: string, 1: array{errors: int, created: int}, 2: list<array{0: string, 1: string}>}>
      */
     public static function arms(): array
     {
-        $catch = '[MeshSync] Failed for client {id}: ';
+        $catch = '[MeshSync] Failed for client {psa_id}: ';
 
         return [
             'catch: MeshClientException, HTTP error' => ['http503', ['errors' => 1, 'created' => 0], [
-                ['error', '[MeshClient] GET api/customers/{id}/ failed with HTTP 503 ('],
+                ['error', '[MeshClient] GET api/customers/<customer> failed with HTTP 503 ('.ServerException::class.')'],
                 ['error', $catch.'Mesh answered the customer read with HTTP 503 ('.MeshClientException::class.')'],
             ]],
             'catch: MeshClientException, connect error' => ['connect', ['errors' => 1, 'created' => 0], [
-                ['error', '[MeshClient] GET api/customers/{id}/ failed with no HTTP status ('],
+                ['error', '[MeshClient] GET api/customers/<customer> failed with no HTTP status ('.ConnectException::class.')'],
                 ['error', $catch.'the customer read failed without an HTTP status from Mesh ('.MeshClientException::class.')'],
             ]],
             'catch: foreign Throwable' => ['foreign', ['errors' => 1, 'created' => 0], [
@@ -115,7 +141,7 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
                 ['error', $catch.'the customer read had no readable licenses_billed field'],
             ]],
             'skip: present 0' => ['zero', ['errors' => 0, 'created' => 0], [
-                ['info', '[MeshSync] Client {id}: 0 licenses billed, skipping'],
+                ['info', '[MeshSync] Client {psa_id}: 0 licenses billed, skipping'],
             ]],
             'normal sync' => ['normal', ['errors' => 0, 'created' => 1], []],
         ];
@@ -141,16 +167,13 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
         // No record names the client, its Mesh id in any form, or the body.
         $this->assertNoClientData($this->dump());
 
-        // The complete record list: level and text, in order.
+        // The complete record list: level, whole message and context, in order.
         $this->assertCount(count($expected), $this->logged, 'every record this arm logs: '.$this->dump());
-        foreach ($expected as $i => [$level, $prefix]) {
-            // '{id}' is the PSA client id on a [MeshSync] line. On the
-            // [MeshClient] line it is literal: the path shape, not an id.
-            if (str_starts_with($prefix, '[MeshSync]')) {
-                $prefix = str_replace('{id}', (string) $client->getKey(), $prefix);
-            }
+        foreach ($expected as $i => [$level, $message]) {
+            $message = str_replace('{psa_id}', (string) $client->getKey(), $message);
             $this->assertSame($level, $this->logged[$i]['level'], "record {$i}: level");
-            $this->assertStringStartsWith($prefix, $this->logged[$i]['text'], "record {$i}: text");
+            $this->assertSame($message, $this->logged[$i]['message'], "record {$i}: message");
+            $this->assertSame([], $this->logged[$i]['context'], "record {$i}: context");
         }
 
         // The [MeshSync] line names the client by its PSA id.
