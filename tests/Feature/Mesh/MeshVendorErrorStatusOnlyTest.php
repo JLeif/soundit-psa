@@ -453,6 +453,29 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->assertStatusOnly((string) MeshAllowRule::sole()->last_error, 'unmeasured create last_error');
     }
 
+    /** 'Mesh never answered the create (…), and the PSA record … could not be written'. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('unansweredCreates')]
+    public function test_an_unanswered_create_with_an_unwritable_record_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->failOn = 'POST';
+        $this->commitBeforeFailing = true;
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+        MeshAllowRule::creating(fn () => throw self::queryFailure());
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+
+        $error = (string) session('error');
+        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('could not be written', $error, 'positive control: the record-unwritable arm');
+        $this->assertStatusOnly($error, 'unanswered create, record unwritable');
+        $this->assertSame(0, MeshAllowRule::count());
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'still spent, never re-approvable');
+        $this->assertStatusOnly((string) TechnicianActionLog::where('action_type', 'mesh_add_allow_rule')->where('result_status', 'executed_with_fault')->sole()->summary, 'record-unwritable audit');
+    }
+
     /** 'Rule id re-read failed: …' after a clean 201. */
     #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
     public function test_a_failed_rule_id_reread_after_a_created_rule_reports_the_status_only(string $mode): void
