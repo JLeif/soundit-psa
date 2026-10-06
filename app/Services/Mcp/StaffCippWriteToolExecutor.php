@@ -718,7 +718,7 @@ class StaffCippWriteToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null, ?string $tokenLabel = null): array
     {
         if (! CippConfig::isEnabled() || ! CippConfig::isConfigured()) {
             return ['error' => 'CIPP is not enabled or configured'];
@@ -736,7 +736,7 @@ class StaffCippWriteToolExecutor
                 return ['error' => 'An explicit active offboarding grant is required.'];
             }
 
-            return app(\App\Services\Cipp\Offboarding\OffboardingAdmission::class)->stage($arguments, $clientId, $token->id);
+            return app(\App\Services\Cipp\Offboarding\OffboardingAdmission::class)->stage($arguments, $clientId, $token->id, DraftedByToken::meta($token->actorLabel(), $token->label));
         }
 
         // Password reset keeps a DEDICATED pair of paths rather than falling through to
@@ -749,25 +749,25 @@ class StaffCippWriteToolExecutor
         // grant had nothing to dispatch to and the mode gate never engaged.
         if ((self::STAGED_TO_DIRECT[$name] ?? $name) === 'cipp_reset_user_password') {
             return isset(self::STAGED_TO_DIRECT[$name])
-                ? $this->stageResetPasswordAction($name, $arguments, $clientId, $actorLabel)
+                ? $this->stageResetPasswordAction($name, $arguments, $clientId, $actorLabel, $tokenLabel)
                 : $this->executeResetPassword($name, $arguments, $clientId, $actorLabel);
         }
 
         if (in_array(self::STAGED_TO_DIRECT[$name] ?? $name, self::PROVISIONING_TOOLS, true)) {
             return isset(self::STAGED_TO_DIRECT[$name])
-                ? $this->stageCreateUserAction($name, $arguments, $clientId, $actorLabel)
+                ? $this->stageCreateUserAction($name, $arguments, $clientId, $actorLabel, $tokenLabel)
                 : $this->executeCreateUserDirect($name, $arguments, $clientId, $actorLabel);
         }
 
         if (in_array(self::STAGED_TO_DIRECT[$name] ?? $name, self::EMAIL_SECURITY_TOOLS, true)) {
             return isset(self::STAGED_TO_DIRECT[$name])
-                ? $this->stageEmailSecurityAction($name, $arguments, $clientId, $actorLabel)
+                ? $this->stageEmailSecurityAction($name, $arguments, $clientId, $actorLabel, $tokenLabel)
                 : $this->executeEmailSecurityDirect($name, $arguments, $clientId, $actorLabel);
         }
 
         if (in_array(self::STAGED_TO_DIRECT[$name] ?? $name, self::GROUP_MEMBERSHIP_TOOLS, true)) {
             return isset(self::STAGED_TO_DIRECT[$name])
-                ? $this->stageGroupMembershipAction($name, $arguments, $clientId, $actorLabel)
+                ? $this->stageGroupMembershipAction($name, $arguments, $clientId, $actorLabel, $tokenLabel)
                 : $this->executeGroupMembershipDirect($name, $arguments, $clientId, $actorLabel);
         }
 
@@ -782,12 +782,12 @@ class StaffCippWriteToolExecutor
         // capability behind a new grant.
         if (in_array(self::STAGED_TO_DIRECT[$name] ?? $name, self::LICENSE_TARGET_TOOLS, true)) {
             return isset(self::STAGED_TO_DIRECT[$name])
-                ? $this->stageLicenseTargetAction($name, $arguments, $clientId, $actorLabel)
+                ? $this->stageLicenseTargetAction($name, $arguments, $clientId, $actorLabel, $tokenLabel)
                 : $this->executeLicenseTargetDirect($name, $arguments, $clientId, $actorLabel);
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt, $tokenLabel);
 
             return $this->admitDirectlyIfRequested($staged, $scheduledTokenId, $executeAt);
         }
@@ -1364,7 +1364,7 @@ class StaffCippWriteToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageResetPasswordAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageResetPasswordAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         // requireTicket: TRUE — a proposal hangs off a ticket, unlike the direct path.
         $context = $this->context($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
@@ -1412,7 +1412,7 @@ class StaffCippWriteToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'person_id' => $person->person->id,
@@ -1480,7 +1480,7 @@ class StaffCippWriteToolExecutor
         ];
     }
 
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null, ?string $tokenLabel = null): array
     {
         if ($executeAt !== null && $scheduledTokenId === null) {
             return ['error' => 'execute_at_requires_mcp_token_lineage'];
@@ -1616,7 +1616,7 @@ class StaffCippWriteToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'person_id' => $person->person->id,
@@ -1819,7 +1819,7 @@ class StaffCippWriteToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageEmailSecurityAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageEmailSecurityAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $context = $this->emailSecurityContext($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -1896,7 +1896,7 @@ class StaffCippWriteToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'redacted_params' => $this->emailSecurityHashParams($params),
@@ -2613,7 +2613,7 @@ class StaffCippWriteToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageCreateUserAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageCreateUserAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $context = $this->createUserContext($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -2664,7 +2664,7 @@ class StaffCippWriteToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'license_type_id' => $license?->licenseType->id,
@@ -3203,7 +3203,7 @@ class StaffCippWriteToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageGroupMembershipAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageGroupMembershipAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $context = $this->groupMembershipContext($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -3268,7 +3268,7 @@ class StaffCippWriteToolExecutor
         $storedParams = array_merge($params, ['group_name' => $group['name'], 'group_type' => $group['type']]);
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'person_id' => $person->person->id,
@@ -3899,7 +3899,7 @@ class StaffCippWriteToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageLicenseTargetAction(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageLicenseTargetAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $context = $this->licenseTargetContext($tool, $arguments, $clientId, $actorLabel, requireTicket: true);
         if (isset($context['error'])) {
@@ -4006,7 +4006,7 @@ class StaffCippWriteToolExecutor
         ]);
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'person_id' => null,

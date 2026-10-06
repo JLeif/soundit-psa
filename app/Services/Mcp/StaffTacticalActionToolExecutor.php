@@ -190,14 +190,14 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null, ?string $tokenLabel = null): array
     {
         if (! TacticalConfig::isEnabled()) {
             return ['error' => 'Tactical RMM is disabled or not configured'];
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt);
+            $staged = $this->stageAction($name, $arguments, $clientId, $actorLabel, $scheduledTokenId, $executeAt, $tokenLabel);
 
             return $this->admitDirectlyIfRequested($staged, $scheduledTokenId, $executeAt);
         }
@@ -645,7 +645,7 @@ class StaffTacticalActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null): array
+    private function stageAction(string $tool, array $arguments, int $clientId, string $actorLabel, ?int $scheduledTokenId = null, ?ExecuteAt $executeAt = null, ?string $tokenLabel = null): array
     {
         if ($executeAt !== null && ($scheduledTokenId === null || ! ExecuteAt::supportsStaged($tool))) {
             return ['error' => $scheduledTokenId === null ? 'execute_at_requires_mcp_token_lineage' : ExecuteAt::refusalFor($tool)];
@@ -724,7 +724,7 @@ class StaffTacticalActionToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'asset_id' => $asset->id,

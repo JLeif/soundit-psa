@@ -243,7 +243,7 @@ class StaffControlDOnboardingToolExecutor
             return ['error' => 'ticket_id is required for staged Control D onboarding and must belong to this client'];
         }
 
-        return $this->stageProposal($client, $ticket, $reason, $actorLabel, $tool, null, (int) $staffToken->id);
+        return $this->stageProposal($client, $ticket, $reason, $actorLabel, $tool, null, (int) $staffToken->id, $staffToken->label);
     }
 
     /**
@@ -272,7 +272,7 @@ class StaffControlDOnboardingToolExecutor
             return ['error' => 'Technician kill-switch engaged; Control D onboarding refused'];
         }
 
-        return $this->stageProposal($client, $ticket, $reason, 'staff:'.$stager->id, self::STAGED_TOOL, (int) $stager->id, null);
+        return $this->stageProposal($client, $ticket, $reason, 'staff:'.$stager->id, self::STAGED_TOOL, (int) $stager->id, null, null);
     }
 
     // ── step derivation ─────────────────────────────────────────────────────────
@@ -333,7 +333,7 @@ class StaffControlDOnboardingToolExecutor
      * $stagerTokenId (token lane: the ai_actor token that staged) is set; approval
      * applies the lane's half of the two-person rule from whichever is present.
      */
-    private function stageProposal(Client $client, Ticket $ticket, string $reason, string $actorLabel, string $tool, ?int $stagerUserId, ?int $stagerTokenId): array
+    private function stageProposal(Client $client, Ticket $ticket, string $reason, string $actorLabel, string $tool, ?int $stagerUserId, ?int $stagerTokenId, ?string $tokenLabel): array
     {
         $clientId = (int) $client->id;
         $derived = $this->nextStep($client);
@@ -378,7 +378,7 @@ class StaffControlDOnboardingToolExecutor
 
         $proposedContent = $this->proposedContent($client, $step, $inputs)."\n".$this->fence->fence('AGENT SUPPLIED REASON', $reason);
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => self::TOOL,
             'redacted_params' => ['step' => $step, 'client_name' => (string) $client->name],

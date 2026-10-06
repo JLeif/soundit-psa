@@ -154,6 +154,20 @@ class HuntressResolveEscalationTest extends TestCase
         return TechnicianRun::findOrFail($this->decodedResult($response)['run_id']);
     }
 
+    /** Card tY39CHiq: the staged run records the caller's BARE token label beside the prefixed drafted_by. */
+    public function test_staged_run_records_the_bare_drafting_token_label(): void
+    {
+        $this->configureHuntress();
+        $this->configureAiActor();
+        $this->mockWriteClientNeverCalled();
+
+        $run = $this->stageRun($this->fixture(), $this->token(['huntress_resolve_escalation:staged']));
+
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+    }
+
     // ── surface & grants ────────────────────────────────────────────────────────
 
     public function test_registry_grantable_explicit_grant_only_and_dormant_without_write_key(): void

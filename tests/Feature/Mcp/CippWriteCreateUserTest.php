@@ -513,6 +513,9 @@ class CippWriteCreateUserTest extends TestCase
 
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
         $this->assertSame(self::STAGED_TOOL, $run->action_type);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
         $this->assertNotEmpty($run->proposed_meta['encrypted_payload'] ?? null);
         $this->assertSame([], $run->proposed_meta['sensitive_inputs']);
         // The cockpit readout names the exact identity being created and the

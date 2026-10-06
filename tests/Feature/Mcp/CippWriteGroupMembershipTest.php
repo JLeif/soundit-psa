@@ -494,6 +494,9 @@ class CippWriteGroupMembershipTest extends TestCase
         $run = TechnicianRun::findOrFail($this->decodedResult($response)['run_id']);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
         $this->assertSame('cipp_stage_set_group_membership', $run->action_type);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
 
         // The held payload stores only safe scalars: the group id, operation,
         // and the verified name/type snapshot for drift detection at approval.

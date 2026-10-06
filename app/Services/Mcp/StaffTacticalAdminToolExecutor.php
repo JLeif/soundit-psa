@@ -320,7 +320,7 @@ class StaffTacticalAdminToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, ?int $clientId, string $actorLabel): array
+    public function execute(string $name, array $arguments, ?int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         if (! TacticalConfig::isEnabled()) {
             return ['error' => 'Tactical RMM is disabled or not configured'];
@@ -328,10 +328,10 @@ class StaffTacticalAdminToolExecutor
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
             $staged = match ($name) {
-                'tactical_stage_reset_patch_policies' => $this->stagePatchPolicyReset($arguments, (int) $clientId, $actorLabel),
-                'tactical_stage_run_policy_task_all' => $this->stagePolicyTaskRunAll($arguments, (int) $clientId, $actorLabel),
-                'tactical_stage_remove_agent' => $this->stageAgentRemoval($arguments, (int) $clientId, $actorLabel),
-                'tactical_stage_set_client_custom_field' => $this->stageClientCustomField($arguments, (int) $clientId, $actorLabel),
+                'tactical_stage_reset_patch_policies' => $this->stagePatchPolicyReset($arguments, (int) $clientId, $actorLabel, $tokenLabel),
+                'tactical_stage_run_policy_task_all' => $this->stagePolicyTaskRunAll($arguments, (int) $clientId, $actorLabel, $tokenLabel),
+                'tactical_stage_remove_agent' => $this->stageAgentRemoval($arguments, (int) $clientId, $actorLabel, $tokenLabel),
+                'tactical_stage_set_client_custom_field' => $this->stageClientCustomField($arguments, (int) $clientId, $actorLabel, $tokenLabel),
                 default => ['error' => "Unknown Tactical staged admin tool: {$name}"],
             };
             // Same outcome recording as the PSA/Assistant executors: a returned
@@ -2286,7 +2286,7 @@ class StaffTacticalAdminToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stagePolicyTaskRunAll(array $arguments, int $clientId, string $actorLabel): array
+    private function stagePolicyTaskRunAll(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'tactical_stage_run_policy_task_all';
         $guard = $this->baseGuard($tool, $arguments, $clientId, $actorLabel);
@@ -2361,7 +2361,7 @@ class StaffTacticalAdminToolExecutor
 
         $proposedContent = "Stage Tactical policy task '{$resolved['task_name']}' to run on ALL affected agents under policy '{$resolved['policy_name']}'.\nReason: ".$guard['reason'];
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [
@@ -2668,7 +2668,7 @@ class StaffTacticalAdminToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stagePatchPolicyReset(array $arguments, int $clientId, string $actorLabel): array
+    private function stagePatchPolicyReset(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'tactical_stage_reset_patch_policies';
         $guard = $this->baseGuard($tool, $arguments, $clientId, $actorLabel);
@@ -2734,7 +2734,7 @@ class StaffTacticalAdminToolExecutor
 
         $proposedContent = 'Stage bulk reset Tactical patch policies for '.$scope['label'].".\nReason: ".$guard['reason'];
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => ['scope' => $scope['label']],
@@ -2831,7 +2831,7 @@ class StaffTacticalAdminToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageAgentRemoval(array $arguments, int $clientId, string $actorLabel): array
+    private function stageAgentRemoval(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'tactical_stage_remove_agent';
         $guard = $this->baseGuard($tool, $arguments, $clientId, $actorLabel);
@@ -2896,7 +2896,7 @@ class StaffTacticalAdminToolExecutor
             ."Last seen per Tactical: {$target['last_seen_label']}.\n"
             .'Reason: '.$guard['reason'];
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [
@@ -3197,7 +3197,7 @@ class StaffTacticalAdminToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageClientCustomField(array $arguments, int $clientId, string $actorLabel): array
+    private function stageClientCustomField(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'tactical_stage_set_client_custom_field';
         $guard = $this->baseGuard($tool, $arguments, $clientId, $actorLabel);
@@ -3281,7 +3281,7 @@ class StaffTacticalAdminToolExecutor
             ."A CLIENT custom field is read by Tactical automation across every agent under that client, so this is a fleet-wide change.\n"
             .'Reason: '.$guard['reason'];
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [

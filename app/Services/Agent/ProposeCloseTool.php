@@ -86,13 +86,20 @@ class ProposeCloseTool
      * Record a held proposal for remote MCP callers. This path deliberately
      * withholds confidence from the gate so the Auto band cannot fire, even if
      * an operator has configured propose_close_auto_threshold for in-process Chet.
+     *
+     * @param  array  $drafter  DraftedByToken::meta() keys from a staff MCP token caller (card tY39CHiq),
+     *                          written into proposed_meta so the drafting token can withdraw the run.
+     *                          Empty for every other caller, which records no drafter.
+     * @param  int|null  $runId  Set to the id of the run this call recorded (or of the identical run already
+     *                           awaiting approval), so the MCP response can carry the run_id that
+     *                           withdraw_staged_action takes. Left null when no run was recorded.
      */
-    public function executeHeld(Ticket $ticket, array $input): string
+    public function executeHeld(Ticket $ticket, array $input, array $drafter = [], ?int &$runId = null): string
     {
-        return $this->executeInternal($ticket, $input, correctionContext: null, forceHeld: true);
+        return $this->executeInternal($ticket, $input, correctionContext: null, forceHeld: true, drafter: $drafter, runId: $runId);
     }
 
-    private function executeInternal(Ticket $ticket, array $input, ?array $correctionContext, bool $forceHeld): string
+    private function executeInternal(Ticket $ticket, array $input, ?array $correctionContext, bool $forceHeld, array $drafter = [], ?int &$runId = null): string
     {
         $reason = trim((string) ($input['reason'] ?? ''));
         $confidence = (float) ($input['confidence'] ?? 0.0);
@@ -136,7 +143,7 @@ class ProposeCloseTool
 
         $hash = hash('sha256', 'propose_close:'.$ticket->id.':'.$reason);
 
-        $baseMeta = ['confidence' => $confidence];
+        $baseMeta = ['confidence' => $confidence, ...$drafter];
         if ($correctionContext !== null) {
             $baseMeta['informed_by_correction'] = $correctionContext;
         }
@@ -156,6 +163,7 @@ class ProposeCloseTool
                 'tokens_used' => 0,
             ],
         );
+        $runId = $run->id;
 
         // Idempotency guard (CO-4): an existing AwaitingApproval run for the same
         // content hash means we already proposed this — do NOT re-dispatch (which
@@ -167,7 +175,7 @@ class ProposeCloseTool
                 return "Already proposed closing ticket #{$ticket->id}; awaiting approval.";
             }
             // Revive a stale run so the cockpit can re-surface it.
-            $reviveMeta = ['confidence' => $confidence];
+            $reviveMeta = ['confidence' => $confidence, ...$drafter];
             if ($correctionContext !== null) {
                 $reviveMeta['informed_by_correction'] = $correctionContext;
             }

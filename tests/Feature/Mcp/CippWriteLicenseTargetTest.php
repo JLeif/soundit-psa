@@ -444,6 +444,11 @@ class CippWriteLicenseTargetTest extends TestCase
             ->where('action_type', 'cipp_stage_assign_tenant_user_license')->get();
         $this->assertCount(2, $runs);
         $this->assertCount(2, $runs->pluck('content_hash')->unique(), 'Two distinct targets produced one content hash.');
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        foreach ($runs as $run) {
+            $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+            $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+        }
     }
 
     /**

@@ -118,14 +118,14 @@ class StaffPsaActionToolExecutor
             'stage_email' => $this->stageTicketAction('stage_email', $arguments, $clientId, $actorLabel, sendsEmail: true, tokenLabel: $tokenLabel),
             'stage_public_note' => $this->stageTicketAction('stage_public_note', $arguments, $clientId, $actorLabel, sendsEmail: false, tokenLabel: $tokenLabel),
             'merge_ticket' => $this->mergeTicketNow($arguments, $clientId, $actorLabel),
-            'propose_merge' => $this->proposeMerge($arguments, $clientId, $actorLabel),
+            'propose_merge' => $this->proposeMerge($arguments, $clientId, $actorLabel, $tokenLabel),
             'rebind_tactical_asset' => $this->rebindTacticalAsset($arguments, $clientId, $actorLabel),
             'merge_asset' => $this->mergeAssetNow($arguments, $clientId, $actorLabel),
-            'propose_asset_merge' => $this->proposeAssetMerge($arguments, $clientId, $actorLabel),
+            'propose_asset_merge' => $this->proposeAssetMerge($arguments, $clientId, $actorLabel, $tokenLabel),
             'update_ticket' => $this->updateTicket($arguments, $clientId, $actorLabel),
             'set_ticket_status' => $this->setTicketStatus($arguments, $clientId, $actorLabel),
             'close_ticket' => $this->closeTicket($arguments, $clientId, $actorLabel),
-            'stage_close_ticket' => $this->stageClose($arguments, $clientId, $actorLabel),
+            'stage_close_ticket' => $this->stageClose($arguments, $clientId, $actorLabel, $tokenLabel),
             'assign_ticket' => $this->assignTicket($arguments, $clientId, $actorLabel),
             'assign_asset' => $this->assignAsset($arguments, $clientId, $actorLabel),
             'unassign_asset' => $this->unassignAsset($arguments, $clientId, $actorLabel),
@@ -576,7 +576,7 @@ class StaffPsaActionToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageClose(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel): array
+    private function stageClose(array $arguments, int|UnlinkedTicketScope $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         // Before ticketForClient() and before every write (Jeeves, crRnwaQJ 9/26 18:07 PT).
         if ($error = $this->refuseUndeclaredCloseArguments('stage_close_ticket', $arguments)) {
@@ -636,7 +636,7 @@ class StaffPsaActionToolExecutor
         $meta = [
             'confidence' => $confidence,
             'close_status' => $status->value,
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
         ];
 
         $run = TechnicianRun::firstOrCreate(
@@ -2990,7 +2990,7 @@ class StaffPsaActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function proposeMerge(array $arguments, int $clientId, string $actorLabel): array
+    private function proposeMerge(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $reason = $this->requiredString($arguments, 'reason');
         if ($reason === null) {
@@ -3020,7 +3020,7 @@ class StaffPsaActionToolExecutor
             'secondary_display_id' => $secondary->display_id,
             'primary_subject' => $primary->subject,
             'secondary_subject' => $secondary->subject,
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
         ];
 
         $run = TechnicianRun::firstOrCreate(
@@ -3090,7 +3090,7 @@ class StaffPsaActionToolExecutor
      * is NOT NULL, so the proposal anchors to a same-client ticket the work is
      * being done under.
      */
-    private function proposeAssetMerge(array $arguments, int $clientId, string $actorLabel): array
+    private function proposeAssetMerge(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $reason = $this->requiredString($arguments, 'reason');
         if ($reason === null) {
@@ -3150,7 +3150,7 @@ class StaffPsaActionToolExecutor
             'duplicate_asset_id' => $duplicate->id,
             'survivor_label' => $survivorLabel,
             'duplicate_label' => $duplicateLabel,
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
         ];
 
         $run = TechnicianRun::firstOrCreate(
