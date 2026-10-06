@@ -517,7 +517,9 @@ class MeshAddAllowRuleTest extends TestCase
         $cases = [
             'expired reap_failed' => [$past, MeshAllowRule::STATE_REAP_FAILED, $removal],
             'unexpired reap_failed' => [now()->addDays(30)->startOfSecond(), MeshAllowRule::STATE_REAP_FAILED, $removal],
-            'permanent reap_failed' => [null, MeshAllowRule::STATE_REAP_FAILED, $removal],
+            // Never reaped and, once its rule is gone, not removable by any
+            // re-staged removal: it must not be told to wait for one.
+            'permanent reap_failed' => [null, MeshAllowRule::STATE_REAP_FAILED, 'that record is PERMANENT (no expiry), so the expiry job never retries the removal and nothing in the PSA will clear this block on its own'],
             'expired unresolved' => [$past, MeshAllowRule::STATE_UNRESOLVED, 'Its expiry ('.$past->toIso8601String().') has passed, so the hourly expiry job does not settle it'],
         ];
 
@@ -532,6 +534,13 @@ class MeshAddAllowRuleTest extends TestCase
             $this->assertStringContainsString('PSA record #'.$row->id, $message, $label);
             $this->assertStringContainsString($expected, $message, $label);
             $this->assertStringNotContainsString('IDENTIFY', $message, $label);
+
+            if ($expiry === null) {
+                $this->assertStringNotContainsString($removal, $message, $label);
+                $this->assertStringContainsString('clear the PSA record by hand', $message, $label);
+            } else {
+                $this->assertStringNotContainsString('never retries the removal', $message, $label);
+            }
         }
     }
 

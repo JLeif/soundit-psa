@@ -249,6 +249,44 @@ class MeshAllowRuleReaperUnexpiredSettleTest extends TestCase
         $this->artisan('mesh:reap-allow-rules')->assertFailed();
     }
 
+    /**
+     * reapOne() never selects a PERMANENT row, so a permanent reap_failed row's
+     * note must not promise a removal the PSA will prove; a dated one's still
+     * may, because reapOne() retries it once its expiry passes.
+     */
+    public function test_a_permanent_reap_failed_row_is_not_told_the_psa_will_prove_a_removal(): void
+    {
+        $this->upstreamRule('bcbcbcbc-0000-4000-8000-000000000016', 'permfail@sender.example.test', 'PSA allow PERMFAIL01');
+        $this->upstreamRule('bcbcbcbc-0000-4000-8000-000000000017', 'datedfail@sender.example.test', 'PSA allow DATEDFAIL1');
+        $this->bindClient();
+        $permanent = $this->record('permfail@sender.example.test', 'PSA allow PERMFAIL01', [
+            'expires_at' => null,
+            'mesh_rule_id' => 'bcbcbcbc-0000-4000-8000-000000000016',
+            'state' => MeshAllowRule::STATE_REAP_FAILED,
+            'last_error' => null,
+        ]);
+        $dated = $this->record('datedfail@sender.example.test', 'PSA allow DATEDFAIL1', [
+            'mesh_rule_id' => 'bcbcbcbc-0000-4000-8000-000000000017',
+            'state' => MeshAllowRule::STATE_REAP_FAILED,
+            'last_error' => null,
+        ]);
+
+        $counts = app(MeshAllowRuleReaper::class)->reap();
+
+        $permanentNote = (string) $permanent->fresh()->last_error;
+        $this->assertSame(MeshAllowRule::STATE_REAP_FAILED, $permanent->fresh()->state);
+        $this->assertStringContainsString('never retries the removal', $permanentNote);
+        $this->assertStringNotContainsString('until the PSA proves a removal', $permanentNote);
+
+        $datedNote = (string) $dated->fresh()->last_error;
+        $this->assertSame(MeshAllowRule::STATE_REAP_FAILED, $dated->fresh()->state);
+        $this->assertStringContainsString('until the PSA proves a removal against this record', $datedNote);
+        $this->assertStringNotContainsString('never retries the removal', $datedNote);
+
+        $this->assertSame(2, $counts['unresolved']);
+        $this->assertNoMeshWrite();
+    }
+
     /** Two rules carry the row's sender and comment: never guess which one it recorded. */
     public function test_an_unexpired_row_with_two_matching_rules_is_not_settled_and_the_ambiguity_is_noted(): void
     {

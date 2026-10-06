@@ -779,10 +779,17 @@ class StaffMeshAdminToolExecutor
                 // records a removal that did not prove absence and is never
                 // settled by identifying it, and a dated row past its expiry
                 // is reapOne()'s to remove, so neither is told that
-                // identification lifts this block.
+                // identification lifts this block. A PERMANENT reap_failed row
+                // is not told to wait for a removal either: reapOne() never
+                // selects it, and once its rule is gone upstream a re-staged
+                // removal is refused at findRuleById, so only a human can
+                // clear that record.
                 .($unsettled->state === MeshAllowRule::STATE_REAP_FAILED
-                    ? 'An earlier attempt to remove that rule (by the expiry job or by an approved removal) did not prove it absent, so identifying it does not settle the record, '
-                        .'and this block stays until the PSA proves a removal against this record. Until then, '
+                    ? ($unsettled->isPermanent()
+                        ? 'An earlier attempt to remove that rule did not prove it absent, and that record is PERMANENT (no expiry), so the expiry job never retries the removal and nothing in the PSA will clear this block on its own. '
+                            .'Someone has to check that rule in the Mesh portal and, if it is gone, clear the PSA record by hand; checking the portal alone changes nothing here. In the meantime, '
+                        : 'An earlier attempt to remove that rule (by the expiry job or by an approved removal) did not prove it absent, so identifying it does not settle the record, '
+                            .'and this block stays until the PSA proves a removal against this record. Until then, ')
                     : ($unsettled->isPermanent()
                         ? ($unsettled->scope_proved
                             ? 'That record is PERMANENT (no expiry), so nothing in the PSA will ever remove it; its scope WAS confirmed when it was created, so the expiry job only has to IDENTIFY it, '
