@@ -774,8 +774,13 @@ PROMPT;
      * - noted_at = email->received_at — note appears at email arrival time, not processing time
      * - Closed excluded from auto-reopen — explicit team decision must not be overridden
      * - PendingThirdParty excluded — client reply does not mean the third party responded
+     *
+     * $predownloadedAttachments: null means no download was attempted, so this method downloads
+     * when the email has a graph_id. An array, even an empty one, means the caller already ran
+     * downloadEmailAttachments() for this email, so it is used as-is and nothing is fetched again
+     * (#5143: a refused or failed item must not be fetched and warned about twice).
      */
-    public function linkEmailToTicket(Email $email, Ticket $ticket, array $predownloadedAttachments = []): void
+    public function linkEmailToTicket(Email $email, Ticket $ticket, ?array $predownloadedAttachments = null): void
     {
         // Mark as read so the email UI unread count stays meaningful
         $email->update(['ticket_id' => $ticket->id, 'is_read' => true]);
@@ -787,8 +792,8 @@ PROMPT;
         // inline images, so gating on it loses screenshot-only emails.
         if ($body !== '' || $email->has_attachments || $email->graph_id) {
             $attachmentService = app(AttachmentService::class);
-            $emailAttachments = $predownloadedAttachments;
-            if (empty($emailAttachments) && $email->graph_id) {
+            $emailAttachments = $predownloadedAttachments ?? [];
+            if ($predownloadedAttachments === null && $email->graph_id) {
                 $graph = app(GraphClient::class);
                 $mailbox = Setting::getValue('graph_mailbox');
                 if ($mailbox) {
@@ -1139,7 +1144,9 @@ PROMPT;
             }
         }
 
-        $this->linkEmailToTicket($email, $ticket, $emailAttachments ?? []);
+        // null when no download was attempted above (no graph_id or no mailbox); an array
+        // (possibly empty) when it was, so linkEmailToTicket does not fetch again (#5143).
+        $this->linkEmailToTicket($email, $ticket, $emailAttachments ?? null);
 
         // psa-vggw: link the sender's device(s) onto the ticket at creation so it
         // carries real asset context from the start (held-first, fail-soft). Skips when
