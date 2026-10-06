@@ -789,9 +789,11 @@ class StaffMeshAdminToolExecutor
                 // (MeshAllowRuleReaper::settleUnexpired): a scope-proved row
                 // was only ever missing its id, so identifying it settles the
                 // row and lifts this block. A row whose scope was never proved
-                // is NOT settled by an id, so the expiry job never clears it;
-                // only a proved removal against the record (mesh_remove_allow_rule,
-                // once its upstream id is recorded) or a human does — and this
+                // is NOT settled by an id, so identifying it never clears it;
+                // only a proved removal against the record does (an approved
+                // mesh_remove_allow_rule, or the expiry job once the row has a
+                // date, e.g. from mesh_edit_allow_rule; both need its upstream
+                // id recorded), or a human — and this
                 // text must not send the approver away to wait for a change
                 // that is never coming.
                 //
@@ -815,8 +817,8 @@ class StaffMeshAdminToolExecutor
                         ? ($unsettled->scope_proved
                             ? 'That record is PERMANENT (no expiry), so the expiry job never removes it; its scope WAS confirmed when it was created, so the expiry job only has to IDENTIFY it, '
                                 .'and this block clears when it does. Until then, '
-                            : 'That record is PERMANENT (no expiry) and Mesh never confirmed its scope, so the expiry job never removes it and identifying it does not clear this block — recovering its id is not scope evidence. '
-                                .'This block clears when an approved mesh_remove_allow_rule proves that rule removed, which it can only do once the PSA has recorded the rule\'s upstream id; otherwise someone has to check that rule in the Mesh portal AND clear the PSA record by hand. Checking the portal alone changes nothing here. In the meantime, ')
+                            : 'That record is PERMANENT (no expiry) and Mesh never confirmed its scope, so the expiry job never removes it while it has no expiry, and identifying it does not clear this block — recovering its id is not scope evidence. '
+                                .'This block clears when the PSA proves that rule removed: an approved mesh_remove_allow_rule does that directly, and an approved mesh_edit_allow_rule that gives the rule a date leaves it to the hourly expiry job once that date passes. Both need the PSA to have recorded the rule\'s upstream id first; otherwise someone has to check that rule in the Mesh portal AND clear the PSA record by hand. Checking the portal alone changes nothing here. In the meantime, ')
                         : (! $unsettled->expires_at->isFuture()
                             ? 'Its expiry ('.$unsettled->expires_at->toIso8601String().') has passed, so the hourly expiry job does not settle it: it tries to identify and remove it, '
                                 .'and this block clears once that removal is proved. Until then, '
