@@ -1487,12 +1487,21 @@ class IntegrationsController extends Controller
                 'api_key' => MeshConfig::get('api_key'),
                 'base_url' => MeshConfig::get('base_url'),
             ]);
-            $service = new \App\Services\Mesh\MeshLicenseSyncService($client);
+            $service = app(\App\Services\Mesh\MeshLicenseSyncService::class, ['meshClient' => $client]);
             $result = $service->syncLicenses();
 
             return back()->with('success', "Mesh sync complete: {$result->created} created, {$result->updated} updated.");
         } catch (\Throwable $e) {
-            return back()->with('error', "Mesh sync failed: {$e->getMessage()}");
+            // Status only (C-56): a MeshClientException message quotes Guzzle's,
+            // which carries the request URI, the host and a summary of the
+            // vendor's body. Any other failure is named by class in the log only.
+            if ($e instanceof \App\Services\Mesh\MeshClientException) {
+                return back()->with('error', 'Mesh sync failed: '.$e->statusPhrase('the license sync').'.');
+            }
+
+            Log::error('[MeshSync] Sync failed with an unexpected error ('.$e::class.')');
+
+            return back()->with('error', 'Mesh sync failed with an unexpected error; the PSA log names its class.');
         }
     }
 
