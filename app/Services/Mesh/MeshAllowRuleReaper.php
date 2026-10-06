@@ -20,11 +20,14 @@ use Illuminate\Support\Facades\Log;
  * retried, because "we could not tell" and "it is gone" are different answers
  * and only one of them means a customer's mail filtering is back to normal.
  *
- * #1133: a rule the caller asked to be permanent has a NULL `expires_at` and
- * is never selected for reaping (see MeshAllowRule::scopeReapable). That is
- * the whole mechanism for "permanent" — there is no flag and no far-future
- * sentinel — so this class NEVER deletes such a rule; removal is by hand in
- * the Mesh portal until mesh_remove_allow_rule exists.
+ * #1133: a permanent rule has a NULL `expires_at` and is never selected for
+ * reaping (see MeshAllowRule::scopeReapable). Permanent is what a caller gets
+ * by passing `never`, and also, since the owner's 2026-10-05 ruling, by
+ * giving no expiry at all: it is the omitted-key default. NULL is the whole
+ * mechanism for "permanent" — there is no flag and no far-future sentinel —
+ * so this class NEVER deletes such a rule. It ends only when someone removes
+ * it (mesh_remove_allow_rule) or gives it a date (mesh_edit_allow_rule),
+ * after which it is an ordinary dated row here.
  *
  * Excluded from reaping is not abandoned, though. An UNEXPIRED row that landed
  * unresolved (or reap_failed) is identified here by settleUnexpired(). That
@@ -47,7 +50,8 @@ class MeshAllowRuleReaper
 {
     /**
      * Rows processed per run. A ceiling, not a target — each row costs a
-     * DELETE plus a paged list read, and the reaper runs daily, so there is no
+     * DELETE plus a paged list read, and the reaper runs hourly
+     * (routes/console.php: mesh:reap-allow-rules ->hourly()), so there is no
      * value in letting one invocation walk an unbounded backlog inside a
      * scheduled window.
      */

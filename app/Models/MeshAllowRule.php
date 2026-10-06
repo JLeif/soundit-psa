@@ -84,8 +84,10 @@ class MeshAllowRule extends Model
     }
 
     /**
-     * A rule the caller asked to be permanent (#1133). NULL `expires_at` is
-     * the only representation of that, and it is deliberately a null rather
+     * A permanent rule (#1133): one whose caller passed `never`, or, since the
+     * owner's 2026-10-05 ruling, simply gave no expiry (permanent is the
+     * omitted-key default). NULL `expires_at` is the only representation of
+     * that, and it is deliberately a null rather
      * than a far-future date: a sentinel date is a lie the reaper would one
      * day act on, and it would read as an ordinary expiry on the approval
      * card.
