@@ -227,7 +227,9 @@ class MeshWriteClient
      * LIST_PAGE_SIZE). It ends on an empty page or when neither signal asks
      * for more. A walk that cannot be shown complete THROWS rather than
      * returning what it has: reaching LIST_PAGE_CEILING with the vendor still
-     * asking for more, or ending with fewer rows seen than `count`.
+     * asking for more, ending with fewer rows seen than `count`, or any page
+     * whose body carries no `results` list (another envelope, or a body that
+     * is not JSON, which request() decodes to an empty array).
      *
      * @return array<int, array<string, mixed>>
      *
@@ -258,7 +260,13 @@ class MeshWriteClient
             }
 
             $results = $response['results'] ?? null;
-            if (! is_array($results) || $results === []) {
+            if (! is_array($results)) {
+                throw new MeshClientException(
+                    "Mesh rule list read got a page without a results list after {$seen} rows; the list was not used."
+                );
+            }
+
+            if ($results === []) {
                 $complete = true;
                 break;
             }

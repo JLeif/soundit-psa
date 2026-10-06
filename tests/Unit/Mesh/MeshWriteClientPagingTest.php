@@ -280,6 +280,43 @@ class MeshWriteClientPagingTest extends TestCase
         $this->assertCount(3, $this->history);
     }
 
+    /**
+     * A 200 whose body carries no `results` list (another envelope, a bare
+     * array of rows, or a body that is not JSON) is an incomplete read: it
+     * throws on the first page and on a later one, and is never handed back
+     * as an empty or truncated list.
+     */
+    public function test_a_page_without_a_results_list_throws_rather_than_ending_the_walk(): void
+    {
+        $cases = [
+            'first page, other envelope' => [new Response(200, [], json_encode(['detail' => 'synthetic-body']))],
+            'first page, bare array of rows' => [new Response(200, [], json_encode([
+                self::rule('bare-rule', 'tenant-T', 'b@sender.example', 'PSA allow BARE000001'),
+            ]))],
+            'first page, not json' => [new Response(200, [], '<html>synthetic-body</html>')],
+            'second page, not json' => [
+                self::page(self::others(100, 'p1'), null, sprintf(self::NEXT, 100)),
+                new Response(200, [], '<html>synthetic-body</html>'),
+            ],
+        ];
+
+        foreach ($cases as $case => $queue) {
+            $client = $this->client($queue);
+
+            $returned = null;
+            try {
+                $returned = $client->listCustomerRules('tenant-T');
+                $this->fail("{$case}: a page without a results list must throw");
+            } catch (MeshClientException $e) {
+                $this->assertStringContainsString('without a results list', $e->getMessage(), $case);
+                $this->assertStringNotContainsString('synthetic-body', $e->getMessage(), "{$case}: no vendor body in the message");
+            }
+
+            $this->assertNull($returned, $case);
+            $this->assertCount(count($queue), $this->history, $case);
+        }
+    }
+
     /** The same incomplete read reaches findRuleByComment as a throw, not a null "not found". */
     public function test_find_by_comment_propagates_an_incomplete_read_rather_than_answering_not_found(): void
     {
