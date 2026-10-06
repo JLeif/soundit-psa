@@ -347,6 +347,8 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertFlashHasNoClientData($flash, [$a, $b]);
         $this->logsContaining('[MeshSync] Failed for client '.$a->id.':');
         $this->logsContaining('[MeshSync] Failed for client '.$b->id.':');
+        $this->logsContaining('[MeshClient] GET api/customers/<customer> failed');
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     public function test_the_sync_button_flashes_a_failure_when_one_of_two_clients_fails(): void
@@ -365,6 +367,8 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertFlashHasNoClientData($flash, [$ok, $bad]);
         $this->assertSame(1, \App\Models\License::where('client_id', $ok->id)->count(), 'positive control: the healthy client synced');
         $this->logsContaining('[MeshSync] Failed for client '.$bad->id.':');
+        $this->logsContaining('[MeshClient] GET api/customers/<customer> failed');
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     public function test_the_sync_button_flashes_success_unchanged_when_no_client_fails(): void
@@ -601,8 +605,9 @@ class MeshC56ReadSitesTest extends TestCase
     /**
      * Also holds over ALL records together, MeshClient's own failure line
      * included: that line logs a customer read's path as
-     * api/customers/<customer> (#5298/#5305, #5323), so the Mesh customer id
-     * is checked everywhere.
+     * api/customers/<customer> (#5298/#5305, #5323). Both Mesh customer ids
+     * used here (MESH_ID, MESH_ID_2) are checked, each raw, dashless and
+     * upper-cased (raw and dashless also case-insensitively) (#5339).
      */
     private function assertNoVendorText(string $text, string $where): void
     {
@@ -610,7 +615,12 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertStringNotContainsString(self::$queryMarker, $text, "{$where}: request query leaked");
         $this->assertStringNotContainsString(self::HOST, $text, "{$where}: request host leaked");
         $this->assertStringNotContainsString(self::$apiKey, $text, "{$where}: API key leaked");
-        $this->assertStringNotContainsString(self::MESH_ID, $text, "{$where}: request path (Mesh id) leaked");
+        foreach ([self::MESH_ID, self::MESH_ID_2] as $id) {
+            foreach (['raw' => $id, 'dashless' => str_replace('-', '', $id)] as $form => $value) {
+                $this->assertStringNotContainsStringIgnoringCase($value, $text, "{$where}: request path (Mesh id, {$form}) leaked");
+            }
+            $this->assertStringNotContainsString(strtoupper($id), $text, "{$where}: request path (Mesh id, upper-cased) leaked");
+        }
         $this->assertStringNotContainsString('_size', $text, "{$where}: request query leaked");
     }
 

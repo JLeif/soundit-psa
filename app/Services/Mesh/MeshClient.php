@@ -73,7 +73,11 @@ class MeshClient
      * status and exception class only: Guzzle's message quotes the request
      * URI and a summary of the vendor's response body (C-56), and the path
      * after customers/ carries a client's Mesh customer id (#5298/#5305,
-     * #5323). The request and the rethrown exception are unchanged.
+     * #5323). Only that log line is redacted. The request is sent to the
+     * real endpoint, and the rethrown MeshClientException is NOT redacted:
+     * its message is Guzzle's, which can quote the full request URI
+     * (customer id included) and vendor body text, so never log
+     * $e->getMessage() from it or from its previous exception.
      */
     private function request(string $method, string $endpoint, array $options = []): array
     {
