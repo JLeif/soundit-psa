@@ -85,7 +85,7 @@ class MeshC56ReadSitesTest extends TestCase
         $rand = bin2hex(random_bytes(4));
         self::$marker = 'SYNTHETIC-VENDOR-BODY-'.$rand;
         self::$queryMarker = 'SYNTHETIC-QUERY-'.$rand;
-        self::$apiKey = 'SYNTHETIC-KEY-'.$rand;
+        self::$apiKey = sprintf('SYNTHETIC-KEY-%s', $rand);
     }
 
     public static function tearDownAfterClass(): void
