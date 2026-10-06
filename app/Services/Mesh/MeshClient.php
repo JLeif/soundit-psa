@@ -68,10 +68,12 @@ class MeshClient
     /**
      * Internal request method with auth header.
      * API-KEY header is added here — never logged. A failure is logged by
-     * method, endpoint path (no query, the customer segment as {id}), HTTP
+     * method, endpoint path (see logPath(): no scheme, host or query, and
+     * everything after a customers/ segment replaced by <customer>), HTTP
      * status and exception class only: Guzzle's message quotes the request
-     * URI and a summary of the vendor's response body (C-56), and the customer
-     * segment is a client's Mesh customer id (#5298/#5305).
+     * URI and a summary of the vendor's response body (C-56), and the path
+     * after customers/ carries a client's Mesh customer id (#5298/#5305,
+     * #5323). The request and the rethrown exception are unchanged.
      */
     private function request(string $method, string $endpoint, array $options = []): array
     {
@@ -95,14 +97,24 @@ class MeshClient
     }
 
     /**
-     * The endpoint as logged: no query string, and the segment after
-     * api/customers/ (a Mesh customer id) replaced by {id}. Only the log
-     * line uses this; the request goes to the real endpoint.
+     * The endpoint as logged. Cut at the first '?' or '#' (strcspn, not
+     * strtok, so a leading '?' still drops the query), strip any scheme and
+     * host (or a scheme-relative //host), then replace EVERYTHING after the
+     * first customers/ segment, at any depth (api/customers/,
+     * api/v2/customers/, api/partners/x/customers/, an absolute URL), with
+     * the literal <customer>: the Mesh customer id and every segment after
+     * it, so an id containing '/' and sub-resources are covered too (#5323).
+     * <customer> is not PSR-3 {placeholder} syntax, so a channel with
+     * replace_placeholders or PsrLogMessageProcessor cannot substitute a
+     * context value into it (#5329). A bare api/customers/ is kept as is.
+     * Only the log line uses this; the request goes to the real endpoint.
      */
     private static function logPath(string $endpoint): string
     {
-        $path = strtok($endpoint, '?') ?: '';
+        $cut = strcspn($endpoint, '?#');
+        $path = substr($endpoint, 0, $cut);
+        $path = (string) preg_replace('#^(?:[a-z][a-z0-9+.\-]*:)?//[^/]*#i', '', $path);
 
-        return (string) preg_replace('#^(/?api/customers/)[^/]+#', '$1{id}', $path);
+        return (string) preg_replace('#(^|/)(customers/).+$#is', '$1$2<customer>', $path);
     }
 }
