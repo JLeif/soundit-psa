@@ -10,6 +10,7 @@ use App\Models\Setting;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
+use App\Services\Assistant\AssistantToolExecutor;
 use App\Services\Mcp\DraftedByToken;
 use App\Support\McpConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -21,7 +22,8 @@ use Tests\TestCase;
  * Card tY39CHiq: the PSA action staging sites that were missing it now record
  * proposed_meta.drafted_by_token, the caller's BARE token label, beside the
  * prefixed drafted_by. These are merge_ticket (propose_merge), merge_asset
- * (propose_asset_merge) and the staged close_ticket (propose_close). So the
+ * (propose_asset_merge), the staged close_ticket (propose_close) and the general
+ * propose_close tool (also propose_close). So the
  * drafting token can withdraw them through withdraw_staged_action, and no
  * other token can.
  *
@@ -64,6 +66,7 @@ class DraftedByTokenStagingTest extends TestCase
             'merge_ticket (proposeMerge)' => ['merge_ticket:staged', 'merge_ticket', 'propose_merge'],
             'merge_asset (proposeAssetMerge)' => ['merge_asset:staged', 'merge_asset', 'propose_asset_merge'],
             'close_ticket staged (stageClose)' => ['close_ticket:staged', 'close_ticket', 'propose_close'],
+            'propose_close (general tool)' => ['propose_close', 'propose_close', 'propose_close'],
         ];
     }
 
@@ -95,6 +98,11 @@ class DraftedByTokenStagingTest extends TestCase
                 'ticket_id' => $primary->id,
                 'resolution_summary' => 'Held: propose closing this stale ticket.',
                 'reason' => 'Held: propose closing this stale ticket.',
+            ],
+            'propose_close' => [
+                'ticket_id' => $primary->id,
+                'reason' => 'No client reply in 30 days; the printer was confirmed fixed.',
+                'confidence' => 0.8,
             ],
         };
 
@@ -130,6 +138,22 @@ class DraftedByTokenStagingTest extends TestCase
         $mine = $this->callTool($drafter, 'withdraw_staged_action', ['run_id' => $run->id, 'reason' => 'Wrong pair; restaging.']);
         $this->assertFalse((bool) $mine->json('result.isError'), (string) $mine->json('result.content.0.text'));
         $this->assertSame(TechnicianRunState::Withdrawn, $run->fresh()->state);
+    }
+
+    /** A tokenless propose_close (the in-app assistant) records no drafter, so no token can withdraw it. */
+    public function test_a_tokenless_propose_close_records_no_drafter(): void
+    {
+        $ticket = Ticket::factory()->for(Client::factory())->create([
+            'status' => TicketStatus::PendingClient, 'closed_at' => null, 'subject' => 'Printer offline',
+        ]);
+
+        $result = (new AssistantToolExecutor(clientId: $ticket->client_id))
+            ->execute('propose_close', ['ticket_id' => $ticket->id, 'reason' => 'No client reply in 30 days; the printer was confirmed fixed.', 'confidence' => 0.8]);
+        $this->assertTrue((bool) ($result['success'] ?? false), (string) json_encode($result));
+
+        $run = TechnicianRun::where('ticket_id', $ticket->id)->where('action_type', 'propose_close')->sole();
+        $this->assertArrayNotHasKey('drafted_by', $run->proposed_meta);
+        $this->assertArrayNotHasKey('drafted_by_token', $run->proposed_meta);
     }
 
     /** The helper never invents a label: absent or empty leaves the key out, so no token can withdraw. */

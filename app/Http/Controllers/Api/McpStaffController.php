@@ -1509,7 +1509,9 @@ class McpStaffController extends Controller
                 $result = $this->requestTool($arguments, $request);
             } else {
                 $userId = $this->userIdForToolCall($request, (string) $name);
-                $executor = new AssistantToolExecutor(ticket: null, clientId: $clientId, userId: $userId);
+                // card tY39CHiq: the drafter labels let a held propose_close record drafted_by_token,
+                // so the drafting token can withdraw it.
+                $executor = new AssistantToolExecutor(ticket: null, clientId: $clientId, userId: $userId, actorLabel: $this->actorLabel($request), tokenLabel: $this->tokenLabel($request));
                 $result = $executor->execute($name, is_array($arguments) ? $arguments : []);
             }
             // The direct lane's own message is written by ScheduledDirectAdmission (it names

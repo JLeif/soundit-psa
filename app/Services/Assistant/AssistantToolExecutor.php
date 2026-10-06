@@ -32,6 +32,7 @@ use App\Services\Cipp\CippMcpAuthException;
 use App\Services\Cipp\CippMcpToolRelay;
 use App\Services\Cipp\HandlesCippTools;
 use App\Services\Level\LevelClient;
+use App\Services\Mcp\DraftedByToken;
 use App\Services\Mesh\MeshReadTools;
 use App\Services\Ninja\NinjaClient;
 use App\Services\Offboarding\DeviceAbsenceVerifier;
@@ -70,11 +71,19 @@ class AssistantToolExecutor
 
     private ?int $userId;
 
-    public function __construct(?Ticket $ticket = null, ?int $clientId = null, ?int $userId = null)
+    // The staff MCP caller's drafter labels (card tY39CHiq): set only by McpStaffController, so a
+    // held propose_close records proposed_meta.drafted_by_token; every other caller leaves them null.
+    private ?string $actorLabel;
+
+    private ?string $tokenLabel;
+
+    public function __construct(?Ticket $ticket = null, ?int $clientId = null, ?int $userId = null, ?string $actorLabel = null, ?string $tokenLabel = null)
     {
         $this->ticket = $ticket;
         $this->clientId = $ticket?->client_id ?? $clientId;
         $this->userId = $userId;
+        $this->actorLabel = $actorLabel;
+        $this->tokenLabel = $tokenLabel;
 
         if ($this->clientId) {
             $this->client = $ticket?->client ?? Client::find($this->clientId);
@@ -761,7 +770,7 @@ class AssistantToolExecutor
         $message = app(ProposeCloseTool::class)->executeHeld($ticket, [
             'reason' => $reason,
             'confidence' => $confidence,
-        ]);
+        ], $this->actorLabel !== null ? DraftedByToken::meta($this->actorLabel, $this->tokenLabel) : []);
 
         return [
             'success' => true,
