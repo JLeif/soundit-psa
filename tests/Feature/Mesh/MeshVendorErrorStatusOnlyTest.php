@@ -50,8 +50,8 @@ use Tests\TestCase;
  *
  * Card FLzMLDxF adds, in the modes each site can reach (an HTTP status, a
  * status-less timeout, a never-sent connect failure):
- *   - the add path: both refusal messages, the three 'Mesh never answered
- *     the create (…)' messages, the failed confirming re-read, and the
+ *   - the add path: both refusal messages, the three 'Mesh did not
+ *     acknowledge the create (…)' messages, the failed confirming re-read, and the
  *     'Rule id re-read failed' last_error;
  *   - remove and edit execution: $deleteError and $patchError, in both the
  *     success and the fault message;
@@ -370,7 +370,8 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
     /**
      * Both determinate-refusal arms of the create: the 400 ('Mesh refused the
      * allow rule') and every other answer that cannot sit on a committed rule
-     * ('… before it was created'), including the never-sent connect failure.
+     * ('The allow rule was not created'), including the never-sent connect
+     * failure, where Mesh refused nothing and the text must not say it did.
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('refusedCreates')]
     public function test_a_refused_create_reports_the_status_only(string $mode): void
@@ -386,7 +387,11 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->assertSame(0, MeshAllowRule::count(), 'still a determinate refusal: no phantom row');
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'still approvable after correction');
         $summary = (string) TechnicianActionLog::where('action_type', 'mesh_add_allow_rule')->where('result_status', 'rejected')->sole()->summary;
-        $this->assertStringContainsString($mode === '400' ? 'Mesh refused the allow rule: ' : 'Mesh refused the allow rule before it was created: ', $summary);
+        $this->assertStringContainsString($mode === '400' ? 'Mesh refused the allow rule: ' : 'The allow rule was not created: ', $summary);
+        if ($mode !== '400') {
+            // G-14: on the never-sent arm Mesh received nothing, so no arm but the 400 claims a refusal.
+            $this->assertStringNotContainsString('refused', $summary);
+        }
         $this->assertStatusOnly($summary, 'create refusal audit');
         if ($mode === 'bare-connect') {
             $this->assertStringContainsString('nothing was sent', $summary, 'the never-sent arm still says so');
@@ -408,7 +413,7 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
     }
 
     /**
-     * 'Mesh never answered the create (…)' with the rule found, and with the
+     * 'Mesh did not acknowledge the create (…)' with the rule found, and with the
      * rule not found because the re-read failed too ('that read failed too').
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('unansweredCreates')]
@@ -424,7 +429,9 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
 
         $error = (string) session('error');
-        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('Mesh did not acknowledge the create (', $error);
+        // G-14: on the 5xx arm Mesh DID answer, so the text must not deny it.
+        $this->assertStringNotContainsString('never answered', $error);
         $this->assertStringContainsString('found the rule live', $error, 'positive control: the found arm');
         $this->assertStatusOnly($error, 'unanswered create, found');
         $record = MeshAllowRule::sole();
@@ -446,14 +453,15 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
 
         $error = (string) session('error');
-        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('Mesh did not acknowledge the create (', $error);
+        $this->assertStringNotContainsString('never answered', $error);
         $this->assertStringContainsString('(that read failed too: ', $error, 'positive control: the re-read-failed arm');
         $this->assertStringContainsString('UNMEASURED', $error);
         $this->assertStatusOnly($error, 'unanswered create, re-read failed');
         $this->assertStatusOnly((string) MeshAllowRule::sole()->last_error, 'unmeasured create last_error');
     }
 
-    /** 'Mesh never answered the create (…), and the PSA record … could not be written'. */
+    /** 'Mesh did not acknowledge the create (…), and the PSA record … could not be written'. */
     #[\PHPUnit\Framework\Attributes\DataProvider('unansweredCreates')]
     public function test_an_unanswered_create_with_an_unwritable_record_reports_the_status_only(string $mode): void
     {
@@ -468,7 +476,8 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
 
         $error = (string) session('error');
-        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('Mesh did not acknowledge the create (', $error);
+        $this->assertStringNotContainsString('never answered', $error);
         $this->assertStringContainsString('could not be written', $error, 'positive control: the record-unwritable arm');
         $this->assertStatusOnly($error, 'unanswered create, record unwritable');
         $this->assertSame(0, MeshAllowRule::count());

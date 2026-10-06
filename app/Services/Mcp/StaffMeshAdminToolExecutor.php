@@ -886,7 +886,9 @@ class StaffMeshAdminToolExecutor
             // as a 400 does.
             // Status only (C-56): the exception message can quote the vendor's
             // response body and the request URI.
-            $message = 'Mesh refused the allow rule before it was created: '.$e->statusPhrase('the create');
+            // Not "Mesh refused": on the never-sent connect arm and the
+            // pre-flight guards Mesh received nothing (G-14).
+            $message = 'The allow rule was not created: '.$e->statusPhrase('the create');
             $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
 
             return ['error' => $message];
@@ -1130,7 +1132,7 @@ class StaffMeshAdminToolExecutor
             // be reported as an error, because an error hands the approver a
             // button that writes a second rule for the same sender. Spent,
             // loud, and handed to a human with the match key.
-            $message = 'Mesh never answered the create ('.$error->statusPhrase('the create')."), and the PSA record for '{$target['sender']}' could not be written"
+            $message = 'Mesh did not acknowledge the create ('.$error->statusPhrase('the create')."), and the PSA record for '{$target['sender']}' could not be written"
                 .($ruleId !== null ? " (a re-read found the rule live upstream as '{$ruleId}')" : '')
                 .'. Nothing will expire it. Look for a rule with the comment '.$comment." on this client's Mesh tenant and remove it by hand.";
             $this->auditAttempt($tool, 'executed_with_fault', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
@@ -1145,13 +1147,13 @@ class StaffMeshAdminToolExecutor
         }
 
         $message = $ruleId !== null
-            ? 'Mesh never answered the create ('.$error->statusPhrase('the create')."), but a re-read of this client's tenant found the rule live for '{$target['sender']}'. "
+            ? 'Mesh did not acknowledge the create ('.$error->statusPhrase('the create')."), but a re-read of this client's tenant found the rule live for '{$target['sender']}'. "
                 .'It is recorded (PSA record #'.$record->id.') and '
                 .($expiresAt === null
                     ? 'it is PERMANENT — the PSA will never remove it. '
                     : 'the PSA will remove it at expiry. ')
                 .'There was no create response, so its scope was never confirmed — check it in the Mesh portal.'
-            : 'Mesh never answered the create ('.$error->statusPhrase('the create')."), and a re-read of this client's tenant did not find the rule"
+            : 'Mesh did not acknowledge the create ('.$error->statusPhrase('the create')."), and a re-read of this client's tenant did not find the rule"
                 .($rereadError !== null ? ' (that read failed too: '.$rereadError.')' : '')
                 .'. Whether the rule was created is UNMEASURED, so it is recorded unresolved (PSA record #'.$record->id.') and '
                 .($expiresAt === null
