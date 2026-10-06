@@ -110,6 +110,9 @@ class McpToolRegistry
             $general = array_values(array_filter($general, fn (array $t): bool => ! isset($rawFileNames[$t['name']])));
 
             $bridge = self::shape(OperatorBridgeTools::definitions());
+            // Agent-owned asset watch alerts (card K3VEcxtw): self-scoped writes on the
+            // caller's own watch rows, explicit grant only, own sensitive tier.
+            $assetWatch = self::shape(self::assetWatchTools());
             $wikiWrites = self::shape([self::wikiAddFactTool(), self::wikiCreatePageTool(), self::wikiUpdatePageTool()]);
             $cippWrites = self::shape(self::withoutStagedAliases(array_merge(
                 self::dynamicCippWriteTools(),
@@ -155,6 +158,7 @@ class McpToolRegistry
                 'calendar' => ['label' => 'Calendar & scheduling reads (sensitive)', 'sensitive' => true, 'tools' => $calendar],
                 'calendar_write' => ['label' => 'Calendar & scheduling writes (sensitive)', 'sensitive' => true, 'tools' => $calendarWrite],
                 'bridge' => ['label' => 'Operator bridge (sensitive)', 'sensitive' => true, 'tools' => $bridge],
+                'asset_watch' => ['label' => 'Asset watch alerts — own watches only (sensitive)', 'sensitive' => true, 'tools' => $assetWatch],
             ];
         });
 
@@ -221,6 +225,9 @@ class McpToolRegistry
                 'controld_onboarding' => ['controld', 'write', 'Client onboarding', 2],
                 'wiki_write' => ['wiki', 'write', 'Write', 2],
                 'bridge' => ['teams', 'bridge', 'Operator bridge', 2],
+                // Its own tier on PSA Core, never the plain Read tier: create/remove are
+                // writes (on the caller's own watch rows only).
+                'asset_watch' => ['psa', 'asset_watch', 'Asset watch alerts', 6],
             ];
 
             /** @var array<string, array<string, array{label: string, sensitive: bool, order: int, tools: array<int, array<string, mixed>>}>> $buckets */
@@ -1279,6 +1286,19 @@ class McpToolRegistry
             self::unlinkAssetUserTool(),
             self::setPrimaryAssetUserTool(),
         ];
+    }
+
+    /**
+     * Agent-owned asset watch alerts (card K3VEcxtw). Registered in their own
+     * sensitive asset_watch group (explicit grant only) and published live only
+     * while Tactical is enabled ({@see McpToolSurface}), since v1 watches cover
+     * Tactical-maintained assets only.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function assetWatchTools(): array
+    {
+        return \App\Services\Mcp\AssetWatchTool::definitions();
     }
 
     /**

@@ -43,9 +43,15 @@ class McpSink
         }
     }
 
+    /**
+     * Context keys an asset.watch_fired inbox row carries to its owner (card
+     * K3VEcxtw). Every other type keeps the reference-only payload unchanged.
+     */
+    private const ASSET_WATCH_CONTEXT_KEYS = ['watch_id', 'state', 'last_seen', 'age_seconds', 'observed_by'];
+
     private function payload(SignalEvent $event): array
     {
-        return [
+        $payload = [
             'event' => $event->type_key,
             'entity' => [
                 'type' => $event->entity_type,
@@ -54,6 +60,13 @@ class McpSink
             'category' => $event->context['category'] ?? null,
             'occurred_at' => $event->occurred_at->toIso8601String(),
         ];
+
+        if ($event->type_key === 'asset.watch_fired') {
+            $context = is_array($event->context) ? $event->context : [];
+            $payload['watch'] = array_intersect_key($context, array_flip(self::ASSET_WATCH_CONTEXT_KEYS));
+        }
+
+        return $payload;
     }
 
     private function postDoorbell(SignalDestination $destination): void

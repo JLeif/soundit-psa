@@ -71,6 +71,10 @@ class McpToolSurface
      */
     public static function liveGeneralToolDefinitions(): array
     {
+        // Read once: the Tactical admin tools and the asset watch tools (card
+        // K3VEcxtw) gate on the same predicate, and tools/list assembles this twice.
+        $tacticalLive = \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable();
+
         return array_merge(
             AssistantToolDefinitions::getTools(hasClient: false),
             [
@@ -93,7 +97,7 @@ class McpToolSurface
             // (no-client) surface. OFF=OFF: gated on CalendarConfig::isAvailable() (switched
             // on AND Graph configured), the same predicate list_tool_surface classifies against.
             CalendarConfig::isAvailable() ? McpToolRegistry::calendarTools() : [],
-            \App\Services\Triage\TriageToolDefinitions::isTacticalAvailable() ? McpToolRegistry::tacticalAdminTools() : [],
+            $tacticalLive ? McpToolRegistry::tacticalAdminTools() : [],
             ChetDataSurfaceTools::generalTools(),
             OperatorBridgeTools::definitions(),
             // HelpDesk Buttons report (card c5JaSetu). OFF=OFF: live only when the
@@ -101,6 +105,10 @@ class McpToolSurface
             // HelpDesk Buttons card they sit on is switched on; otherwise it
             // classifies as unavailable_config. Declares its own required client_id.
             HdbPortalConfig::isConfigured() && T2TConfig::isEnabled() ? McpToolRegistry::hdbReportTools() : [],
+            // Asset watch alerts (card K3VEcxtw). v1 covers Tactical assets only, so
+            // OFF=OFF: live only while Tactical is enabled, the predicate the poller
+            // and its schedule gate on. Declares its own client_id where it takes one.
+            $tacticalLive ? McpToolRegistry::assetWatchTools() : [],
         );
     }
 

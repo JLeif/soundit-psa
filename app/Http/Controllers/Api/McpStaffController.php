@@ -837,6 +837,9 @@ class McpStaffController extends Controller
         if ($this->psaRecordsRequiresClientId((string) $name) && $clientId !== null) {
             $auditArguments['client_id'] = $clientId;
         }
+        if (\App\Services\Mcp\AssetWatchTool::handles((string) $name) && $clientId !== null) {
+            $auditArguments['client_id'] = $clientId;
+        }
 
         // A present-but-malformed scope on a fleet-capable read is a caller error,
         // and the failure mode of guessing is cross-tenant disclosure. Refuse and
@@ -1295,6 +1298,18 @@ class McpStaffController extends Controller
                 // Card c5JaSetu: client_id was lifted out above; the tool fences the
                 // ticket to it before the report client is called.
                 $result = app(\App\Services\Mcp\HdbReportTool::class)->execute($arguments, $clientId);
+            } elseif (\App\Services\Mcp\AssetWatchTool::handles((string) $name)) {
+                // Card K3VEcxtw: the owner is the authenticated token's bare label,
+                // never input; client_id was lifted out above and is passed with
+                // whether one was supplied, so a malformed id is refused.
+                $result = app(\App\Services\Mcp\AssetWatchTool::class)->execute(
+                    (string) $name,
+                    $arguments,
+                    $clientId,
+                    $hasClientIdArgument,
+                    $this->tokenLabel($request),
+                    $this->actorLabel($request),
+                );
             } elseif ($name === \App\Services\Mcp\PsaVersionTool::NAME) {
                 $result = app(\App\Services\Mcp\PsaVersionTool::class)->execute();
             } elseif ($name === \App\Services\Mcp\BenjiPaysForecastTool::NAME) {
@@ -1765,6 +1780,16 @@ class McpStaffController extends Controller
 
         if ($tool === 'delete_contact') {
             return $this->auditDeleteContactArguments($args);
+        }
+
+        if (\App\Services\Mcp\AssetWatchTool::handles((string) $tool)) {
+            // Ids and flags only; reason is operator prose, so only its length.
+            $safe = array_intersect_key($args, array_flip(['client_id', 'asset_id', 'watch_id', 'state', 'repeat', 'expires_at']));
+            if (array_key_exists('reason', $args)) {
+                $safe['reason_length'] = is_string($args['reason']) ? mb_strlen($args['reason']) : 0;
+            }
+
+            return $safe;
         }
 
         if ($tool === 'rebind_tactical_asset') {
@@ -3125,6 +3150,12 @@ class McpStaffController extends Controller
         }
 
         if (in_array($toolName, self::WIKI_WRITE_TOOLS, true)) {
+            return $token->allowedTools !== null && $token->allows($toolName);
+        }
+
+        // Asset watch alerts (card K3VEcxtw): EXPLICIT-GRANT-ONLY, never inherited by
+        // the legacy full-surface token, which also has no label to own a watch.
+        if (\App\Services\Mcp\AssetWatchTool::handles($toolName)) {
             return $token->allowedTools !== null && $token->allows($toolName);
         }
 

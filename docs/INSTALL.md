@@ -379,6 +379,8 @@ These commands execute automatically based on their schedule:
 | `tactical:sync-devices` | Daily at 05:32 | Sync devices from Tactical RMM into `tactical_assets` and hostname-link to assets (only if configured + clients mapped to a Tactical site) |
 | `tactical:sync-scripts` | Daily at 05:35 | Sync the script library from Tactical RMM (only if configured) |
 | `tactical:sweep-queued-actions` | Every `tactical_offline_queue_sweep_minutes` (default 10 min) | Offline-script queue fallback (only if Tactical configured): run approved actions whose device is back online and expire stale ones. The device-sync hook + resolved-alert webhook are the low-latency triggers; this is the safety net |
+| `assets:poll-watched` | Every minute | Asset watch alerts: only while Tactical is enabled AND at least one watch is armed, reads `GET agents/{agent_id}/` for watched agents only (at most `ASSET_WATCH_POLL_MAX_AGENTS`, default 25, per run, each with `ASSET_WATCH_POLL_TIMEOUT_SECONDS`, default 3) and fires watches whose state changed. Writes no asset or `tactical_assets` column |
+| `assets:expire-watches` | Every 15 minutes | Mark asset watches past their `expires_at` as expired (a lapsed watch never fires either way) |
 | `mesh:sync-licenses` | Daily at 04:30 | Sync license counts from Mesh Email Security |
 | `cipp:sync-licenses` | Daily at 04:45 | Sync M365 license counts from CIPP |
 | `huntress:sync-licenses` | Daily at 05:00 | Sync EDR/ITDR license counts from Huntress (only if configured) |
@@ -803,6 +805,12 @@ Optionally set a key expiry and rotate periodically (no rotation runbook is auto
     adds no new ROUTES (it branches the existing asset deviceData GET + the
     refresh POST, both already controller-level), so likewise no README change.
 -->
+
+### Asset watch alerts (staff MCP tools)
+
+Agents can ask to be told when a Tactical RMM device comes online or goes offline. The staff MCP tools `create_asset_watch`, `list_asset_watches` and `remove_asset_watch` are published only while Tactical is enabled, and each must be granted to a token by name. The legacy full-surface token never inherits them. A watch belongs to the token that created it. A fire is delivered only to that token's own signal inbox, through an MCP destination named "Asset watches for <label>" that is created on the first fire, and the token reads it with `poll_signals`. So the token must also be granted `poll_signals`. Revoking the token removes its armed watches, and a token later minted with the same label starts with none of them. The event type `asset.watch_fired` is not routable: no Alerts Hub route or relay-matrix cell delivers it to anyone else. Only assets that are linked to a Tactical agent and not also linked to NinjaOne or Level can be watched.
+
+Optional `.env` keys: `ASSET_WATCH_POLL_MAX_AGENTS` (default 25) and `ASSET_WATCH_POLL_TIMEOUT_SECONDS` (default 3) bound the per-minute `assets:poll-watched` read. The fixed lifetimes (7 days by default, at most 30) and the 120-second freshness bound for an `online` fire are set in `config/asset_watch.php`. The `asset_watches` table is created by a migration.
 
 ### QuickBooks Online
 
