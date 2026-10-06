@@ -500,7 +500,8 @@ class MeshEditAllowRuleTest extends TestCase
         $fixture = $this->fixture();
         $this->tracked($fixture);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
         $write->shouldNotReceive('patchRule');
 
         $result = $this->decodedResult($this->callTool(
@@ -1045,7 +1046,8 @@ class MeshEditAllowRuleTest extends TestCase
         $run = $this->stagedRun($fixture);
 
         $write->shouldReceive('patchRule')->once()->andReturn([]);
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
 
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
         $error = (string) session('error');

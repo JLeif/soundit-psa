@@ -363,7 +363,8 @@ class MeshRemoveAllowRuleTest extends TestCase
         $this->configureMesh();
         $fixture = $this->fixture();
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
         $write->shouldNotReceive('deleteRule');
 
         $result = $this->decodedResult($this->callTool(

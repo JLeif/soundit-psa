@@ -73,6 +73,9 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
 
     private bool $patched = false;
 
+    /** When set, the list page reports this count instead of the real one. */
+    private ?int $reportedCount = null;
+
     /** @var array<string, array<string, mixed>> */
     private array $upstream = [];
 
@@ -297,6 +300,65 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->assertStringContainsString('the DELETE', $log);
     }
 
+    // ---- failures the client detects itself (G-14) ------------------------------
+
+    /**
+     * Every page answered HTTP 200, but the client itself refused the read
+     * (rows seen fewer than the count Mesh reported). That message is written
+     * by the PSA and quotes no vendor text, so it is reported as written —
+     * never as a status-less transport failure that did not happen.
+     */
+    public function test_a_client_detected_list_failure_keeps_its_own_diagnosis(): void
+    {
+        $this->failOn = 'none';
+        $this->reportedCount = 5;
+        $this->seedRule('billing@vendor.example.test', 'PSA allow STATUSONLY');
+        $this->bindClient();
+
+        try {
+            $this->app->make(MeshWriteClient::class)->listCustomerRules(self::TENANT);
+            $this->fail('positive control: a short read against a larger count was expected to be refused');
+        } catch (MeshClientException $e) {
+            $this->assertSame(0, $e->getCode(), 'positive control: a client-detected failure carries no status');
+            $this->assertStringContainsString('Mesh reported 5', $e->getMessage());
+        }
+
+        $fixture = $this->fixture();
+        $text = (string) $this->callTool('mesh_remove_allow_rule', $this->args($fixture))->json('result.content.0.text');
+        $this->assertStringContainsString('scope could not be checked and nothing was removed', $text);
+        $this->assertStringContainsString('Mesh reported 5', $text);
+        $this->assertStringNotContainsString('without an HTTP status', $text);
+        $this->assertSame(0, TechnicianRun::count(), 'still fail-closed');
+
+        $expired = $this->reaperRow('PSA allow EXPIRED003', now()->subDay());
+        $counts = app(MeshAllowRuleReaper::class)->reap();
+        $this->assertSame(1, $counts['failed']);
+        $expired->refresh();
+        $this->assertSame(MeshAllowRule::STATE_REAP_FAILED, $expired->state);
+        $this->assertStringContainsString("Could not read the tenant's rule list to resolve the upstream id: ", (string) $expired->last_error);
+        $this->assertStringContainsString('Mesh reported 5', (string) $expired->last_error);
+        $this->assertStringNotContainsString('without an HTTP status', (string) $expired->last_error);
+    }
+
+    /** Each arm of statusPhrase(), including the ones no scripted vendor reaches. */
+    public function test_status_phrase_reduces_only_upstream_failures_to_their_status(): void
+    {
+        $status = new MeshClientException('Mesh API error: '.self::MARKER, 503);
+        $this->assertSame('Mesh answered the DELETE with HTTP 503', $status->statusPhrase('the DELETE'));
+
+        $wrapped = new MeshClientException('Mesh API error: cURL error 7 '.self::MARKER, 0);
+        $this->assertSame('the DELETE failed without an HTTP status from Mesh', $wrapped->statusPhrase('the DELETE'));
+
+        $chained = new MeshClientException(self::MARKER, 0, new \RuntimeException(self::MARKER));
+        $this->assertSame('the DELETE failed without an HTTP status from Mesh', $chained->statusPhrase('the DELETE'));
+
+        $uri = new MeshClientException('read of https://'.self::HOST.'/x refused', 0);
+        $this->assertSame('the DELETE failed without an HTTP status from Mesh', $uri->statusPhrase('the DELETE'));
+
+        $own = new MeshClientException('Mesh API key is not configured; nothing was sent.');
+        $this->assertSame('Mesh API key is not configured; nothing was sent.', $own->statusPhrase('the DELETE'));
+    }
+
     // ---- the scripted vendor ----------------------------------------------------
 
     private function failure(RequestInterface $request)
@@ -331,7 +393,7 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
 
             if ($isList) {
                 return Create::promiseFor(new Response(200, [], json_encode([
-                    'count' => count($this->upstream),
+                    'count' => $this->reportedCount ?? count($this->upstream),
                     'next' => null,
                     'previous' => null,
                     'results' => array_values($this->upstream),
