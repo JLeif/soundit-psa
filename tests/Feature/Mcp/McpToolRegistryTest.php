@@ -16,7 +16,7 @@ class McpToolRegistryTest extends TestCase
     {
         $groups = McpToolRegistry::groups();
 
-        $this->assertSame(['general', 'client', 'integration', 'cipp_write', 'cipp_admin', 'tactical_action', 'tactical_admin', 'huntress_action', 'mesh_admin', 'controld_onboarding', 'wiki_write', 'psa_action', 'psa_records', 'psa_read', 'psa_raw_file', 'intake_manage', 'taxonomy', 'calendar', 'calendar_write', 'bridge', 'asset_watch'], array_keys($groups));
+        $this->assertSame(['general', 'client', 'integration', 'cipp_write', 'cipp_admin', 'tactical_action', 'tactical_admin', 'huntress_action', 'mesh_read', 'mesh_admin', 'controld_onboarding', 'wiki_write', 'psa_action', 'psa_records', 'psa_read', 'psa_raw_file', 'intake_manage', 'taxonomy', 'calendar', 'calendar_write', 'bridge', 'asset_watch'], array_keys($groups));
 
         $names = fn (string $group): array => array_column($groups[$group]['tools'], 'name');
 
@@ -457,5 +457,51 @@ class McpToolRegistryTest extends TestCase
             $this->assertTrue($tierOf[$name]['sensitive'], "{$name} is re-routed off PSA Core and must land in a sensitive tier, never a target card's plain Read tier");
         }
         $this->assertSame(['get_teams_message_attachment' => 'teams'], McpToolRegistry::PSA_TOOLS_ON_OTHER_CARDS);
+    }
+
+    /**
+     * Card UtffkPs5: mesh_list_allow_rules is a READ, so the catalog must not show it under
+     * "Allow-list writes" (psa-lulgh: a mislabelled tier misleads the operator). It moves to
+     * its own SENSITIVE read tier on the Mesh card, never Mesh's plain non-sensitive "Read"
+     * tier, whose bulk "Grant shown" grants without the sensitive confirmation: the gate
+     * keeps it explicit-grant-only, and the catalog must say the same thing.
+     *
+     * Both flags are asserted, as for the raw-file tier: the TIER flag drives the shield and
+     * the bulk-grant confirmation, the TOOL flag the per-tool badge and the sensitive counter.
+     */
+    public function test_mesh_list_allow_rules_renders_in_a_sensitive_mesh_read_tier_not_allow_list_writes(): void
+    {
+        $name = 'mesh_list_allow_rules';
+        $groups = McpToolRegistry::groups();
+        $this->assertArrayHasKey('mesh_read', $groups, 'the Mesh read verb needs its own read group');
+        $names = fn (string $group): array => array_column($groups[$group]['tools'], 'name');
+
+        $this->assertSame([$name], $names('mesh_read'), 'the Mesh read group holds exactly the list verb');
+        $this->assertTrue($groups['mesh_read']['sensitive'], 'the Mesh read group stays sensitive: explicit grant only');
+        $this->assertStringContainsString('reads', $groups['mesh_read']['label']);
+        $this->assertStringNotContainsString('write', $groups['mesh_read']['label']);
+        $this->assertNotContains($name, $names('mesh_admin'), 'a read must not sit in the allow-list writes group');
+        $this->assertNotContains($name, $names('integration'), 'a read granted explicitly must not sit in the non-sensitive integration reads');
+        $this->assertSame(['mesh_add_allow_rule', 'mesh_remove_allow_rule', 'mesh_edit_allow_rule'], $names('mesh_admin'), 'the three writes stay in the writes group');
+
+        $mesh = McpToolRegistry::integrationGroups()['mesh'] ?? null;
+        $this->assertNotNull($mesh, 'the Mesh card must render');
+        $tiers = collect($mesh['tiers'])->keyBy('key');
+        $tierOf = $tiers->first(fn (array $t): bool => in_array($name, array_column($t['tools'], 'name'), true));
+
+        $this->assertNotNull($tierOf, "{$name} must render on the Mesh card");
+        $this->assertSame('allow_list_read', $tierOf['key'], 'its own tier key, never the plain read tier');
+        $this->assertSame('Allow-list reads', $tierOf['label']);
+        $this->assertSame([$name], array_column($tierOf['tools'], 'name'));
+        $this->assertTrue($tierOf['sensitive'], 'the tier flag drives the bulk-grant confirmation');
+        $this->assertTrue(collect($tierOf['tools'])->firstWhere('name', $name)['sensitive'], 'the tool keeps its Sensitive badge');
+
+        $this->assertFalse($tiers['read']['sensitive']);
+        $this->assertNotContains($name, array_column($tiers['read']['tools'], 'name'));
+        $this->assertSame('Allow-list writes', $tiers['write']['label']);
+        $this->assertTrue($tiers['write']['sensitive']);
+        $this->assertSame(['mesh_add_allow_rule', 'mesh_remove_allow_rule', 'mesh_edit_allow_rule'], array_column($tiers['write']['tools'], 'name'));
+        $this->assertSame(['read', 'allow_list_read', 'write'], $tiers->keys()->all(), 'reads render before writes');
+        $this->assertSame(4, $mesh['sensitive_count'], 'the list verb still counts as sensitive');
     }
 }

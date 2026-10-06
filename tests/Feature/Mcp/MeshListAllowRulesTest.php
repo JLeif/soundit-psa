@@ -574,6 +574,45 @@ class MeshListAllowRulesTest extends TestCase
         $this->assertSame(0, TechnicianRun::count());
     }
 
+    /**
+     * Card UtffkPs5 moved the verb from the allow-list writes tier to its own sensitive read
+     * tier. Display only: the grant must stay explicit, so neither a token holding every Mesh
+     * write plus Mesh's plain reads, nor the legacy full-surface token, gains it, and a grant
+     * stored by NAME (how mcp_tokens.tools keeps grants; there are no group keys) still works
+     * and still survives the token page's save validation.
+     */
+    public function test_the_read_tier_move_keeps_the_grant_explicit_and_honours_a_stored_name_grant(): void
+    {
+        $name = 'mesh_list_allow_rules';
+        $client = $this->mappedClient();
+        $this->upstream = [$this->row('rule-1', 'a@example.test')];
+
+        $this->assertContains($name, array_column(McpToolRegistry::groups()['mesh_read']['tools'] ?? [], 'name'), 'it renders in the Mesh read group');
+
+        $writesAndPlainReads = $this->token([
+            'mesh_add_allow_rule:staged', 'mesh_remove_allow_rule:staged', 'mesh_edit_allow_rule:staged',
+            'mesh_search_email_logs', 'mesh_get_email_events',
+        ]);
+        $this->assertStringContainsString('Tool not allowed', $this->errorText($this->callTool($writesAndPlainReads, ['client_id' => $client->id])));
+        $this->assertStringContainsString('Tool not allowed', $this->errorText($this->callTool(McpConfig::rotateStaffToken(), ['client_id' => $client->id])));
+        $this->assertNotContains($name, array_column($this->withHeaders(['Authorization' => 'Bearer '.McpConfig::rotateStaffToken()])
+            ->postJson('/api/mcp/staff', ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => []])
+            ->json('result.tools') ?? [], 'name'), 'the legacy token must not list it');
+        $this->assertSame([], $this->history, 'a refused call sends nothing upstream');
+
+        // A grant held by name before the move: stored as the plain tool name.
+        $plain = McpConfig::rotateStaffToken(allowedTools: [$name], label: 'pre-move-grant');
+        $this->assertSame([$name], \App\Models\McpToken::query()->where('label', 'pre-move-grant')->value('tools'));
+        $normalized = McpToolModes::normalizeGrantEntries([$name]);
+        $this->assertSame([], $normalized['unknown'], 'the token page must still accept the stored name');
+        $this->assertSame([$name], $normalized['entries']);
+
+        $response = $this->callTool($plain, ['client_id' => $client->id]);
+        $response->assertOk();
+        $this->assertNotTrue($response->json('result.isError'), (string) $response->json('result.content.0.text'));
+        $this->assertSame('rule-1', json_decode((string) $response->json('result.content.0.text'), true)['rules'][0]['rule_id']);
+    }
+
     public function test_the_granted_token_sees_it_in_tools_list_without_a_staged_parameter(): void
     {
         $tools = $this->withHeaders(['Authorization' => 'Bearer '.$this->token(['mesh_list_allow_rules'])])
