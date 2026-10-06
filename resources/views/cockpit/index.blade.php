@@ -228,6 +228,8 @@
         </section>
     @endif
 
+    @include('cockpit.partials.drafter-withdrawals')
+
     <section class="cockpit-section mb-4" data-section-key="replies" x-show="visible('replies')" :class="{ 'cockpit-section-empty': counts.replies === 0 }">
         <div class="cockpit-section-head">
             <h2><i class="bi bi-envelope me-2"></i>Replies &amp; sends</h2>

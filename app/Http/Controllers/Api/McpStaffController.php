@@ -189,6 +189,19 @@ class McpStaffController extends Controller
         'unassign_asset',
         'set_ticket_contact',
         'move_ticket_to_client',
+        // Card XUiMXNEH: explicit grant only, like every PSA action. Its scope is the
+        // run's drafting token, not a client, so it is also PSA_CLIENTLESS_ACTION_TOOLS.
+        'withdraw_staged_action',
+    ];
+
+    /**
+     * PSA actions whose scope is not a client (card XUiMXNEH). A supplied client_id
+     * is refused rather than required or ignored: withdraw_staged_action acts only on
+     * a run the calling token drafted, and a caller who believes a client argument
+     * narrowed that has been misled.
+     */
+    private const PSA_CLIENTLESS_ACTION_TOOLS = [
+        'withdraw_staged_action',
     ];
 
     private const PSA_TICKET_SCOPED_TOOLS = [
@@ -982,7 +995,22 @@ class McpStaffController extends Controller
             }
         }
 
-        if ($this->isPsaActionTool((string) $name) && ! $ticketScopedPsaTool && $clientId === null) {
+        $clientlessPsaTool = in_array((string) $name, self::PSA_CLIENTLESS_ACTION_TOOLS, true);
+        if ($clientlessPsaTool && $hasClientIdArgument) {
+            $message = "client_id must be omitted for {$name}; it acts only on runs this token drafted.";
+            $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
+
+            return response()->json([
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'result' => [
+                    'content' => [['type' => 'text', 'text' => $message]],
+                    'isError' => true,
+                ],
+            ]);
+        }
+
+        if ($this->isPsaActionTool((string) $name) && ! $ticketScopedPsaTool && ! $clientlessPsaTool && $clientId === null) {
             $message = "client_id is required for {$name}.";
             $this->audit('tools/call', (string) $name, $auditArguments, 'error', $message, $start, $request);
 
@@ -1406,11 +1434,15 @@ class McpStaffController extends Controller
                     $staffToken instanceof McpStaffToken ? $staffToken : null,
                 );
             } elseif ($this->isMeshAdminTool((string) $name)) {
+                // Card XUiMXNEH: the bare tokenLabel is threaded so a staged Mesh run
+                // records proposed_meta.drafted_by_token, which withdraw_staged_action
+                // matches (as stage_email, send_reply and the calendar stagings do).
                 $result = app(StaffMeshAdminToolExecutor::class)->execute(
                     (string) $name,
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $this->tokenLabel($request),
                 );
             } elseif ($this->isTacticalAdminTool((string) $name)) {
                 $result = app(StaffTacticalAdminToolExecutor::class)->execute(

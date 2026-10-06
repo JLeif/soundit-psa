@@ -308,19 +308,26 @@ class StaffMeshAdminToolExecutor
         return self::STAGED_TO_DIRECT;
     }
 
-    /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, ?int $clientId, string $actorLabel): array
+    /**
+     * $actorLabel is the prefixed audit label; $tokenLabel is the caller's BARE
+     * McpToken.label, recorded on staged runs as proposed_meta.drafted_by_token so
+     * the drafting token can withdraw its own proposal (card XUiMXNEH). Null for a
+     * caller with no token label: such a run has no drafter to match.
+     *
+     * @return array<string, mixed>
+     */
+    public function execute(string $name, array $arguments, ?int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         if (! MeshConfig::isEnabled() || ! MeshConfig::isConfigured()) {
             return ['error' => 'Mesh Email Security is not configured'];
         }
 
         $result = match ($name) {
-            'mesh_stage_add_allow_rule' => $this->stageAllowRule($arguments, (int) $clientId, $actorLabel),
+            'mesh_stage_add_allow_rule' => $this->stageAllowRule($arguments, (int) $clientId, $actorLabel, $tokenLabel),
             'mesh_add_allow_rule' => $this->immediateRefused('mesh_add_allow_rule', 'mesh_stage_add_allow_rule', $arguments, $clientId, $actorLabel),
-            'mesh_stage_remove_allow_rule' => $this->stageRemoveAllowRule($arguments, (int) $clientId, $actorLabel),
+            'mesh_stage_remove_allow_rule' => $this->stageRemoveAllowRule($arguments, (int) $clientId, $actorLabel, $tokenLabel),
             'mesh_remove_allow_rule' => $this->immediateRefused('mesh_remove_allow_rule', 'mesh_stage_remove_allow_rule', $arguments, $clientId, $actorLabel),
-            'mesh_stage_edit_allow_rule' => $this->stageEditAllowRule($arguments, (int) $clientId, $actorLabel),
+            'mesh_stage_edit_allow_rule' => $this->stageEditAllowRule($arguments, (int) $clientId, $actorLabel, $tokenLabel),
             'mesh_edit_allow_rule' => $this->immediateRefused('mesh_edit_allow_rule', 'mesh_stage_edit_allow_rule', $arguments, $clientId, $actorLabel),
             self::LIST_TOOL => $this->listAllowRules($arguments, $clientId),
             default => ['error' => "Unknown Mesh admin tool: {$name}"],
@@ -355,7 +362,7 @@ class StaffMeshAdminToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageAllowRule(array $arguments, int $clientId, string $actorLabel): array
+    private function stageAllowRule(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'mesh_stage_add_allow_rule';
 
@@ -572,6 +579,9 @@ class StaffMeshAdminToolExecutor
 
         $meta = [
             'drafted_by' => $actorLabel,
+            // Card XUiMXNEH: the BARE token label; withdraw_staged_action matches this
+            // field only, never the prefixed drafted_by above.
+            'drafted_by_token' => $tokenLabel,
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [
@@ -2178,7 +2188,7 @@ class StaffMeshAdminToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageRemoveAllowRule(array $arguments, int $clientId, string $actorLabel): array
+    private function stageRemoveAllowRule(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'mesh_stage_remove_allow_rule';
 
@@ -2291,6 +2301,9 @@ class StaffMeshAdminToolExecutor
 
         $meta = [
             'drafted_by' => $actorLabel,
+            // Card XUiMXNEH: the BARE token label; withdraw_staged_action matches this
+            // field only, never the prefixed drafted_by above.
+            'drafted_by_token' => $tokenLabel,
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [
@@ -2625,7 +2638,7 @@ class StaffMeshAdminToolExecutor
      *
      * @return array<string, mixed>
      */
-    private function stageEditAllowRule(array $arguments, int $clientId, string $actorLabel): array
+    private function stageEditAllowRule(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $tool = 'mesh_stage_edit_allow_rule';
 
@@ -2744,6 +2757,9 @@ class StaffMeshAdminToolExecutor
 
         $meta = [
             'drafted_by' => $actorLabel,
+            // Card XUiMXNEH: the BARE token label; withdraw_staged_action matches this
+            // field only, never the prefixed drafted_by above.
+            'drafted_by_token' => $tokenLabel,
             'reasons' => [$guard['reason']],
             'direct_tool' => self::STAGED_TO_DIRECT[$tool],
             'redacted_params' => [

@@ -634,6 +634,8 @@ class McpToolRegistry
             self::unassignAssetTool(),
             self::setTicketContactTool(),
             self::moveTicketToClientTool(),
+            // Card XUiMXNEH: the drafting token withdraws its own pending proposal.
+            \App\Services\Mcp\WithdrawStagedActionTool::definition(),
         ];
     }
 

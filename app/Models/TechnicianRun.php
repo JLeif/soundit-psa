@@ -379,6 +379,47 @@ class TechnicianRun extends Model
         return $resolved;
     }
 
+    /**
+     * The drafting token withdraws its own still-pending proposal (card XUiMXNEH):
+     * awaiting_approval → withdrawn, with the withdrawal recorded in proposed_meta.
+     *
+     * CAS on the state, in ONE write: claimForExecution() moves an approved run out of
+     * awaiting_approval with the same kind of conditional UPDATE, so whichever lands
+     * first wins and the other is a no-op. A racing approval therefore never has its run
+     * pulled from under it, and a withdrawal never resurrects a run that already left
+     * the queue. The meta rides in the same UPDATE (as queueForOffline() does) so there
+     * is no second write to race.
+     *
+     * Withdrawn, never Superseded or Denied: both of those read as a human decision
+     * (CloseBandEvaluator counts Superseded as corrected and Denied as declined), and
+     * nobody decided anything here — the drafter took its own proposal back.
+     *
+     * Who may call this is the caller's question (WithdrawStagedActionTool checks the
+     * drafting token); this method only guarantees the transition is atomic.
+     *
+     * @param  array<string, mixed>  $metaPatch
+     */
+    public function withdrawByDrafter(array $metaPatch): bool
+    {
+        $meta = array_merge($this->proposed_meta ?? [], $metaPatch);
+
+        $withdrawn = static::query()
+            ->whereKey($this->getKey())
+            ->where('state', TechnicianRunState::AwaitingApproval->value)
+            ->update([
+                'state' => TechnicianRunState::Withdrawn->value,
+                'proposed_meta' => json_encode($meta),
+            ]) === 1;
+
+        if ($withdrawn) {
+            $this->state = TechnicianRunState::Withdrawn;
+            $this->proposed_meta = $meta;
+            $this->syncOriginalAttributes(['state', 'proposed_meta']);
+        }
+
+        return $withdrawn;
+    }
+
     public function markSuperseded(): void
     {
         $this->advanceTo(TechnicianRunState::Superseded);
