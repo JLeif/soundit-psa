@@ -164,9 +164,12 @@ class MeshAllowRuleReaper
                         ."{$lifetime}, and the PSA keeps refusing new allow rules for this sender while this row is unsettled.";
                 }
             } catch (MeshClientException $e) {
+                // Status only (C-56, #5248): the note goes to last_error and
+                // to the log, and the exception message can quote the vendor's
+                // response body and the request URI.
                 $note = $permanent
-                    ? "Could not read the tenant's rule list to resolve the upstream id of this PERMANENT rule: {$e->getMessage()}"
-                    : "Could not read the tenant's rule list to resolve the upstream id of this unexpired rule: {$e->getMessage()}";
+                    ? "Could not read the tenant's rule list to resolve the upstream id of this PERMANENT rule: {$e->statusPhrase('the rule list read')}"
+                    : "Could not read the tenant's rule list to resolve the upstream id of this unexpired rule: {$e->statusPhrase('the rule list read')}";
             }
 
             // The one thing this pass CAN settle: an UNRESOLVED row whose
@@ -253,7 +256,8 @@ class MeshAllowRuleReaper
         try {
             $ruleId = $rule->mesh_rule_id ?: $this->resolveRuleId($rule);
         } catch (MeshClientException $e) {
-            return $this->markFailed($rule, "Could not read the tenant's rule list to resolve the upstream id: {$e->getMessage()}");
+            // Status only (C-56, #5248), as in the settle pass.
+            return $this->markFailed($rule, "Could not read the tenant's rule list to resolve the upstream id: {$e->statusPhrase('the rule list read')}");
         }
 
         if ($ruleId === null) {
@@ -280,7 +284,7 @@ class MeshAllowRuleReaper
         } catch (MeshClientException $e) {
             // A delete that threw may still have landed, so absence is
             // re-measured below rather than assumed either way.
-            Log::warning("[MeshAllowRuleReaper] DELETE failed for mesh_allow_rules#{$rule->id}: {$e->getMessage()}");
+            Log::warning("[MeshAllowRuleReaper] DELETE failed for mesh_allow_rules#{$rule->id}: {$e->statusPhrase('the DELETE')}");
         }
 
         $absent = $this->client->ruleAbsent($ruleId);

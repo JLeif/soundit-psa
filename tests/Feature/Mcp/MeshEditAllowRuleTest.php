@@ -500,7 +500,8 @@ class MeshEditAllowRuleTest extends TestCase
         $fixture = $this->fixture();
         $this->tracked($fixture);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
         $write->shouldNotReceive('patchRule');
 
         $result = $this->decodedResult($this->callTool(
@@ -510,7 +511,9 @@ class MeshEditAllowRuleTest extends TestCase
         ));
 
         $this->assertStringContainsString('scope could not be checked and nothing was changed', $result['error']);
-        $this->assertStringContainsString('read timed out', $result['error']);
+        // Status only (C-56): the exception message never reaches the caller.
+        $this->assertStringNotContainsString('read timed out', $result['error']);
+        $this->assertStringContainsString('the rule list read failed without an HTTP status from Mesh', $result['error']);
         $this->assertSame(0, TechnicianRun::count());
     }
 
@@ -1043,12 +1046,15 @@ class MeshEditAllowRuleTest extends TestCase
         $run = $this->stagedRun($fixture);
 
         $write->shouldReceive('patchRule')->once()->andReturn([]);
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
 
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
         $error = (string) session('error');
         $this->assertStringContainsString('could NOT be measured', $error);
-        $this->assertStringContainsString('read timed out', $error);
+        // Status only (C-56): the exception message never reaches the approver.
+        $this->assertStringNotContainsString('read timed out', $error);
+        $this->assertStringContainsString('the confirming read failed (the rule list read failed without an HTTP status from Mesh)', $error);
         $this->assertStringContainsString('the upstream side was NOT retried', $error);
 
         $record->refresh();

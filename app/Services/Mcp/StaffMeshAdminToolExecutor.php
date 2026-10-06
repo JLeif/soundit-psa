@@ -2121,8 +2121,10 @@ class StaffMeshAdminToolExecutor
         } catch (MeshClientException $e) {
             // Fail closed. An unreadable list is not an empty list, and the
             // difference matters in both directions: refusing wrongly costs a
-            // retry, deleting on an unverified scope cannot be undone.
-            return ['error' => "The rule could not be read from Mesh, so its scope could not be checked and nothing was removed: {$e->getMessage()}"];
+            // retry, deleting on an unverified scope cannot be undone. The
+            // status is the whole report: the exception message can quote the
+            // vendor's response body and the request URI (C-56).
+            return ['error' => "The rule could not be read from Mesh, so its scope could not be checked and nothing was removed: {$e->statusPhrase('the rule list read')}"];
         }
 
         if ($row === null) {
@@ -2594,7 +2596,8 @@ class StaffMeshAdminToolExecutor
         try {
             $row = $this->client->findRuleById($tenant, $ruleId);
         } catch (MeshClientException $e) {
-            return ['error' => "The rule could not be read from Mesh, so its scope could not be checked and nothing was changed: {$e->getMessage()}"];
+            // Status only, as on the remove path (C-56).
+            return ['error' => "The rule could not be read from Mesh, so its scope could not be checked and nothing was changed: {$e->statusPhrase('the rule list read')}"];
         }
 
         if ($row === null) {
@@ -2979,7 +2982,8 @@ class StaffMeshAdminToolExecutor
         try {
             $after = $this->client->findRuleById($target['mesh_customer_id'], $target['rule_id']);
         } catch (MeshClientException $e) {
-            $readError = $e->getMessage();
+            // Status only (C-56): this text reaches the approver and the audit row.
+            $readError = $e->statusPhrase('the rule list read');
         }
 
         $displayAgrees = $after !== null && self::displayAgrees($after, $expiresAt);
@@ -3026,7 +3030,7 @@ class StaffMeshAdminToolExecutor
         } elseif ($after === null) {
             $fault = 'display_unmeasured';
             $message = "The PSA now enforces the new expiry for allow rule '{$target['rule_id']}' (sender '{$target['sender']}'): {$transition}. "
-                ."Whether Mesh displays it could NOT be measured — the confirming read did not answer ({$readError}) — and the upstream side was NOT retried. "
+                ."Whether Mesh displays it could NOT be measured — the confirming read failed ({$readError}) — and the upstream side was NOT retried. "
                 .'Mesh may keep showing the old expiry while the PSA enforces the new one. Check the rule in the Mesh portal.';
         } else {
             $fault = 'display_unsynced';

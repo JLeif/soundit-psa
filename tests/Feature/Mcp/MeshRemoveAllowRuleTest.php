@@ -363,7 +363,8 @@ class MeshRemoveAllowRuleTest extends TestCase
         $this->configureMesh();
         $fixture = $this->fixture();
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('read timed out'));
+        // Shaped as MeshWriteClient::request() wraps a transport failure.
+        $write->shouldReceive('findRuleById')->once()->andThrow(new MeshClientException('Mesh API error: read timed out'));
         $write->shouldNotReceive('deleteRule');
 
         $result = $this->decodedResult($this->callTool(
@@ -373,7 +374,9 @@ class MeshRemoveAllowRuleTest extends TestCase
         ));
 
         $this->assertStringContainsString('scope could not be checked and nothing was removed', $result['error']);
-        $this->assertStringContainsString('read timed out', $result['error']);
+        // Status only (C-56): the exception message never reaches the caller.
+        $this->assertStringNotContainsString('read timed out', $result['error']);
+        $this->assertStringContainsString('the rule list read failed without an HTTP status from Mesh', $result['error']);
         $this->assertSame(0, TechnicianRun::count());
     }
 
