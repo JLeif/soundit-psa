@@ -122,7 +122,15 @@ class McpToolRegistry
             $tacticalActions = self::shape(self::withoutStagedAliases(self::tacticalActionTools()));
             $tacticalAdmin = self::shape(self::withoutStagedAliases(self::tacticalAdminTools()));
             $huntressActions = self::shape(self::withoutStagedAliases(self::huntressActionTools()));
-            $meshAdmin = self::shape(self::withoutStagedAliases(self::meshAdminTools()));
+            // Split the one Mesh READ verb out of the allow-list WRITE tier (card UtffkPs5) so the
+            // grant catalog never shows a read under a "writes" label (psa-lulgh). Display only:
+            // the gate is StaffMeshAdminToolExecutor::handles(), which still answers for it, so it
+            // stays explicit-grant-only, and grants are stored by tool name. It keeps its own
+            // SENSITIVE group rather than joining the non-sensitive integration reads, because a
+            // non-sensitive tier's bulk "Grant shown" grants without the by-name confirmation.
+            $meshAll = self::shape(self::withoutStagedAliases(self::meshAdminTools()));
+            $meshRead = array_values(array_filter($meshAll, fn (array $t): bool => $t['name'] === StaffMeshAdminToolExecutor::LIST_TOOL));
+            $meshAdmin = array_values(array_filter($meshAll, fn (array $t): bool => $t['name'] !== StaffMeshAdminToolExecutor::LIST_TOOL));
             $controldOnboarding = self::shape(self::withoutStagedAliases(self::controldOnboardingTools()));
             $psaRecords = self::shape(self::psaRecordsTools());
             $psaRead = self::shape(self::psaReadTools());
@@ -146,6 +154,7 @@ class McpToolRegistry
                 'tactical_action' => ['label' => 'Tactical endpoint actions (sensitive)', 'sensitive' => true, 'tools' => $tacticalActions],
                 'tactical_admin' => ['label' => 'Tactical admin/provisioning (sensitive)', 'sensitive' => true, 'tools' => $tacticalAdmin],
                 'huntress_action' => ['label' => 'Huntress SOC escalation actions (sensitive)', 'sensitive' => true, 'tools' => $huntressActions],
+                'mesh_read' => ['label' => 'Mesh Email Security allow-list reads (sensitive)', 'sensitive' => true, 'tools' => $meshRead],
                 'mesh_admin' => ['label' => 'Mesh Email Security allow-list writes (sensitive)', 'sensitive' => true, 'tools' => $meshAdmin],
                 'controld_onboarding' => ['label' => 'Control D client onboarding (sensitive)', 'sensitive' => true, 'tools' => $controldOnboarding],
                 'wiki_write' => ['label' => 'Wiki write (sensitive)', 'sensitive' => true, 'tools' => $wikiWrites],
@@ -219,7 +228,11 @@ class McpToolRegistry
                 // an allow rule weakens a customer's mail filtering, and a sensitive write shown
                 // under a bucket labelled for read-only odds and ends is the mislabelled-tier
                 // hazard psa-lulgh names — the operator grants it believing it is something else.
-                'mesh_admin' => ['mesh', 'write', 'Allow-list writes', 2],
+                // Its own tier key, never 'read': Mesh's non-sensitive "Read" tier is pushed first
+                // (from the integration group) and would absorb it, losing the sensitive tier flag
+                // that drives the bulk-grant confirmation (as psa_raw_file above).
+                'mesh_read' => ['mesh', 'allow_list_read', 'Allow-list reads', 2],
+                'mesh_admin' => ['mesh', 'write', 'Allow-list writes', 3],
                 // Creates vendor organizations and provisioning codes: a sensitive write tier
                 // under its own integration card, never a line in "Other integrations".
                 'controld_onboarding' => ['controld', 'write', 'Client onboarding', 2],
