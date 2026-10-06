@@ -3,6 +3,7 @@
 namespace Tests\Feature\Mcp;
 
 use App\Enums\TechnicianRunState;
+use App\Enums\TechnicianTier;
 use App\Models\Client;
 use App\Models\Setting;
 use App\Models\TechnicianActionLog;
@@ -95,6 +96,12 @@ class WithdrawStagedActionTest extends TestCase
         $this->assertSame($run->id, (int) $log->run_id);
         $this->assertSame('executed', $log->result_status);
         $this->assertSame('mcp-staff:chet', $log->actor_label);
+        // A self-scoped autonomous act, not an executed approval of the proposal: Auto tier
+        // and its own hash (the AssetWatchTool precedent), never the run's content_hash.
+        $this->assertSame(TechnicianTier::Auto->value, $log->tier);
+        $this->assertNotSame(TechnicianTier::Approve->value, $log->tier);
+        $this->assertSame(hash('sha256', 'withdraw_staged_action|'.$run->id), $log->content_hash);
+        $this->assertNotSame($run->content_hash, $log->content_hash);
 
         // A corrected proposal stages as a fresh awaiting run.
         $again = $this->stageNote($ticket, 'chet', 'We replaced the toner and the drum.');
@@ -168,7 +175,12 @@ class WithdrawStagedActionTest extends TestCase
         $result = $this->withdraw($run->id, 'chet');
 
         $this->assertArrayNotHasKey('success', $result);
-        $this->assertStringContainsString('no longer awaiting approval (state: '.$state->value.')', (string) ($result['error'] ?? ''));
+        $this->assertSame(
+            "Run #{$run->id} is not awaiting approval (state: {$state->value}), so it cannot be withdrawn; nothing was changed.",
+            $result['error'] ?? null,
+        );
+        // G-14: the refusal must not claim the run was ever awaiting approval.
+        $this->assertStringNotContainsString('no longer', (string) $result['error']);
         $this->assertSame($before, $run->fresh()->getAttributes());
     }
 
@@ -190,6 +202,40 @@ class WithdrawStagedActionTest extends TestCase
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
     }
 
+    public function test_a_reason_over_500_characters_is_refused_before_anything_is_written(): void
+    {
+        $ticket = $this->ticket();
+        $run = $this->stageNote($ticket, 'chet');
+        $before = $run->fresh()->getAttributes();
+
+        // Multibyte, padded: measured in characters after trim, not bytes.
+        $result = $this->withdraw($run->id, 'chet', '  '.str_repeat('é', 501).'  ');
+
+        $this->assertSame('reason must be at most 500 characters.', $result['error'] ?? null);
+        $this->assertSame($before, $run->fresh()->getAttributes());
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame(0, TechnicianActionLog::where('action_type', WithdrawStagedActionTool::NAME)->count());
+    }
+
+    public function test_a_reason_of_exactly_500_characters_is_accepted(): void
+    {
+        $ticket = $this->ticket();
+        $run = $this->stageNote($ticket, 'chet');
+        $reason = str_repeat('é', 500);
+
+        $result = $this->withdraw($run->id, 'chet', '  '.$reason.'  ');
+
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $this->assertSame(TechnicianRunState::Withdrawn, $run->fresh()->state);
+        $this->assertSame($reason, $run->fresh()->proposed_meta['withdrawn_reason']);
+        $this->assertSame(1, TechnicianActionLog::where('action_type', WithdrawStagedActionTool::NAME)->count());
+    }
+
+    public function test_the_schema_caps_the_reason_at_500(): void
+    {
+        $this->assertSame(500, WithdrawStagedActionTool::definition()['input_schema']['properties']['reason']['maxLength'] ?? null);
+    }
+
     public function test_an_approval_that_claims_the_run_between_read_and_update_wins(): void
     {
         $ticket = $this->ticket();
@@ -204,7 +250,8 @@ class WithdrawStagedActionTest extends TestCase
 
         $result = $this->withdraw($run->id, 'chet');
 
-        $this->assertStringContainsString('no longer awaiting approval (state: executing)', (string) ($result['error'] ?? ''));
+        $this->assertStringContainsString("Run #{$run->id} is not awaiting approval (state: executing)", (string) ($result['error'] ?? ''));
+        $this->assertStringNotContainsString('no longer', (string) $result['error']);
         $fresh = TechnicianRun::withoutEvents(fn () => TechnicianRun::query()->whereKey($run->id)->toBase()->first());
         $this->assertSame('executing', $fresh->state);
         $this->assertArrayNotHasKey('withdrawn_by', json_decode((string) $fresh->proposed_meta, true));

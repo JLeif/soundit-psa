@@ -45,6 +45,9 @@ final class WithdrawStagedActionTool
     /** Recorded in proposed_meta.withdrawn_by; the cockpit lane keys on it. */
     public const WITHDRAWN_BY_DRAFTER = 'drafter';
 
+    /** Longest reason accepted, in characters after trim; it is copied into proposed_meta. */
+    public const REASON_MAX = 500;
+
     /** @return array<string, mixed> */
     public static function definition(): array
     {
@@ -60,6 +63,7 @@ final class WithdrawStagedActionTool
                     ],
                     'reason' => [
                         'type' => 'string',
+                        'maxLength' => self::REASON_MAX,
                         'description' => 'Why the proposal is being withdrawn. Shown to the operator in the cockpit.',
                     ],
                 ],
@@ -98,6 +102,9 @@ final class WithdrawStagedActionTool
         if ($reason === '') {
             return ['error' => 'reason is required and must not be empty.'];
         }
+        if (mb_strlen($reason) > self::REASON_MAX) {
+            return ['error' => 'reason must be at most '.self::REASON_MAX.' characters.'];
+        }
 
         $run = TechnicianRun::find($runId);
         if ($run === null || ! $this->draftedBy($run, $tokenLabel)) {
@@ -121,12 +128,14 @@ final class WithdrawStagedActionTool
                 'approver_user_id' => null,
                 'actor_label' => $actorLabel,
                 'action_type' => self::NAME,
-                'tier' => TechnicianTier::Approve->value,
+                'tier' => TechnicianTier::Auto->value,
                 'result_status' => 'executed',
                 'ticket_id' => $run->ticket_id,
                 'client_id' => $run->client_id,
                 'run_id' => $run->id,
-                'content_hash' => $run->content_hash,
+                // Its own hash, as AssetWatchTool::audit() does: the run's content_hash
+                // would make this row read as an executed approval of the proposal.
+                'content_hash' => hash('sha256', self::NAME.'|'.$run->id),
                 'summary' => mb_substr("MCP withdrew staged {$run->action_type} run #{$run->id}: ".EmailRedactor::redact($reason), 0, 1000),
                 'correlation_id' => (string) Str::uuid(),
             ]);
@@ -159,7 +168,7 @@ final class WithdrawStagedActionTool
 
     private static function notAwaiting(int $runId, ?TechnicianRunState $state): string
     {
-        return "Staged action #{$runId} is no longer awaiting approval (state: ".($state?->value ?? 'unknown')
+        return "Run #{$runId} is not awaiting approval (state: ".($state?->value ?? 'unknown')
             .'), so it cannot be withdrawn; nothing was changed.';
     }
 
