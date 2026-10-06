@@ -14,6 +14,7 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -88,7 +89,8 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
         parent::setUp();
         // Guards Laravel Http-facade calls on the driven paths (the service,
         // model observers or hooks, deactivateOrphaned()): any such request
-        // throws instead of leaving the box (G-5, #5332). It does NOT see
+        // throws instead of leaving the box (G-5, #5332), which
+        // test_a_stray_http_facade_request_throws drives (#5386). It does NOT see
         // MeshClient's raw Guzzle (#5327); that request is isolated by the
         // scripted handler, and each arm asserts it received the one request
         // ($this->requested).
@@ -186,6 +188,21 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
             $this->assertMatchesRegularExpression('/^\[MeshSync\] (Failed for client|Client) '.$client->getKey().':/', $r['text'], 'named by id');
         }
         $this->assertSame($expected === [] ? 0 : 1, count($sync), 'one [MeshSync] line per logging arm');
+    }
+
+    /**
+     * Positive control for setUp()'s Http::preventStrayRequests() (#5386):
+     * an Http-facade request in this test class throws Laravel's
+     * StrayRequestException before anything is sent.
+     */
+    public function test_a_stray_http_facade_request_throws(): void
+    {
+        try {
+            Http::get('https://stray.example.test/');
+            $this->fail('the stray Http-facade request was not refused');
+        } catch (StrayRequestException $e) {
+            $this->assertStringContainsString('stray.example.test', $e->getMessage(), 'the refusal names the stray request');
+        }
     }
 
     /** The instrument can see a leak: the same assertion fails on a line that carries one. */

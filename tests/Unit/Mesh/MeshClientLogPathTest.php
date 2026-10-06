@@ -9,6 +9,7 @@ use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Psr7\Uri;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Event;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -24,9 +25,14 @@ use Tests\TestCase;
  * MeshClient whose Guzzle is a MockHandler answering 503. The handler queue
  * holds exactly one response and must be empty afterwards, so the request
  * went through the swapped-in handler and nowhere else. For EVERY shape the
- * handler also records the URI it received, which must still carry the form
- * the endpoint was built with (the id as given, upper-cased or dashless
- * included): only the log line is redacted, never the request (#5334). The
+ * handler also records the URI it received, and the row pins that URI's
+ * scheme and host, its exact path, its query and its fragment: the path keeps
+ * the id in the form it was built with (upper-cased or dashless included, a
+ * newline percent-encoded), so only the log line is redacted, never the
+ * request (#5334). The endpoint's own query is NOT carried: get() always
+ * passes Guzzle a 'query' option, which replaces it (empty here), and the
+ * query rows pin that empty query. A fragment is carried on the request URI
+ * and dropped only from the log line (#5378, #5379, #5380, #5385, #5387). The
  * rethrown exception is checked to be a MeshClientException with Guzzle's
  * code (503) whose message is 'Mesh API error: ' plus Guzzle's own message,
  * wrapping that ServerException; this test does not make its content safe
@@ -55,10 +61,11 @@ class MeshClientLogPathTest extends TestCase
     }
 
     /**
-     * Endpoint as passed to get() => the path the log line must show => a
-     * substring the URI the handler received must still contain.
+     * Endpoint as passed to get() => the path the log line must show => the
+     * exact path of the URI the handler received => its exact query (default
+     * '') => its exact fragment (default '').
      *
-     * @return array<string, array{0: string, 1: string, 2: string}>
+     * @return array<string, array{0: string, 1: string, 2: string, 3?: string, 4?: string}>
      */
     public static function shapes(): array
     {
@@ -82,12 +89,21 @@ class MeshClientLogPathTest extends TestCase
             'id upper-cased' => ["api/customers/{$up}/", 'api/customers/<customer>', "/api/customers/{$up}/"],
             'id dashless' => ["api/customers/{$bare}/", 'api/customers/<customer>', "/api/customers/{$bare}/"],
             'id, no trailing slash' => ["api/customers/{$id}", 'api/customers/<customer>', "/api/customers/{$id}"],
-            // get() always passes Guzzle a 'query' option (empty here), which
-            // replaces a query written into the endpoint: the request carries
-            // the path only, so that is what these rows expect it to carry.
-            'id with a query' => ["api/customers/{$id}/{$q}", 'api/customers/<customer>', "/api/customers/{$id}/"],
-            'id with a fragment' => ["api/customers/{$id}/#frag", 'api/customers/<customer>', "/api/customers/{$id}/"],
-            // #5337: the regex flags and the segment boundary.
+            // Query rows. get() always passes Guzzle a 'query' option, and
+            // that option REPLACES a query written into the endpoint: with
+            // get()'s default [] the request carries the endpoint's path and
+            // an empty query (measured; pinned by the '' query below).
+            'id with a query' => ["api/customers/{$id}/{$q}", 'api/customers/<customer>', "/api/customers/{$id}/", ''],
+            'customer list with a query' => ["api/customers/{$q}", 'api/customers/', '/api/customers/', ''],
+            // A bare query resolves against base_uri: path '/', query
+            // replaced by the empty option (measured).
+            'leading ?' => [$q, '', '/', ''],
+            // Fragment row. The query option does not touch a fragment: the
+            // request URI KEEPS '#frag' (Guzzle's resolver carries the
+            // relative fragment), and only the log line drops it.
+            'id with a fragment' => ["api/customers/{$id}/#frag", 'api/customers/<customer>', "/api/customers/{$id}/", '', 'frag'],
+            // #5337: the regex flags and the segment boundary. The request
+            // path carries the newline percent-encoded.
             'id with a newline (s flag)' => ["api/customers/{$nl}/", 'api/customers/<customer>', '/api/customers/'.str_replace("\n", '%0A', $nl).'/'],
             'upper-case scheme (i flag, host strip)' => ['HTTPS://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
             'upper-case Customers/ (i flag, redaction)' => ["api/Customers/{$id}/", 'api/Customers/<customer>', "/api/Customers/{$id}/"],
@@ -95,15 +111,18 @@ class MeshClientLogPathTest extends TestCase
             // Not a customers/ segment, so nothing is redacted. The tail is
             // deliberately not an id, so the leak checks still hold.
             'xcustomers/ is not a segment (boundary)' => ['api/xcustomers/p-7/', 'api/xcustomers/p-7/', '/api/xcustomers/p-7/'],
-            'customer list with a query' => ["api/customers/{$q}", 'api/customers/', '/api/customers/'],
             'customer list' => ['api/customers/', 'api/customers/', '/api/customers/'],
-            'leading ?' => [$q, '', 'https://'.self::HOST.'/'],
         ];
     }
 
     #[DataProvider('shapes')]
-    public function test_the_failure_line_redacts_the_customer_tail(string $endpoint, string $expectedPath, string $requestCarries): void
-    {
+    public function test_the_failure_line_redacts_the_customer_tail(
+        string $endpoint,
+        string $expectedPath,
+        string $requestPath,
+        string $requestQuery = '',
+        string $requestFragment = '',
+    ): void {
         [$client, $mock, $seen] = $this->clientAnswering503();
 
         try {
@@ -121,8 +140,15 @@ class MeshClientLogPathTest extends TestCase
 
         $this->assertSame(0, $mock->count(), 'the request went through the swapped-in MockHandler');
         $this->assertCount(1, $seen->uris, 'exactly one request reached the handler');
-        // Positive control, every shape: the REQUEST is not redacted.
-        $this->assertStringContainsString($requestCarries, $seen->uris[0], 'positive control: the request still carries the endpoint as built');
+        // Positive control, every shape: the REQUEST is not redacted. Each
+        // URI component is pinned exactly, so a request sent to any other
+        // path, or carrying the endpoint's own query, fails here.
+        $uri = new Uri($seen->uris[0]);
+        $this->assertSame('https', $uri->getScheme(), 'positive control: request scheme');
+        $this->assertSame(self::HOST, $uri->getHost(), 'positive control: request host');
+        $this->assertSame($requestPath, $uri->getPath(), 'positive control: the request path keeps the id as built');
+        $this->assertSame($requestQuery, $uri->getQuery(), "positive control: the request query is get()'s query option, not the endpoint's");
+        $this->assertSame($requestFragment, $uri->getFragment(), 'positive control: the request fragment');
 
         $this->assertCount(1, $this->logged, 'records: '.json_encode($this->logged));
         $message = $this->logged[0]['message'];
@@ -163,7 +189,9 @@ class MeshClientLogPathTest extends TestCase
 
         $this->assertSame(0, $mock->count(), 'the request went through the swapped-in MockHandler');
         $this->assertCount(1, $seen->uris, 'exactly one request reached the handler');
-        $this->assertStringContainsString('filter='.self::QUERY_MARKER, $seen->uris[0], 'positive control: the request carried the query');
+        $uri = new Uri($seen->uris[0]);
+        $this->assertSame('/api/customers/', $uri->getPath(), 'positive control: the request path');
+        $this->assertSame('_size=1&filter='.self::QUERY_MARKER, $uri->getQuery(), 'positive control: the request carried the query option');
 
         $this->assertCount(1, $this->logged);
         $this->assertSame(
@@ -173,25 +201,34 @@ class MeshClientLogPathTest extends TestCase
     }
 
     /**
-     * logPath() itself, reached by reflection, on the shapes whose line must
-     * differ from the endpoint: each comes back changed and free of every
-     * leak form, and a kept shape comes back as given. An identity logPath()
-     * (returning its input) fails here (#5335; this replaces a check that
-     * only exercised PHPUnit).
+     * logPath() itself, reached by reflection, on every shape: each comes
+     * back exactly as the row expects (so an identity logPath() fails on
+     * every changed row, #5335), and a changed row is free of every leak form
+     * the endpoint held. The rows are counted by kind with exact numbers: 17
+     * redact a customer tail to <customer>, 2 are changed only by the query
+     * cut ('customer list with a query', 'leading ?'), 2 come back as given
+     * (#5383). Dropping or unredacting a row changes a count.
      */
     public function test_log_path_changes_every_redacted_shape(): void
     {
         $logPath = new \ReflectionMethod(MeshClient::class, 'logPath');
         $redacted = 0;
+        $queryCutOnly = 0;
+        $kept = 0;
 
         foreach (self::shapes() as $name => [$endpoint, $expectedPath]) {
             $out = $logPath->invoke(null, $endpoint);
             $this->assertSame($expectedPath, $out, "{$name}: logPath()");
-            if ($expectedPath === $endpoint) {
+            if ($out === $endpoint) {
+                $kept++;
+
                 continue;
             }
-            $redacted++;
-            $this->assertNotSame($endpoint, $out, "{$name}: logPath() returned its input");
+            if (str_contains($out, '<customer>')) {
+                $redacted++;
+            } else {
+                $queryCutOnly++;
+            }
             foreach ($this->leakForms() as $what => $form) {
                 if (stripos($endpoint, $form) !== false) {
                     $this->assertStringNotContainsStringIgnoringCase($form, $out, "{$name}: {$what} survived logPath()");
@@ -199,7 +236,9 @@ class MeshClientLogPathTest extends TestCase
             }
         }
 
-        $this->assertGreaterThanOrEqual(15, $redacted, 'positive control: the shapes include the redacted ones');
+        $this->assertSame(17, $redacted, 'rows whose customer tail logPath() redacts');
+        $this->assertSame(2, $queryCutOnly, 'rows changed only by the query cut');
+        $this->assertSame(2, $kept, 'rows logPath() keeps as given');
     }
 
     /** @return array<string, string> */
