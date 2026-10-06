@@ -134,10 +134,12 @@ class MeshAllowRule extends Model
      * the row is not inert: while it sits unsettled, the brake refuses every
      * later allow rule for its sender. The reaper records whatever upstream
      * id it can recover for such a row (identify only, never delete). What
-     * that settles depends on `scope_proved`: a row whose 201 proved scope
-     * was missing nothing but its id, so it goes active once exactly one
-     * rule is known; a row whose scope was never proved is not settled by an
-     * id and stays counted as unresolved.
+     * that settles depends on the row: an UNRESOLVED row whose 201 proved
+     * scope was missing nothing but its id, so it goes active once a read
+     * finds exactly one rule; a row whose scope was never proved is not
+     * settled by an id and stays counted as unresolved; a reap_failed row
+     * records a removal that did not prove the rule absent, so it is never
+     * settled here and stays reap_failed.
      *
      * The future-only bound is the complement of scopeReapable()'s
      * `expires_at <= now()`: a row due for reaping is the reap pass's, never

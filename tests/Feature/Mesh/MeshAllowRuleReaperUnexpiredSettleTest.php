@@ -181,23 +181,48 @@ class MeshAllowRuleReaperUnexpiredSettleTest extends TestCase
         $this->assertNoMeshWrite();
     }
 
-    public function test_an_unexpired_reap_failed_scope_proved_row_with_exactly_one_match_goes_active(): void
+    /**
+     * A failed mesh_remove_allow_rule leaves its row reap_failed, with its id
+     * and a future expiry, so the settle pass selects it. Identifying the rule
+     * answers nothing about that removal: the row is never marked active, its
+     * fault text is kept and its stored id is not replaced, whether the rule
+     * is still listed or not. An id-less reap_failed row gets its id recorded
+     * for the reap pass and nothing else.
+     */
+    public function test_an_unexpired_reap_failed_row_is_never_settled_and_keeps_its_fault(): void
     {
         $this->upstreamRule('cccccccc-0000-4000-8000-000000000003', 'failed@sender.example.test', 'PSA allow REAPFAIL01');
+        $this->upstreamRule('cccccccc-0000-4000-8000-000000000005', 'noid@sender.example.test', 'PSA allow REAPFAIL03');
         $this->bindClient();
-        $record = $this->record('failed@sender.example.test', 'PSA allow REAPFAIL01', [
+        $listed = $this->record('failed@sender.example.test', 'PSA allow REAPFAIL01', [
+            'mesh_rule_id' => 'cccccccc-0000-4000-8000-000000000003',
+            'state' => MeshAllowRule::STATE_REAP_FAILED,
+            'last_error' => "Mesh still returns allow rule 'cccccccc-0000-4000-8000-000000000003' (sender 'failed@sender.example.test') after the delete, so it was NOT removed.",
+        ]);
+        $gone = $this->record('gone@sender.example.test', 'PSA allow REAPFAIL02', [
+            'mesh_rule_id' => 'cccccccc-0000-4000-8000-000000000004',
+            'state' => MeshAllowRule::STATE_REAP_FAILED,
+            'last_error' => "Whether allow rule 'cccccccc-0000-4000-8000-000000000004' (sender 'gone@sender.example.test') was removed could NOT be measured. Treat the rule as still live until it is checked.",
+        ]);
+        $noId = $this->record('noid@sender.example.test', 'PSA allow REAPFAIL03', [
             'state' => MeshAllowRule::STATE_REAP_FAILED,
             'last_error' => "Could not read the tenant's rule list to resolve the upstream id: synthetic.",
         ]);
 
         $counts = app(MeshAllowRuleReaper::class)->reap();
 
-        $record->refresh();
-        $this->assertSame(MeshAllowRule::STATE_ACTIVE, $record->state);
-        $this->assertSame('cccccccc-0000-4000-8000-000000000003', $record->mesh_rule_id);
-        $this->assertNull($record->last_error);
-        $this->assertSame(0, $counts['unresolved']);
-        $this->assertSame(0, $counts['failed']);
+        foreach ([$listed, $gone, $noId] as $record) {
+            $fresh = $record->fresh();
+            $this->assertSame(MeshAllowRule::STATE_REAP_FAILED, $fresh->state);
+            $this->assertSame($record->last_error, $fresh->last_error, 'the removal fault is never erased');
+            $this->assertSame([], $this->stateWrites[$record->id] ?? [], 'the state was never written');
+        }
+
+        $this->assertSame('cccccccc-0000-4000-8000-000000000003', $listed->fresh()->mesh_rule_id);
+        $this->assertSame('cccccccc-0000-4000-8000-000000000004', $gone->fresh()->mesh_rule_id);
+        $this->assertSame('cccccccc-0000-4000-8000-000000000005', $noId->fresh()->mesh_rule_id);
+        $this->assertSame(0, MeshAllowRule::where('state', MeshAllowRule::STATE_ACTIVE)->count());
+        $this->assertSame(['examined' => 0, 'reaped' => 0, 'unresolved' => 3, 'failed' => 0], $counts);
         $this->assertNoMeshWrite();
     }
 
@@ -433,18 +458,28 @@ class MeshAllowRuleReaperUnexpiredSettleTest extends TestCase
         $this->assertEqualsCanonicalizing($want, MeshAllowRule::unsettledUnexpired()->pluck('id')->all());
     }
 
-    /** A scope-proved row that already carries its id settles without a list read, as the permanent pass always did. */
-    public function test_an_unexpired_scope_proved_row_that_already_has_its_id_settles_without_a_read(): void
+    /**
+     * A stored id alone never settles a row: the list is read, and the row goes
+     * active only when that read returns exactly one rule. With no match it
+     * stays unresolved and keeps both its id and its note.
+     */
+    public function test_an_unexpired_scope_proved_row_that_already_has_its_id_settles_only_on_a_read(): void
     {
+        $this->upstreamRule('78787878-0000-4000-8000-000000000011', 'known@sender.example.test', 'PSA allow KNOWNID001');
         $this->bindClient();
-        $record = $this->record('known@sender.example.test', 'PSA allow KNOWNID001', ['mesh_rule_id' => '78787878-0000-4000-8000-000000000011']);
+        $found = $this->record('known@sender.example.test', 'PSA allow KNOWNID001', ['mesh_rule_id' => '78787878-0000-4000-8000-000000000011']);
+        $missing = $this->record('unlisted@sender.example.test', 'PSA allow KNOWNID002', ['mesh_rule_id' => '78787878-0000-4000-8000-000000000012']);
 
         $counts = app(MeshAllowRuleReaper::class)->reap();
 
-        $this->assertSame(MeshAllowRule::STATE_ACTIVE, $record->fresh()->state);
-        $this->assertSame('78787878-0000-4000-8000-000000000011', $record->fresh()->mesh_rule_id);
-        $this->assertSame(0, $counts['unresolved']);
-        $this->assertSame([], $this->requests);
+        $this->assertSame(MeshAllowRule::STATE_ACTIVE, $found->fresh()->state);
+        $this->assertSame('78787878-0000-4000-8000-000000000011', $found->fresh()->mesh_rule_id);
+        $this->assertSame(MeshAllowRule::STATE_UNRESOLVED, $missing->fresh()->state);
+        $this->assertSame('78787878-0000-4000-8000-000000000012', $missing->fresh()->mesh_rule_id);
+        $this->assertSame('Allow rule created, but its Mesh rule id could not be recovered by re-read.', $missing->fresh()->last_error);
+        $this->assertSame(1, $counts['unresolved']);
+        $this->assertContains('GET api/rule-allows-blocks/', $this->requests);
+        $this->assertNoMeshWrite();
     }
 
     /**
