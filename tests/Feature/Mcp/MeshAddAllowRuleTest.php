@@ -433,6 +433,118 @@ class MeshAddAllowRuleTest extends TestCase
     }
 
     /**
+     * Nh0dzF2T: the duplicate brake's text for a DATED unsettled row must match
+     * what the reaper now does. A scope-proved dated row is settled by the
+     * hourly identify pass (MeshAllowRuleReaper::settleUnexpired) as soon as
+     * its rule is found, so "cannot settle until its expiry passes" would send
+     * the approver away to wait months for a block that clears within the
+     * hour. A dated row whose scope was never proved still waits for expiry.
+     */
+    public function test_the_dated_unsettled_brake_says_the_next_reaper_run_settles_a_scope_proved_row(): void
+    {
+        $this->configureMesh();
+        $actor = $this->configureAiActor();
+        $fixture = $this->fixture();
+        $write = $this->mockWrite();
+        $write->shouldNotReceive('createAllowRule');
+
+        $expiry = now()->addDays(30)->startOfSecond();
+        $row = MeshAllowRule::create([
+            'client_id' => $fixture['client']->id,
+            'mesh_customer_id' => self::TENANT,
+            'sender' => 'billing@vendor.example',
+            'comment' => 'PSA allow ABCDEFGHIJ',
+            'mesh_rule_id' => null,
+            'expires_at' => $expiry,
+            'state' => MeshAllowRule::STATE_UNRESOLVED,
+            'scope_proved' => true,
+            'created_by_actor' => 'test',
+        ]);
+
+        $run = $this->stagedRun($fixture);
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+        $proved = (string) session('error');
+
+        $this->assertStringContainsString('PSA record #'.$row->id, $proved);
+        $this->assertStringContainsString('the hourly expiry job only has to IDENTIFY it, and this block clears on the first run before its expiry ('.$expiry->toIso8601String().') that finds exactly one rule in Mesh carrying its sender and comment', $proved);
+        $this->assertStringNotContainsString('until its expiry', $proved);
+        $this->assertStringNotContainsString('PERMANENT', $proved);
+
+        // The same dated row WITHOUT scope proof is never settled by an id, so
+        // for it the expiry really is the next thing that can happen.
+        $row->update(['scope_proved' => false]);
+        TechnicianRun::query()->delete();
+        TechnicianActionLog::query()->delete();
+        $run = $this->stagedRun($fixture);
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+        $unproved = (string) session('error');
+
+        $this->assertStringContainsString('cannot settle that record until its expiry ('.$expiry->toIso8601String().') passes', $unproved);
+        $this->assertStringNotContainsString('only has to IDENTIFY', $unproved);
+        $this->assertSame(0, MeshAllowRule::where('state', MeshAllowRule::STATE_ACTIVE)->count());
+    }
+
+    /**
+     * Nh0dzF2T: "only has to IDENTIFY it" is true only of an UNRESOLVED row
+     * that is permanent or unexpired. A reap_failed row records a removal that
+     * did not prove absence and the identify pass never settles it; a dated
+     * row past its expiry is the reap pass's, which removes it rather than
+     * settling it. Neither may be told that identification lifts the block,
+     * scope-proved or not.
+     */
+    public function test_the_brake_never_promises_identification_for_a_reap_failed_or_expired_row(): void
+    {
+        $this->configureMesh();
+        $actor = $this->configureAiActor();
+        $fixture = $this->fixture();
+        $write = $this->mockWrite();
+        $write->shouldNotReceive('createAllowRule');
+
+        $row = MeshAllowRule::create([
+            'client_id' => $fixture['client']->id,
+            'mesh_customer_id' => self::TENANT,
+            'sender' => 'billing@vendor.example',
+            'comment' => 'PSA allow ABCDEFGHIJ',
+            'mesh_rule_id' => 'rule-synthetic-1',
+            'expires_at' => now()->subDay(),
+            'state' => MeshAllowRule::STATE_REAP_FAILED,
+            'scope_proved' => true,
+            'created_by_actor' => 'test',
+        ]);
+
+        $removal = 'this block stays until the PSA proves a removal against this record';
+        $past = now()->subDay()->startOfSecond();
+        $cases = [
+            'expired reap_failed' => [$past, MeshAllowRule::STATE_REAP_FAILED, $removal],
+            'unexpired reap_failed' => [now()->addDays(30)->startOfSecond(), MeshAllowRule::STATE_REAP_FAILED, $removal],
+            // Never reaped and, once its rule is gone, not removable by any
+            // re-staged removal: it must not be told to wait for one.
+            'permanent reap_failed' => [null, MeshAllowRule::STATE_REAP_FAILED, 'that record is PERMANENT (no expiry), so the expiry job never retries the removal and nothing in the PSA will clear this block on its own'],
+            'expired unresolved' => [$past, MeshAllowRule::STATE_UNRESOLVED, 'Its expiry ('.$past->toIso8601String().') has passed, so the hourly expiry job does not settle it'],
+        ];
+
+        foreach ($cases as $label => [$expiry, $state, $expected]) {
+            $row->forceFill(['expires_at' => $expiry, 'state' => $state])->save();
+            TechnicianRun::query()->delete();
+            TechnicianActionLog::query()->delete();
+            $run = $this->stagedRun($fixture);
+            $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+            $message = (string) session('error');
+
+            $this->assertStringContainsString('PSA record #'.$row->id, $message, $label);
+            $this->assertStringContainsString($expected, $message, $label);
+            $this->assertStringNotContainsString('IDENTIFY', $message, $label);
+
+            if ($expiry === null) {
+                $this->assertStringNotContainsString($removal, $message, $label);
+                $this->assertStringContainsString('clear the PSA record by hand', $message, $label);
+            } else {
+                $this->assertStringNotContainsString('never retries the removal', $message, $label);
+            }
+        }
+    }
+
+    /**
      * #1133: the staging hash carries the caller's expiry, but the 'executed'
      * audit row is written under the expiry-free base hash. Asking the
      * post-execution dedup question with the lifetime-bearing hash could never
@@ -1601,13 +1713,16 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertSame(0, MeshAllowRule::reapable()->count());
 
         $write = $this->mockWrite();
+        // The settle pass reads even for a row that already carries an id; no
+        // rule matches here, so nothing is identified.
+        $write->shouldReceive('findRulesByComment')->andReturn([]);
         $write->shouldNotReceive('deleteRule');
 
         $counts = app(MeshAllowRuleReaper::class)->reap();
         $this->assertSame(0, $counts['examined']);
-        // The two unsettled rows are identified and left unresolved — their
-        // scope was never proved, so they stay counted and the command stays
-        // loud. Only the row that was already active is silent.
+        // The two unsettled rows are read and left unsettled (unresolved, and
+        // reap_failed) — neither can be settled, so they stay counted and the
+        // command stays loud. Only the row that was already active is silent.
         $this->assertSame(2, $counts['unresolved']);
         $this->artisan('mesh:reap-allow-rules')->assertFailed();
     }
@@ -1617,8 +1732,8 @@ class MeshAddAllowRuleTest extends TestCase
         $this->configureMesh();
         $record = $this->record(['expires_at' => null, 'mesh_rule_id' => null, 'state' => MeshAllowRule::STATE_UNRESOLVED]);
         $write = $this->mockWrite();
-        // Called once: the second run reads the id off the row, not upstream.
-        $write->shouldReceive('findRuleByComment')->once()->with(self::TENANT, 'billing@vendor.example', 'PSA allow ABCDEFGHIJ')->andReturn(['id' => 'late-id']);
+        // Called twice: every run reads, even once the row carries an id.
+        $write->shouldReceive('findRulesByComment')->twice()->with(self::TENANT, 'billing@vendor.example', 'PSA allow ABCDEFGHIJ')->andReturn([['id' => 'late-id']]);
         // The caller asked for permanent. Identifying it is the whole point;
         // deleting it would be the PSA revoking a decision it was told to keep.
         $write->shouldNotReceive('deleteRule');
@@ -1657,7 +1772,7 @@ class MeshAddAllowRuleTest extends TestCase
         $record->forceFill(['last_error' => 'Mesh reported this rule was added for another tenant; check the Mesh portal and remove it by hand if the scope is wrong.'])->save();
 
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->once()->andReturn(['id' => 'late-id']);
+        $write->shouldReceive('findRulesByComment')->once()->andReturn([['id' => 'late-id']]);
         $write->shouldNotReceive('deleteRule');
 
         app(MeshAllowRuleReaper::class)->reap();
@@ -1672,7 +1787,7 @@ class MeshAddAllowRuleTest extends TestCase
         $this->configureMesh();
         $record = $this->record(['expires_at' => null, 'mesh_rule_id' => null, 'state' => MeshAllowRule::STATE_UNRESOLVED]);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->twice()->andReturn(null);
+        $write->shouldReceive('findRulesByComment')->twice()->andReturn([]);
         $write->shouldNotReceive('deleteRule');
 
         $counts = app(MeshAllowRuleReaper::class)->reap();
@@ -1706,7 +1821,7 @@ class MeshAddAllowRuleTest extends TestCase
             'scope_proved' => true,
         ]);
         $write = $this->mockWrite();
-        $write->shouldReceive('findRuleByComment')->once()->andReturn(['id' => 'late-id']);
+        $write->shouldReceive('findRulesByComment')->once()->andReturn([['id' => 'late-id']]);
         // Permanent means permanent: settling is identification, never removal.
         $write->shouldNotReceive('deleteRule');
 

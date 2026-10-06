@@ -26,15 +26,22 @@ use Illuminate\Support\Facades\Log;
  * sentinel — so this class NEVER deletes such a rule; removal is by hand in
  * the Mesh portal until mesh_remove_allow_rule exists.
  *
- * Excluded from reaping is not abandoned, though. A permanent row that landed
- * unresolved (or reap_failed) is still identified here, by settlePermanent():
- * it has no expiry for anything else to wait on, so without that pass the
- * daily command goes quiet about a rule that may be live. That pass never
- * deletes anything — but what identifying a row SETTLES depends on what its
- * create proved. A row whose 201 proved scope (`scope_proved`) was missing
- * nothing but its id, so recovering the id settles it and it goes active; a
- * row whose scope was never proved keeps its fault text, stays unresolved and
- * stays counted, because re-reading an id does not prove scope.
+ * Excluded from reaping is not abandoned, though. An UNEXPIRED row that landed
+ * unresolved (or reap_failed) is identified here by settleUnexpired(). That
+ * covers a permanent row, which has no expiry for anything else to wait on,
+ * and a dated row whose expiry is still in the future, which no reap pass
+ * selects until that date, possibly months away. Meanwhile the duplicate
+ * brake refuses every new allow rule for its sender. The settle pass reads
+ * the tenant's rule list and writes only the local row: it never creates,
+ * deletes or changes anything in Mesh. What identifying a row SETTLES depends
+ * on what its create proved. An UNRESOLVED row whose 201 proved scope
+ * (`scope_proved`) was missing nothing but its id, so when exactly one rule
+ * matches it, that id is recorded and the row goes active. A row whose scope
+ * was never proved keeps its fault text, stays unresolved and stays counted,
+ * because re-reading an id does not prove scope. A reap_failed row is never
+ * settled: it records a removal that did not prove the rule absent, and no
+ * read answers that. A row due for reaping (expiry past) is never selected by
+ * the settle pass; it stays with reapOne().
  */
 class MeshAllowRuleReaper
 {
@@ -63,7 +70,7 @@ class MeshAllowRuleReaper
             return $counts;
         }
 
-        $counts = $this->settlePermanent($counts);
+        $counts = $this->settleUnexpired($counts);
 
         $due = MeshAllowRule::reapable()->orderBy('expires_at')->limit(self::BATCH_LIMIT)->get();
 
@@ -77,99 +84,160 @@ class MeshAllowRuleReaper
     }
 
     /**
-     * Identify — never delete — permanent rules the PSA never settled.
+     * Identify (never delete) UNEXPIRED rules the PSA never settled: permanent
+     * rows and dated rows whose expiry is still in the future
+     * (MeshAllowRule::scopeUnsettledUnexpired). A row past its expiry is
+     * never selected here; it belongs to reapOne().
      *
-     * The id is re-resolved the same way the create path recovers it and is
-     * stored, so the rule is nameable when a human (or a future removal verb)
-     * comes to end it. Whether that SETTLES the row is decided by
-     * `scope_proved`, the verdict the 201's `added_for` gave at create time:
+     * This pass READS the tenant's rule list and writes only the local row. It
+     * never creates, deletes or changes anything in Mesh.
      *
-     *   scope proved, id now known — nothing is outstanding. The row goes
+     * The id is re-read by sender + PSA-generated comment, and it is recorded
+     * only when EXACTLY ONE rule on the tenant matches. Two or more matches
+     * are ambiguous: none of their ids is recorded, the row is not settled,
+     * and the ambiguity is noted. No match, or an unreadable list,
+     * leaves the row unsettled, with a note where the row has none. The list
+     * is read even for a row that already carries an id: a stored id alone
+     * never settles a row, and it is never replaced on a row that stays
+     * unsettled (reapOne() deletes by it).
+     *
+     * Whether an id SETTLES the row is decided by `scope_proved`, the verdict
+     * the 201's `added_for` gave at create time:
+     *
+     *   unresolved, scope proved, id now known: nothing is outstanding. The row goes
      *     ACTIVE, the record liveAllowRule() answers "already allowed for this
      *     client" from, which is also the only way the executor's duplicate
-     *     brake ever lets this sender through again. Leaving it unresolved
-     *     wedges that sender forever for a rule Mesh confirmed and the PSA can
-     *     now name, with no PSA verb able to clear it.
-     *   scope never proved (or the create never answered) — an id is not that
+     *     brake ever lets this sender through again. A dated row that goes
+     *     active is still reaped when its expiry passes (scopeReapable).
+     *   scope never proved (or the create never answered): an id is not that
      *     proof, and a read-back cannot supply it because the server
-     *     normalises every stored row to organization_level:true. The row
-     *     keeps its fault text, stays UNRESOLVED and counts as unresolved, so
-     *     mesh:reap-allow-rules keeps exiting FAILURE: a permanent rule whose
-     *     scope was never proved may be a hole in the wrong tenant's
-     *     filtering, and that must not go quiet.
+     *     normalises every stored row to organization_level:true. The id is
+     *     stored, the row keeps its fault text and stays unsettled, and it
+     *     counts as unresolved, so mesh:reap-allow-rules keeps exiting
+     *     FAILURE.
+     *   reap_failed: the row records a removal (by reapOne() or an approved
+     *     mesh_remove_allow_rule) that did not prove the rule absent. Finding
+     *     the rule answers nothing about that, so the row is never settled
+     *     here: it keeps its state and its fault text, and it counts as
+     *     unresolved.
      *
-     * Neither branch is marked reap_failed: no reap was attempted here and
-     * none ever will be.
+     * No branch here marks a row reap_failed, or moves one out of it: no reap
+     * is attempted.
      *
-     * `examined` is untouched — these rows were not examined for reaping — so
+     * `examined` is untouched (these rows were not examined for reaping), so
      * the counts keep meaning what the command prints about expired rules.
      *
      * @param  array{examined: int, reaped: int, unresolved: int, failed: int}  $counts
      * @return array{examined: int, reaped: int, unresolved: int, failed: int}
      */
-    private function settlePermanent(array $counts): array
+    private function settleUnexpired(array $counts): array
     {
-        $stuck = MeshAllowRule::unsettledPermanent()->orderBy('id')->limit(self::BATCH_LIMIT)->get();
+        $stuck = MeshAllowRule::unsettledUnexpired()->orderBy('id')->limit(self::BATCH_LIMIT)->get();
 
         foreach ($stuck as $rule) {
+            $permanent = $rule->isPermanent();
+            $lifetime = $permanent
+                ? 'This rule is PERMANENT, so it is never reaped'
+                : 'This rule is not due for reaping until its expiry ('.$rule->expires_at->toIso8601String().')';
+            $storedId = is_string($rule->mesh_rule_id) && $rule->mesh_rule_id !== '' ? $rule->mesh_rule_id : null;
             $ruleId = null;
-            $note = 'Upstream rule id unresolved: no rule on this tenant matches the recorded sender and comment. This rule is PERMANENT, so it is never reaped, and the PSA keeps refusing new allow rules for this sender.';
+            $ambiguous = false;
+            $note = "Upstream rule id unresolved: no rule on this tenant matches the recorded sender and comment. {$lifetime}, and the PSA keeps refusing new allow rules for this sender.";
 
+            // Read even when the row already carries an id: a row goes active
+            // only on a lookup that returns EXACTLY ONE rule, never on a
+            // stored id alone.
             try {
-                $ruleId = $rule->mesh_rule_id ?: $this->resolveRuleId($rule);
+                $matches = $this->client->findRulesByComment(
+                    (string) $rule->mesh_customer_id,
+                    (string) $rule->sender,
+                    (string) $rule->comment,
+                );
+
+                if (count($matches) === 1) {
+                    $ruleId = self::ruleIdOf($matches[0]);
+                } elseif (count($matches) > 1) {
+                    // Never guess: the first match is not evidence that it
+                    // is the rule this row recorded.
+                    $ambiguous = true;
+                    $note = 'Upstream rule id unresolved: '.count($matches).' rules on this tenant match the recorded sender and comment, so none of their ids was recorded and this row was not settled. '
+                        ."{$lifetime}, and the PSA keeps refusing new allow rules for this sender while this row is unsettled.";
+                }
             } catch (MeshClientException $e) {
-                $note = "Could not read the tenant's rule list to resolve the upstream id of this PERMANENT rule: {$e->getMessage()}";
+                $note = $permanent
+                    ? "Could not read the tenant's rule list to resolve the upstream id of this PERMANENT rule: {$e->getMessage()}"
+                    : "Could not read the tenant's rule list to resolve the upstream id of this unexpired rule: {$e->getMessage()}";
             }
 
-            // The one thing this pass CAN settle: a row whose create response
-            // proved scope was only ever missing its id, and the id is now in
-            // hand. Nothing about it is outstanding, so it must not stay in a
-            // state that refuses this sender forever.
-            $settled = $ruleId !== null && (bool) $rule->scope_proved;
+            // The one thing this pass CAN settle: an UNRESOLVED row whose
+            // create response proved scope was only ever missing its id, and
+            // exactly one id is now in hand. A reap_failed row is never
+            // settled: it records a removal (by reapOne() or an approved
+            // mesh_remove_allow_rule) that did not prove the rule absent, and
+            // finding the rule answers nothing about that.
+            $reapFailed = $rule->state === MeshAllowRule::STATE_REAP_FAILED;
+            $settled = $ruleId !== null && (bool) $rule->scope_proved && ! $reapFailed;
 
             if ($ruleId !== null) {
-                $note = $settled
-                    ? "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the PERMANENT rule is now recorded active. The PSA still never removes it — that stays a human's job in the Mesh portal."
-                    : "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this PERMANENT rule stays unresolved: the PSA will never remove it, and it keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that — the record itself has to be cleared by hand.";
+                $note = match (true) {
+                    $settled && $permanent => "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the PERMANENT rule is now recorded active. The PSA still never removes it — that stays a human's job in the Mesh portal.",
+                    $settled => "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the rule is now recorded active. It is still selected for reaping once its expiry passes.",
+                    // A PERMANENT reap_failed row is never selected by reapOne(),
+                    // so no PSA removal will ever be proved against it on its own.
+                    $reapFailed && $permanent => "Upstream rule id is '{$ruleId}'. This row records an earlier removal that did not prove the rule absent, so identifying the rule does not settle it: it stays reap_failed and keeps refusing new allow rules for this sender. It is PERMANENT, so the expiry job never retries the removal and nothing in the PSA clears this record on its own — check the rule in the Mesh portal and, if it is gone, clear the record by hand.",
+                    $reapFailed => "Upstream rule id is '{$ruleId}'. This row records an earlier removal that did not prove the rule absent, so identifying the rule does not settle it: it stays reap_failed and keeps refusing new allow rules for this sender until the PSA proves a removal against this record.",
+                    $permanent => "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this PERMANENT rule stays unresolved: the PSA will never remove it, and it keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that — the record itself has to be cleared by hand.",
+                    default => "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this rule stays unsettled and keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that.",
+                };
             }
 
-            $update = [
-                // Scope is proved ONCE, by the create response, and that
-                // verdict is on the row (scope_proved). Nothing in this pass
-                // can prove it — the server normalises every stored row to
-                // organization_level:true, so a read-back cannot tell a tenant
-                // rule from a partner-wide one — so a row that never carried
-                // the proof stays UNRESOLVED however many ids we recover.
-                'state' => $settled ? MeshAllowRule::STATE_ACTIVE : MeshAllowRule::STATE_UNRESOLVED,
-            ];
+            // Scope is proved ONCE, by the create response (scope_proved).
+            // Nothing in this pass can prove it, because the server normalises
+            // every stored row to organization_level:true, so a row without
+            // that proof is never settled however many ids we recover.
+            //
+            // An unsettled row keeps the state it had: an unresolved row stays
+            // unresolved, and a reap_failed row still carries its removal
+            // fault (writing it unresolved would let a later run settle it).
+            // A stored id is never replaced on an unsettled row.
+            $update = $settled ? ['state' => MeshAllowRule::STATE_ACTIVE] : [];
 
-            if ($ruleId !== null) {
+            if ($ruleId !== null && ($settled || $storedId === null)) {
                 $update['mesh_rule_id'] = $ruleId;
             }
 
             if ($settled) {
-                // The fault is over — scope was proved at create time and the
-                // id is now recorded — so the row must not keep reading as if
-                // a human still had something to go and check.
+                // The fault is over: scope was proved at create time and the
+                // id is now recorded.
                 $update['last_error'] = null;
-            } elseif (trim((string) $rule->last_error) === '') {
-                // The row's existing last_error is the ONLY record of why it
-                // never settled — a scope that was never proved, or a create
-                // that was never answered — and it names what a human has to go
-                // and check. Learning an id answers neither question, so this
-                // pass writes here only where there is nothing to overwrite.
+            } elseif (
+                trim((string) $rule->last_error) === ''
+                || ($ambiguous && (bool) $rule->scope_proved && $rule->state === MeshAllowRule::STATE_UNRESOLVED)
+            ) {
+                // The row's existing last_error is normally the ONLY record of
+                // why it never settled, so this pass writes here only where
+                // there is nothing to overwrite. One exception: on an
+                // UNRESOLVED scope-proved row the only thing outstanding is
+                // the id, so "N rules match" is a more specific account of
+                // that fault than the "could not be recovered" note it
+                // replaces. A scope fault (scope never proved) and a
+                // reap_failed row's delete fault are never overwritten.
                 $update['last_error'] = mb_substr($note, 0, 1000);
             }
 
-            $rule->forceFill($update)->save();
+            if ($update !== []) {
+                $rule->forceFill($update)->save();
+            }
+
+            $which = $permanent ? 'is permanent' : 'is unexpired';
 
             if ($settled) {
-                Log::info("[MeshAllowRuleReaper] mesh_allow_rules#{$rule->id} is permanent and now identified; it is recorded active and no longer blocks new allow rules for this sender. {$note}");
+                Log::info("[MeshAllowRuleReaper] mesh_allow_rules#{$rule->id} {$which} and now identified; it is recorded active and no longer blocks new allow rules for this sender. {$note}");
 
                 continue;
             }
 
-            Log::warning("[MeshAllowRuleReaper] mesh_allow_rules#{$rule->id} is permanent and unsettled; it may be live and it blocks new allow rules for this sender. {$note}");
+            Log::warning("[MeshAllowRuleReaper] mesh_allow_rules#{$rule->id} {$which} and unsettled; it may be live and it blocks new allow rules for this sender. {$note}");
 
             $counts['unresolved']++;
         }
@@ -245,6 +313,16 @@ class MeshAllowRuleReaper
             (string) $rule->comment,
         );
 
+        return $match === null ? null : self::ruleIdOf($match);
+    }
+
+    /**
+     * A matched row's upstream id as a non-empty string, or null.
+     *
+     * @param  array<string, mixed>  $match
+     */
+    private static function ruleIdOf(array $match): ?string
+    {
         $id = $match['id'] ?? null;
 
         return is_scalar($id) && (string) $id !== '' ? (string) $id : null;
