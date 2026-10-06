@@ -512,7 +512,10 @@ class MeshRemoveAllowRuleTest extends TestCase
 
         $run = $this->stagedRun($fixture);
 
-        $this->assertStringContainsString('PERMANENT — it has no expiry and nothing in the PSA would ever have removed it', $run->proposed_content);
+        $this->assertStringContainsString('PERMANENT — it has no expiry, so nothing would have removed it automatically', $run->proposed_content);
+        // #5156 (G-14): mesh_edit_allow_rule can date this record for the
+        // reaper, so the card must not say nothing in the PSA ever would.
+        $this->assertStringNotContainsString('nothing in the PSA would ever have removed it', $run->proposed_content);
     }
 
     /**
