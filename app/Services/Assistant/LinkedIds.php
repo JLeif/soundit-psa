@@ -81,6 +81,7 @@ final class LinkedIds
         'comet_device_id',
         'servosity_dr_backup_id',
         'autoelevate_computer_id',
+        'litsrmm_device_id',
         'merged_into_asset_id',
     ];
 
