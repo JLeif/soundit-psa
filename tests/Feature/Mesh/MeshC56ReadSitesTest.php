@@ -145,7 +145,7 @@ class MeshC56ReadSitesTest extends TestCase
         $log = $this->logsContaining('Mesh log search failed');
         $this->assertStatusOnly($log, 'search log');
         $this->assertStringContainsString(self::CLASS_IN_CONTEXT, $log, 'search log: the exception class is named');
-        $this->assertNoVendorText($this->allLogs(), 'every record', false);
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
@@ -233,7 +233,7 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertStringNotContainsString($client->name, $this->allLogs(), 'the client name is not logged');
         $this->assertStatusOnly($log, 'license sync log');
         $this->assertStringContainsString('('.MeshClientException::class.')', $log, 'the class is named');
-        $this->assertNoVendorText($this->allLogs(), 'every record', false);
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     public function test_a_foreign_failure_in_the_license_sync_logs_the_class_only(): void
@@ -264,7 +264,7 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertStringStartsWith('Could not load Mesh customers: ', $flash, 'the PSA prose is kept');
         $this->assertStringNotContainsString('connect', $flash, 'not "could not connect" when Mesh may have answered');
         $this->assertStatusOnly($flash, 'mapping page flash');
-        $this->assertNoVendorText($this->allLogs(), 'every record', false);
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
@@ -290,7 +290,7 @@ class MeshC56ReadSitesTest extends TestCase
         $log = $this->logsContaining('[MeshSync] Failed for client '.$client->id.':');
         $this->assertStatusOnly($log, 'sync log');
         $this->assertStringNotContainsString($client->name, $this->allLogs());
-        $this->assertNoVendorText($this->allLogs(), 'every record', false);
+        $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
@@ -599,19 +599,17 @@ class MeshC56ReadSitesTest extends TestCase
     }
 
     /**
-     * $pathIdToo is false only for ALL records together: MeshClient's own
-     * failure line logs the endpoint path, which can carry the Mesh customer
-     * id (a separate issue, outside this card).
+     * Also holds over ALL records together, MeshClient's own failure line
+     * included: that line logs a customer read's path as api/customers/{id}/
+     * (#5298/#5305), so the Mesh customer id is checked everywhere.
      */
-    private function assertNoVendorText(string $text, string $where, bool $pathIdToo = true): void
+    private function assertNoVendorText(string $text, string $where): void
     {
         $this->assertStringNotContainsString(self::$marker, $text, "{$where}: vendor body leaked");
         $this->assertStringNotContainsString(self::$queryMarker, $text, "{$where}: request query leaked");
         $this->assertStringNotContainsString(self::HOST, $text, "{$where}: request host leaked");
         $this->assertStringNotContainsString(self::$apiKey, $text, "{$where}: API key leaked");
-        if ($pathIdToo) {
-            $this->assertStringNotContainsString(self::MESH_ID, $text, "{$where}: request path (Mesh id) leaked");
-        }
+        $this->assertStringNotContainsString(self::MESH_ID, $text, "{$where}: request path (Mesh id) leaked");
         $this->assertStringNotContainsString('_size', $text, "{$where}: request query leaked");
     }
 

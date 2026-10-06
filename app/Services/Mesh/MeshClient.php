@@ -68,9 +68,10 @@ class MeshClient
     /**
      * Internal request method with auth header.
      * API-KEY header is added here — never logged. A failure is logged by
-     * method, endpoint path (no query), HTTP status and exception class only:
-     * Guzzle's message quotes the request URI and a summary of the vendor's
-     * response body (C-56).
+     * method, endpoint path (no query, the customer segment as {id}), HTTP
+     * status and exception class only: Guzzle's message quotes the request
+     * URI and a summary of the vendor's response body (C-56), and the customer
+     * segment is a client's Mesh customer id (#5298/#5305).
      */
     private function request(string $method, string $endpoint, array $options = []): array
     {
@@ -83,7 +84,7 @@ class MeshClient
             $response = $this->http->request($method, $endpoint, $options);
         } catch (GuzzleException $e) {
             $status = $e instanceof RequestException ? ($e->getResponse()?->getStatusCode() ?? 0) : 0;
-            Log::error("[MeshClient] {$method} ".(strtok($endpoint, '?') ?: '').' failed with '
+            Log::error("[MeshClient] {$method} ".self::logPath($endpoint).' failed with '
                 .($status > 0 ? "HTTP {$status}" : 'no HTTP status').' ('.$e::class.')');
             throw new MeshClientException("Mesh API error: {$e->getMessage()}", $e->getCode(), $e);
         }
@@ -91,5 +92,17 @@ class MeshClient
         $body = (string) $response->getBody();
 
         return json_decode($body, true) ?? [];
+    }
+
+    /**
+     * The endpoint as logged: no query string, and the segment after
+     * api/customers/ (a Mesh customer id) replaced by {id}. Only the log
+     * line uses this; the request goes to the real endpoint.
+     */
+    private static function logPath(string $endpoint): string
+    {
+        $path = strtok($endpoint, '?') ?: '';
+
+        return (string) preg_replace('#^(/?api/customers/)[^/]+#', '$1{id}', $path);
     }
 }
