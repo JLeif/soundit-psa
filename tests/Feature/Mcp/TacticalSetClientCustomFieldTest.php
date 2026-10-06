@@ -604,6 +604,10 @@ class TacticalSetClientCustomFieldTest extends TestCase
         $this->assertSame($fixture['ticket']->id, $run->ticket_id);
         $this->assertSame('tactical_set_client_custom_field', $run->proposed_meta['direct_tool']);
 
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+
         // The approver has to be able to judge the write, so the proposal shows the
         // value and says what a client-scoped field costs.
         $this->assertStringContainsString('org-abc123', $run->proposed_content);

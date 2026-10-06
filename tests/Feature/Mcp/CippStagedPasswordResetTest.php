@@ -142,6 +142,9 @@ class CippStagedPasswordResetTest extends TestCase
         $run = TechnicianRun::query()->where('action_type', self::STAGED)->first();
         $this->assertNotNull($run, 'a staged reset must create a held TechnicianRun');
         $this->assertSame($fixture['client']->id, (int) $run->client_id);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
 
         // The proposal must not carry a credential — none exists yet.
         $result = $this->decoded($response);

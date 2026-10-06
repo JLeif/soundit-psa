@@ -526,6 +526,9 @@ class CippWriteEmailSecurityTest extends TestCase
         $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
         $run = TechnicianRun::findOrFail($this->decodedResult($response)['run_id']);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
 
         // The approver must review the exact value and its tenant-wide blast radius.
         $this->assertStringContainsString('billing@vendor.example', $run->proposed_content);

@@ -181,6 +181,9 @@ class CippStagedActionSupersedeTest extends TestCase
         $runB = TechnicianRun::findOrFail($runIdB);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $runA->fresh()->state, 'run A must NOT be superseded by the unrelated run B');
         $this->assertSame(TechnicianRunState::AwaitingApproval, $runB->fresh()->state);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $runA->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $runA->proposed_meta['drafted_by']);
 
         $this->assertSame(2, TechnicianRun::where('ticket_id', $fixture['ticket']->id)
             ->where('action_type', 'cipp_stage_set_mailbox_forwarding')

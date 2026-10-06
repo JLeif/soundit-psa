@@ -89,6 +89,9 @@ class CippOffboardingAdmissionTest extends TestCase
         $sealed = json_decode(Crypt::decryptString($run->proposed_meta['encrypted_payload']), true);
         $this->assertSame(['revoke_sessions'], $sealed['input']['actions']);
         $this->assertSame('awaiting_approval', $run->state->value);
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('synthetic-offboarding', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:synthetic-offboarding', $run->proposed_meta['drafted_by']);
     }
 
     public function test_legacy_ungranted_and_immediate_calls_cannot_stage(): void

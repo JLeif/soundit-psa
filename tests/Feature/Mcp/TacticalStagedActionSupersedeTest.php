@@ -109,6 +109,27 @@ class TacticalStagedActionSupersedeTest extends TestCase
         ];
     }
 
+    /** Card tY39CHiq: the staged run records the caller's BARE token label beside the prefixed drafted_by. */
+    public function test_staged_command_records_the_bare_drafting_token_label(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->twoAssetFixture();
+        $blocked = Mockery::mock(TacticalClient::class);
+        $blocked->shouldNotReceive('cmd');
+        $this->app->instance(TacticalClient::class, $blocked);
+
+        $res = $this->callTool($this->token(['tactical_stage_command']), 'tactical_stage_command', $this->stageCommandArgs(
+            $fixture, 'PC-01', 'ipconfig /flushdns', 'Flush DNS on PC-01.',
+        ));
+        $this->assertFalse((bool) $res->json('result.isError'), (string) $res->json('result.content.0.text'));
+        $run = TechnicianRun::findOrFail($this->decodedResult($res)['run_id']);
+
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+    }
+
     public function test_two_different_content_staged_commands_coexist(): void
     {
         $this->configureTactical();

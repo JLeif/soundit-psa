@@ -132,6 +132,33 @@ class TacticalAdminStagedActionDedupTest extends TestCase
         ];
     }
 
+    /** Card tY39CHiq: both staging sites record the caller's BARE token label beside the prefixed drafted_by. */
+    public function test_policy_task_run_all_and_patch_reset_record_the_bare_drafting_token_label(): void
+    {
+        $this->configureTactical();
+        $this->configureAiActor();
+        $fixture = $this->fixture();
+
+        $client = Mockery::mock(TacticalClient::class);
+        $client->shouldReceive('getPolicies')->andReturn($this->policies());
+        $client->shouldReceive('getPolicyTasks')->with(7)->andReturn($this->policyTasks());
+        $client->shouldReceive('getClients')->andReturn($this->tacticalClients());
+        $this->app->instance(TacticalClient::class, $client);
+
+        foreach ([
+            'tactical_stage_run_policy_task_all' => $this->stagePolicyTaskRunAllArgs($fixture, 'Run a quick scan fleet-wide.'),
+            'tactical_stage_reset_patch_policies' => $this->stagePatchResetArgs($fixture, 'Reset patch policies for the site.'),
+        ] as $tool => $args) {
+            $res = $this->callTool($this->token([$tool]), $tool, $args);
+            $this->assertFalse((bool) $res->json('result.isError'), $tool.': '.(string) $res->json('result.content.0.text'));
+            $run = TechnicianRun::findOrFail($this->decodedResult($res)['run_id']);
+
+            $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state, $tool);
+            $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null, $tool);
+            $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by'], $tool);
+        }
+    }
+
     public function test_policy_task_run_all_restaging_identical_content_while_awaiting_returns_idempotent_with_real_run_id(): void
     {
         $this->configureTactical();

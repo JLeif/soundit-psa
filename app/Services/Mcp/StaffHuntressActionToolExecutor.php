@@ -169,7 +169,7 @@ class StaffHuntressActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    public function execute(string $name, array $arguments, int $clientId, string $actorLabel): array
+    public function execute(string $name, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         if (! HuntressConfig::isEnabled() || ! HuntressConfig::isConfigured()) {
             return ['error' => 'Huntress is not configured'];
@@ -180,7 +180,7 @@ class StaffHuntressActionToolExecutor
         }
 
         if (isset(self::STAGED_TO_DIRECT[$name])) {
-            return $this->stageResolveEscalation($name, $arguments, $clientId, $actorLabel);
+            return $this->stageResolveEscalation($name, $arguments, $clientId, $actorLabel, $tokenLabel);
         }
 
         if ($name === 'huntress_resolve_escalation') {
@@ -199,7 +199,7 @@ class StaffHuntressActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function stageResolveEscalation(string $tool, array $arguments, int $clientId, string $actorLabel): array
+    private function stageResolveEscalation(string $tool, array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel = null): array
     {
         $directTool = self::STAGED_TO_DIRECT[$tool];
         $contentHash = $this->contentHash($tool, $clientId, null, $arguments);
@@ -339,7 +339,7 @@ class StaffHuntressActionToolExecutor
         }
 
         $meta = [
-            'drafted_by' => $actorLabel,
+            ...DraftedByToken::meta($actorLabel, $tokenLabel),
             'reasons' => [$reason],
             'direct_tool' => $directTool,
             'redacted_params' => ['escalation_id' => $escalationId],

@@ -1390,6 +1390,7 @@ class McpStaffController extends Controller
                     $this->actorLabel($request),
                     $staffToken instanceof McpStaffToken ? $staffToken->id : null,
                     $executeAt,
+                    $this->tokenLabel($request),
                 );
             } elseif ($this->isCippAdminTool((string) $name)) {
                 $result = app(StaffCippAdminToolExecutor::class)->execute(
@@ -1414,6 +1415,7 @@ class McpStaffController extends Controller
                     $this->actorLabel($request),
                     $staffToken instanceof McpStaffToken ? $staffToken->id : null,
                     $executeAt,
+                    $this->tokenLabel($request),
                 );
             } elseif ($this->isHuntressActionTool((string) $name)) {
                 $result = app(StaffHuntressActionToolExecutor::class)->execute(
@@ -1421,6 +1423,7 @@ class McpStaffController extends Controller
                     $arguments,
                     (int) $clientId,
                     $this->actorLabel($request),
+                    $this->tokenLabel($request),
                 );
             } elseif ($this->isControlDOnboardingTool((string) $name)) {
                 // B4.1 (#2043): the executor binds the staging token (id + ai_actor) into the
@@ -1450,6 +1453,7 @@ class McpStaffController extends Controller
                     $arguments,
                     $clientId,
                     $this->actorLabel($request),
+                    $this->tokenLabel($request),
                 );
             } elseif ($this->isPsaActionTool((string) $name)) {
                 $result = app(StaffPsaActionToolExecutor::class)->execute(

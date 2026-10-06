@@ -17,7 +17,11 @@ class OffboardingAdmission
 {
     public function __construct(private readonly OffboardingScope $scope, private readonly CippRestWriteClient $client) {}
 
-    public function stage(array $input, int $clientId, int $tokenId): array
+    /**
+     * @param  array{drafted_by?: string, drafted_by_token?: string}  $drafter  the staging token's
+     *                                                                          DraftedByToken::meta() keys (card tY39CHiq)
+     */
+    public function stage(array $input, int $clientId, int $tokenId, array $drafter = []): array
     {
         try {
             $input = OffboardingPlan::validate($input);
@@ -33,7 +37,7 @@ class OffboardingAdmission
             $snapshot['token_id'] = $tokenId;
             (new OffboardingLedger(DB::connection()))->assertAvailable($snapshot);
             $hash = OffboardingPlan::hash($snapshot);
-            $run = DB::transaction(function () use ($snapshot, $hash): TechnicianRun {
+            $run = DB::transaction(function () use ($snapshot, $hash, $drafter): TechnicianRun {
                 // Lock the local ticket to coalesce same-ticket proposals without reviving spent rows.
                 DB::table('tickets')->where('id', $snapshot['input']['ticket_id'])->lockForUpdate()->first();
                 $existing = TechnicianRun::where('ticket_id', $snapshot['input']['ticket_id'])
@@ -54,7 +58,7 @@ class OffboardingAdmission
                     'state' => TechnicianRunState::AwaitingApproval,
                     'proposed_content' => $this->preview($snapshot),
                     'proposed_meta' => ['revision' => 1, 'plan_hash' => $hash, 'actions' => $snapshot['input']['actions'],
-                        'encrypted_payload' => Crypt::encryptString(OffboardingPlan::canonical($snapshot))],
+                        'encrypted_payload' => Crypt::encryptString(OffboardingPlan::canonical($snapshot))] + $drafter,
                     'tokens_used' => 0,
                 ]);
             });

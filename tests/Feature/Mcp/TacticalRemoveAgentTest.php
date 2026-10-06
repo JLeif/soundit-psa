@@ -347,6 +347,10 @@ class TacticalRemoveAgentTest extends TestCase
         $this->assertSame('tactical_remove_agent', $run->proposed_meta['direct_tool']);
         $this->assertSame('RETIRED-01', $run->proposed_meta['redacted_params']['hostname']);
 
+        // Card tY39CHiq: the BARE token label beside the prefixed drafted_by.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
+        $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+
         // The upstream agent id is never carried in the proposal: approval
         // re-resolves it from the PSA asset against live state.
         $this->assertArrayNotHasKey('agent_id', $run->proposed_meta['redacted_params']);

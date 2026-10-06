@@ -475,6 +475,8 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertNull($payload['staged_by_user_id']);
         $this->assertSame($tokenId, $run->proposed_meta['staged_by_token_id'] ?? null);
         $this->assertSame('mcp-staff:opsbot', $run->proposed_meta['drafted_by']);
+        // Card tY39CHiq: the BARE token label, which withdraw_staged_action matches.
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null);
         $this->assertStringNotContainsString('psa-mcp-', json_encode($run->proposed_meta));
 
         $this->vendor([$this->ok(['organization' => $this->orgRow()]), $this->ok(['sub_organizations' => [$this->orgRow()]])]);
@@ -695,6 +697,8 @@ class ControlDOnboardClientTest extends TestCase
         $run = TechnicianRun::sole();
         $this->assertSame('controld_stage_onboard_client', $run->action_type);
         $this->assertSame('organization', $run->proposed_meta['redacted_params']['step']);
+        // Card tY39CHiq: a logged-in Admin is not a token, so no token label is invented.
+        $this->assertArrayNotHasKey('drafted_by_token', $run->proposed_meta);
 
         // The verb finds the same live proposal rather than a second one.
         $again = $this->decoded($this->callTool($this->token(), 'controld_onboard_client', ['client_id' => $fixture['client']->id, 'ticket_id' => $fixture['ticket']->id, 'reason' => 'again', 'staged' => true]));
