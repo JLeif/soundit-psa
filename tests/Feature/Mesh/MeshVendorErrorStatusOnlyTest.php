@@ -392,11 +392,16 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
             }
 
             if ($isList) {
+                // Paged as Mesh pages: rows from `_from` on. Re-serving the
+                // first page at every offset would let the walk pad itself up
+                // to any reported count, and no short read would ever happen.
+                parse_str($request->getUri()->getQuery(), $query);
+
                 return Create::promiseFor(new Response(200, [], json_encode([
                     'count' => $this->reportedCount ?? count($this->upstream),
                     'next' => null,
                     'previous' => null,
-                    'results' => array_values($this->upstream),
+                    'results' => array_slice(array_values($this->upstream), (int) ($query['_from'] ?? 0)),
                 ])));
             }
 
