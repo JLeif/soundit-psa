@@ -137,6 +137,29 @@ class Asset extends Model
         ];
     }
 
+    /**
+     * A person changing is_active on an asset the LITSRMM sync retired ends the
+     * sync's claim on that status: litsrmm_retired_at is cleared, and so is the
+     * link to the retired device, so a later sync does not retire again an
+     * asset a person reactivated while its device is still retired, nor
+     * reactivate one a person made inactive again. The sync's own writes either
+     * bypass model events or set litsrmm_retired_at themselves, and are left
+     * alone.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (Asset $asset) {
+            if ($asset->isDirty('is_active') && ! $asset->isDirty('litsrmm_retired_at')
+                && $asset->getOriginal('litsrmm_retired_at') !== null) {
+                $asset->litsrmm_retired_at = null;
+                if (! $asset->isDirty('litsrmm_device_id')) {
+                    $asset->litsrmm_device_id = null;
+                    $asset->litsrmm_synced_at = null;
+                }
+            }
+        });
+    }
+
     // ── Relations ──
 
     public function client(): BelongsTo

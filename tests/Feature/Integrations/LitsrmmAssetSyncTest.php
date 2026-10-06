@@ -511,7 +511,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame(1, $result->deactivated);
     }
 
-    public function test_a_retired_device_is_not_created_and_loses_its_link(): void
+    public function test_a_retired_device_is_not_created_and_its_asset_keeps_its_link(): void
     {
         $row = $this->device('1', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
         $this->device('2', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
@@ -520,7 +520,8 @@ class LitsrmmAssetSyncTest extends TestCase
         $result = $this->service()->sync();
 
         $this->assertSame(1, Asset::count(), 'no asset is created for a retired device');
-        $this->assertNull($asset->fresh()->litsrmm_device_id);
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id, 'a retired asset keeps its link');
+        $this->assertFalse((bool) $asset->fresh()->is_active);
         $this->assertFalse($asset->fresh()->trashed());
         $this->assertSame(0, $this->detailRequests());
         $this->assertSame(1, $result->deactivated);
@@ -660,7 +661,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $asset->refresh();
         $this->assertFalse((bool) $asset->is_active);
         $this->assertNotNull($asset->litsrmm_retired_at);
-        $this->assertNull($asset->litsrmm_device_id);
+        $this->assertSame($row['id'], $asset->litsrmm_device_id);
         $this->assertFalse($asset->trashed());
     }
 
@@ -696,6 +697,87 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->service()->sync();
 
         $this->assertFalse((bool) $asset->fresh()->is_active);
+    }
+
+    // ---- Review of #4485 round 2: retirement is reversible on every path ----
+
+    public function test_a_device_back_from_retirement_reactivates_its_own_asset(): void
+    {
+        $row = $this->device('1', ['serial' => 'Default string', 'enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => null, 'is_active' => true, 'litsrmm_device_id' => $row['id']]);
+        $this->service()->sync();
+        $this->assertFalse((bool) $asset->fresh()->is_active);
+
+        $this->rows = [];
+        $this->device('1', ['serial' => 'Default string']);
+        $result = $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertSame(1, Asset::count(), 'no second, billable asset');
+        $this->assertSame($row['id'], $asset->litsrmm_device_id);
+        $this->assertTrue((bool) $asset->is_active);
+        $this->assertNull($asset->litsrmm_retired_at);
+        $this->assertSame(0, $result->created);
+    }
+
+    public function test_a_machine_reenrolled_after_retirement_takes_back_its_asset_by_hostname(): void
+    {
+        $retired = ['serial' => 'Default string', 'enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z'];
+        $old = $this->device('1', $retired);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => null, 'is_active' => true, 'litsrmm_device_id' => $old['id']]);
+        $this->service()->sync();
+        $this->assertFalse((bool) $asset->fresh()->is_active);
+
+        $this->rows = [];
+        $this->device('1', $retired);
+        $new = $this->device('2', ['hostname' => 'WORKSTATION-1', 'serial' => 'Default string']);
+        $result = $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertSame(1, Asset::count(), 'no second, billable asset');
+        $this->assertSame($new['id'], $asset->litsrmm_device_id);
+        $this->assertTrue((bool) $asset->is_active);
+        $this->assertNull($asset->litsrmm_retired_at);
+        $this->assertSame(0, $result->created);
+    }
+
+    public function test_a_person_reactivating_a_retired_asset_ends_the_syncs_claim(): void
+    {
+        $row = $this->device('1', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'is_active' => true, 'litsrmm_device_id' => $row['id']]);
+        $this->service()->sync();
+        $this->assertNotNull($asset->fresh()->litsrmm_retired_at);
+
+        $asset->fresh()->forceFill(['is_active' => true])->save();
+
+        $asset->refresh();
+        $this->assertNull($asset->litsrmm_retired_at);
+        $this->assertNull($asset->litsrmm_device_id);
+
+        $result = $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertTrue((bool) $asset->is_active, 'the device still reads retired; the person decided');
+        $this->assertNull($asset->litsrmm_retired_at);
+        $this->assertSame(0, $result->deactivated);
+    }
+
+    public function test_a_retired_asset_a_person_reactivated_then_made_inactive_stays_inactive(): void
+    {
+        $row = $this->device('1', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'is_active' => true, 'litsrmm_device_id' => $row['id']]);
+        $this->service()->sync();
+
+        $asset->fresh()->forceFill(['is_active' => true])->save();
+        $asset->fresh()->forceFill(['is_active' => false])->save();
+
+        $this->rows = [];
+        $this->device('1');
+        $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertFalse((bool) $asset->is_active, 'an asset a person made inactive is never reactivated');
+        $this->assertNull($asset->litsrmm_retired_at);
     }
 
     private function licenses(Client $client): array
