@@ -131,9 +131,10 @@ final class MeshReadTools
         try {
             $result = app(MeshClient::class)->get('api/emaillogs/', $params);
         } catch (\Throwable $e) {
-            Log::warning("{$logPrefix} Mesh log search failed", ['error' => $e->getMessage()]);
+            $reason = self::failureReason($e, 'the email-log search');
+            Log::warning("{$logPrefix} Mesh log search failed", ['reason' => $reason, 'exception' => $e::class]);
 
-            return ['error' => 'Mesh query failed: '.mb_substr($e->getMessage(), 0, 200)];
+            return ['error' => 'Mesh query failed: '.$reason];
         }
 
         $rows = $result['list'] ?? null;
@@ -205,9 +206,10 @@ final class MeshReadTools
         try {
             $result = app(MeshClient::class)->get('api/emaillogs/events', ['queue_id' => $queueId]);
         } catch (\Throwable $e) {
-            Log::warning("{$logPrefix} Mesh events query failed", ['queue_id' => $queueId, 'error' => $e->getMessage()]);
+            $reason = self::failureReason($e, 'the email-events read');
+            Log::warning("{$logPrefix} Mesh events query failed", ['queue_id' => $queueId, 'reason' => $reason, 'exception' => $e::class]);
 
-            return ['error' => 'Mesh query failed: '.mb_substr($e->getMessage(), 0, 200)];
+            return ['error' => 'Mesh query failed: '.$reason];
         }
 
         if ($result === [] || array_key_exists('error', $result)) {
@@ -272,10 +274,25 @@ final class MeshReadTools
                 try {
                     Cache::put($this->queueCacheKey($clientId, $queueId), $key, self::QUEUE_TTL_SECONDS);
                 } catch (\Throwable $e) {
-                    Log::warning("{$logPrefix} Mesh queue id could not be recorded", ['error' => $e->getMessage()]);
+                    Log::warning("{$logPrefix} Mesh queue id could not be recorded", ['exception' => $e::class]);
                 }
             }
         }
+    }
+
+    /**
+     * A failed read as a phrase safe to hand the caller and the log (C-56). A
+     * MeshClientException reports through statusPhrase(): the HTTP status, or
+     * that there was none. Its message is never used, because MeshClient
+     * builds it from Guzzle's, which quotes the request URI, the host and a
+     * summary of the vendor's body. Any other Throwable is reported by none of
+     * its text either: the log line names its class.
+     */
+    private static function failureReason(\Throwable $e, string $what): string
+    {
+        return $e instanceof MeshClientException
+            ? $e->statusPhrase($what)
+            : "{$what} failed with an unexpected error; the PSA log names its class";
     }
 
     private function servedQueueId(int $clientId, string $key, string $queueId): bool

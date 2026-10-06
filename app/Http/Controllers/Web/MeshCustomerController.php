@@ -28,7 +28,10 @@ class MeshCustomerController extends Controller
             $customers = $meshClient->getCustomers(size: 200);
         } catch (MeshClientException $e) {
             return redirect()->route('settings.integrations')
-                ->with('error', "Could not connect to Mesh: {$e->getMessage()}");
+                // Status only (C-56): the message quotes Guzzle's, which carries
+                // the request URI, the host and a summary of the vendor's body.
+                // Not "could not connect": Mesh may have answered with a status.
+                ->with('error', 'Could not load Mesh customers: '.$e->statusPhrase('the customer list read').'.');
         }
 
         // Sort customers by company_name

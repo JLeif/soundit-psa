@@ -29,7 +29,14 @@ class MeshLicenseSyncService
             try {
                 $this->syncClientLicenses($client, $result);
             } catch (\Throwable $e) {
-                Log::error("[MeshSync] Failed for client {$client->name}: {$e->getMessage()}");
+                // By client id, never by name (client data), and by status or
+                // exception class, never by the message: a MeshClientException
+                // message quotes Guzzle's, which carries the request URI, the
+                // host and a summary of the vendor's body (C-56).
+                $reason = $e instanceof MeshClientException
+                    ? $e->statusPhrase('the customer read')
+                    : 'an unexpected error';
+                Log::error("[MeshSync] Failed for client {$client->getKey()}: {$reason} (".$e::class.')');
                 $result->errors++;
             }
 

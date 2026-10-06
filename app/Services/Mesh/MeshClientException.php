@@ -2,6 +2,8 @@
 
 namespace App\Services\Mesh;
 
+use Illuminate\Support\Facades\Log;
+
 /**
  * A Mesh call that did not succeed. The code is the HTTP status Mesh answered
  * with, or 0 when there is none (see MeshWriteClient::request()).
@@ -77,5 +79,24 @@ class MeshClientException extends \RuntimeException
 
         return "{$what} failed without an HTTP status from Mesh"
             .($this->nothingSent ? '; nothing was sent' : '');
+    }
+
+    /**
+     * How Laravel's exception handler reports this exception when it is
+     * uncaught or passed to report() (#5282). Without it the handler logs
+     * getMessage() as the record message and the exception itself as context,
+     * and Monolog's formatters print the message of every exception down the
+     * getPrevious() chain. MeshClient and MeshWriteClient chain the Guzzle
+     * exception there, whose message quotes the request URI, the host and a
+     * summary of the vendor's body, and which also holds the PSR-7 request
+     * (API-KEY header) and response. So this writes one status-only line by
+     * class and statusPhrase(), and returns true so the handler does not also
+     * write its default record.
+     */
+    public function report(): bool
+    {
+        Log::error('[Mesh] '.static::class.' reported: '.$this->statusPhrase('the request'));
+
+        return true;
     }
 }
