@@ -61,7 +61,7 @@ class MeshLicenseSyncService
         // rather than by a throw so the log carries no exception class that
         // would read as a failed request: the request answered, the data did not.
         if (empty($customerData)) {
-            $this->degradedRead($client, $result, 'the customer read returned no data');
+            $this->degradedRead($client, $result, 'the customer read returned no usable data');
 
             return;
         }

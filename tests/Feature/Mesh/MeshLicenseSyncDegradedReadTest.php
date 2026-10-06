@@ -86,7 +86,7 @@ class MeshLicenseSyncDegradedReadTest extends TestCase
 
         $this->assertCounts($result, errors: 1, created: 0, updated: 0);
         $this->assertSame(0, License::count(), 'no license written');
-        $this->assertErrorLogged($client, 'the customer read returned no data');
+        $this->assertErrorLogged($client, 'the customer read returned no usable data');
         $this->assertNoClientDataLogged();
     }
 
