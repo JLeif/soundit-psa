@@ -60,17 +60,31 @@ class MeshWriteClient
      */
     public const ALLOW_RULE = true;
 
-    /** Page size for the list read. The route paginates on _from/_size. */
-    public const LIST_PAGE_SIZE = 200;
+    /**
+     * Page size REQUESTED by the list read. The route paginates on _from/_size
+     * and answers `{count, next, previous, results}`.
+     *
+     * 100 is the vendor's cap, not our choice (measured 2026-10-06 on the
+     * production Partner Hub, read-only): asked for `_size=200`, the route
+     * returned 100 rows, `count` 375 and a `next` link carrying
+     * `_from=100&_size=100`. Requesting more is silently clamped, so this value
+     * is never used to decide whether the walk is over — listCustomerRules()
+     * reads that from the vendor's own `next` and `count`. (It used to stop on
+     * "fewer rows than requested", which with a 200 request and a 100 cap ended
+     * every walk after the first page.)
+     */
+    public const LIST_PAGE_SIZE = 100;
 
     /**
-     * Hard ceiling on pages walked in one scoped read. The partner-wide list
-     * was 393 rows when measured; 50 pages x 200 is two orders of magnitude of
-     * headroom. A ceiling exists at all because `customer_id` is IGNORED as a
-     * filter on this route (measured: passing it returns other customers'
-     * rules), so a scoped read has no choice but to page the whole list — and
-     * an unbounded loop against a list we do not control is a hang inside a
-     * synchronous approval request.
+     * Hard ceiling on pages walked in one scoped read: 50 pages x 100 rows is
+     * 5,000 rows. The partner-wide list measured 393 rows on 2026-09-01 and
+     * 375 on 2026-10-06, so this is over an order of magnitude of headroom. A
+     * ceiling exists at all because `customer_id` is IGNORED as a filter on
+     * this route (measured: passing it returns other customers' rules), so a
+     * scoped read has no choice but to page the whole list — and an unbounded
+     * loop against a list we do not control is a hang inside a synchronous
+     * approval request. Reaching it before the list ends is a FAILURE, never
+     * a truncated answer: see listCustomerRules().
      */
     public const LIST_PAGE_CEILING = 50;
 
@@ -205,7 +219,20 @@ class MeshWriteClient
      * return value is only the matching tenant's rows; no caller, no log line
      * and no error body ever receives the unfiltered list.
      *
+     * COMPLETENESS is the other half of the contract, because every caller
+     * reads "not in this list" as "not on this tenant". The walk continues
+     * while the vendor says there is more — a non-empty `next` link, or fewer
+     * rows seen than its `count` — and advances `_from` by the rows actually
+     * returned, never by the size requested (the vendor clamps that; see
+     * LIST_PAGE_SIZE). It ends on an empty page or when neither signal asks
+     * for more. A walk that cannot be shown complete THROWS rather than
+     * returning what it has: reaching LIST_PAGE_CEILING with the vendor still
+     * asking for more, or ending with fewer rows seen than `count`.
+     *
      * @return array<int, array<string, mixed>>
+     *
+     * @throws MeshClientException credential missing, upstream failure, or a
+     *                             list read that could not be completed
      */
     public function listCustomerRules(string $customerId): array
     {
@@ -217,14 +244,22 @@ class MeshWriteClient
 
         $matching = [];
         $from = 0;
+        $seen = 0;
+        $count = null;
+        $complete = false;
 
         for ($page = 0; $page < self::LIST_PAGE_CEILING; $page++) {
             $response = $this->request('GET', self::RULE_ENDPOINT, [
                 'query' => ['_from' => $from, '_size' => self::LIST_PAGE_SIZE],
             ]);
 
+            if (is_int($response['count'] ?? null)) {
+                $count = $response['count'];
+            }
+
             $results = $response['results'] ?? null;
             if (! is_array($results) || $results === []) {
+                $complete = true;
                 break;
             }
 
@@ -234,11 +269,30 @@ class MeshWriteClient
                 }
             }
 
-            if (count($results) < self::LIST_PAGE_SIZE) {
+            $seen += count($results);
+            $from += count($results);
+
+            $next = $response['next'] ?? null;
+            $moreByNext = is_string($next) && trim($next) !== '';
+            $moreByCount = $count !== null && $seen < $count;
+
+            if (! $moreByNext && ! $moreByCount) {
+                $complete = true;
                 break;
             }
+        }
 
-            $from += self::LIST_PAGE_SIZE;
+        if (! $complete) {
+            throw new MeshClientException(
+                'Mesh rule list read reached its page ceiling ('.self::LIST_PAGE_CEILING.' pages, '.$seen
+                .' rows) while Mesh still reported more rows; the incomplete list was not used.'
+            );
+        }
+
+        if ($count !== null && $seen < $count) {
+            throw new MeshClientException(
+                "Mesh rule list read ended after {$seen} rows but Mesh reported {$count}; the incomplete list was not used."
+            );
         }
 
         return $matching;
