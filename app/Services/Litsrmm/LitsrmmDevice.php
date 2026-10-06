@@ -37,7 +37,6 @@ final class LitsrmmDevice
     /** Five values, not a boolean: "offline" is a recorded fact, not "unknown". */
     public const AVAILABILITY_STATES = ['online', 'offline', 'overdue', 'dormant', 'retired'];
 
-
     private const REQUIRED = ['id', 'clientId', 'clientName', 'hostname', 'enrollmentState', 'availabilityState'];
 
     private const OPTIONAL_STRINGS = ['serial', 'osName', 'osVersion', 'osBuild', 'agentVersion', 'lastUser'];

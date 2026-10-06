@@ -904,7 +904,16 @@
                         <button type="submit" class="btn btn-outline-primary">
                             <i class="bi bi-arrow-repeat me-1"></i>Sync all devices
                         </button>
-                        <div class="form-text">Creates and updates assets, and LITSRMM seats, for every mapped client. Also runs every 4 hours.</div>
+                        <div class="form-text">Creates and updates assets, and LITSRMM seats, for every mapped client.</div>
+                    </form>
+                    <form method="POST" action="{{ route('settings.integrations.litsrmm.schedule') }}" class="mt-3">
+                        @csrf
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="enabled" value="1" id="litsrmm_sync_schedule"
+                                   {{ $litsrmmScheduleEnabled ? 'checked' : '' }} onchange="this.form.submit()">
+                            <label class="form-check-label" for="litsrmm_sync_schedule">Sync every 4 hours</label>
+                        </div>
+                        <div class="form-text">Off by default. Switch on after a supervised manual run has been reviewed.</div>
                     </form>
                 </div>
                 @endif

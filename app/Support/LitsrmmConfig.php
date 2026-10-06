@@ -60,6 +60,16 @@ class LitsrmmConfig
     }
 
     /**
+     * Whether the 4-hourly device sync may run. Off unless an admin switched it
+     * on: it writes assets and seats, so it goes live only after a supervised
+     * manual run has been read.
+     */
+    public static function isScheduleEnabled(): bool
+    {
+        return Setting::getValue('litsrmm_sync_schedule_enabled', '0') === '1';
+    }
+
+    /**
      * The question every consumer should ask: configured AND switched on.
      *
      * Kept distinct from isConfigured() so that "we hold credentials" and "we

@@ -40,7 +40,14 @@ use Illuminate\Support\Facades\Log;
  *  - A DEVICE THAT LEAVES loses only our link (litsrmm_device_id,
  *    litsrmm_synced_at). The asset, its hardware facts and every other
  *    vendor's link stay: offboarding is a deliberate operator action
- *    (psa-u97k). A retired device counts as having left.
+ *    (psa-u97k).
+ *  - A RETIRED DEVICE also marks its asset inactive, REVERSIBLY: is_active
+ *    false and litsrmm_retired_at set, so it no longer looks live and is not
+ *    re-matched by hostname. The same machine coming back by its real serial
+ *    reactivates it. An asset a person made inactive is never reactivated.
+ *  - A LINK TO A DEVICE THIS READ DOES NOT LIST LIVE does not hold its asset:
+ *    a machine re-enrolled under a new device id takes its own asset back
+ *    instead of creating a second, billable one.
  *  - A DELETED ASSET IS NEVER REVIVED. Soft-deleted rows can neither match
  *    nor block a match; a deletion is a person's decision.
  *  - A NAME A PERSON CHOSE IS KEPT. `name` is set from the hostname only when
@@ -237,6 +244,14 @@ class LitsrmmAssetSyncService
 
             try {
                 $hardware[$device->id] = LitsrmmHardware::fromInventory($this->litsrmm->getDevice($device->id)['inventory']);
+
+                // Drift: the vendor sent a category in a shape we do not read.
+                if ($hardware[$device->id]->malformed !== []) {
+                    Log::warning('[LitsrmmAssetSync] device detail has malformed inventory categories (drift)', [
+                        'device' => $device->id,
+                        'categories' => $hardware[$device->id]->malformed,
+                    ]);
+                }
             } catch (LitsrmmClientException $e) {
                 // The list facts are still written; only the hardware is stale.
                 $result->recordError("{$device->hostname}: hardware not refreshed ({$e->getMessage()})");
@@ -263,13 +278,21 @@ class LitsrmmAssetSyncService
             }
         }
 
-        // Two devices answering to one name in one client cannot both be the
-        // asset that carries it.
+        // Two devices answering to one name, or one real serial, in one
+        // client cannot both be the asset that carries it. $liveIds: the
+        // devices this read lists that are not retired.
         $nameCounts = [];
+        $serialCounts = [];
+        $liveIds = [];
         foreach ($rows as $device) {
             if (! $device->isRetired()) {
                 $key = self::normalizeHostname($device->hostname);
                 $nameCounts[$key] = ($nameCounts[$key] ?? 0) + 1;
+                $serial = LitsrmmSerial::identity($device->serial);
+                if ($serial !== null) {
+                    $serialCounts[$serial] = ($serialCounts[$serial] ?? 0) + 1;
+                }
+                $liveIds[strtolower($device->id)] = true;
             }
         }
 
@@ -294,7 +317,14 @@ class LitsrmmAssetSyncService
             }
 
             if ($asset === null) {
-                $match = $this->matchUnlinked($device, $assets, $kept, $nameCounts);
+                $serial = LitsrmmSerial::identity($device->serial);
+                if ($serial !== null && ($serialCounts[$serial] ?? 0) > 1) {
+                    $result->recordSkipped("{$device->hostname}: shares its serial with another device; not linked, not created");
+
+                    continue;
+                }
+
+                $match = $this->matchUnlinked($device, $assets, $kept, $nameCounts, $liveIds);
 
                 if ($match === false) {
                     $result->recordSkipped("{$device->hostname}: more than one asset or device could be this machine; not linked, not created");
@@ -316,6 +346,23 @@ class LitsrmmAssetSyncService
             $kept[$asset->id] = true;
         }
 
+        // A retired device's asset, unless a live device took it back above:
+        // inactive, reversibly. Only an asset that is active now is stamped, so
+        // one a person made inactive keeps a null litsrmm_retired_at.
+        $retiredIds = [];
+        foreach ($rows as $device) {
+            if ($device->isRetired()) {
+                $retiredIds[] = $device->id;
+            }
+        }
+        if ($retiredIds !== []) {
+            Asset::where('client_id', $client->id)
+                ->whereIn('litsrmm_device_id', $retiredIds)
+                ->where('is_active', true)
+                ->when($kept !== [], fn ($q) => $q->whereNotIn('id', array_keys($kept)))
+                ->update(['is_active' => false, 'litsrmm_retired_at' => now()]);
+        }
+
         // A successful read that did not return a linked device: release OUR
         // link and nothing else.
         $result->deactivated += Asset::where('client_id', $client->id)
@@ -331,11 +378,15 @@ class LitsrmmAssetSyncService
      * @param  Collection<int, Asset>  $assets
      * @param  array<int, true>  $kept
      * @param  array<string, int>  $nameCounts
+     * @param  array<string, true>  $liveIds
      * @return Asset|null|false the asset; null for none (create one); false for ambiguous
      */
-    private function matchUnlinked(LitsrmmDevice $device, Collection $assets, array $kept, array $nameCounts): Asset|null|false
+    private function matchUnlinked(LitsrmmDevice $device, Collection $assets, array $kept, array $nameCounts, array $liveIds): Asset|null|false
     {
-        $free = $assets->filter(fn (Asset $a) => $a->litsrmm_device_id === null && ! isset($kept[$a->id]));
+        // Free: unlinked, or linked to a device this read does not list live
+        // (retired, or gone), and not claimed earlier in this run.
+        $free = $assets->filter(fn (Asset $a) => ! isset($kept[$a->id])
+            && ($a->litsrmm_device_id === null || ! isset($liveIds[strtolower($a->litsrmm_device_id)])));
 
         $serial = LitsrmmSerial::identity($device->serial);
         if ($serial !== null) {
@@ -354,7 +405,16 @@ class LitsrmmAssetSyncService
             return null;
         }
 
-        $byName = $free->filter(fn (Asset $a) => self::normalizeHostname($a->hostname) === $name)->values();
+        // Never an asset the sync retired, and never across two real serials
+        // that differ: a replacement PC reusing a hostname is a new machine.
+        $byName = $free->filter(function (Asset $a) use ($name, $serial) {
+            if ($a->litsrmm_retired_at !== null || self::normalizeHostname($a->hostname) !== $name) {
+                return false;
+            }
+            $assetSerial = LitsrmmSerial::identity($a->serial_number);
+
+            return $serial === null || $assetSerial === null || $assetSerial === $serial;
+        })->values();
 
         if ($byName->isEmpty()) {
             return null;
@@ -400,6 +460,12 @@ class LitsrmmAssetSyncService
 
         if ($hardware !== null) {
             $data = array_merge($data, $hardware->columns());
+        }
+
+        // The same machine back after the sync retired its asset: undo that.
+        if ($asset !== null && $asset->litsrmm_retired_at !== null) {
+            $data['is_active'] = true;
+            $data['litsrmm_retired_at'] = null;
         }
 
         if ($asset !== null) {

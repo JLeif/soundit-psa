@@ -87,8 +87,17 @@ class LitsrmmSyncControlsTest extends TestCase
         $this->assertTrue($event->withoutOverlapping);
     }
 
+    /** Review of #4485: not live until a supervised manual run has been read. */
+    public function test_the_schedule_is_off_by_default(): void
+    {
+        $this->mapped();
+
+        $this->assertFalse($this->event()->filtersPass($this->app), 'mapped and configured, but the schedule was never switched on');
+    }
+
     public function test_the_schedule_runs_only_when_switched_on_configured_and_mapped(): void
     {
+        Setting::setValue('litsrmm_sync_schedule_enabled', '1');
         $this->assertFalse($this->event()->filtersPass($this->app), 'no client mapped: nothing to do');
 
         $this->mapped();
@@ -107,7 +116,7 @@ class LitsrmmSyncControlsTest extends TestCase
             ->withArgs(fn (?Client $only) => $only?->id === $client->id)
             ->andReturn(self::created(3));
 
-        $this->actingAs(User::factory()->tech()->create())
+        $this->actingAs(User::factory()->admin()->create())
             ->from(route('clients.show', $client))
             ->post(route('clients.litsrmm.sync', $client))
             ->assertRedirect(route('clients.show', $client))
@@ -122,7 +131,7 @@ class LitsrmmSyncControlsTest extends TestCase
         $result->recordSkipped('SHARED: more than one asset or device could be this machine; not linked, not created');
         $this->syncService()->shouldReceive('sync')->once()->andReturn($result);
 
-        $this->actingAs(User::factory()->tech()->create())
+        $this->actingAs(User::factory()->admin()->create())
             ->post(route('clients.litsrmm.sync', $client))
             ->assertSessionHas('error', fn ($message) => str_contains($message, 'boom') && str_contains($message, 'SHARED'));
     }
@@ -132,7 +141,7 @@ class LitsrmmSyncControlsTest extends TestCase
         $client = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true]);
         $this->syncService()->shouldNotReceive('sync');
 
-        $this->actingAs(User::factory()->tech()->create())
+        $this->actingAs(User::factory()->admin()->create())
             ->post(route('clients.litsrmm.sync', $client))
             ->assertSessionHas('error', fn ($message) => str_contains($message, 'not linked to LITSRMM'));
     }
@@ -143,9 +152,30 @@ class LitsrmmSyncControlsTest extends TestCase
         Setting::setValue('litsrmm_enabled', '0');
         $this->syncService()->shouldNotReceive('sync');
 
-        $this->actingAs(User::factory()->tech()->create())
+        $this->actingAs(User::factory()->admin()->create())
             ->post(route('clients.litsrmm.sync', $client))
             ->assertSessionHas('error', fn ($message) => str_contains($message, 'switched off'));
+    }
+
+    /** Review of #4485: a vendor read plus asset and seat writes is an admin's call, as in Settings. */
+    public function test_the_client_page_button_is_admins_only(): void
+    {
+        $client = $this->mapped();
+        $this->syncService()->shouldNotReceive('sync');
+
+        $this->actingAs(User::factory()->tech()->create())
+            ->post(route('clients.litsrmm.sync', $client))
+            ->assertForbidden();
+    }
+
+    public function test_a_tech_does_not_see_the_client_page_button(): void
+    {
+        $client = $this->mapped();
+
+        $this->actingAs(User::factory()->tech()->create())
+            ->get(route('clients.show', $client))
+            ->assertOk()
+            ->assertDontSee(route('clients.litsrmm.sync', $client));
     }
 
     public function test_the_client_page_button_needs_a_login(): void
@@ -162,7 +192,7 @@ class LitsrmmSyncControlsTest extends TestCase
         $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'rmm_workstation', 'name' => 'LITSRMM — Workstation', 'is_active' => true]);
         License::create(['license_type_id' => $type->id, 'client_id' => $client->id, 'vendor_ref' => self::VENDOR_CLIENT, 'quantity' => 3, 'status' => 'active', 'synced_at' => now()]);
 
-        $this->actingAs(User::factory()->tech()->create())
+        $this->actingAs(User::factory()->admin()->create())
             ->get(route('clients.show', $client))
             ->assertOk()
             ->assertSee(route('clients.litsrmm.sync', $client))
@@ -201,6 +231,35 @@ class LitsrmmSyncControlsTest extends TestCase
         $this->actingAs(User::factory()->tech()->create())
             ->post(route('settings.integrations.litsrmm.sync-devices'))
             ->assertForbidden();
+    }
+
+    public function test_an_admin_switches_the_schedule_on_and_off(): void
+    {
+        $admin = User::factory()->admin()->create();
+
+        $this->actingAs($admin)->post(route('settings.integrations.litsrmm.schedule'), ['enabled' => '1'])
+            ->assertSessionHas('success');
+        $this->assertSame('1', Setting::getValue('litsrmm_sync_schedule_enabled'));
+
+        $this->actingAs($admin)->post(route('settings.integrations.litsrmm.schedule'), [])
+            ->assertSessionHas('success');
+        $this->assertSame('0', Setting::getValue('litsrmm_sync_schedule_enabled'));
+    }
+
+    public function test_the_schedule_switch_is_admins_only(): void
+    {
+        $this->actingAs(User::factory()->tech()->create())
+            ->post(route('settings.integrations.litsrmm.schedule'), ['enabled' => '1'])
+            ->assertForbidden();
+        $this->assertNotSame('1', Setting::getValue('litsrmm_sync_schedule_enabled'));
+    }
+
+    public function test_the_settings_card_offers_the_schedule_switch(): void
+    {
+        $this->actingAs(User::factory()->admin()->create())->get(route('settings.integrations'))
+            ->assertOk()
+            ->assertSee(route('settings.integrations.litsrmm.schedule'))
+            ->assertSee('Sync every 4 hours');
     }
 
     public function test_the_settings_card_offers_the_button_only_when_it_can_run(): void

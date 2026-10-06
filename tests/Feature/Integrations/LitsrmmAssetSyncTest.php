@@ -49,7 +49,7 @@ class LitsrmmAssetSyncTest extends TestCase
     /** @var array<string, array|int> device id => inventory, or an HTTP status to fail with */
     private array $details = [];
 
-    private int|null $listStatus = null;
+    private ?int $listStatus = null;
 
     private array $history = [];
 
@@ -440,6 +440,22 @@ class LitsrmmAssetSyncTest extends TestCase
 
     // ---- what a sync must not destroy ----
 
+    /** Review of #4485 (smaller 7): a malformed category is drift, and is logged, not silently skipped. */
+    public function test_a_malformed_hardware_category_is_logged_as_drift(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        $row = $this->device('1');
+        $inventory = self::inventory();
+        $inventory['disks'] = 'nonsense';
+        $this->details[$row['id']] = $inventory;
+
+        $this->service()->sync();
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message, $context = []) => str_contains($message, 'malformed') && ($context['categories'] ?? null) === ['disks'])
+            ->once();
+    }
+
     public function test_a_missing_category_leaves_the_existing_value_alone(): void
     {
         $row = $this->device('1');
@@ -565,6 +581,123 @@ class LitsrmmAssetSyncTest extends TestCase
     // ---- licenses: one seat per device running the vendor's agent ----
 
     /** @return array{server: ?License, workstation: ?License} */
+    // ---- Review of #4485 (Sound IT, 2026-10-01) ----
+
+    /** Item 2: an asset whose link names a device this read does not list live is free to match. */
+    public function test_a_reenrolled_machine_takes_back_its_own_asset(): void
+    {
+        $old = $this->device('1', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => $old['id']]);
+        $new = $this->device('2', ['hostname' => 'WORKSTATION-1', 'serial' => 'SN1REAL0']);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(1, Asset::count(), 'no second, billable asset');
+        $this->assertSame($new['id'], $asset->fresh()->litsrmm_device_id);
+        $this->assertTrue((bool) $asset->fresh()->is_active);
+        $this->assertSame(0, $result->created);
+    }
+
+    public function test_an_asset_linked_to_a_device_that_is_gone_is_free_to_match(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'OTHER-NAME', 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000777']);
+        $row = $this->device('1');
+
+        $this->service()->sync();
+
+        $this->assertSame(1, Asset::count());
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+    }
+
+    /** Item 3: two live devices with one real serial are reported, and neither takes or creates an asset. */
+    public function test_two_devices_sharing_a_real_serial_are_reported_not_guessed(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'SOMETHING-ELSE', 'serial_number' => 'SHARED123']);
+        $this->device('1', ['serial' => 'SHARED123']);
+        $this->device('2', ['serial' => 'SHARED123']);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(1, Asset::count(), 'no duplicate carrying the same serial');
+        $this->assertNull($asset->fresh()->litsrmm_device_id);
+        $this->assertSame(0, $result->created);
+        $this->assertCount(2, array_filter($result->skippedMessages, fn ($m) => str_contains($m, 'serial')));
+    }
+
+    /** Item 4: a replacement PC that reuses a hostname does not take over the old machine's asset. */
+    public function test_the_hostname_does_not_match_when_the_real_serials_differ(): void
+    {
+        $old = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => 'OLDSERIAL9']);
+        $row = $this->device('1');
+
+        $result = $this->service()->sync();
+
+        $this->assertNull($old->fresh()->litsrmm_device_id);
+        $this->assertSame('OLDSERIAL9', $old->fresh()->serial_number);
+        $this->assertSame(1, $result->created);
+        $this->assertSame('SN1REAL0', Asset::where('litsrmm_device_id', $row['id'])->sole()->serial_number);
+    }
+
+    public function test_the_hostname_still_matches_when_only_one_side_has_a_real_serial(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => 'System Serial Number']);
+        $row = $this->device('1');
+
+        $this->service()->sync();
+
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+        $this->assertSame(1, Asset::count());
+    }
+
+    /** Follow-up item 4: a retired device's asset gets a reversible inactive status. */
+    public function test_a_retired_device_marks_its_asset_inactive_reversibly(): void
+    {
+        $row = $this->device('1', ['enrollmentState' => 'retired', 'availabilityState' => 'retired', 'retiredAt' => '2026-09-30T10:00:00.000Z']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'is_active' => true, 'litsrmm_device_id' => $row['id']]);
+
+        $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertFalse((bool) $asset->is_active);
+        $this->assertNotNull($asset->litsrmm_retired_at);
+        $this->assertNull($asset->litsrmm_device_id);
+        $this->assertFalse($asset->trashed());
+    }
+
+    public function test_a_retired_asset_is_not_rematched_by_hostname(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => null, 'is_active' => false, 'litsrmm_retired_at' => now()]);
+        $this->device('1', ['serial' => null]);
+
+        $this->service()->sync();
+
+        $this->assertNull($asset->fresh()->litsrmm_device_id);
+        $this->assertFalse((bool) $asset->fresh()->is_active);
+    }
+
+    public function test_a_retired_asset_reclaimed_by_its_real_serial_is_reactivated(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'OLD-NAME', 'serial_number' => 'SN1REAL0', 'is_active' => false, 'litsrmm_retired_at' => now()]);
+        $row = $this->device('1');
+
+        $this->service()->sync();
+
+        $asset->refresh();
+        $this->assertSame($row['id'], $asset->litsrmm_device_id);
+        $this->assertTrue((bool) $asset->is_active);
+        $this->assertNull($asset->litsrmm_retired_at);
+    }
+
+    public function test_an_asset_an_operator_made_inactive_is_not_reactivated(): void
+    {
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'OLD-NAME', 'serial_number' => 'SN1REAL0', 'is_active' => false, 'litsrmm_retired_at' => null]);
+        $this->device('1');
+
+        $this->service()->sync();
+
+        $this->assertFalse((bool) $asset->fresh()->is_active);
+    }
+
     private function licenses(Client $client): array
     {
         $of = fn (string $sku) => License::where('client_id', $client->id)
@@ -651,7 +784,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('untouched', $otherAsset->fresh()->last_user, 'another client is not written');
         $this->assertNotNull($orphan->fresh()->litsrmm_device_id, 'the estate-wide unmapped sweep belongs to a full sync');
         $this->assertNull($this->licenses($other)['workstation'], 'nor are its seats');
-        $this->assertSame(1, $this->detailRequests(),'only this client\'s device is read in detail');
+        $this->assertSame(1, $this->detailRequests(), 'only this client\'s device is read in detail');
     }
 
     public function test_a_single_client_sync_of_an_unmapped_client_is_refused(): void

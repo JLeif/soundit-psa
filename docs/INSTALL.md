@@ -375,6 +375,7 @@ These commands execute automatically based on their schedule:
 |---------|----------|---------|
 | `ninja:sync-devices` | Every 4 hours | Full device sync from NinjaRMM (inventory, hardware detail, status, creates, deletes) — only runs when `ninja_enabled=1` |
 | `level:sync-devices` | Every 4 hours | Sync devices from Level RMM (online status updated in real-time via webhooks) |
+| `litsrmm:sync-devices` | Every 4 hours | Sync devices from LITSRMM (Leif IT Solutions RMM) into assets and LITSRMM seats for mapped clients. **Off by default**: runs only once an admin switches on "Sync every 4 hours" under Settings > Integrations > LITSRMM (`litsrmm_sync_schedule_enabled=1`) |
 | `tactical:reconcile-alerts` | Hourly | Resolve PSA alerts whose Tactical alerts have closed — the at-least-once backstop for dropped resolve webhooks (resolves the alert only; does not auto-resolve a linked auto-ticket — only if Tactical configured) |
 | `tactical:sync-devices` | Daily at 05:32 | Sync devices from Tactical RMM into `tactical_assets` and hostname-link to assets (only if configured + clients mapped to a Tactical site) |
 | `tactical:sync-scripts` | Daily at 05:35 | Sync the script library from Tactical RMM (only if configured) |

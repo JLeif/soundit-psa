@@ -77,7 +77,7 @@ class LitsrmmSerialTest extends TestCase
     public function it_normalises_case_and_surrounding_whitespace(): void
     {
         $this->assertSame('ABC-123', LitsrmmSerial::identity('  abc-123  '));
-        $this->assertSame('ABC 123', LitsrmmSerial::identity("abc   123"));
+        $this->assertSame('ABC 123', LitsrmmSerial::identity('abc   123'));
     }
 
     #[Test]

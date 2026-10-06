@@ -10,9 +10,9 @@ use Illuminate\Console\Command;
 /**
  * Sync LITSRMM devices into PSA assets for every mapped, operational client.
  *
- * Deliberately NOT scheduled yet: it is run by hand until it has been proven
- * against a real estate, then added to routes/console.php beside
- * level:sync-devices.
+ * Scheduled every 4 hours in routes/console.php, but only once an admin has
+ * switched on "Sync every 4 hours" (Settings > Integrations > LITSRMM), which
+ * is off by default until a supervised manual run has been read.
  */
 class LitsrmmSyncDevices extends Command
 {

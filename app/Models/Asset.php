@@ -92,6 +92,7 @@ class Asset extends Model
         'autoelevate_synced_at',
         'litsrmm_device_id',
         'litsrmm_synced_at',
+        'litsrmm_retired_at',
     ];
 
     protected function casts(): array
@@ -132,6 +133,7 @@ class Asset extends Model
             'autoelevate_last_checked_in_at' => 'datetime',
             'autoelevate_synced_at' => 'datetime',
             'litsrmm_synced_at' => 'datetime',
+            'litsrmm_retired_at' => 'datetime',
         ];
     }
 

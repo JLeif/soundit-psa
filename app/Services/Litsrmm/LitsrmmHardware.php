@@ -21,7 +21,8 @@ use DateTimeZone;
  * with a null that means "nobody asked".
  *
  * A malformed category is skipped rather than thrown: one bad payload must not
- * cost the asset the other three.
+ * cost the asset the other three. It is NAMED in $malformed, so the sync can
+ * log it as drift; an absent category is not malformed.
  */
 final class LitsrmmHardware
 {
@@ -34,6 +35,8 @@ final class LitsrmmHardware
         public readonly ?string $ipAddress,
         public readonly ?DateTimeImmutable $lastBootAt,
         public readonly ?bool $needsReboot,
+        /** @var list<string> categories present but not the documented shape */
+        public readonly array $malformed = [],
     ) {}
 
     public static function fromInventory(array $inventory): self
@@ -43,6 +46,13 @@ final class LitsrmmHardware
         $network = self::payload($inventory, 'network');
         $system = self::payload($inventory, 'system');
 
+        $malformed = [];
+        foreach (['hardware', 'disks', 'network', 'system'] as $category) {
+            if (array_key_exists($category, $inventory) && self::payload($inventory, $category) === null) {
+                $malformed[] = $category;
+            }
+        }
+
         return new self(
             cpu: self::nonEmptyString($hardware['cpu'] ?? null),
             ramGb: self::ramGb($hardware['ramBytes'] ?? null),
@@ -50,6 +60,7 @@ final class LitsrmmHardware
             ipAddress: self::ipAddress($network),
             lastBootAt: self::instant($system['bootTimeUtc'] ?? null),
             needsReboot: is_bool($system['pendingReboot'] ?? null) ? $system['pendingReboot'] : null,
+            malformed: $malformed,
         );
     }
 

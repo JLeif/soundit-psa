@@ -9,9 +9,10 @@ use PHPUnit\Framework\TestCase;
  * The `inventory` block of LITSRMM `GET /v1/devices/{id}`, turned into the
  * asset columns a Level-fed asset already carries.
  *
- * The payload below has the shape of a real inventory as the vendor stores it;
- * identifying values are synthetic (documentation-range MAC and IP, random GUID). Expected values were worked out by
- * hand from it, not read back from the code.
+ * The payload below has the shape of a real inventory as the vendor stores
+ * it; identifying values are synthetic (documentation-range MAC and IP, a
+ * random GUID). Expected values were worked out by hand from it, not read back
+ * from the code.
  */
 class LitsrmmHardwareTest extends TestCase
 {
@@ -127,6 +128,15 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertNull($hw->ramGb);
         $this->assertNull($hw->diskSummary);
         $this->assertSame('192.0.2.10', $hw->ipAddress);
+        $this->assertSame(['hardware', 'disks'], $hw->malformed, 'named, so the sync can log the drift');
+    }
+
+    public function test_an_absent_category_is_not_malformed(): void
+    {
+        $inventory = self::inventory();
+        unset($inventory['disks']);
+
+        $this->assertSame([], LitsrmmHardware::fromInventory($inventory)->malformed);
     }
 
     public function test_an_unparseable_boot_time_is_dropped(): void

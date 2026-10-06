@@ -1076,7 +1076,7 @@
                                     @endif
                                 </div>
                                 @endif
-                                @if($vendor === 'litsrmm')
+                                @if($vendor === 'litsrmm' && auth()->user()?->isAdmin())
                                 <form method="POST" action="{{ route('clients.litsrmm.sync', $client) }}">
                                     @csrf
                                     <button type="submit" class="btn btn-outline-primary btn-sm mt-2">
