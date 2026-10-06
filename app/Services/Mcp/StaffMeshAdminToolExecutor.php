@@ -857,11 +857,11 @@ class StaffMeshAdminToolExecutor
                 $expiresAt?->toIso8601String(),
             );
         } catch (MeshWriteRejectedException $e) {
-            // Criterion 9: Mesh's own validation text IS the useful reason —
-            // it names which field it disliked and why. Passing it through
-            // beats a generic "the request was refused" that sends a
-            // technician hunting.
-            $message = 'Mesh refused the allow rule: '.$e->getMessage();
+            // Status only (C-56, card FLzMLDxF): the refusal text is the
+            // vendor's own response body (MeshWriteClient::refusalText()), so
+            // it is not quoted here; the status says Mesh validated the
+            // request and declined it.
+            $message = 'Mesh refused the allow rule: '.$e->statusPhrase('the create');
             $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
 
             return ['error' => $message];
@@ -884,7 +884,9 @@ class StaffMeshAdminToolExecutor
             // mesh:reap-allow-rules red forever for a rule that never existed.
             // The proposal stays approvable once the cause is fixed, exactly
             // as a 400 does.
-            $message = 'Mesh refused the allow rule before it was created: '.$e->getMessage();
+            // Status only (C-56): the exception message can quote the vendor's
+            // response body and the request URI.
+            $message = 'Mesh refused the allow rule before it was created: '.$e->statusPhrase('the create');
             $this->auditAttempt($tool, 'rejected', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
 
             return ['error' => $message];
@@ -996,7 +998,7 @@ class StaffMeshAdminToolExecutor
         try {
             $match = $this->client->findRuleByComment($target['mesh_customer_id'], $target['sender'], $comment);
         } catch (MeshClientException $e) {
-            $record->forceFill(['last_error' => 'Rule id re-read failed: '.$e->getMessage()])->save();
+            $record->forceFill(['last_error' => 'Rule id re-read failed: '.$e->statusPhrase('the rule list read')])->save();
         }
 
         $ruleId = is_scalar($match['id'] ?? null) && (string) $match['id'] !== '' ? (string) $match['id'] : null;
@@ -1089,7 +1091,8 @@ class StaffMeshAdminToolExecutor
         try {
             $match = $this->client->findRuleByComment($target['mesh_customer_id'], $target['sender'], $comment);
         } catch (MeshClientException $e) {
-            $rereadError = $e->getMessage();
+            // Status only (C-56): this reaches the approver, last_error and the audit row.
+            $rereadError = $e->statusPhrase('the rule list read');
         }
 
         $ruleId = is_scalar($match['id'] ?? null) && (string) $match['id'] !== '' ? (string) $match['id'] : null;
@@ -1127,7 +1130,7 @@ class StaffMeshAdminToolExecutor
             // be reported as an error, because an error hands the approver a
             // button that writes a second rule for the same sender. Spent,
             // loud, and handed to a human with the match key.
-            $message = 'Mesh never answered the create ('.$error->getMessage()."), and the PSA record for '{$target['sender']}' could not be written"
+            $message = 'Mesh never answered the create ('.$error->statusPhrase('the create')."), and the PSA record for '{$target['sender']}' could not be written"
                 .($ruleId !== null ? " (a re-read found the rule live upstream as '{$ruleId}')" : '')
                 .'. Nothing will expire it. Look for a rule with the comment '.$comment." on this client's Mesh tenant and remove it by hand.";
             $this->auditAttempt($tool, 'executed_with_fault', $clientId, null, $contentHash, $message, $actorLabel, $run?->id, $approverId);
@@ -1142,13 +1145,13 @@ class StaffMeshAdminToolExecutor
         }
 
         $message = $ruleId !== null
-            ? 'Mesh never answered the create ('.$error->getMessage()."), but a re-read of this client's tenant found the rule live for '{$target['sender']}'. "
+            ? 'Mesh never answered the create ('.$error->statusPhrase('the create')."), but a re-read of this client's tenant found the rule live for '{$target['sender']}'. "
                 .'It is recorded (PSA record #'.$record->id.') and '
                 .($expiresAt === null
                     ? 'it is PERMANENT — the PSA will never remove it. '
                     : 'the PSA will remove it at expiry. ')
                 .'There was no create response, so its scope was never confirmed — check it in the Mesh portal.'
-            : 'Mesh never answered the create ('.$error->getMessage()."), and a re-read of this client's tenant did not find the rule"
+            : 'Mesh never answered the create ('.$error->statusPhrase('the create')."), and a re-read of this client's tenant did not find the rule"
                 .($rereadError !== null ? ' (that read failed too: '.$rereadError.')' : '')
                 .'. Whether the rule was created is UNMEASURED, so it is recorded unresolved (PSA record #'.$record->id.') and '
                 .($expiresAt === null
@@ -1187,15 +1190,16 @@ class StaffMeshAdminToolExecutor
      * mid-flight) and a 5xx from a server that may have committed before it
      * fell over. Everything else is a server that ANSWERED without acting —
      * 401/403 (credential), 404 (route), 429 — and MeshWriteClient's own
-     * pre-flight guards ('… nothing was sent') never put a request on the
-     * wire at all. Reconciling those would create a mesh_allow_rules row for a
+     * pre-flight guards and its connect-phase failures never put a request
+     * on the wire at all; the exception says so structurally
+     * (MeshClientException::nothingWasSent()), not in its message. Reconciling those would create a mesh_allow_rules row for a
      * rule that does not exist: reapOne() has no terminal state for it, so it
      * would burn a BATCH_LIMIT slot and force mesh:reap-allow-rules to exit
      * FAILURE on every run, forever.
      */
     private function createMayHaveCommitted(MeshClientException $error): bool
     {
-        if (str_contains($error->getMessage(), 'nothing was sent')) {
+        if ($error->nothingWasSent()) {
             return false;
         }
 
@@ -1597,10 +1601,13 @@ class StaffMeshAdminToolExecutor
         try {
             return MeshAllowRule::create($attributes);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('[Mesh] Allow rule is live upstream but its PSA record could not be written: '.$e->getMessage(), [
+            // The class, never the message: a QueryException's message is the
+            // SQL with its bindings, i.e. the row's client data. The context
+            // keeps the ids and the comment (the PSA's own match key), which
+            // is what a human needs to find the rule in the portal.
+            \Illuminate\Support\Facades\Log::error('[Mesh] Allow rule is live upstream but its PSA record could not be written ('.$e::class.')', [
                 'client_id' => $attributes['client_id'] ?? null,
                 'mesh_customer_id' => $attributes['mesh_customer_id'] ?? null,
-                'sender' => $attributes['sender'] ?? null,
                 'comment' => $attributes['comment'] ?? null,
             ]);
 
@@ -1936,7 +1943,9 @@ class StaffMeshAdminToolExecutor
         try {
             return $this->writeAuditAttempt(...$arguments);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('[Mesh] Allow-rule audit row could not be written: '.$e->getMessage());
+            // The class, never the message: a QueryException's message is the
+            // SQL with its bindings (the summary, sender and ticket text).
+            \Illuminate\Support\Facades\Log::error('[Mesh] Allow-rule audit row could not be written ('.$e::class.')');
 
             return null;
         }
@@ -2479,8 +2488,9 @@ class StaffMeshAdminToolExecutor
             // failure here would put the proposal back in front of the
             // approver for a removal that already happened; declaring success
             // would assert one that may not have. The post-condition below
-            // answers it, and it is the only thing that does.
-            $deleteError = $e->getMessage();
+            // answers it, and it is the only thing that does. Status only
+            // (C-56): this text reaches the approver, last_error and the audit row.
+            $deleteError = $e->statusPhrase('the DELETE');
         }
 
         $absent = $this->client->ruleAbsent($target['rule_id']);
@@ -2974,7 +2984,8 @@ class StaffMeshAdminToolExecutor
             // made permanent must stop displaying a date it no longer has.
             $this->client->patchRule($target['rule_id'], ['date_expiry' => $expiresAt?->toIso8601String()]);
         } catch (MeshClientException $e) {
-            $patchError = $e->getMessage();
+            // Status only (C-56): this text reaches the approver and the audit row.
+            $patchError = $e->statusPhrase('the PATCH');
         }
 
         $readError = null;

@@ -678,7 +678,9 @@ class MeshRemoveAllowRuleTest extends TestCase
 
         $this->assertSame(MeshAllowRule::STATE_REMOVED, $record->fresh()->state);
         $summary = TechnicianActionLog::where('action_type', 'mesh_remove_allow_rule')->where('result_status', 'executed')->sole()->summary;
-        $this->assertStringContainsString('connection reset', $summary);
+        // Status only (C-56, card FLzMLDxF): the exception's own text stays out.
+        $this->assertStringContainsString('did not answer cleanly (the DELETE failed without an HTTP status from Mesh)', $summary);
+        $this->assertStringNotContainsString('connection reset', $summary);
         $this->assertStringContainsString('but the rule is gone', $summary);
     }
 

@@ -48,6 +48,19 @@ use Tests\TestCase;
  *   - reapOne's list read (last_error, log);
  *   - reapOne's DELETE failure (log).
  *
+ * Card FLzMLDxF adds, in the modes each site can reach (an HTTP status, a
+ * status-less timeout, a never-sent connect failure):
+ *   - the add path: both refusal messages, the three 'Mesh never answered
+ *     the create (…)' messages, the failed confirming re-read, and the
+ *     'Rule id re-read failed' last_error;
+ *   - remove and edit execution: $deleteError and $patchError, in both the
+ *     success and the fault message;
+ *   - the executor's record-write and audit-write Log::error lines
+ *     (exception class only, never the SQL or its bindings);
+ *   - MeshWriteClient's and MeshClient's failure log lines (method, path,
+ *     status, class);
+ *   - #5271: an unreachable failure whose message has no '://'.
+ *
  * Synthetic data only.
  */
 class MeshVendorErrorStatusOnlyTest extends TestCase
@@ -57,6 +70,9 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
     private const MARKER = 'SYNTHETIC-VENDOR-BODY-7f3a';
 
     private const HOST = 'mesh.example.test';
+
+    /** A host-like marker in a transport message that carries no '://' (RFC 5737). */
+    private const LEAK_IP = '192.0.2.10';
 
     private const TENANT = '9e3c1f0a-1b2c-4d5e-8f90-a1b2c3d4e5f6';
 
@@ -73,6 +89,17 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
 
     private bool $patched = false;
 
+    /** When true, the list read fails only once a POST has been answered. */
+    private bool $failListAfterPost = false;
+
+    /** When true, the list read fails as well as the request named by $failOn. */
+    private bool $listFailsToo = false;
+
+    /** When true, the failing write is APPLIED upstream before it fails (Mesh commits before it answers). */
+    private bool $commitBeforeFailing = false;
+
+    private bool $posted = false;
+
     /** When set, the list page reports this count instead of the real one. */
     private ?int $reportedCount = null;
 
@@ -82,6 +109,9 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
     /** @var list<array{level: string, message: string}> */
     private array $logged = [];
 
+    /** @var list<string> */
+    private array $lastErrors = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -89,6 +119,12 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->freezeTime();
         Http::preventStrayRequests();
         Setting::setEncrypted('mesh_api_key', 'k');
+
+        // Every last_error ever saved, not only the final one: a later save on
+        // the same request can overwrite an earlier, leaking one.
+        MeshAllowRule::saved(function (MeshAllowRule $row): void {
+            $this->lastErrors[] = (string) $row->last_error;
+        });
 
         Event::listen(MessageLogged::class, function (MessageLogged $e): void {
             $this->logged[] = ['level' => $e->level, 'message' => $e->message.' '.json_encode($e->context)];
@@ -300,6 +336,347 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->assertStringContainsString('the DELETE', $log);
     }
 
+    // ---- the add path (card FLzMLDxF) ------------------------------------------
+
+    private const SENDER = 'billing@vendor.example.test';
+
+    private function aiActor(): User
+    {
+        $actor = User::factory()->create(['name' => 'AI Actor']);
+        Setting::setValue('triage_system_user_id', (string) $actor->id);
+
+        return $actor;
+    }
+
+    private function stagedAdd(array $fixture): TechnicianRun
+    {
+        $this->callTool('mesh_stage_add_allow_rule', [
+            'client_id' => $fixture['client']->id,
+            'ticket_id' => $fixture['ticket']->id,
+            'sender' => self::SENDER,
+            'confirm_domain' => 'vendor.example.test',
+            'reason' => 'Synthetic reason long enough to be accepted by the verb.',
+        ])->assertOk();
+
+        return TechnicianRun::where('action_type', 'mesh_stage_add_allow_rule')->firstOrFail();
+    }
+
+    /** @return array<string, array{string}> */
+    public static function refusedCreates(): array
+    {
+        return ['HTTP 400 (vendor validation text)' => ['400'], 'HTTP 401' => ['401'], 'never sent (bare connect, #5271)' => ['bare-connect']];
+    }
+
+    /**
+     * Both determinate-refusal arms of the create: the 400 ('Mesh refused the
+     * allow rule') and every other answer that cannot sit on a committed rule
+     * ('… before it was created'), including the never-sent connect failure.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('refusedCreates')]
+    public function test_a_refused_create_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->failOn = 'POST';
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run));
+
+        $this->assertSame(0, MeshAllowRule::count(), 'still a determinate refusal: no phantom row');
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'still approvable after correction');
+        $summary = (string) TechnicianActionLog::where('action_type', 'mesh_add_allow_rule')->where('result_status', 'rejected')->sole()->summary;
+        $this->assertStringContainsString($mode === '400' ? 'Mesh refused the allow rule: ' : 'Mesh refused the allow rule before it was created: ', $summary);
+        $this->assertStatusOnly($summary, 'create refusal audit');
+        if ($mode === 'bare-connect') {
+            $this->assertStringContainsString('nothing was sent', $summary, 'the never-sent arm still says so');
+        }
+        $log = $this->loggedBy('[MeshWriteClient]');
+        if ($mode === '400') {
+            // The 400 arm logs its own fixed line (already status-only).
+            $this->assertStringContainsString('refused by Mesh (400)', $log);
+            $this->assertStringNotContainsString(self::MARKER, $log);
+        } else {
+            $this->assertStatusOnlyLog($log, 'client log');
+        }
+    }
+
+    /** @return array<string, array{string}> */
+    public static function unansweredCreates(): array
+    {
+        return ['HTTP 502' => ['502'], 'timeout, no status' => ['timeout']];
+    }
+
+    /**
+     * 'Mesh never answered the create (…)' with the rule found, and with the
+     * rule not found because the re-read failed too ('that read failed too').
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('unansweredCreates')]
+    public function test_an_unanswered_create_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->failOn = 'POST';
+        $this->commitBeforeFailing = true;
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+
+        $error = (string) session('error');
+        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('found the rule live', $error, 'positive control: the found arm');
+        $this->assertStatusOnly($error, 'unanswered create, found');
+        $record = MeshAllowRule::sole();
+        $this->assertSame(MeshAllowRule::STATE_UNRESOLVED, $record->state, 'reconciled, never declared');
+        $this->assertStatusOnly((string) $record->last_error, 'unanswered create last_error');
+        $this->assertStatusOnly((string) TechnicianActionLog::where('action_type', 'mesh_add_allow_rule')->where('result_status', 'executed_with_fault')->sole()->summary, 'unanswered create audit');
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('unansweredCreates')]
+    public function test_an_unanswered_create_whose_reread_failed_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->failOn = 'POST';
+        $this->listFailsToo = true;
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+
+        $error = (string) session('error');
+        $this->assertStringContainsString('Mesh never answered the create (', $error);
+        $this->assertStringContainsString('(that read failed too: ', $error, 'positive control: the re-read-failed arm');
+        $this->assertStringContainsString('UNMEASURED', $error);
+        $this->assertStatusOnly($error, 'unanswered create, re-read failed');
+        $this->assertStatusOnly((string) MeshAllowRule::sole()->last_error, 'unmeasured create last_error');
+    }
+
+    /** 'Rule id re-read failed: …' after a clean 201. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_a_failed_rule_id_reread_after_a_created_rule_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->failListAfterPost = true;
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run));
+
+        $this->assertTrue($this->posted, 'positive control: the create was answered before the re-read failed');
+        $record = MeshAllowRule::sole();
+        $this->assertSame(MeshAllowRule::STATE_UNRESOLVED, $record->state);
+        // The id-unresolved fault overwrites last_error right after the
+        // catch, so the catch's own write is read from the save history.
+        $history = implode("\n", $this->lastErrors);
+        $this->assertStringContainsString('Rule id re-read failed: ', $history, 'positive control: the catch wrote last_error');
+        $this->assertStatusOnly($history, 'rule id re-read last_error');
+        $this->assertStatusOnlyLog($this->loggedBy('[MeshWriteClient]'), 'client log');
+    }
+
+    // ---- remove / edit execution: $deleteError, $patchError (card FLzMLDxF) ------
+
+    private function stagedVerb(string $verb, array $fixture, array $extra = []): TechnicianRun
+    {
+        $this->callTool($verb, $this->args($fixture, $extra))->assertOk();
+
+        return TechnicianRun::where('action_type', str_replace('mesh_', 'mesh_stage_', $verb))->firstOrFail();
+    }
+
+    /** The DELETE threw over a rule that IS gone: success, "did not answer cleanly (…)". */
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_a_delete_that_failed_over_a_removed_rule_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode === 'connect' ? 'timeout' : $mode;
+        $this->failOn = 'DELETE';
+        $this->commitBeforeFailing = true;
+        $this->seedRule(self::SENDER, 'PSA allow STATUSONLY');
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $fixture = $this->fixture();
+        $this->tracked($fixture);
+        $run = $this->stagedVerb('mesh_remove_allow_rule', $fixture);
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('success');
+
+        $summary = (string) TechnicianActionLog::where('action_type', 'mesh_remove_allow_rule')->where('result_status', 'executed')->sole()->summary;
+        $this->assertStringContainsString('The DELETE call itself did not answer cleanly (', $summary);
+        $this->assertStatusOnly($summary, 'remove success summary');
+        $this->assertStatusOnlyLog($this->loggedBy('[MeshWriteClient]'), 'client log');
+    }
+
+    /** The DELETE failed and the rule is still there: fault, "The DELETE call reported: …". */
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_a_delete_that_failed_over_a_live_rule_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode === 'connect' ? 'timeout' : $mode;
+        $this->failOn = 'DELETE';
+        $this->seedRule(self::SENDER, 'PSA allow STATUSONLY');
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $fixture = $this->fixture();
+        $record = $this->tracked($fixture);
+        $run = $this->stagedVerb('mesh_remove_allow_rule', $fixture);
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('error');
+
+        $error = (string) session('error');
+        $this->assertStringContainsString('The DELETE call reported: ', $error);
+        $this->assertStatusOnly($error, 'remove fault');
+        $this->assertSame(MeshAllowRule::STATE_REAP_FAILED, $record->fresh()->state, 'still left in the reaper queue');
+        $this->assertStatusOnly((string) $record->fresh()->last_error, 'remove fault last_error');
+        $this->assertStatusOnly((string) TechnicianActionLog::where('action_type', 'mesh_remove_allow_rule')->where('result_status', 'executed_with_fault')->sole()->summary, 'remove fault audit');
+    }
+
+    /** The PATCH threw and the display took: success, "did not answer cleanly (…)". */
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_a_patch_that_failed_over_a_display_that_took_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode === 'connect' ? 'timeout' : $mode;
+        $this->failOn = 'PATCH';
+        $this->commitBeforeFailing = true;
+        $this->seedRule(self::SENDER, 'PSA allow STATUSONLY');
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $fixture = $this->fixture();
+        $this->tracked($fixture);
+        $run = $this->stagedVerb('mesh_edit_allow_rule', $fixture, ['expires_at' => now()->addDays(60)->startOfMinute()->toIso8601String()]);
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('success');
+
+        $summary = (string) TechnicianActionLog::where('action_type', 'mesh_edit_allow_rule')->where('result_status', 'executed')->sole()->summary;
+        $this->assertStringContainsString('The PATCH call itself did not answer cleanly (', $summary);
+        $this->assertStatusOnly($summary, 'edit success summary');
+    }
+
+    /** The PATCH failed and the display did not take: fault, "The PATCH call reported: …". */
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_a_patch_that_failed_over_a_stale_display_reports_the_status_only(string $mode): void
+    {
+        $this->mode = $mode === 'connect' ? 'timeout' : $mode;
+        $this->failOn = 'PATCH';
+        $this->seedRule(self::SENDER, 'PSA allow STATUSONLY');
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $fixture = $this->fixture();
+        $this->tracked($fixture);
+        $run = $this->stagedVerb('mesh_edit_allow_rule', $fixture, ['expires_at' => now()->addDays(60)->startOfMinute()->toIso8601String()]);
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run));
+
+        $summary = (string) TechnicianActionLog::where('action_type', 'mesh_edit_allow_rule')->where('result_status', 'executed_with_fault')->sole()->summary;
+        $this->assertStringContainsString('The PATCH call reported: ', $summary);
+        $this->assertStatusOnly($summary, 'edit fault summary');
+    }
+
+    // ---- the executor's DB-write Log::error lines (card FLzMLDxF) ------------------
+
+    private const SQL_MARKER = 'SYNTHETIC-SQL-BINDING-5e1d';
+
+    private static function queryFailure(): \Illuminate\Database\QueryException
+    {
+        return new \Illuminate\Database\QueryException('testing', 'insert into t (sender) values (?)', [self::SQL_MARKER], new \PDOException('SQLSTATE[HY000]: synthetic '.self::SQL_MARKER));
+    }
+
+    /**
+     * The PSA row write and the audit row write both fail with a
+     * QueryException whose message carries the SQL bindings: the two
+     * Log::error lines name the exception class, never its message.
+     */
+    public function test_the_db_write_failure_logs_name_the_class_not_the_sql(): void
+    {
+        $this->mode = '503';
+        $this->bindClient();
+        $actor = $this->aiActor();
+        $run = $this->stagedAdd($this->fixture());
+        $this->assertStringContainsString(self::SQL_MARKER, self::queryFailure()->getMessage(), 'positive control: the message carries the bindings');
+
+        MeshAllowRule::creating(fn () => throw self::queryFailure());
+        TechnicianActionLog::creating(function (TechnicianActionLog $log): void {
+            if ($log->action_type === 'mesh_add_allow_rule') {
+                throw self::queryFailure();
+            }
+        });
+
+        $this->actingAs($actor)->post(route('cockpit.approve', $run));
+
+        $this->assertTrue($this->posted, 'positive control: the create landed before the record write failed');
+        $record = $this->loggedBy('PSA record could not be written');
+        $audit = $this->loggedBy('audit row could not be written');
+        foreach (['record write log' => $record, 'audit write log' => $audit] as $where => $log) {
+            $this->assertStringContainsString('QueryException', $log, "{$where}: names the class");
+            $this->assertStringNotContainsString(self::SQL_MARKER, $log, "{$where}: SQL bindings leaked");
+            $this->assertStringNotContainsString('insert into', $log, "{$where}: SQL leaked");
+            $this->assertStringNotContainsString(self::SENDER, $log, "{$where}: client data leaked");
+        }
+    }
+
+    // ---- MeshClient (read client) log line (card FLzMLDxF) -------------------------
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('modes')]
+    public function test_the_read_client_logs_method_path_status_and_class_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $client = new \App\Services\Mesh\MeshClient(['api_key' => 'k', 'base_url' => 'https://'.self::HOST]);
+        // No network: the client builds its own Guzzle, so swap in a scripted one.
+        $guzzle = new GuzzleClient([
+            'base_uri' => 'https://'.self::HOST.'/',
+            'handler' => HandlerStack::create(fn (RequestInterface $r) => $this->failure($r)),
+            'http_errors' => true,
+        ]);
+        (new \ReflectionProperty($client, 'http'))->setValue($client, $guzzle);
+
+        try {
+            $client->get('api/customers/', ['_size' => 1, 'filter' => self::MARKER]);
+            $this->fail('the scripted read was expected to fail');
+        } catch (MeshClientException $e) {
+            $this->assertStringContainsString(self::HOST, $e->getMessage(), 'positive control: the raw message carries the host');
+        }
+
+        $log = $this->loggedBy('[MeshClient]');
+        $this->assertStringContainsString('GET api/customers/', $log, 'the method and path are kept');
+        $this->assertStatusOnlyLog($log, 'read client log');
+    }
+
+    /** The client log lines: method, path, status (or none) and class; nothing else. */
+    private function assertStatusOnlyLog(string $log, string $where): void
+    {
+        $this->assertStringNotContainsString(self::MARKER, $log, "{$where}: vendor body or query leaked");
+        $this->assertStringNotContainsString(self::HOST, $log, "{$where}: host leaked");
+        $this->assertStringNotContainsString(self::LEAK_IP, $log, "{$where}: host leaked");
+        $this->assertStringNotContainsString('?', $log, "{$where}: a query string leaked");
+        $this->assertStringContainsString('Exception', $log, "{$where}: the exception class is named");
+        if (is_numeric($this->mode)) {
+            $this->assertStringContainsString('failed with HTTP '.$this->mode, $log, "{$where}: the status is the report");
+        } else {
+            $this->assertMatchesRegularExpression('/no HTTP status|could not connect/', $log, "{$where}: a status-less failure says so");
+        }
+    }
+
+    /** MeshWriteClient's two log lines ("failed" and "could not connect"). */
+    #[\PHPUnit\Framework\Attributes\DataProvider('clientLogModes')]
+    public function test_the_write_client_logs_method_path_status_and_class_only(string $mode): void
+    {
+        $this->mode = $mode;
+        $this->bindClient();
+        $this->assertTheVendorMessageCarriesTheLeak();
+
+        $log = $this->loggedBy('[MeshWriteClient]');
+        $this->assertStringContainsString('GET api/rule-allows-blocks/', $log, 'the method and path are kept');
+        $this->assertStatusOnlyLog($log, 'write client log');
+        if (in_array($mode, ['connect', 'bare-connect'], true)) {
+            $this->assertStringContainsString('could not connect', $log);
+        }
+    }
+
+    /** @return array<string, array{string}> */
+    public static function clientLogModes(): array
+    {
+        return ['HTTP 503' => ['503'], 'connect, never sent' => ['connect'], 'timeout, no status' => ['timeout']];
+    }
+
     // ---- failures the client detects itself (G-14) ------------------------------
 
     /**
@@ -355,14 +732,65 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $uri = new MeshClientException('read of https://'.self::HOST.'/x refused', 0);
         $this->assertSame('the DELETE failed without an HTTP status from Mesh', $uri->statusPhrase('the DELETE'));
 
-        $own = new MeshClientException('Mesh API key is not configured; nothing was sent.');
+        // Classified by construction (#5271): only a throw site that says it
+        // wrote the message itself has it passed through.
+        $own = new MeshClientException('Mesh API key is not configured; nothing was sent.', clientDetected: true, nothingSent: true);
         $this->assertSame('Mesh API key is not configured; nothing was sent.', $own->statusPhrase('the DELETE'));
+        $this->assertTrue($own->nothingWasSent());
+
+        // Unflagged text is upstream, whatever it says: no prefix, no '://'.
+        $bare = new MeshClientException('connect to '.self::LEAK_IP.' port 443 failed '.self::MARKER, 0);
+        $this->assertSame('the DELETE failed without an HTTP status from Mesh', $bare->statusPhrase('the DELETE'));
+        $this->assertFalse($bare->nothingWasSent());
+    }
+
+    /**
+     * #5271: request()'s never-sent arm, driven through the REAL client with a
+     * connect failure whose message has NO '://' and carries a host-like
+     * marker. Under the old message denylist this text was passed through;
+     * by construction it is status-less upstream, and still says that
+     * nothing was sent, which is the only fact callers branch on.
+     */
+    public function test_an_unreachable_failure_without_a_uri_reports_no_vendor_text(): void
+    {
+        $this->mode = 'bare-connect';
+        $this->failOn = 'DELETE';
+        $this->bindClient();
+
+        try {
+            $this->app->make(MeshWriteClient::class)->deleteRule(self::RULE_ID);
+            $this->fail('the scripted DELETE was expected to fail');
+        } catch (MeshClientException $e) {
+            $this->assertStringNotContainsString('://', $e->getMessage(), 'positive control: the transport message names no URI');
+            $this->assertStringContainsString(self::LEAK_IP, $e->getMessage(), 'positive control: the raw message carries the host');
+            $this->assertSame(0, $e->getCode());
+            $this->assertTrue($e->nothingWasSent(), 'the never-sent arm still says so, structurally');
+
+            $phrase = $e->statusPhrase('the DELETE');
+            $this->assertSame('the DELETE failed without an HTTP status from Mesh; nothing was sent', $phrase);
+        }
+
+        $log = $this->loggedBy('[MeshWriteClient]');
+        $this->assertStringNotContainsString(self::LEAK_IP, $log, 'the client log carries no host');
+        $this->assertStringNotContainsString(self::MARKER, $log);
+        $this->assertStringContainsString('nothing was sent', $log);
     }
 
     // ---- the scripted vendor ----------------------------------------------------
 
     private function failure(RequestInterface $request)
     {
+        if ($this->mode === 'bare-connect') {
+            // #5271: a connect failure worded with no URI at all, as a custom
+            // handler or a future Guzzle may word it.
+            return Create::rejectionFor(new ConnectException(
+                'connect to '.self::LEAK_IP.' port 443 failed: Connection refused '.self::MARKER,
+                $request,
+                null,
+                ['errno' => 7],
+            ));
+        }
+
         if ($this->mode === 'connect') {
             // errno 7 (couldn't connect) is one MeshWriteClient reads as
             // never-sent; its own message still names the URI and the marker.
@@ -374,7 +802,21 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
             ));
         }
 
-        return Create::promiseFor(new Response(503, ['Content-Type' => 'application/json'], json_encode(['detail' => self::MARKER])));
+        if ($this->mode === 'timeout') {
+            // errno 28: the request was sent and no answer came. Status 0,
+            // NOT never-sent, so a create is reconciled rather than refused.
+            return Create::rejectionFor(new ConnectException(
+                'cURL error 28: Operation timed out '.self::MARKER.' for '.$request->getUri(),
+                $request,
+                null,
+                ['errno' => 28],
+            ));
+        }
+
+        return Create::promiseFor(new Response((int) $this->mode, ['Content-Type' => 'application/json'], json_encode([
+            'detail' => self::MARKER,
+            'errors' => ['Invalid sender: '.self::MARKER],
+        ])));
     }
 
     private function bindClient(): void
@@ -384,11 +826,26 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
             $path = ltrim($request->getUri()->getPath(), '/');
             $isList = $method === 'GET' && $path === 'api/rule-allows-blocks/';
 
-            if ($isList && $this->failOn === 'GET list' && (! $this->failListAfterPatch || $this->patched)) {
+            if ($isList && $this->failOn === 'GET list' && (! $this->failListAfterPatch || $this->patched)
+                && (! $this->failListAfterPost || $this->posted)) {
+                return $this->failure($request);
+            }
+            if ($isList && $this->listFailsToo) {
                 return $this->failure($request);
             }
             if ($method === $this->failOn) {
+                if ($this->commitBeforeFailing) {
+                    $this->apply($request);
+                }
+
                 return $this->failure($request);
+            }
+
+            if ($method === 'POST') {
+                $this->apply($request);
+                $this->posted = true;
+
+                return Create::promiseFor(new Response(201, [], json_encode(['added_for' => [self::TENANT]])));
             }
 
             if ($isList) {
@@ -432,6 +889,23 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->app->instance(MeshWriteClient::class, new MeshWriteClient(['api_key' => 'k'], $guzzle));
     }
 
+    /** What a write does to the scripted tenant when Mesh commits it. */
+    private function apply(RequestInterface $request): void
+    {
+        $method = $request->getMethod();
+        $id = trim(substr(ltrim($request->getUri()->getPath(), '/'), strlen('api/rule-allows-blocks/')), '/');
+        $body = json_decode((string) $request->getBody(), true) ?: [];
+
+        if ($method === 'POST') {
+            $this->seedRule((string) ($body['sender'] ?? ''), (string) ($body['comment'] ?? ''));
+        } elseif ($method === 'DELETE') {
+            unset($this->upstream[$id]);
+        } elseif ($method === 'PATCH' && isset($this->upstream[$id])) {
+            $this->upstream[$id] = array_merge($this->upstream[$id], $body);
+            $this->patched = true;
+        }
+    }
+
     private function seedRule(string $sender, string $comment): void
     {
         $this->upstream[self::RULE_ID] = [
@@ -468,9 +942,11 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
         $this->assertStringNotContainsString(self::HOST, $text, "{$where}: request host leaked");
         $this->assertStringNotContainsString('rule-allows-blocks', $text, "{$where}: request route leaked");
         $this->assertStringNotContainsString('Mesh API', $text, "{$where}: the exception message was used");
+        $this->assertStringNotContainsString(self::LEAK_IP, $text, "{$where}: transport host leaked");
+        $this->assertStringNotContainsString('_size', $text, "{$where}: request query leaked");
 
-        if ($this->mode === '503') {
-            $this->assertStringContainsString('with HTTP 503', $text, "{$where}: the status is the report");
+        if (is_numeric($this->mode)) {
+            $this->assertStringContainsString('with HTTP '.$this->mode, $text, "{$where}: the status is the report");
         } else {
             $this->assertStringContainsString('failed without an HTTP status from Mesh', $text, "{$where}: a status-less failure says so");
             $this->assertStringNotContainsString('HTTP 0', $text, $where);

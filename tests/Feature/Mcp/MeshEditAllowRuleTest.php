@@ -991,7 +991,9 @@ class MeshEditAllowRuleTest extends TestCase
 
         $this->assertTrue($record->fresh()->expires_at->equalTo($new));
         $summary = TechnicianActionLog::where('action_type', 'mesh_edit_allow_rule')->where('result_status', 'executed')->sole()->summary;
-        $this->assertStringContainsString('connection reset', $summary);
+        // Status only (C-56, card FLzMLDxF): the exception's own text stays out.
+        $this->assertStringContainsString('did not answer cleanly (the PATCH failed without an HTTP status from Mesh)', $summary);
+        $this->assertStringNotContainsString('connection reset', $summary);
         $this->assertStringContainsString('but the re-read shows the new date', $summary);
     }
 
