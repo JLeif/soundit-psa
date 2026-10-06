@@ -1152,7 +1152,7 @@ class StaffMeshAdminToolExecutor
                 .($expiresAt === null
                     ? 'it is PERMANENT — the PSA will never remove it. '
                     : 'the PSA will remove it at expiry. ')
-                .'There was no create response, so its scope was never confirmed — check it in the Mesh portal.'
+                .'There was no successful create response, so its scope was never confirmed — check it in the Mesh portal.'
             : 'Mesh did not acknowledge the create ('.$error->statusPhrase('the create')."), and a re-read of this client's tenant did not find the rule"
                 .($rereadError !== null ? ' (that read failed too: '.$rereadError.')' : '')
                 .'. Whether the rule was created is UNMEASURED, so it is recorded unresolved (PSA record #'.$record->id.') and '

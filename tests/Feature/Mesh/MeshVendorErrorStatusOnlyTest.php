@@ -430,8 +430,11 @@ class MeshVendorErrorStatusOnlyTest extends TestCase
 
         $error = (string) session('error');
         $this->assertStringContainsString('Mesh did not acknowledge the create (', $error);
-        // G-14: on the 5xx arm Mesh DID answer, so the text must not deny it.
+        // G-14: on the 5xx arm Mesh DID answer, so the text must not deny it,
+        // neither in the parenthesis nor in the scope sentence that follows.
         $this->assertStringNotContainsString('never answered', $error);
+        $this->assertStringNotContainsString('no create response', $error);
+        $this->assertStringContainsString('There was no successful create response, so its scope was never confirmed', $error);
         $this->assertStringContainsString('found the rule live', $error, 'positive control: the found arm');
         $this->assertStatusOnly($error, 'unanswered create, found');
         $record = MeshAllowRule::sole();
