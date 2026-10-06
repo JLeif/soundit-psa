@@ -408,6 +408,7 @@ class IntegrationsController extends Controller
         $litsrmmBaseUrl = (string) (LitsrmmConfig::get('base_url') ?? '');
         $litsrmmConfigured = LitsrmmConfig::isConfigured();
         $litsrmmEnabled = LitsrmmConfig::isEnabled();
+        $litsrmmScheduleEnabled = LitsrmmConfig::isScheduleEnabled();
         $litsrmmConnectedAt = $fmtTs(Setting::getValue('litsrmm_connected_at'));
         $meshEnabled = MeshConfig::isEnabled();
         $cippEnabled = CippConfig::isEnabled();
@@ -603,7 +604,7 @@ class IntegrationsController extends Controller
             'benjipaysPayOnline',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
-            'litsrmmHasApiKey', 'litsrmmBaseUrl', 'litsrmmConfigured', 'litsrmmEnabled', 'litsrmmConnectedAt',
+            'litsrmmHasApiKey', 'litsrmmBaseUrl', 'litsrmmConfigured', 'litsrmmEnabled', 'litsrmmScheduleEnabled', 'litsrmmConnectedAt',
             'meshHasApiKey', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
             'huntressConfigured', 'huntressConnected', 'huntressEnabled',
             'huntressWebhookSecretStored', 'huntressWebhookAccountId', 'huntressWebhooksEnabled',
@@ -2396,6 +2397,27 @@ class IntegrationsController extends Controller
         } catch (\Throwable $e) {
             return back()->with('error', "Control D sync failed: {$e->getMessage()}");
         }
+    }
+
+    public function syncLitsrmmDevices(\App\Services\Litsrmm\LitsrmmAssetSyncService $sync)
+    {
+        if (! \App\Support\LitsrmmConfig::isAvailable()) {
+            return back()->with('error', 'LITSRMM is switched off or not configured. Nothing was read.');
+        }
+
+        $result = $sync->sync();
+
+        return back()->with($result->errors > 0 ? 'error' : 'success', \App\Services\Litsrmm\LitsrmmAssetSyncService::describe($result));
+    }
+
+    /** "Sync every 4 hours" on the LITSRMM card. Admins only (routes/web.php). */
+    public function updateLitsrmmSchedule(Request $request)
+    {
+        $on = $request->boolean('enabled');
+        Setting::setValue('litsrmm_sync_schedule_enabled', $on ? '1' : '0');
+
+        return redirect()->route('settings.integrations')
+            ->with('success', $on ? 'LITSRMM device sync will run every 4 hours.' : 'LITSRMM device sync will run only when started by hand.');
     }
 
     public function syncControlDDevices()
