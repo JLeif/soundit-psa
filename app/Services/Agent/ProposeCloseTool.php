@@ -90,13 +90,16 @@ class ProposeCloseTool
      * @param  array  $drafter  DraftedByToken::meta() keys from a staff MCP token caller (card tY39CHiq),
      *                          written into proposed_meta so the drafting token can withdraw the run.
      *                          Empty for every other caller, which records no drafter.
+     * @param  int|null  $runId  Set to the id of the run this call recorded (or of the identical run already
+     *                           awaiting approval), so the MCP response can carry the run_id that
+     *                           withdraw_staged_action takes. Left null when no run was recorded.
      */
-    public function executeHeld(Ticket $ticket, array $input, array $drafter = []): string
+    public function executeHeld(Ticket $ticket, array $input, array $drafter = [], ?int &$runId = null): string
     {
-        return $this->executeInternal($ticket, $input, correctionContext: null, forceHeld: true, drafter: $drafter);
+        return $this->executeInternal($ticket, $input, correctionContext: null, forceHeld: true, drafter: $drafter, runId: $runId);
     }
 
-    private function executeInternal(Ticket $ticket, array $input, ?array $correctionContext, bool $forceHeld, array $drafter = []): string
+    private function executeInternal(Ticket $ticket, array $input, ?array $correctionContext, bool $forceHeld, array $drafter = [], ?int &$runId = null): string
     {
         $reason = trim((string) ($input['reason'] ?? ''));
         $confidence = (float) ($input['confidence'] ?? 0.0);
@@ -160,6 +163,7 @@ class ProposeCloseTool
                 'tokens_used' => 0,
             ],
         );
+        $runId = $run->id;
 
         // Idempotency guard (CO-4): an existing AwaitingApproval run for the same
         // content hash means we already proposed this — do NOT re-dispatch (which

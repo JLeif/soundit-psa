@@ -767,15 +767,18 @@ class AssistantToolExecutor
             return ['error' => 'Ticket has no valid client'];
         }
 
+        $runId = null;
         $message = app(ProposeCloseTool::class)->executeHeld($ticket, [
             'reason' => $reason,
             'confidence' => $confidence,
-        ], $this->actorLabel !== null ? DraftedByToken::meta($this->actorLabel, $this->tokenLabel) : []);
+        ], $this->actorLabel !== null ? DraftedByToken::meta($this->actorLabel, $this->tokenLabel) : [], $runId);
 
+        // run_id is the handle withdraw_staged_action takes (as stage_close_ticket returns it).
         return [
             'success' => true,
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
+            ...($runId !== null ? ['run_id' => $runId] : []),
             'message' => $message,
         ];
     }

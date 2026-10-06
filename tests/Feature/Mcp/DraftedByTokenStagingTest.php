@@ -111,6 +111,9 @@ class DraftedByTokenStagingTest extends TestCase
 
         $run = TechnicianRun::where('ticket_id', $primary->id)->where('action_type', $actionType)->sole();
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->state);
+        // The drafter withdraws by the run_id the staging call RETURNED, so the response must carry it.
+        $result = json_decode((string) $res->json('result.content.0.text'), true) ?? [];
+        $this->assertSame($run->id, $result['run_id'] ?? null, 'the staging response must return the run_id withdraw_staged_action takes');
 
         return $run;
     }
