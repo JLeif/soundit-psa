@@ -21,11 +21,20 @@ use Psr\Http\Message\RequestInterface;
 use Tests\TestCase;
 
 /**
- * #5298 / #5305 (card 6ac52e6f): every log record a Mesh license sync writes
- * names the client by its PSA id only. No record, at any level and from any
- * class the sync reaches (MeshLicenseSyncService, MeshClient), carries the
- * client's name, its Mesh customer id (raw, dashless or upper-cased), or the
- * vendor's body.
+ * #5298 / #5305 (card 6ac52e6f): on the paths driven here, every log record a
+ * Mesh license sync writes names the client by its PSA id only. No record
+ * captured on those paths, at any level and from any class they reach,
+ * carries the client's name, its Mesh customer id (raw, dashless or
+ * upper-cased), or the vendor's body.
+ *
+ * The paths driven (#5326): ONE mapped client per arm, with no license
+ * beforehand; the customer read failing, degraded, billing 0, or creating
+ * one license (the normal arm); and deactivateOrphaned() with nothing to
+ * deactivate. NOT driven, so not covered by the first half below: a sync that
+ * updates an existing license (quantity or status change), several mapped
+ * clients in one run, an orphaned license actually being deactivated, and
+ * the onProgress callback. A record written on one of those paths, by the
+ * service or by a model observer or hook, would not fail this test.
  *
  * Two halves:
  *
