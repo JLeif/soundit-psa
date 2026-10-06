@@ -44,7 +44,7 @@ class MeshAlreadyWordingTest extends TestCase
 
     private const RULES = 'https://mesh.invalid/api/rule-allows-blocks/';
 
-    private const LIST_READ = 'GET '.self::RULES.'?_from=0&_size=200';
+    private const LIST_READ = 'GET '.self::RULES.'?_from=0&_size=100';
 
     /** @var array<int,mixed> */
     private array $history = [];

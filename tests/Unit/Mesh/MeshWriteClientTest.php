@@ -171,8 +171,8 @@ class MeshWriteClientTest extends TestCase
         $page1[7] = $this->rule('mine-1', 'tenant-1', 'a@example.test', 'PSA allow AAAAAAAAAA');
 
         $client = $this->clientReturning([
-            new Response(200, [], json_encode(['count' => 201, 'results' => $page1])),
-            new Response(200, [], json_encode(['count' => 201, 'results' => [$this->rule('mine-2', 'tenant-1', 'b@example.test', 'PSA allow BBBBBBBBBB')]])),
+            new Response(200, [], json_encode(['count' => MeshWriteClient::LIST_PAGE_SIZE + 1, 'next' => 'https://hub-us.example.test/api/rule-allows-blocks/?_from=100&_size=100', 'results' => $page1])),
+            new Response(200, [], json_encode(['count' => MeshWriteClient::LIST_PAGE_SIZE + 1, 'next' => null, 'results' => [$this->rule('mine-2', 'tenant-1', 'b@example.test', 'PSA allow BBBBBBBBBB')]])),
         ]);
 
         $rules = $client->listCustomerRules('tenant-1');
