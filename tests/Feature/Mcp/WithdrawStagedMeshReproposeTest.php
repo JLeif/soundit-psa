@@ -8,7 +8,6 @@ use App\Models\Setting;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
-use App\Services\Mcp\StaffPsaActionToolExecutor;
 use App\Services\Mcp\WithdrawStagedActionTool;
 use App\Services\Mesh\MeshWriteClient;
 use App\Support\McpConfig;
@@ -23,13 +22,9 @@ use Tests\TestCase;
  * guards (liveAwaitingRun / awaitingRunForSender) read awaiting_approval only, so a
  * Withdrawn run must not block the corrected proposal, whatever lifetime it asks.
  *
- * A NEW file on purpose: StaffMeshAdminToolExecutor and MeshAddAllowRuleTest are
- * held by another seat. Nothing here edits either.
- *
- * Mesh staging does not record proposed_meta.drafted_by_token at base 07806ab0
- * (only the prefixed drafted_by), so the tool cannot match a Mesh run's drafter
- * yet; that change is reported on the card. These tests stamp the bare label the
- * fixed staging path would write, then withdraw through the real tool.
+ * Nothing is stamped by hand: the run is staged through the real MCP Mesh path
+ * with a token, which records proposed_meta.drafted_by_token, and withdrawn over
+ * MCP by that same token. So these tests also prove the writer.
  */
 class WithdrawStagedMeshReproposeTest extends TestCase
 {
@@ -49,11 +44,16 @@ class WithdrawStagedMeshReproposeTest extends TestCase
         $this->app->instance(MeshWriteClient::class, $write);
     }
 
+    private ?string $token = null;
+
+    private function token(): string
+    {
+        return $this->token ??= McpConfig::rotateStaffToken(allowedTools: ['mesh_add_allow_rule:staged', 'withdraw_staged_action'], label: 'opsbot');
+    }
+
     private function stage(array $fixture, array $overrides = []): TestResponse
     {
-        $token = McpConfig::rotateStaffToken(allowedTools: ['mesh_add_allow_rule:staged'], label: 'opsbot');
-
-        return $this->withHeaders(['Authorization' => 'Bearer '.$token])
+        return $this->withHeaders(['Authorization' => 'Bearer '.$this->token()])
             ->postJson('/api/mcp/staff', [
                 'jsonrpc' => '2.0',
                 'id' => 1,
@@ -90,17 +90,16 @@ class WithdrawStagedMeshReproposeTest extends TestCase
 
     private function withdrawAsDrafter(TechnicianRun $run): void
     {
-        // The bare label the fixed Mesh staging path would record (see class docblock).
-        $run->forceFill(['proposed_meta' => array_merge($run->proposed_meta, ['drafted_by_token' => 'opsbot'])])->save();
+        $this->assertSame('opsbot', $run->proposed_meta['drafted_by_token'] ?? null, 'the Mesh staging path records the drafting token');
 
-        $result = app(StaffPsaActionToolExecutor::class)->execute(
-            WithdrawStagedActionTool::NAME,
-            ['run_id' => $run->id, 'reason' => 'Wrong lifetime; restaging.'],
-            0,
-            'mcp-staff:opsbot',
-            'opsbot',
-        );
-        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $response = $this->withHeaders(['Authorization' => 'Bearer '.$this->token()])
+            ->postJson('/api/mcp/staff', [
+                'jsonrpc' => '2.0',
+                'id' => 1,
+                'method' => 'tools/call',
+                'params' => ['name' => WithdrawStagedActionTool::NAME, 'arguments' => ['run_id' => $run->id, 'reason' => 'Wrong lifetime; restaging.']],
+            ]);
+        $this->assertFalse((bool) $response->json('result.isError'), (string) $response->json('result.content.0.text'));
         $this->assertSame(TechnicianRunState::Withdrawn, $run->fresh()->state);
     }
 

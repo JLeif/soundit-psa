@@ -75,6 +75,20 @@ final class WithdrawStagedActionTool
      */
     public function execute(array $arguments, ?string $tokenLabel, string $actorLabel): array
     {
+        // PSA action tools are self-validating at the MCP boundary (the controller's
+        // generic undeclared-argument guard defers to the executor), so an undeclared
+        // key is refused HERE, by name, before anything is read or written. Only key
+        // names are echoed, capped; values are never read.
+        $declared = array_keys(self::definition()['input_schema']['properties']);
+        $unknown = array_values(array_diff(array_map('strval', array_keys($arguments)), $declared));
+        if ($unknown !== []) {
+            sort($unknown);
+
+            return ['error' => 'Unsupported argument(s): '
+                .implode(', ', array_map(static fn (string $k): string => mb_substr($k, 0, 64), array_slice($unknown, 0, 10)))
+                .'. '.self::NAME.' accepts only: '.implode(', ', $declared).'. Nothing was withdrawn.'];
+        }
+
         $runId = $arguments['run_id'] ?? null;
         if (! is_int($runId) || $runId < 1) {
             return ['error' => 'run_id is required and must be a positive integer.'];
