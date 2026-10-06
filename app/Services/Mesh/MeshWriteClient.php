@@ -185,7 +185,7 @@ class MeshWriteClient
         $this->assertConfigured();
 
         if (trim($customerId) === '') {
-            throw new MeshClientException('Mesh customer id is required; nothing was sent.');
+            throw new MeshClientException('Mesh customer id is required; nothing was sent.', clientDetected: true, nothingSent: true);
         }
 
         // The body is assembled here in full and from these four arguments
@@ -241,7 +241,7 @@ class MeshWriteClient
         $this->assertConfigured();
 
         if (trim($customerId) === '') {
-            throw new MeshClientException('Mesh customer id is required; no list read was made.');
+            throw new MeshClientException('Mesh customer id is required; no list read was made.', clientDetected: true, nothingSent: true);
         }
 
         $matching = [];
@@ -262,7 +262,8 @@ class MeshWriteClient
             $results = $response['results'] ?? null;
             if (! is_array($results)) {
                 throw new MeshClientException(
-                    "Mesh rule list read got a page without a results list after {$seen} rows; the list was not used."
+                    "Mesh rule list read got a page without a results list after {$seen} rows; the list was not used.",
+                    clientDetected: true,
                 );
             }
 
@@ -293,13 +294,15 @@ class MeshWriteClient
         if (! $complete) {
             throw new MeshClientException(
                 'Mesh rule list read reached its page ceiling ('.self::LIST_PAGE_CEILING.' pages, '.$seen
-                .' rows) while Mesh still reported more rows; the incomplete list was not used.'
+                .' rows) while Mesh still reported more rows; the incomplete list was not used.',
+                clientDetected: true,
             );
         }
 
         if ($count !== null && $seen < $count) {
             throw new MeshClientException(
-                "Mesh rule list read ended after {$seen} rows but Mesh reported {$count}; the incomplete list was not used."
+                "Mesh rule list read ended after {$seen} rows but Mesh reported {$count}; the incomplete list was not used.",
+                clientDetected: true,
             );
         }
 
@@ -489,7 +492,7 @@ class MeshWriteClient
         $this->assertConfigured();
 
         if (trim($ruleId) === '') {
-            throw new MeshClientException('Mesh rule id is required; nothing was sent.');
+            throw new MeshClientException('Mesh rule id is required; nothing was sent.', clientDetected: true, nothingSent: true);
         }
 
         // Refuse the whole call on ANY unknown key rather than filtering it
@@ -503,12 +506,14 @@ class MeshWriteClient
             throw new MeshClientException(
                 'Mesh rule update refused: field(s) '.implode(', ', $unknown)
                 .' are not updatable by this client (only '.implode(', ', self::PATCHABLE_FIELDS)
-                .' are); nothing was sent.'
+                .' are); nothing was sent.',
+                clientDetected: true,
+                nothingSent: true,
             );
         }
 
         if ($fields === []) {
-            throw new MeshClientException('Mesh rule update needs at least one field; nothing was sent.');
+            throw new MeshClientException('Mesh rule update needs at least one field; nothing was sent.', clientDetected: true, nothingSent: true);
         }
 
         return $this->request('PATCH', self::RULE_ENDPOINT.rawurlencode($ruleId).'/', ['json' => $fields]);
@@ -525,7 +530,7 @@ class MeshWriteClient
         $this->assertConfigured();
 
         if (trim($ruleId) === '') {
-            throw new MeshClientException('Mesh rule id is required; nothing was sent.');
+            throw new MeshClientException('Mesh rule id is required; nothing was sent.', clientDetected: true, nothingSent: true);
         }
 
         $this->request('DELETE', self::RULE_ENDPOINT.rawurlencode($ruleId).'/');
@@ -584,14 +589,18 @@ class MeshWriteClient
     private function assertConfigured(): void
     {
         if (! $this->isConfigured()) {
-            throw new MeshClientException('Mesh API key is not configured; nothing was sent.');
+            throw new MeshClientException('Mesh API key is not configured; nothing was sent.', clientDetected: true, nothingSent: true);
         }
     }
 
     /**
      * Authenticated request. The API-KEY header is added here and is never
-     * logged — the failure log below carries method, endpoint and message
-     * only, and the endpoint never contains the key.
+     * logged. A failure is logged by method, endpoint path (no query), HTTP
+     * status and exception class only: Guzzle's message quotes the request
+     * URI, the host and a summary of the vendor's response body (C-56), so it
+     * goes into neither the log line nor anything a caller reports — the
+     * thrown exception is upstream by construction (MeshClientException) and
+     * callers report it through statusPhrase().
      *
      * @param  array<string, mixed>  $options
      * @return array<string, mixed>
@@ -634,9 +643,13 @@ class MeshWriteClient
 
             if ($httpResponse === null
                 && in_array($neverSentErrno, self::NEVER_SENT_CURL_ERRNOS, true)) {
-                Log::error("[MeshWriteClient] {$method} {$endpoint} could not connect: {$e->getMessage()}");
+                Log::error("[MeshWriteClient] {$method} ".self::logPath($endpoint).' could not connect (cURL errno '.$neverSentErrno.', '.$e::class.'); nothing was sent');
 
-                throw new MeshClientException("Mesh API unreachable: {$e->getMessage()}; nothing was sent.", 0);
+                // Upstream by construction (#5271): the Guzzle exception is
+                // chained and the client-detected flag is NOT set, so
+                // statusPhrase() never returns this message, whatever the
+                // transport's wording. nothingSent is what callers branch on.
+                throw new MeshClientException("Mesh API unreachable: {$e->getMessage()}; nothing was sent.", 0, $e, nothingSent: true);
             }
 
             if ($status === 400) {
@@ -651,14 +664,21 @@ class MeshWriteClient
                 );
             }
 
-            Log::error("[MeshWriteClient] {$method} {$endpoint} failed: {$e->getMessage()}");
+            Log::error("[MeshWriteClient] {$method} ".self::logPath($endpoint).' failed with '
+                .($status > 0 ? "HTTP {$status}" : 'no HTTP status').' ('.$e::class.')');
 
-            throw new MeshClientException("Mesh API error: {$e->getMessage()}", $status);
+            throw new MeshClientException("Mesh API error: {$e->getMessage()}", $status, $e);
         }
 
         $decoded = json_decode((string) $response->getBody(), true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /** The endpoint as a log may carry it: the path, never a query string. */
+    private static function logPath(string $endpoint): string
+    {
+        return strtok($endpoint, '?') ?: '';
     }
 
     /**

@@ -837,7 +837,12 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertSame(MeshAllowRule::STATE_UNRESOLVED, $record->state);
     }
 
-    public function test_a_400_from_mesh_is_passed_through_as_the_refusal_reason(): void
+    /**
+     * C-56 (card FLzMLDxF): a 400 is still a determinate refusal (no row, the
+     * proposal stays approvable), but it is reported by its status: the
+     * refusal text is the vendor's own response body and is not quoted.
+     */
+    public function test_a_400_from_mesh_is_reported_by_its_status_as_a_refusal(): void
     {
         $this->configureMesh();
         $actor = $this->configureAiActor();
@@ -853,7 +858,8 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'a refused create leaves the proposal approvable after correction');
         $this->assertSame(0, MeshAllowRule::count());
         $log = TechnicianActionLog::where('action_type', 'mesh_add_allow_rule')->where('result_status', 'rejected')->sole();
-        $this->assertStringContainsString('reserved domain', $log->summary);
+        $this->assertStringContainsString('Mesh refused the allow rule: Mesh answered the create with HTTP 400', $log->summary);
+        $this->assertStringNotContainsString('reserved domain', $log->summary);
     }
 
     public function test_a_lost_create_response_is_reconciled_by_re_read_and_the_landed_rule_is_recorded(): void
