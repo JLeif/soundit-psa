@@ -23,9 +23,15 @@ use Tests\TestCase;
  * Each shape is driven through the public get() -> request() over a real
  * MeshClient whose Guzzle is a MockHandler answering 503. The handler queue
  * holds exactly one response and must be empty afterwards, so the request
- * went through the swapped-in handler and nowhere else; the handler also
- * records the URI it received, which must still carry the Mesh id (only the
- * log line is redacted). The ONE record logged is pinned by exact equality.
+ * went through the swapped-in handler and nowhere else. For EVERY shape the
+ * handler also records the URI it received, which must still carry the form
+ * the endpoint was built with (the id as given, upper-cased or dashless
+ * included): only the log line is redacted, never the request (#5334). The
+ * rethrown exception is checked to be a MeshClientException with Guzzle's
+ * code (503) whose message is 'Mesh API error: ' plus Guzzle's own message,
+ * wrapping that ServerException; this test does not make its content safe
+ * (see MeshClient::request()). The ONE record logged is pinned by exact
+ * equality.
  *
  * Synthetic data only (G-13): a made-up Mesh uuid, host and query marker.
  */
@@ -49,37 +55,54 @@ class MeshClientLogPathTest extends TestCase
     }
 
     /**
-     * Endpoint as passed to get() => the path the log line must show.
+     * Endpoint as passed to get() => the path the log line must show => a
+     * substring the URI the handler received must still contain.
      *
-     * @return array<string, array{0: string, 1: string}>
+     * @return array<string, array{0: string, 1: string, 2: string}>
      */
     public static function shapes(): array
     {
         $id = self::MESH_ID;
+        $up = strtoupper($id);
+        $bare = str_replace('-', '', $id);
+        // An id with a newline in it (mesh_customer_id is stored raw): '.+'
+        // reaches past the newline only under the s flag (#5337).
+        $nl = substr($id, 0, 8)."\n".substr($id, 9);
         $q = '?filter='.self::QUERY_MARKER.'&_size=1';
 
         return [
-            'customer read (getCustomer shape)' => ["api/customers/{$id}/", 'api/customers/<customer>'],
-            'leading slash' => ["/api/customers/{$id}/", '/api/customers/<customer>'],
-            'absolute URL' => ['https://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>'],
-            'scheme-relative URL' => ['//'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>'],
-            'versioned prefix' => ["api/v2/customers/{$id}/", 'api/v2/customers/<customer>'],
-            'nested prefix' => ["api/partners/p-1/customers/{$id}/", 'api/partners/p-1/customers/<customer>'],
-            'id containing a slash' => ["api/customers/abc/{$id}/", 'api/customers/<customer>'],
-            'sub-resource' => ["api/customers/{$id}/licenses/", 'api/customers/<customer>'],
-            'id upper-cased' => ['api/customers/'.strtoupper($id).'/', 'api/customers/<customer>'],
-            'id dashless' => ['api/customers/'.str_replace('-', '', $id).'/', 'api/customers/<customer>'],
-            'id, no trailing slash' => ["api/customers/{$id}", 'api/customers/<customer>'],
-            'id with a query' => ["api/customers/{$id}/{$q}", 'api/customers/<customer>'],
-            'id with a fragment' => ["api/customers/{$id}/#frag", 'api/customers/<customer>'],
-            'customer list with a query' => ["api/customers/{$q}", 'api/customers/'],
-            'customer list' => ['api/customers/', 'api/customers/'],
-            'leading ?' => [$q, ''],
+            'customer read (getCustomer shape)' => ["api/customers/{$id}/", 'api/customers/<customer>', "/api/customers/{$id}/"],
+            'leading slash' => ["/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            'absolute URL' => ['https://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            'scheme-relative URL' => ['//'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            'versioned prefix' => ["api/v2/customers/{$id}/", 'api/v2/customers/<customer>', "/api/v2/customers/{$id}/"],
+            'nested prefix' => ["api/partners/p-1/customers/{$id}/", 'api/partners/p-1/customers/<customer>', "/api/partners/p-1/customers/{$id}/"],
+            'id containing a slash' => ["api/customers/abc/{$id}/", 'api/customers/<customer>', "/api/customers/abc/{$id}/"],
+            'sub-resource' => ["api/customers/{$id}/licenses/", 'api/customers/<customer>', "/api/customers/{$id}/licenses/"],
+            'id upper-cased' => ["api/customers/{$up}/", 'api/customers/<customer>', "/api/customers/{$up}/"],
+            'id dashless' => ["api/customers/{$bare}/", 'api/customers/<customer>', "/api/customers/{$bare}/"],
+            'id, no trailing slash' => ["api/customers/{$id}", 'api/customers/<customer>', "/api/customers/{$id}"],
+            // get() always passes Guzzle a 'query' option (empty here), which
+            // replaces a query written into the endpoint: the request carries
+            // the path only, so that is what these rows expect it to carry.
+            'id with a query' => ["api/customers/{$id}/{$q}", 'api/customers/<customer>', "/api/customers/{$id}/"],
+            'id with a fragment' => ["api/customers/{$id}/#frag", 'api/customers/<customer>', "/api/customers/{$id}/"],
+            // #5337: the regex flags and the segment boundary.
+            'id with a newline (s flag)' => ["api/customers/{$nl}/", 'api/customers/<customer>', '/api/customers/'.str_replace("\n", '%0A', $nl).'/'],
+            'upper-case scheme (i flag, host strip)' => ['HTTPS://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            'upper-case Customers/ (i flag, redaction)' => ["api/Customers/{$id}/", 'api/Customers/<customer>', "/api/Customers/{$id}/"],
+            'bare customers/ at the start (^ branch)' => ["customers/{$id}/", 'customers/<customer>', "/customers/{$id}/"],
+            // Not a customers/ segment, so nothing is redacted. The tail is
+            // deliberately not an id, so the leak checks still hold.
+            'xcustomers/ is not a segment (boundary)' => ['api/xcustomers/p-7/', 'api/xcustomers/p-7/', '/api/xcustomers/p-7/'],
+            'customer list with a query' => ["api/customers/{$q}", 'api/customers/', '/api/customers/'],
+            'customer list' => ['api/customers/', 'api/customers/', '/api/customers/'],
+            'leading ?' => [$q, '', 'https://'.self::HOST.'/'],
         ];
     }
 
     #[DataProvider('shapes')]
-    public function test_the_failure_line_redacts_the_customer_tail(string $endpoint, string $expectedPath): void
+    public function test_the_failure_line_redacts_the_customer_tail(string $endpoint, string $expectedPath, string $requestCarries): void
     {
         [$client, $mock, $seen] = $this->clientAnswering503();
 
@@ -87,15 +110,19 @@ class MeshClientLogPathTest extends TestCase
             $client->get($endpoint);
             $this->fail('the 503 must throw');
         } catch (MeshClientException $e) {
-            // The rethrown exception is unchanged: it still wraps Guzzle's.
-            $this->assertInstanceOf(ServerException::class, $e->getPrevious());
+            // What the rethrow is (not that its content is safe: it is not).
+            $this->assertSame(MeshClientException::class, $e::class);
+            $previous = $e->getPrevious();
+            $this->assertInstanceOf(ServerException::class, $previous);
+            $this->assertSame(ServerException::class, $previous::class);
+            $this->assertSame(503, $e->getCode(), "the rethrow keeps Guzzle's code");
+            $this->assertSame('Mesh API error: '.$previous->getMessage(), $e->getMessage());
         }
 
         $this->assertSame(0, $mock->count(), 'the request went through the swapped-in MockHandler');
         $this->assertCount(1, $seen->uris, 'exactly one request reached the handler');
-        if (str_contains($endpoint, self::MESH_ID)) {
-            $this->assertStringContainsString(self::MESH_ID, $seen->uris[0], 'positive control: the REQUEST still names the Mesh customer');
-        }
+        // Positive control, every shape: the REQUEST is not redacted.
+        $this->assertStringContainsString($requestCarries, $seen->uris[0], 'positive control: the request still carries the endpoint as built');
 
         $this->assertCount(1, $this->logged, 'records: '.json_encode($this->logged));
         $message = $this->logged[0]['message'];
@@ -116,34 +143,63 @@ class MeshClientLogPathTest extends TestCase
         );
     }
 
-    /** The kept shape the issue requires: GET api/customers/ survives. */
+    /**
+     * The kept shape the issue requires: GET api/customers/ survives. The
+     * query travels as get()'s second argument, i.e. as Guzzle's 'query'
+     * option, never inside $endpoint, so logPath()'s '?'/'#' cut is not what
+     * keeps it out of this line (the 'customer list with a query' shape pins
+     * that cut). Here the request is checked to have carried the query and
+     * the line to have dropped it.
+     */
     public function test_the_customer_list_path_is_kept(): void
     {
-        [$client] = $this->clientAnswering503();
+        [$client, $mock, $seen] = $this->clientAnswering503();
 
         try {
             $client->get('api/customers/', ['_size' => 1, 'filter' => self::QUERY_MARKER]);
+            $this->fail('the 503 must throw');
         } catch (MeshClientException) {
         }
 
+        $this->assertSame(0, $mock->count(), 'the request went through the swapped-in MockHandler');
+        $this->assertCount(1, $seen->uris, 'exactly one request reached the handler');
+        $this->assertStringContainsString('filter='.self::QUERY_MARKER, $seen->uris[0], 'positive control: the request carried the query');
+
         $this->assertCount(1, $this->logged);
-        $this->assertStringContainsString('GET api/customers/ failed with HTTP 503', $this->logged[0]['message']);
-        $this->assertStringNotContainsString(self::QUERY_MARKER, $this->logged[0]['message']);
+        $this->assertSame(
+            '[MeshClient] GET api/customers/ failed with HTTP 503 ('.ServerException::class.')',
+            $this->logged[0]['message'],
+        );
     }
 
-    /** The leak assertion can see each form: a line carrying it fails. */
-    public function test_the_leak_assertion_fails_on_each_form(): void
+    /**
+     * logPath() itself, reached by reflection, on the shapes whose line must
+     * differ from the endpoint: each comes back changed and free of every
+     * leak form, and a kept shape comes back as given. An identity logPath()
+     * (returning its input) fails here (#5335; this replaces a check that
+     * only exercised PHPUnit).
+     */
+    public function test_log_path_changes_every_redacted_shape(): void
     {
-        foreach ($this->leakForms() as $what => $form) {
-            $line = "[MeshClient] GET api/customers/{$form} failed with HTTP 503";
-            try {
-                $this->assertStringNotContainsStringIgnoringCase($form, $line);
-            } catch (\PHPUnit\Framework\AssertionFailedError) {
+        $logPath = new \ReflectionMethod(MeshClient::class, 'logPath');
+        $redacted = 0;
+
+        foreach (self::shapes() as $name => [$endpoint, $expectedPath]) {
+            $out = $logPath->invoke(null, $endpoint);
+            $this->assertSame($expectedPath, $out, "{$name}: logPath()");
+            if ($expectedPath === $endpoint) {
                 continue;
             }
-            $this->fail("positive control: a line carrying the {$what} passed");
+            $redacted++;
+            $this->assertNotSame($endpoint, $out, "{$name}: logPath() returned its input");
+            foreach ($this->leakForms() as $what => $form) {
+                if (stripos($endpoint, $form) !== false) {
+                    $this->assertStringNotContainsStringIgnoringCase($form, $out, "{$name}: {$what} survived logPath()");
+                }
+            }
         }
-        $this->assertCount(6, $this->leakForms());
+
+        $this->assertGreaterThanOrEqual(15, $redacted, 'positive control: the shapes include the redacted ones');
     }
 
     /** @return array<string, string> */

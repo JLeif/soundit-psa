@@ -16,6 +16,7 @@ use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Psr\Http\Message\RequestInterface;
 use Tests\TestCase;
@@ -85,10 +86,13 @@ class MeshLicenseSyncLogPrivacyTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        // No Http::preventStrayRequests(): MeshClient sends through raw Guzzle,
-        // which that facade guard does not see (#5327). Isolation is the
-        // scripted handler itself, and each arm asserts it received the one
-        // request ($this->requested).
+        // Guards Laravel Http-facade calls on the driven paths (the service,
+        // model observers or hooks, deactivateOrphaned()): any such request
+        // throws instead of leaving the box (G-5, #5332). It does NOT see
+        // MeshClient's raw Guzzle (#5327); that request is isolated by the
+        // scripted handler, and each arm asserts it received the one request
+        // ($this->requested).
+        Http::preventStrayRequests();
         if (self::$marker === '') {
             self::$marker = 'LOGPRIV-BODY-'.bin2hex(random_bytes(6));
         }
