@@ -261,6 +261,61 @@ class MeshListAllowRulesTest extends TestCase
         $this->assertTrue($out['unsettled_psa_records'][0]['seen_in_mesh_list']);
     }
 
+    public function test_records_stored_against_a_previous_tenant_are_not_joined_or_listed(): void
+    {
+        $client = $this->mappedClient();
+        // Stored against the client's previous tenant: the reaper works them there, not here.
+        $this->record($client, [
+            'mesh_customer_id' => self::OTHER_TENANT, 'sender' => 'billing@vendor.example.test',
+            'comment' => 'PSA allow STALE00001', 'mesh_rule_id' => null,
+            'state' => MeshAllowRule::STATE_UNRESOLVED, 'expires_at' => now()->addDays(5),
+        ]);
+        $this->record($client, [
+            'mesh_customer_id' => self::OTHER_TENANT, 'sender' => 'news.example.test',
+            'comment' => 'PSA allow STALE00002', 'mesh_rule_id' => 'rule-by-id',
+            'state' => MeshAllowRule::STATE_REAP_FAILED, 'expires_at' => now()->subDay(),
+        ]);
+        $this->upstream = [
+            $this->row('rule-copy', 'billing@vendor.example.test', ['comment' => 'PSA allow STALE00001']),
+            $this->row('rule-by-id', 'news.example.test', ['comment' => 'PSA allow STALE00002']),
+        ];
+
+        $out = $this->listOk($client);
+        $rules = collect($out['rules'])->keyBy('rule_id');
+
+        $this->assertSame(['rule-copy', 'rule-by-id'], $rules->keys()->all(), 'positive control: both rules are listed');
+        foreach ($rules as $id => $rule) {
+            $this->assertFalse($rule['psa_created'], $id);
+            $this->assertNull($rule['psa_match'], $id);
+            $this->assertNull($rule['psa_record_id'], $id);
+            $this->assertTrue($rule['permanent'], $id);
+            $this->assertNull($rule['expires_at'], $id);
+        }
+        $this->assertSame([], $out['unsettled_psa_records']);
+    }
+
+    public function test_a_stored_last_error_is_reported_as_present_never_as_text(): void
+    {
+        $client = $this->mappedClient();
+        $this->record($client, [
+            'state' => MeshAllowRule::STATE_REAP_FAILED, 'mesh_rule_id' => 'rule-f', 'expires_at' => now()->subDay(),
+            'last_error' => 'Mesh API error: Client error: DELETE https://mesh.invalid/api/rule-allows-blocks/rule-f/ resulted in 400 {"detail":"SECRET-BODY-MARKER"}',
+        ]);
+        $this->record($client, ['sender' => 'clean@vendor.example.test', 'comment' => 'PSA allow CLEAN00001', 'state' => MeshAllowRule::STATE_UNRESOLVED]);
+
+        $out = $this->listOk($client);
+        $unsettled = collect($out['unsettled_psa_records'])->keyBy('sender');
+        $encoded = (string) json_encode($out, JSON_UNESCAPED_SLASHES);
+
+        $this->assertCount(2, $unsettled, 'positive control: both records are listed');
+        $this->assertStringNotContainsString('SECRET-BODY-MARKER', $encoded);
+        $this->assertStringNotContainsString('mesh.invalid', $encoded);
+        $this->assertStringNotContainsString('rule-allows-blocks', $encoded);
+        $this->assertArrayNotHasKey('last_error', $unsettled['billing@vendor.example.test']);
+        $this->assertTrue($unsettled['billing@vendor.example.test']['last_error_recorded']);
+        $this->assertFalse($unsettled['clean@vendor.example.test']['last_error_recorded']);
+    }
+
     // ---- sender filter -------------------------------------------------------------
 
     private function filterFixture(): Client

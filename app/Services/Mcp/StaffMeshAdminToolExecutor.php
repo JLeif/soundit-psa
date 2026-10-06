@@ -3164,8 +3164,14 @@ class StaffMeshAdminToolExecutor
             return ['error' => "{$client->name}'s Mesh allow rules could not be read: {$what}. This is not an empty list; retry, and report it if it persists."];
         }
 
+        // The reaper works each record against its OWN mesh_customer_id
+        // (MeshAllowRuleReaper::resolveRuleId()), not the client's current
+        // mapping. A record stored against a tenant this client was mapped to
+        // before is not a record of the tenant being listed: joining it would
+        // report the reaper's verdict for rules it never touches.
         $records = MeshAllowRule::query()
             ->where('client_id', $client->id)
+            ->where('mesh_customer_id', $tenant)
             ->orderByDesc('id')
             ->get();
 
@@ -3216,7 +3222,9 @@ class StaffMeshAdminToolExecutor
                 'expires_at' => self::expiryValue($record->expires_at),
                 'ticket_id' => $record->ticket_id,
                 'technician_run_id' => $record->technician_run_id,
-                'last_error' => $record->last_error !== null ? mb_substr((string) $record->last_error, 0, 300) : null,
+                // The stored text can hold a vendor exception message (URL,
+                // response body); only whether one is recorded is reported.
+                'last_error_recorded' => $record->last_error !== null && trim((string) $record->last_error) !== '',
                 'psa_recorded_at' => $record->created_at?->toIso8601String(),
             ];
         }
@@ -3355,7 +3363,7 @@ class StaffMeshAdminToolExecutor
             .'permanent / expires_at, the expiry Mesh displays, any other date_* fields Mesh returns (verbatim, under mesh_dates), and whether the PSA created it '
             .'(psa_created, with its ticket_id, technician_run_id and PSA record state). '
             .'permanent is true unless the PSA holds a record with an expiry that its reaper still works; Mesh does not expire rules itself, so a rule the PSA did not create is permanent whatever date Mesh displays. '
-            .'Block rules are not listed (only counted). Also returns the PSA\'s own records for this client that are unresolved or reap_failed (unsettled_psa_records). '
+            .'Block rules are not listed (only counted). Also returns the PSA\'s own records for this client and its current Mesh tenant that are unresolved or reap_failed (unsettled_psa_records). '
             .'A Mesh read that fails (an HTTP error or no answer) is returned as an error, never as an empty list. Requires an explicit grant.',
             [
                 'sender' => [
