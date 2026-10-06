@@ -64,6 +64,7 @@ class MeshC56ReadSitesTest extends TestCase
     /** Query-string marker (sent as a filter value). */
     private static string $queryMarker = '';
 
+    /** The API-KEY header value the client sends; synthetic, a fresh suffix per process (G-13). */
     private static string $apiKey = '';
 
     /** @var resource|null */
