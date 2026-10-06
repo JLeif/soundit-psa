@@ -58,6 +58,8 @@ class MeshC56ReadSitesTest extends TestCase
 
     private const MESH_ID = '3f2a9c1e-5b7d-4e60-9a1b-2c3d4e5f6a7b';
 
+    private const MESH_ID_2 = '8d4b1f6a-2c9e-4a73-b5d0-6e7f8a9b0c1d';
+
     /** Body marker; a fresh suffix per process. */
     private static string $marker = '';
 
@@ -276,9 +278,14 @@ class MeshC56ReadSitesTest extends TestCase
             ->from(route('settings.integrations'))
             ->post(route('settings.integrations.mesh.sync'));
 
-        // syncLicenses() absorbs a per-client failure, so the flash is the
-        // summary and the failure is the client-id log line.
+        // syncLicenses() absorbs a per-client failure into $result->errors and
+        // logs it by client id; the button must still flash a failure (#5293).
         $response->assertRedirect(route('settings.integrations'));
+        $this->assertNull(session('success'), 'a sync whose only client failed is not a success');
+        $this->assertSame(
+            'Mesh sync finished with 1 client error(s): 0 created, 0 updated. The PSA log names each failed client by id.',
+            session('error'),
+        );
         $this->assertNoVendorText((string) session('success').(string) session('error'), 'sync flash');
         $log = $this->logsContaining('[MeshSync] Failed for client '.$client->id.':');
         $this->assertStatusOnly($log, 'sync log');
@@ -320,6 +327,56 @@ class MeshC56ReadSitesTest extends TestCase
         $log = $this->logsContaining('[MeshSync] Sync failed');
         $this->assertNoVendorText($log, 'sync log');
         $this->assertStringContainsString('RuntimeException', $log, 'the class is logged');
+    }
+
+    // ---- #5293: per-client failures reach the sync button -----------------------
+
+    public function test_the_sync_button_flashes_a_failure_when_every_client_fails(): void
+    {
+        $a = $this->mappedClient();
+        $b = $this->mappedClient(self::MESH_ID_2, 'Synthetic Client Name 9e4b');
+        $this->bindRealSync([self::MESH_ID, self::MESH_ID_2]);
+
+        $flash = $this->pressSync('error');
+
+        $this->assertSame(
+            'Mesh sync finished with 2 client error(s): 0 created, 0 updated. The PSA log names each failed client by id.',
+            $flash,
+        );
+        $this->assertNull(session('success'), 'no green flash when every client failed');
+        $this->assertFlashHasNoClientData($flash, [$a, $b]);
+        $this->logsContaining('[MeshSync] Failed for client '.$a->id.':');
+        $this->logsContaining('[MeshSync] Failed for client '.$b->id.':');
+    }
+
+    public function test_the_sync_button_flashes_a_failure_when_one_of_two_clients_fails(): void
+    {
+        $ok = $this->mappedClient();
+        $bad = $this->mappedClient(self::MESH_ID_2, 'Synthetic Client Name 9e4b');
+        $this->bindRealSync([self::MESH_ID_2]);
+
+        $flash = $this->pressSync('error');
+
+        $this->assertSame(
+            'Mesh sync finished with 1 client error(s): 1 created, 0 updated. The PSA log names each failed client by id.',
+            $flash,
+        );
+        $this->assertNull(session('success'), 'no green flash when a client failed');
+        $this->assertFlashHasNoClientData($flash, [$ok, $bad]);
+        $this->assertSame(1, \App\Models\License::where('client_id', $ok->id)->count(), 'positive control: the healthy client synced');
+        $this->logsContaining('[MeshSync] Failed for client '.$bad->id.':');
+    }
+
+    public function test_the_sync_button_flashes_success_unchanged_when_no_client_fails(): void
+    {
+        $this->mappedClient();
+        $this->mappedClient(self::MESH_ID_2, 'Synthetic Client Name 9e4b');
+        $this->bindRealSync([]);
+
+        $flash = $this->pressSync('success');
+
+        $this->assertSame('Mesh sync complete: 2 created, 0 updated.', $flash);
+        $this->assertNull(session('error'), 'a clean sync flashes no error');
     }
 
     // ---- #5282: the exception handler and the previous chain ---------------------
@@ -366,6 +423,55 @@ class MeshC56ReadSitesTest extends TestCase
         $this->app->bind(MeshLicenseSyncService::class, fn () => $mock);
 
         return $mock;
+    }
+
+    /**
+     * The real MeshLicenseSyncService over a scripted MeshClient (bound as a
+     * closure for the same reason as bindSync()). A customer read for a Mesh
+     * id in $failing answers HTTP 503; any other answers one billed license.
+     *
+     * @param  list<string>  $failing
+     */
+    private function bindRealSync(array $failing): void
+    {
+        Setting::setEncrypted('mesh_api_key', self::$apiKey);
+        $this->mode = '503';
+        $mesh = $this->scriptedClient(function (RequestInterface $r) use ($failing) {
+            foreach ($failing as $id) {
+                if (str_contains($r->getUri()->getPath(), $id)) {
+                    return $this->failure($r);
+                }
+            }
+
+            return Create::promiseFor(new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'licenses_billed' => 3,
+                'service_name' => 'Synthetic Service',
+                'active' => true,
+            ])));
+        });
+        $this->app->bind(MeshLicenseSyncService::class, fn () => new MeshLicenseSyncService($mesh));
+    }
+
+    /** POST the sync button; return the flash under $key (which must be set). */
+    private function pressSync(string $key): string
+    {
+        $this->actingAs(User::factory()->admin()->create())
+            ->from(route('settings.integrations'))
+            ->post(route('settings.integrations.mesh.sync'))
+            ->assertRedirect(route('settings.integrations'));
+        $this->assertTrue(session()->has($key), "the sync flashed '{$key}'");
+
+        return (string) session($key);
+    }
+
+    /** @param  list<Client>  $clients */
+    private function assertFlashHasNoClientData(string $flash, array $clients): void
+    {
+        $this->assertNoVendorText($flash, 'sync flash');
+        $this->assertStringNotContainsString(self::MESH_ID_2, $flash, 'sync flash: Mesh id leaked');
+        foreach ($clients as $c) {
+            $this->assertStringNotContainsString($c->name, $flash, 'sync flash: client name leaked');
+        }
     }
 
     /** A MeshClientException thrown by the real client over the scripted Guzzle. */
@@ -467,11 +573,11 @@ class MeshC56ReadSitesTest extends TestCase
         $_SERVER['HTTP_PROXY'] = 'http://127.0.0.1:'.self::$port;
     }
 
-    private function mappedClient(): Client
+    private function mappedClient(string $meshId = self::MESH_ID, string $name = 'Synthetic Client Name 7c1d'): Client
     {
         return Client::factory()->create([
-            'name' => 'Synthetic Client Name 7c1d',
-            'mesh_customer_id' => self::MESH_ID,
+            'name' => $name,
+            'mesh_customer_id' => $meshId,
             'is_active' => true,
         ]);
     }

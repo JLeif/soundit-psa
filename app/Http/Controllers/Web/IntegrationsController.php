@@ -1490,6 +1490,15 @@ class IntegrationsController extends Controller
             $service = app(\App\Services\Mesh\MeshLicenseSyncService::class, ['meshClient' => $client]);
             $result = $service->syncLicenses();
 
+            // syncLicenses() absorbs each per-client failure into $result->errors
+            // (and logs it by client id), so a sync where every client failed
+            // would otherwise flash green (C-56). Status only: the count, never
+            // vendor text or client names. The CLI twin exits FAILURE likewise.
+            if ($result->errors > 0) {
+                return back()->with('error', "Mesh sync finished with {$result->errors} client error(s): "
+                    ."{$result->created} created, {$result->updated} updated. The PSA log names each failed client by id.");
+            }
+
             return back()->with('success', "Mesh sync complete: {$result->created} created, {$result->updated} updated.");
         } catch (\Throwable $e) {
             // Status only (C-56): a MeshClientException message quotes Guzzle's,
