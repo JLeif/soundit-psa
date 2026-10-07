@@ -171,11 +171,20 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertArrayHasKey('expires_at', $definition['inputSchema']['properties']);
         $this->assertNotContains('expires_at', $definition['inputSchema']['required']);
         $this->assertStringContainsString('never', $definition['inputSchema']['properties']['expires_at']['description']);
-        $this->assertStringNotContainsString(
-            'expires after 90 days',
-            $definition['description'],
-            'the description must not still promise a fixed lifetime',
-        );
+        // #5154: the pre-#5131 text said 'omit it for the 90-day default' and
+        // 'the 90-day default if it is omitted'; the literal this used to pin
+        // ('expires after 90 days') never appeared in it, so the old assertion
+        // caught nothing. This one matches every spelling that text used.
+        foreach ([
+            'description' => $definition['description'],
+            'expires_at' => $definition['inputSchema']['properties']['expires_at']['description'],
+        ] as $label => $text) {
+            $this->assertDoesNotMatchRegularExpression(
+                '/\b\d+\s*-?\s*days?\b|\bdefault\b[^.]*\b(lifetime|expiry)\b|\b(lifetime|expiry)\b[^.]*\bdefault\b|for the default/i',
+                $text,
+                "the {$label} text must not advertise a default lifetime",
+            );
+        }
 
         $this->assertNotContains('mesh_stage_add_allow_rule', $scoped->keys()->all(), 'the staged alias is dispatch-only, never advertised');
         $this->assertSame(['mesh_add_allow_rule', McpToolModes::MODE_STAGED], McpToolModes::parseGrantEntry('mesh_add_allow_rule:staged'));
@@ -693,14 +702,34 @@ class MeshAddAllowRuleTest extends TestCase
         $actor = $this->configureAiActor();
         $fixture = $this->fixture();
         $write = $this->mockWrite();
-        $run = $this->stagedRun($fixture);
+        // Dated on purpose (#5161): STATE_REAPED is only reachable for a dated
+        // row (scopeReapable() requires a non-null expires_at), so the reaped
+        // record below must be one the reaper could actually have produced.
+        $run = $this->stagedRun($fixture, ['expires_at' => now()->addDays(30)->toIso8601String()]);
 
         $write->shouldReceive('createAllowRule')->once()->andReturn(['added_for' => [self::TENANT]]);
         $write->shouldReceive('findRuleByComment')->once()->andReturn(['id' => 'r1']);
         $this->actingAs($actor)->post(route('cockpit.approve', $run))->assertSessionHas('success');
 
         $record = MeshAllowRule::sole();
-        $record->update(['state' => MeshAllowRule::STATE_REAPED, 'reaped_at' => now()]);
+        $this->assertFalse($record->isPermanent(), 'the fixture must be a dated row, the only kind the reaper reaps');
+
+        // Reaped the way the reaper reaps: past its expiry, DELETE, then a
+        // proved 404 on the detail read. Not a hand-written state.
+        $write->shouldReceive('deleteRule')->once()->with('r1');
+        $write->shouldReceive('ruleAbsent')->once()->with('r1')->andReturn(true);
+        $this->travelTo($record->expires_at->copy()->addHour());
+        $this->assertSame(1, app(MeshAllowRuleReaper::class)->reap()['reaped']);
+        $record->refresh();
+        $this->assertSame(MeshAllowRule::STATE_REAPED, $record->state);
+
+        // The 24-hour post-execution dedup window is measured from the
+        // 'executed' audit row; keep the re-stage inside it, as the original
+        // test did, so the proved-absent branch is the one reached.
+        TechnicianActionLog::query()
+            ->where('action_type', 'mesh_add_allow_rule')
+            ->where('result_status', 'executed')
+            ->update(['created_at' => now()->subHour()]);
 
         $second = $this->decodedResult($this->callTool(
             $this->token(['mesh_add_allow_rule:staged']),
@@ -1265,14 +1294,15 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertSame('never', $result['expires_at']);
         $this->assertStringContainsString('PERMANENTLY', $run->proposed_content);
         $this->assertStringContainsString('NO EXPIRY', $run->proposed_content);
-        $this->assertStringContainsString('NEVER remove it', $run->proposed_content);
+        $this->assertStringContainsString('nothing removes it automatically', $run->proposed_content);
+        $this->assertStringContainsString('mesh_remove_allow_rule', $run->proposed_content);
         $this->assertStringNotContainsString('until the PSA removes the rule on', $run->proposed_content);
         $this->assertSame('never', $run->proposed_meta['redacted_params']['expires_at']);
         $this->assertStringContainsString('PERMANENT', $run->proposed_meta['redacted_params']['expiry_note']);
 
         // The card a human actually reads says it, not only the stored text.
         $this->actingAs($actor)->get(route('cockpit.index'))->assertOk()
-            ->assertSee('This weakens filtering for that sender PERMANENTLY: the rule has NO EXPIRY and the PSA will NEVER remove it.', false);
+            ->assertSee('This weakens filtering for that sender PERMANENTLY: the rule has NO EXPIRY, so nothing removes it automatically; it stays until someone removes it (mesh_remove_allow_rule) or gives it a date (mesh_edit_allow_rule).', false);
 
         $write->shouldReceive('createAllowRule')->once()
             ->with(self::TENANT, 'billing@vendor.example', $comment, null)
@@ -1435,7 +1465,7 @@ class MeshAddAllowRuleTest extends TestCase
         $this->assertSame('never', $result['expires_at']);
         $this->assertStringContainsString('PERMANENTLY', $run->proposed_content);
         $this->assertStringContainsString('NO EXPIRY', $run->proposed_content);
-        $this->assertStringContainsString('NEVER remove it', $run->proposed_content);
+        $this->assertStringContainsString('nothing removes it automatically', $run->proposed_content);
         $this->assertSame('never', $run->proposed_meta['redacted_params']['expires_at']);
         $this->assertStringContainsString('PERMANENT', $run->proposed_meta['redacted_params']['expiry_note']);
 
@@ -1533,8 +1563,8 @@ class MeshAddAllowRuleTest extends TestCase
         $write = $this->mockWrite();
         $run = $this->stagedRun($fixture);
 
-        // Whatever this card says, the rule that exists is PERMANENT and the
-        // PSA will never remove it. The approver must be told that, on the
+        // Whatever this card says, the rule that exists is PERMANENT and
+        // nothing removes it automatically. The approver must be told that, on the
         // error channel — not shown a green 'executed'.
         MeshAllowRule::create([
             'client_id' => $fixture['client']->id,

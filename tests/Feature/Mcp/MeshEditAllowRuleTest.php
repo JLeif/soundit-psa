@@ -796,8 +796,12 @@ class MeshEditAllowRuleTest extends TestCase
         $run = $this->stagedRun($fixture, ['expires_at' => 'never']);
 
         $this->assertStringContainsString('New expiry: PERMANENT — never reaped by the PSA', $run->proposed_content);
-        $this->assertStringContainsString('nothing in the PSA will ever remove it', $run->proposed_content);
-        $this->assertStringContainsString('until a human closes it in the Mesh portal', $run->proposed_content);
+        // #5156 (G-14): the PSA's own verbs can end a permanent rule, so the
+        // card names them rather than claiming nothing in the PSA ever will.
+        $this->assertStringContainsString('nothing removes it automatically', $run->proposed_content);
+        $this->assertStringContainsString('until someone removes the rule (mesh_remove_allow_rule) or gives it a date (mesh_edit_allow_rule)', $run->proposed_content);
+        $this->assertStringNotContainsString('will ever remove', $run->proposed_content);
+        $this->assertStringNotContainsString('Mesh portal', $run->proposed_content);
         $this->assertSame('never', $run->proposed_meta['redacted_params']['expires_at']);
     }
 

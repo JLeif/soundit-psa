@@ -20,11 +20,14 @@ use Illuminate\Support\Facades\Log;
  * retried, because "we could not tell" and "it is gone" are different answers
  * and only one of them means a customer's mail filtering is back to normal.
  *
- * #1133: a rule the caller asked to be permanent has a NULL `expires_at` and
- * is never selected for reaping (see MeshAllowRule::scopeReapable). That is
- * the whole mechanism for "permanent" — there is no flag and no far-future
- * sentinel — so this class NEVER deletes such a rule; removal is by hand in
- * the Mesh portal until mesh_remove_allow_rule exists.
+ * #1133: a permanent rule has a NULL `expires_at` and is never selected for
+ * reaping (see MeshAllowRule::scopeReapable). Permanent is what a caller gets
+ * by passing `never`, and also, since the owner's 2026-10-05 ruling, by
+ * giving no expiry at all: it is the omitted-key default. NULL is the whole
+ * mechanism for "permanent" — there is no flag and no far-future sentinel —
+ * so this class NEVER deletes such a rule. It ends only when someone removes
+ * it (mesh_remove_allow_rule) or gives it a date (mesh_edit_allow_rule),
+ * after which it is an ordinary dated row here.
  *
  * Excluded from reaping is not abandoned, though. An UNEXPIRED row that landed
  * unresolved (or reap_failed) is identified here by settleUnexpired(). That
@@ -47,7 +50,8 @@ class MeshAllowRuleReaper
 {
     /**
      * Rows processed per run. A ceiling, not a target — each row costs a
-     * DELETE plus a paged list read, and the reaper runs daily, so there is no
+     * DELETE plus a paged list read, and the reaper runs hourly
+     * (routes/console.php: mesh:reap-allow-rules ->hourly()), so there is no
      * value in letting one invocation walk an unbounded backlog inside a
      * scheduled window.
      */
@@ -183,13 +187,13 @@ class MeshAllowRuleReaper
 
             if ($ruleId !== null) {
                 $note = match (true) {
-                    $settled && $permanent => "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the PERMANENT rule is now recorded active. The PSA still never removes it — that stays a human's job in the Mesh portal.",
+                    $settled && $permanent => "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the PERMANENT rule is now recorded active. It has no expiry, so the expiry job never removes it; it stays until someone removes it (mesh_remove_allow_rule) or gives it a date (mesh_edit_allow_rule).",
                     $settled => "Upstream rule id is '{$ruleId}', and this rule's scope was confirmed by its create response, so the rule is now recorded active. It is still selected for reaping once its expiry passes.",
                     // A PERMANENT reap_failed row is never selected by reapOne(),
                     // so no PSA removal will ever be proved against it on its own.
                     $reapFailed && $permanent => "Upstream rule id is '{$ruleId}'. This row records an earlier removal that did not prove the rule absent, so identifying the rule does not settle it: it stays reap_failed and keeps refusing new allow rules for this sender. It is PERMANENT, so the expiry job never retries the removal and nothing in the PSA clears this record on its own — check the rule in the Mesh portal and, if it is gone, clear the record by hand.",
                     $reapFailed => "Upstream rule id is '{$ruleId}'. This row records an earlier removal that did not prove the rule absent, so identifying the rule does not settle it: it stays reap_failed and keeps refusing new allow rules for this sender until the PSA proves a removal against this record.",
-                    $permanent => "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this PERMANENT rule stays unresolved: the PSA will never remove it, and it keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that — the record itself has to be cleared by hand.",
+                    $permanent => "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this PERMANENT rule stays unresolved: the expiry job never removes it while it has no expiry, and it keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that — the record closes when the PSA proves the rule removed: an approved mesh_remove_allow_rule does that directly, and once an approved mesh_edit_allow_rule gives the rule a date, the expiry job does it after that date passes; otherwise the record has to be cleared by hand.",
                     default => "Upstream rule id is '{$ruleId}'. An id is not scope evidence, so this rule stays unsettled and keeps refusing new allow rules for this sender. Checking the rule in the Mesh portal does not change that.",
                 };
             }
