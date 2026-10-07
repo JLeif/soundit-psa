@@ -11,6 +11,7 @@ use App\Services\Mesh\MeshLicenseSyncService;
 use App\Services\Mesh\MeshReadTools;
 use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Response;
@@ -352,12 +353,21 @@ class MeshC56ReadSitesTest extends TestCase
         // reached the scripted vendor, so the MESH_ID and MESH_ID_2 absence
         // checks below are about ids that were really in flight.
         $this->assertSyncRequested([self::MESH_ID, self::MESH_ID_2]);
-        // One MeshClient failure line per failed client, and one MeshSync
-        // line per failed client, named by PSA client id only (C-56).
-        $this->assertSame(2, $this->countLogs('[MeshClient] GET api/customers/<customer> failed'), 'one MeshClient failure line per failed client');
-        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$a->id.':'), 'client a: one failure line');
-        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$b->id.':'), 'client b: one failure line');
-        $this->assertSame(2, $this->countLogs('[MeshSync] Failed for client '), 'no other failure lines');
+        // Every MeshClient and MeshSync failure record, level and full text:
+        // one MeshClient line and one MeshSync line per failed client, all at
+        // 'error' (a demoted line fails here, #5404), and each MeshSync line
+        // is exactly the PSA client id plus the status phrase and class, so
+        // it carries no other client identifier (C-56, #5406).
+        $this->assertSame([
+            $this->meshClientFailureRecord(),
+            $this->meshClientFailureRecord(),
+        ], $this->recordsContaining('[MeshClient] '), 'MeshClient failure records');
+        $this->assertSame(
+            $this->sorted([$this->meshSyncFailureRecord($a), $this->meshSyncFailureRecord($b)]),
+            $this->recordsContaining('[MeshSync] Failed for client '),
+            'MeshSync failure records: one per failed client, by PSA id only',
+        );
+        $this->assertNoClientNames($this->allLogs(), [$a, $b]);
         $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
@@ -377,12 +387,17 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertFlashHasNoClientData($flash, [$ok, $bad]);
         $this->assertSame(1, \App\Models\License::where('client_id', $ok->id)->count(), 'positive control: the healthy client synced');
         // Positive controls (#5382): both ids were requested; only the
-        // MESH_ID_2 client failed, so exactly one line of each kind, naming
-        // the failed client by PSA id only (C-56).
+        // MESH_ID_2 client failed, so exactly one failure record of each
+        // kind, at 'error' (#5404), the MeshSync one being exactly the failed
+        // client's PSA id plus the status phrase and class (C-56, #5406).
         $this->assertSyncRequested([self::MESH_ID, self::MESH_ID_2]);
-        $this->assertSame(1, $this->countLogs('[MeshClient] GET api/customers/<customer> failed'), 'one MeshClient failure line for the one failed client');
-        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$bad->id.':'), 'the failed client: one failure line');
-        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '), 'no failure line for the healthy client');
+        $this->assertSame([$this->meshClientFailureRecord()], $this->recordsContaining('[MeshClient] '), 'MeshClient failure records');
+        $this->assertSame(
+            [$this->meshSyncFailureRecord($bad)],
+            $this->recordsContaining('[MeshSync] Failed for client '),
+            'MeshSync failure records: the failed client only, by PSA id only',
+        );
+        $this->assertNoClientNames($this->allLogs(), [$ok, $bad]);
         $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
@@ -661,10 +676,53 @@ class MeshC56ReadSitesTest extends TestCase
         return implode("\n", array_map(fn (array $r) => $r['level'].' '.$r['message'], $this->logged));
     }
 
-    /** How many records, at any level, contain $needle. */
-    private function countLogs(string $needle): int
+    /**
+     * Every record whose text contains $needle, as 'level text' (the text
+     * being the message plus its JSON context), sorted. Reading the level
+     * with the text means a record moved to another level is a different
+     * string, so an exact list pins both (#5404).
+     *
+     * @return list<string>
+     */
+    private function recordsContaining(string $needle): array
     {
-        return count(array_filter($this->logged, fn (array $r) => str_contains($r['message'], $needle)));
+        $lines = array_values(array_map(
+            fn (array $r) => $r['level'].' '.$r['message'],
+            array_filter($this->logged, fn (array $r) => str_contains($r['message'], $needle)),
+        ));
+
+        return $this->sorted($lines);
+    }
+
+    /**
+     * @param  list<string>  $lines
+     * @return list<string>
+     */
+    private function sorted(array $lines): array
+    {
+        sort($lines);
+
+        return $lines;
+    }
+
+    /** MeshClient::request()'s failure record for one failed customer read (HTTP 503), as recordsContaining() renders it. */
+    private function meshClientFailureRecord(): string
+    {
+        return 'error [MeshClient] GET api/customers/<customer> failed with HTTP 503 ('.ServerException::class.') []';
+    }
+
+    /** syncLicenses()' failure record for $client after a 503 customer read, as recordsContaining() renders it. */
+    private function meshSyncFailureRecord(Client $client): string
+    {
+        return 'error [MeshSync] Failed for client '.$client->id.': Mesh answered the customer read with HTTP 503 ('.MeshClientException::class.') []';
+    }
+
+    /** @param  list<Client>  $clients */
+    private function assertNoClientNames(string $text, array $clients): void
+    {
+        foreach ($clients as $c) {
+            $this->assertStringNotContainsString($c->name, $text, 'a client name reached the logs');
+        }
     }
 
     /** The records whose text contains $needle, at any level; at least one must exist. */

@@ -26,13 +26,18 @@ use Tests\TestCase;
  * holds exactly one response and must be empty afterwards, so the request
  * went through the swapped-in handler and nowhere else. For EVERY shape the
  * handler also records the URI it received, and the row pins that URI's
- * scheme and host, its exact path, its query and its fragment: the path keeps
- * the id in the form it was built with (upper-cased or dashless included, a
- * newline percent-encoded), so only the log line is redacted, never the
- * request (#5334). The endpoint's own query is NOT carried: get() always
- * passes Guzzle a 'query' option, which replaces it (empty here), and the
- * query rows pin that empty query. A fragment is carried on the request URI
- * and dropped only from the log line (#5378, #5379, #5380, #5385, #5387). The
+ * scheme, host, port (none) and user-info (none), its exact path, its query
+ * and its fragment. Scheme and host are row values: the absolute rows name
+ * another host (and one another scheme) than base_uri, so a request that
+ * ignored the endpoint's host or scheme fails (#5409). The path keeps the id
+ * in the form it was built with (upper-cased or dashless included, a newline
+ * percent-encoded), so the log line is redacted and the request is not
+ * (#5334). The endpoint's own query is NOT carried: get() always passes
+ * Guzzle a 'query' option, which replaces it (empty here), and the query rows
+ * pin that empty query. A fragment written into the endpoint is still on the
+ * PSR-7 request URI the handler receives, and the log line drops it; this
+ * test does not see what Guzzle's real transports send (#5405; #5378, #5379,
+ * #5380, #5385, #5387). The
  * rethrown exception is checked to be a MeshClientException with Guzzle's
  * code (503) whose message is 'Mesh API error: ' plus Guzzle's own message,
  * wrapping that ServerException; this test does not make its content safe
@@ -44,6 +49,9 @@ use Tests\TestCase;
 class MeshClientLogPathTest extends TestCase
 {
     private const HOST = 'mesh-logpath.example.test';
+
+    /** The host an absolute endpoint names; not base_uri's (#5409). */
+    private const ENDPOINT_HOST = 'mesh-endpoint.example.test';
 
     private const MESH_ID = '7b2e9d41-5c3a-4f86-a0d2-e91c4b7f3a65';
 
@@ -63,9 +71,10 @@ class MeshClientLogPathTest extends TestCase
     /**
      * Endpoint as passed to get() => the path the log line must show => the
      * exact path of the URI the handler received => its exact query (default
-     * '') => its exact fragment (default '').
+     * '') => its exact fragment (default '') => its exact host (default
+     * base_uri's) => its exact scheme (default 'https').
      *
-     * @return array<string, array{0: string, 1: string, 2: string, 3?: string, 4?: string}>
+     * @return array<string, array{0: string, 1: string, 2: string, 3?: string, 4?: string, 5?: string, 6?: string}>
      */
     public static function shapes(): array
     {
@@ -80,8 +89,11 @@ class MeshClientLogPathTest extends TestCase
         return [
             'customer read (getCustomer shape)' => ["api/customers/{$id}/", 'api/customers/<customer>', "/api/customers/{$id}/"],
             'leading slash' => ["/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
-            'absolute URL' => ['https://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
-            'scheme-relative URL' => ['//'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            // Absolute rows name ENDPOINT_HOST, not base_uri's host, and the
+            // first an http scheme: the request goes to the endpoint's own
+            // scheme and host (a scheme-relative one keeps base_uri's scheme).
+            'absolute URL' => ['http://'.self::ENDPOINT_HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/", '', '', self::ENDPOINT_HOST, 'http'],
+            'scheme-relative URL' => ['//'.self::ENDPOINT_HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/", '', '', self::ENDPOINT_HOST],
             'versioned prefix' => ["api/v2/customers/{$id}/", 'api/v2/customers/<customer>', "/api/v2/customers/{$id}/"],
             'nested prefix' => ["api/partners/p-1/customers/{$id}/", 'api/partners/p-1/customers/<customer>', "/api/partners/p-1/customers/{$id}/"],
             'id containing a slash' => ["api/customers/abc/{$id}/", 'api/customers/<customer>', "/api/customers/abc/{$id}/"],
@@ -99,13 +111,15 @@ class MeshClientLogPathTest extends TestCase
             // replaced by the empty option (measured).
             'leading ?' => [$q, '', '/', ''],
             // Fragment row. The query option does not touch a fragment: the
-            // request URI KEEPS '#frag' (Guzzle's resolver carries the
-            // relative fragment), and only the log line drops it.
+            // PSR-7 request URI the handler receives KEEPS '#frag' (Guzzle's
+            // resolver carries the relative fragment), and the log line drops
+            // it. Not measured here: Guzzle's real transports send the URL
+            // without its fragment (#5405).
             'id with a fragment' => ["api/customers/{$id}/#frag", 'api/customers/<customer>', "/api/customers/{$id}/", '', 'frag'],
             // #5337: the regex flags and the segment boundary. The request
             // path carries the newline percent-encoded.
             'id with a newline (s flag)' => ["api/customers/{$nl}/", 'api/customers/<customer>', '/api/customers/'.str_replace("\n", '%0A', $nl).'/'],
-            'upper-case scheme (i flag, host strip)' => ['HTTPS://'.self::HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/"],
+            'upper-case scheme (i flag, host strip)' => ['HTTPS://'.self::ENDPOINT_HOST."/api/customers/{$id}/", '/api/customers/<customer>', "/api/customers/{$id}/", '', '', self::ENDPOINT_HOST],
             'upper-case Customers/ (i flag, redaction)' => ["api/Customers/{$id}/", 'api/Customers/<customer>', "/api/Customers/{$id}/"],
             'bare customers/ at the start (^ branch)' => ["customers/{$id}/", 'customers/<customer>', "/customers/{$id}/"],
             // Not a customers/ segment, so nothing is redacted. The tail is
@@ -122,6 +136,8 @@ class MeshClientLogPathTest extends TestCase
         string $requestPath,
         string $requestQuery = '',
         string $requestFragment = '',
+        string $requestHost = self::HOST,
+        string $requestScheme = 'https',
     ): void {
         [$client, $mock, $seen] = $this->clientAnswering503();
 
@@ -141,11 +157,14 @@ class MeshClientLogPathTest extends TestCase
         $this->assertSame(0, $mock->count(), 'the request went through the swapped-in MockHandler');
         $this->assertCount(1, $seen->uris, 'exactly one request reached the handler');
         // Positive control, every shape: the REQUEST is not redacted. Each
-        // URI component is pinned exactly, so a request sent to any other
-        // path, or carrying the endpoint's own query, fails here.
+        // URI component (scheme, user-info, host, port, path, query,
+        // fragment) is pinned to the row's value, so a request sent anywhere
+        // else, or carrying the endpoint's own query, fails here (#5409).
         $uri = new Uri($seen->uris[0]);
-        $this->assertSame('https', $uri->getScheme(), 'positive control: request scheme');
-        $this->assertSame(self::HOST, $uri->getHost(), 'positive control: request host');
+        $this->assertSame($requestScheme, $uri->getScheme(), 'positive control: request scheme');
+        $this->assertSame('', $uri->getUserInfo(), 'positive control: request user-info (none)');
+        $this->assertSame($requestHost, $uri->getHost(), 'positive control: request host');
+        $this->assertNull($uri->getPort(), 'positive control: request port (the scheme default)');
         $this->assertSame($requestPath, $uri->getPath(), 'positive control: the request path keeps the id as built');
         $this->assertSame($requestQuery, $uri->getQuery(), "positive control: the request query is get()'s query option, not the endpoint's");
         $this->assertSame($requestFragment, $uri->getFragment(), 'positive control: the request fragment');
@@ -206,8 +225,10 @@ class MeshClientLogPathTest extends TestCase
      * every changed row, #5335), and a changed row is free of every leak form
      * the endpoint held. The rows are counted by kind with exact numbers: 17
      * redact a customer tail to <customer>, 2 are changed only by the query
-     * cut ('customer list with a query', 'leading ?'), 2 come back as given
-     * (#5383). Dropping or unredacting a row changes a count.
+     * cut ('customer list with a query', 'leading ?': the output is exactly
+     * the endpoint up to its first '?' or '#'), 2 come back as given (#5383).
+     * A row changed any other way without a <customer> fails (#5407).
+     * Dropping or unredacting a row changes a count.
      */
     public function test_log_path_changes_every_redacted_shape(): void
     {
@@ -226,8 +247,10 @@ class MeshClientLogPathTest extends TestCase
             }
             if (str_contains($out, '<customer>')) {
                 $redacted++;
-            } else {
+            } elseif ($out === substr($endpoint, 0, strcspn($endpoint, '?#'))) {
                 $queryCutOnly++;
+            } else {
+                $this->fail("{$name}: changed without a <customer> and not only by the query cut: ".json_encode($out));
             }
             foreach ($this->leakForms() as $what => $form) {
                 if (stripos($endpoint, $form) !== false) {
@@ -250,6 +273,7 @@ class MeshClientLogPathTest extends TestCase
             'Mesh id, upper-cased' => strtoupper(self::MESH_ID),
             'query marker' => self::QUERY_MARKER,
             'host' => self::HOST,
+            'endpoint host' => self::ENDPOINT_HOST,
             'id prefix segment' => 'abc/',
         ];
     }
