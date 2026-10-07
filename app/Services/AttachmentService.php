@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Attachment;
 use App\Models\Email;
 use App\Services\Graph\GraphClient;
+use App\Services\Graph\GraphClientException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -293,7 +294,19 @@ class AttachmentService
         try {
             $raw = $graph->getMessageAttachmentRaw($mailbox, $email->graph_id, $attachmentId);
         } catch (\Throwable $e) {
-            $this->warnSkipped($email, $ga, 'fetch_failed', ['status' => $e->getCode()]);
+            // #5136: getCode() is not an HTTP status for every Throwable (GraphClientException
+            // carries 0 for a connect/timeout or token failure). Report a status only when the
+            // exception carries an HTTP status; otherwise status is null, the exception class
+            // names what failed, and the reason claims no HTTP failure. Never the message (C-56).
+            $httpStatus = $e instanceof GraphClientException ? $e->getHttpStatus() : 0;
+            if ($httpStatus > 0) {
+                $this->warnSkipped($email, $ga, 'fetch_failed', ['status' => $httpStatus]);
+            } else {
+                $this->warnSkipped($email, $ga, 'no_http_status', [
+                    'status' => null,
+                    'exception' => $e::class,
+                ]);
+            }
 
             return null;
         }
@@ -347,8 +360,9 @@ class AttachmentService
 
     /**
      * Filename stem for a stored item: the slugged display name, or "forwarded-message" when
-     * the name is missing or slugs to nothing. Slashes become spaces first so basename() in
-     * sanitizeFilename() cannot cut a subject like "Q1/Q2" down to its last part.
+     * the name is missing or slugs to nothing. Str::slug already drops '/' and '\', so no path
+     * separator survives either way; turning them into spaces first only keeps a word
+     * separator where they stood ("Q1/Q2" gives "q1-q2" rather than "q1q2").
      */
     private function itemBaseName(mixed $name): string
     {

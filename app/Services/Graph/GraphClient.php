@@ -166,6 +166,10 @@ class GraphClient
      * the calendar reads do. Errors are GraphClientException from authenticatedRequest (one
      * token retry on 401, backoff on 429, the configured request_timeout). A 2xx is returned
      * as-is, including an empty body; the caller decides what an empty body means.
+     *
+     * A failed request is NOT logged here (#5144): the only caller treats it as a soft skip and
+     * reports it itself, status-only. Other Graph calls keep throwFromGuzzle's error record.
+     * The token request and the 429 backoff keep their own records on this path too.
      */
     public function getMessageAttachmentRaw(string $mailbox, string $messageId, string $attachmentId): string
     {
@@ -173,7 +177,7 @@ class GraphClient
             .'/messages/'.self::seg($messageId)
             .'/attachments/'.self::seg($attachmentId).'/$value';
 
-        return (string) $this->authenticatedRequest('GET', $endpoint)->getBody();
+        return (string) $this->authenticatedRequest('GET', $endpoint, logFailure: false)->getBody();
     }
 
     /**
@@ -510,9 +514,10 @@ class GraphClient
 
     /**
      * Core authenticated request with token retry on 401 and rate-limit backoff on 429.
-     * Returns the raw Guzzle response.
+     * Returns the raw Guzzle response. $logFailure false skips throwFromGuzzle's error record
+     * for a caller that reports the failure itself.
      */
-    private function authenticatedRequest(string $method, string $endpoint, array $options = []): \Psr\Http\Message\ResponseInterface
+    private function authenticatedRequest(string $method, string $endpoint, array $options = [], bool $logFailure = true): \Psr\Http\Message\ResponseInterface
     {
         $token = $this->getToken();
 
@@ -557,7 +562,7 @@ class GraphClient
                     continue;
                 }
 
-                $this->throwFromGuzzle($e, $method, $endpoint);
+                $this->throwFromGuzzle($e, $method, $endpoint, $logFailure);
             }
         }
 
@@ -653,7 +658,7 @@ class GraphClient
      *
      * @throws GraphClientException
      */
-    private function throwFromGuzzle(GuzzleException $e, string $method, string $endpoint): never
+    private function throwFromGuzzle(GuzzleException $e, string $method, string $endpoint, bool $log = true): never
     {
         $statusCode = 0;
         $responseBody = null;
@@ -663,12 +668,14 @@ class GraphClient
             $responseBody = json_decode((string) $e->getResponse()->getBody(), true);
         }
 
-        Log::error('Graph API request failed', [
-            'method' => $method,
-            'endpoint' => $endpoint,
-            'status' => $statusCode,
-            'error' => $e->getMessage(),
-        ]);
+        if ($log) {
+            Log::error('Graph API request failed', [
+                'method' => $method,
+                'endpoint' => $endpoint,
+                'status' => $statusCode,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         throw new GraphClientException(
             "Graph API error: {$method} {$endpoint} returned {$statusCode}",
