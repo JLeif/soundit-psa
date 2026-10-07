@@ -75,8 +75,9 @@ class MeshClient
      * after customers/ carries a client's Mesh customer id (#5298/#5305,
      * #5323). Only that log line is redacted. The request is sent to the
      * real endpoint, and the rethrown MeshClientException is NOT redacted:
-     * its message is Guzzle's, which can quote the full request URI
-     * (customer id included) and vendor body text, so never log
+     * its message is 'Mesh API error: ' followed by Guzzle's message, which
+     * can quote the full request URI (customer id included) and vendor body
+     * text, so never log
      * $e->getMessage() from it or from its previous exception.
      */
     private function request(string $method, string $endpoint, array $options = []): array

@@ -82,6 +82,9 @@ class MeshC56ReadSitesTest extends TestCase
     /** @var list<array{level: string, message: string}> */
     private array $logged = [];
 
+    /** Request paths bindRealSync()'s scripted Mesh received, in order. @var list<string> */
+    private array $syncRequestPaths = [];
+
     public static function setUpBeforeClass(): void
     {
         parent::setUpBeforeClass();
@@ -345,9 +348,16 @@ class MeshC56ReadSitesTest extends TestCase
         );
         $this->assertNull(session('success'), 'no green flash when every client failed');
         $this->assertFlashHasNoClientData($flash, [$a, $b]);
-        $this->logsContaining('[MeshSync] Failed for client '.$a->id.':');
-        $this->logsContaining('[MeshSync] Failed for client '.$b->id.':');
-        $this->logsContaining('[MeshClient] GET api/customers/<customer> failed');
+        // Positive controls (#5382): a customer read carrying EACH Mesh id
+        // reached the scripted vendor, so the MESH_ID and MESH_ID_2 absence
+        // checks below are about ids that were really in flight.
+        $this->assertSyncRequested([self::MESH_ID, self::MESH_ID_2]);
+        // One MeshClient failure line per failed client, and one MeshSync
+        // line per failed client, named by PSA client id only (C-56).
+        $this->assertSame(2, $this->countLogs('[MeshClient] GET api/customers/<customer> failed'), 'one MeshClient failure line per failed client');
+        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$a->id.':'), 'client a: one failure line');
+        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$b->id.':'), 'client b: one failure line');
+        $this->assertSame(2, $this->countLogs('[MeshSync] Failed for client '), 'no other failure lines');
         $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
@@ -366,8 +376,13 @@ class MeshC56ReadSitesTest extends TestCase
         $this->assertNull(session('success'), 'no green flash when a client failed');
         $this->assertFlashHasNoClientData($flash, [$ok, $bad]);
         $this->assertSame(1, \App\Models\License::where('client_id', $ok->id)->count(), 'positive control: the healthy client synced');
-        $this->logsContaining('[MeshSync] Failed for client '.$bad->id.':');
-        $this->logsContaining('[MeshClient] GET api/customers/<customer> failed');
+        // Positive controls (#5382): both ids were requested; only the
+        // MESH_ID_2 client failed, so exactly one line of each kind, naming
+        // the failed client by PSA id only (C-56).
+        $this->assertSyncRequested([self::MESH_ID, self::MESH_ID_2]);
+        $this->assertSame(1, $this->countLogs('[MeshClient] GET api/customers/<customer> failed'), 'one MeshClient failure line for the one failed client');
+        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '.$bad->id.':'), 'the failed client: one failure line');
+        $this->assertSame(1, $this->countLogs('[MeshSync] Failed for client '), 'no failure line for the healthy client');
         $this->assertNoVendorText($this->allLogs(), 'every record');
     }
 
@@ -441,6 +456,7 @@ class MeshC56ReadSitesTest extends TestCase
         Setting::setEncrypted('mesh_api_key', self::$apiKey);
         $this->mode = '503';
         $mesh = $this->scriptedClient(function (RequestInterface $r) use ($failing) {
+            $this->syncRequestPaths[] = $r->getUri()->getPath();
             foreach ($failing as $id) {
                 if (str_contains($r->getUri()->getPath(), $id)) {
                     return $this->failure($r);
@@ -454,6 +470,21 @@ class MeshC56ReadSitesTest extends TestCase
             ])));
         });
         $this->app->bind(MeshLicenseSyncService::class, fn () => new MeshLicenseSyncService($mesh));
+    }
+
+    /**
+     * The scripted Mesh behind bindRealSync() received exactly one customer
+     * read per id in $meshIds (order-free), each at its exact path.
+     *
+     * @param  list<string>  $meshIds
+     */
+    private function assertSyncRequested(array $meshIds): void
+    {
+        $expected = array_map(fn (string $id) => "/api/customers/{$id}/", $meshIds);
+        $seen = $this->syncRequestPaths;
+        sort($expected);
+        sort($seen);
+        $this->assertSame($expected, $seen, 'positive control: one customer read per mapped Mesh id reached the vendor');
     }
 
     /** POST the sync button; return the flash under $key (which must be set). */
@@ -606,8 +637,9 @@ class MeshC56ReadSitesTest extends TestCase
      * Also holds over ALL records together, MeshClient's own failure line
      * included: that line logs a customer read's path as
      * api/customers/<customer> (#5298/#5305, #5323). Both Mesh customer ids
-     * used here (MESH_ID, MESH_ID_2) are checked, each raw, dashless and
-     * upper-cased (raw and dashless also case-insensitively) (#5339).
+     * used here (MESH_ID, MESH_ID_2) are checked in two forms, raw and
+     * dashless, each case-insensitively, so an upper-cased or mixed-case form
+     * of either is caught by the same check (#5339, #5381).
      */
     private function assertNoVendorText(string $text, string $where): void
     {
@@ -619,7 +651,6 @@ class MeshC56ReadSitesTest extends TestCase
             foreach (['raw' => $id, 'dashless' => str_replace('-', '', $id)] as $form => $value) {
                 $this->assertStringNotContainsStringIgnoringCase($value, $text, "{$where}: request path (Mesh id, {$form}) leaked");
             }
-            $this->assertStringNotContainsString(strtoupper($id), $text, "{$where}: request path (Mesh id, upper-cased) leaked");
         }
         $this->assertStringNotContainsString('_size', $text, "{$where}: request query leaked");
     }
@@ -628,6 +659,12 @@ class MeshC56ReadSitesTest extends TestCase
     private function allLogs(): string
     {
         return implode("\n", array_map(fn (array $r) => $r['level'].' '.$r['message'], $this->logged));
+    }
+
+    /** How many records, at any level, contain $needle. */
+    private function countLogs(string $needle): int
+    {
+        return count(array_filter($this->logged, fn (array $r) => str_contains($r['message'], $needle)));
     }
 
     /** The records whose text contains $needle, at any level; at least one must exist. */
