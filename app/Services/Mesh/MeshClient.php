@@ -73,12 +73,15 @@ class MeshClient
      * status and exception class only: Guzzle's message quotes the request
      * URI and a summary of the vendor's response body (C-56), and the path
      * after customers/ carries a client's Mesh customer id (#5298/#5305,
-     * #5323). Only that log line is redacted. The request is sent to the
-     * real endpoint, and the rethrown MeshClientException is NOT redacted:
-     * its message is 'Mesh API error: ' followed by Guzzle's message, which
-     * can quote the full request URI (customer id included) and vendor body
-     * text, so never log
-     * $e->getMessage() from it or from its previous exception.
+     * #5323). Only that log line is redacted. The request is not: Guzzle
+     * sends $endpoint's path unredacted (resolved against base_uri, or to
+     * its own scheme and host if it names them), but with $options['query']
+     * as its query, which REPLACES any query written into $endpoint (get()
+     * always passes one, [] by default). The rethrown MeshClientException is
+     * NOT redacted: its message is 'Mesh API error: ' followed by Guzzle's
+     * message, which can quote the full request URI (customer id included)
+     * and vendor body text, so never log $e->getMessage() from it or from
+     * its previous exception.
      */
     private function request(string $method, string $endpoint, array $options = []): array
     {
@@ -112,7 +115,9 @@ class MeshClient
      * <customer> is not PSR-3 {placeholder} syntax, so a channel with
      * replace_placeholders or PsrLogMessageProcessor cannot substitute a
      * context value into it (#5329). A bare api/customers/ is kept as is.
-     * Only the log line uses this; the request goes to the real endpoint.
+     * Only the log line uses this; the request is built from $endpoint
+     * unredacted, with its query replaced by get()'s query option (see
+     * request()).
      */
     private static function logPath(string $endpoint): string
     {
