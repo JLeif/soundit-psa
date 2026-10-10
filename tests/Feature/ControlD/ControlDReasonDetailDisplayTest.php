@@ -27,7 +27,7 @@ class ControlDReasonDetailDisplayTest extends TestCase
         Http::preventStrayRequests();
         Setting::setValue('controld_enabled', '1');
         Setting::setEncrypted('controld_api_key', 'synthetic-key');
-        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7',
+        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_profile_id' => '444444synthDD', 'code_expiry_days' => '7',
             'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $value);
         }

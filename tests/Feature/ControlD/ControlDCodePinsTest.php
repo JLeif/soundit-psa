@@ -58,7 +58,7 @@ class ControlDCodePinsTest extends TestCase
         Setting::setValue('controld_enabled', '1');
         Setting::setEncrypted('controld_api_key', self::KEY);
         Setting::setValue('controld_stats_endpoint', 'synthetic-region');
-        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7',
+        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_profile_id' => '444444synthDD', 'code_expiry_days' => '7',
             'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $value);
         }
@@ -159,9 +159,9 @@ class ControlDCodePinsTest extends TestCase
         $fixture = $this->fixture(3);
         $run = $this->stage($fixture);
 
-        $this->assertSame(['max' => 5, 'expiry_days' => 7, 'stats' => 0, 'intercept_mode' => 'standard', 'profile_id' => 'testprofile01'], $this->payload($run)['code_pins']);
+        $this->assertSame(['max' => 5, 'expiry_days' => 7, 'stats' => 0, 'intercept_mode' => 'standard', 'profile_id' => '444444synthDD'], $this->payload($run)['code_pins']);
         // P7A74iGD (b): the plan card shows the pinned values and says that approval re-derives the plan and refuses on any difference.
-        $this->assertStringContainsString('with these pinned values: enforced profile testprofile01, expiry 7 days, device limit 5 (asset count 3 + headroom 2), analytics level 0, intercept mode standard', $run->proposed_content);
+        $this->assertStringContainsString('with these pinned values: enforced profile 444444synthDD (controld_code_profile_id); the global profile testprofile01 is inherited, expiry 7 days, device limit 5 (asset count 3 + headroom 2), analytics level 0, intercept mode standard', $run->proposed_content);
         $this->assertStringContainsString('Approval derives the plan again from the client\'s current state and refuses, with nothing written, if it differs from this card (a step already done, a changed setting or pinned value, or a changed device link); stage again then.', $run->proposed_content);
         $this->assertStringNotContainsString('leaves all five unchanged does not refuse', $run->proposed_content, 'G-14 (contract:1): underivable values and other checks still refuse');
         $this->assertStringNotContainsString('if a setting or the client\'s asset count changes before approval, approval refuses', $run->proposed_content);
@@ -174,7 +174,7 @@ class ControlDCodePinsTest extends TestCase
         Setting::setValue('controld_code_intercept_mode', 'intercept-dns');
         $fixture = $this->fixture(3);
         $run = $this->stage($fixture);
-        $this->bindVendor($this->codeExchange(5, 7, 1, 'intercept-dns', 'testprofile01'));
+        $this->bindVendor($this->codeExchange(5, 7, 1, 'intercept-dns', '444444synthDD'));
 
         $this->approve($run);
 
@@ -182,7 +182,7 @@ class ControlDCodePinsTest extends TestCase
         $this->assertSame('bound', ControlDOnboardingIntent::sole()->state);
         $post = collect($this->history)->first(fn ($h) => $h['request']->getMethod() === 'POST');
         $sent = json_decode((string) $post['request']->getBody(), true);
-        $this->assertSame(['icon' => 'desktop-windows', 'profile_id' => 'testprofile01', 'max' => 5, 'ts_exp' => now()->getTimestamp() + 7 * 86400, 'stats' => 1, 'intercept_mode' => 'intercept-dns'], $sent);
+        $this->assertSame(['icon' => 'desktop-windows', 'profile_id' => '444444synthDD', 'max' => 5, 'ts_exp' => now()->getTimestamp() + 7 * 86400, 'stats' => 1, 'intercept_mode' => 'intercept-dns'], $sent);
     }
 
     /** The pinned values, not live ones, reach stageCode() and the POST (mutant: execute with live values). */
@@ -211,7 +211,7 @@ class ControlDCodePinsTest extends TestCase
             'expiry days' => [fn () => Setting::setValue('controld_code_expiry_days', '8')],
             'analytics level' => [fn () => Setting::setValue('controld_code_analytics_level', '2')],
             'intercept mode' => [fn () => Setting::setValue('controld_code_intercept_mode', 'intercept-dns')],
-            'profile id' => [fn () => Setting::setValue('controld_default_profile_id', 'testprofile02')],
+            'profile id' => [fn () => Setting::setValue('controld_code_profile_id', '555555synthEE')],
         ];
     }
 
@@ -243,7 +243,7 @@ class ControlDCodePinsTest extends TestCase
         // asset count 3 -> 2 and headroom 2 -> 3: max stays 5, so no pin moves.
         Asset::where('client_id', $fixture['client']->id)->first()->delete();
         Setting::setValue('controld_code_device_limit_headroom', '3');
-        $this->bindVendor($this->codeExchange(5, 7, 0, 'standard', 'testprofile01'));
+        $this->bindVendor($this->codeExchange(5, 7, 0, 'standard', '444444synthDD'));
 
         $this->approve($run);
 

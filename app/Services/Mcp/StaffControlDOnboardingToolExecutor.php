@@ -150,7 +150,7 @@ class StaffControlDOnboardingToolExecutor
     public const INVALIDATE_EFFECT = 'After it is invalidated, the code stops working for new enrollments: no new device can enroll with it. Devices already enrolled with it are NOT removed and keep their Control D enrollment.';
 
     /** Approval refusal when codePins() cannot derive the five values again (it threw), so a match with the card cannot be shown. */
-    public const CODE_PINS_UNDERIVABLE = 'Approval could not derive the code values again from the current settings and the client\'s asset count (an onboarding default is missing or invalid, or the asset count plus the device-limit headroom is outside 1..10000), so they cannot be shown to match the values pinned on this card. Fix the cause, then deny this proposal and stage again so the current values are shown and approved on a new card. Nothing was created and nothing was changed at Control D.';
+    public const CODE_PINS_UNDERIVABLE = 'Approval could not derive the code values again from the current settings and the client\'s asset count (an onboarding default is missing or invalid, the code profile setting controld_code_profile_id is unset, invalid or equal to the global profile, or the asset count plus the device-limit headroom is outside 1..10000), so they cannot be shown to match the values pinned on this card. Fix the cause, then deny this proposal and stage again so the current values are shown and approved on a new card. Nothing was created and nothing was changed at Control D.';
 
     public function __construct(
         private readonly ActionRedactor $redactor,
@@ -512,6 +512,14 @@ class StaffControlDOnboardingToolExecutor
         // knowingly replace a global profile someone chose (this code sends an
         // unconditional PUT, so one set after the pre-admission read is not detected and
         // the PUT may replace it).
+        // eGIRKv51: every plan from here on carries a code step, so a code profile that is
+        // unset, malformed or equal to the global profile refuses HERE, before the GET below:
+        // no vendor call, no intent, no staged run (derivePlan() reads codePins() only later).
+        try {
+            ControlDOnboardingStaged::codeProfile();
+        } catch (ControlDClientException $e) {
+            return ['error' => mb_substr($e->getMessage(), 0, 300).' Nothing was staged.', 'reason' => mb_substr($e->getMessage(), 0, 300), 'underivable' => true];
+        }
         try {
             $state = $this->onboarding()->globalProfileState((string) $org);
         } catch (ControlDClientException $e) {
@@ -686,7 +694,7 @@ class StaffControlDOnboardingToolExecutor
             $lines[] = match ($step) {
                 self::STEP_ORGANIZATION => $n.'Organization (writes at Control D): creates a sub-organization named after the client, contact email from the client record ('.$this->fence->neutralizeUntrusted((string) ($pins['org_inputs']['contact_email'] ?? '')).'), two-factor required, analytics region '.($pins['org_inputs']['stats_endpoint'] ?? '').', with the configured global profile '.($pins['org_inputs']['profile_id'] ?? '').', and binds the returned organization id to the client.',
                 self::STEP_GLOBAL_PROFILE => $n.'Global profile (writes at Control D): sets the configured global profile '.($pins['profile_pk'] ?? '')." on organization {$org}, which has none set (one update, then a read-back). If a different global profile is set when this runs, the step refuses and writes nothing. ".self::RACE_DISCLOSURE,
-                self::STEP_CODE => $n.'Provisioning code (writes at Control D): cuts one provisioning code under the client\'s organization with these pinned values: enforced profile '.($pins['code_pins']['profile_id'] ?? '')
+                self::STEP_CODE => $n.'Provisioning code (writes at Control D): cuts one provisioning code under the client\'s organization with these pinned values: enforced profile '.($pins['code_pins']['profile_id'] ?? '').' (controld_code_profile_id); the global profile '.ControlDConfig::defaultProfileId().' is inherited'
                     .', expiry '.($pins['code_pins']['expiry_days'] ?? '').' days, device limit '.($pins['code_pins']['max'] ?? '').' (asset count '.$client->assets()->count().' + headroom '.ControlDConfig::codeDeviceLimitHeadroom().'), analytics level '.($pins['code_pins']['stats'] ?? '').', intercept mode '.($pins['code_pins']['intercept_mode'] ?? '').', icon '.self::CODE_ICON
                     .'. No deactivation PIN and no hostname prefix. The code is stored encrypted on the client record and is never shown here, in the audit log or in the result.',
                 self::STEP_DEPLOY => $n.'Deploy (writes in Tactical RMM): runs only if the provisioning code is bound (by this plan, or before it). Reads custom field #'.($pins['deploy']['field_id'] ?? '').' of Tactical client "'.$this->fence->neutralizeUntrusted((string) ($pins['deploy']['tactical_client'] ?? '')).'". If the field is empty, writes the client\'s provisioning code into it and reads it back; if it already holds that same code, it is left as it is; if it holds a different value, the deploy step refuses and writes nothing. Then it asks Tactical to run the configured deploy script (#'.($pins['deploy']['script_id'] ?? '').'), with no arguments from the PSA, on '

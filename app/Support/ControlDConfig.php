@@ -38,6 +38,17 @@ class ControlDConfig
     public const DEFAULT_PROFILE_SETTING = 'controld_default_profile_id';
 
     /**
+     * eGIRKv51 (option 3, Jeeves 2026-10-10): the profile a provisioning code enforces on its
+     * devices (the code's `profile_id`). It must be a SHARED profile of the main organization and
+     * must differ from the Global Profile above: Control D does not accept a sub-organization's
+     * Global Profile as a device profile inside that sub-organization (vendor error 40003). Same
+     * opaque-PK, trim-only normalisation as the Global Profile. Not one of the six onboarding
+     * defaults and not on the settings panel: the code step refuses at staging while it is unset,
+     * malformed or equal to the Global Profile (ControlDOnboardingStaged::codeProfile()).
+     */
+    public const CODE_PROFILE_SETTING = 'controld_code_profile_id';
+
+    /**
      * Defaults a client's provisioning code is cut with.
      *
      * Expiry and headroom are OURS: days, and the slack added to a client's asset count
@@ -76,6 +87,7 @@ class ControlDConfig
             'tactical_client_org_field_id' => Setting::getValue(self::TACTICAL_CLIENT_ORG_FIELD_SETTING),
             'tactical_deploy_script_id' => Setting::getValue(self::TACTICAL_DEPLOY_SCRIPT_SETTING),
             'default_profile_id' => Setting::getValue(self::DEFAULT_PROFILE_SETTING),
+            'code_profile_id' => Setting::getValue(self::CODE_PROFILE_SETTING),
             'code_expiry_days' => Setting::getValue(self::CODE_EXPIRY_DAYS_SETTING),
             'code_device_limit_headroom' => Setting::getValue(self::CODE_DEVICE_LIMIT_HEADROOM_SETTING),
             'code_analytics_level' => Setting::getValue(self::CODE_ANALYTICS_LEVEL_SETTING),
@@ -155,6 +167,18 @@ class ControlDConfig
     public static function defaultProfileId(): ?string
     {
         $raw = trim((string) self::get('default_profile_id'));
+
+        return $raw !== '' ? $raw : null;
+    }
+
+    /**
+     * The profile a provisioning code enforces (CODE_PROFILE_SETTING), or null when unset or
+     * whitespace-only. Trimmed, otherwise as typed, like defaultProfileId(). Shape and the
+     * distinct-from-the-Global-Profile rule are checked by ControlDOnboardingStaged::codeProfile().
+     */
+    public static function codeProfileId(): ?string
+    {
+        $raw = trim((string) self::get('code_profile_id'));
 
         return $raw !== '' ? $raw : null;
     }

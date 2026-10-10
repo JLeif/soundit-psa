@@ -290,12 +290,13 @@ class ControlDOnboardingStagedTest extends TestCase
     {
         $this->travelTo(now()->startOfSecond());
         Setting::setEncrypted('controld_api_key', 'synthetic-key');
-        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7',
+        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_profile_id' => '444444synthDD', 'code_expiry_days' => '7',
             'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $value);
         }
         $row = json_decode(file_get_contents(base_path('tests/Fixtures/ControlD/provision.json')), true);
         $row['max'] = 2;
+        $row['profile_id'] = '444444synthDD';
         $row['ts_exp'] = now()->getTimestamp() + 7 * 86400;
 
         return $row;
@@ -304,7 +305,7 @@ class ControlDOnboardingStagedTest extends TestCase
     private function codePreflight(): array
     {
         return [$this->response(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
-            $this->response(['profiles' => [['PK' => 'testprofile01']]])];
+            $this->response(['profiles' => [['PK' => '444444synthDD']]])];
     }
 
     public function test_code_intent_stores_encrypted_secrets_without_holding_transaction_over_vendor(): void
@@ -411,7 +412,8 @@ class ControlDOnboardingStagedTest extends TestCase
         $actor = User::factory()->create(['is_active' => true]);
         $client = Client::factory()->create(['controld_org_id' => $row['org']]);
         $id = $this->writer([])->stageCode($actor, $client->id, 'desktop-windows');
-        Setting::setValue('controld_default_profile_id', '');
+        // eGIRKv51: the code step reads the code profile, not the global one.
+        Setting::setValue('controld_code_profile_id', '');
         // A zero-I/O local refusal is not evidence that a POST may have happened.
         $this->refusal(fn () => $this->writer([])->execute($actor, $id));
         $intent = ControlDOnboardingIntent::findOrFail($id);
@@ -422,7 +424,7 @@ class ControlDOnboardingStagedTest extends TestCase
         $this->assertNull($intent->vendor_pk);
         $this->assertSame($client->id, $intent->active_client_id);
         $this->assertCount(0, $this->history);
-        Setting::setValue('controld_default_profile_id', 'testprofile01');
+        Setting::setValue('controld_code_profile_id', '444444synthDD');
         $writer = $this->writer([...$this->codePreflight(), $this->response(['provision' => $row]), $this->response(['provisions' => [$row]])]);
         $writer->execute($actor, $id);
         $this->assertSame('bound', ControlDOnboardingIntent::findOrFail($id)->state);

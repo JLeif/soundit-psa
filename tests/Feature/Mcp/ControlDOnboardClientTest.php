@@ -68,7 +68,7 @@ class ControlDOnboardClientTest extends TestCase
         Setting::setValue('controld_enabled', '1');
         Setting::setEncrypted('controld_api_key', 'synthetic-key');
         Setting::setValue('controld_stats_endpoint', 'synthetic-region');
-        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7',
+        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_profile_id' => '444444synthDD', 'code_expiry_days' => '7',
             'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $defaults ? $value : '');
         }
@@ -184,11 +184,12 @@ class ControlDOnboardClientTest extends TestCase
         $row = json_decode(file_get_contents(base_path('tests/Fixtures/ControlD/provision.json')), true);
         $row['org'] = $org;
         $row['max'] = 2;
+        $row['profile_id'] = '444444synthDD';
         $row['ts_exp'] = now()->getTimestamp() + 7 * 86400;
 
         return [
             $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
-            $this->ok(['profiles' => [['PK' => 'testprofile01']]]),
+            $this->ok(['profiles' => [['PK' => '444444synthDD']]]),
             $this->ok(['provision' => $row]),
             $this->ok(['provisions' => [$row]]),
         ];
@@ -399,7 +400,8 @@ class ControlDOnboardClientTest extends TestCase
         $this->assertSame('desktop-windows', $sent['icon']);
         $this->assertArrayNotHasKey('deactivation_pin', $sent);
         $this->assertArrayNotHasKey('name_prefix', $sent);
-        $this->assertSame('testprofile01', $sent['profile_id']);
+        // eGIRKv51: the code POST sends the code profile, never the global profile (testprofile01).
+        $this->assertSame('444444synthDD', $sent['profile_id']);
 
         // RED CONTROL: the code (and any PIN) never appears in an audit row, the run, or the session flash.
         $code = '0123456789abcdef0123456789abcdef';

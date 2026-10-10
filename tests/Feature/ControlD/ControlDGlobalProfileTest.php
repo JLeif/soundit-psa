@@ -1032,7 +1032,9 @@ class ControlDGlobalProfileTest extends TestCase
         // XULQ2iix #6362 r2 context:5/contract:3, context:6/contract:7, diff:3.
         $this->assertStringNotContainsString('or the process stops after admission, the intent stays', $install);
         $this->assertStringNotContainsString('any other refusal (a 2xx without `success:true`, a 4xx without that envelope, a 5xx)', $install);
-        $this->assertStringContainsString('Whether POST `/provision` accepts a Global Profile PK as `profile_id` is NOT yet proven; an HTTP 4xx refusal there in the vendor error envelope is a definite rejection, and any other refusal of that POST is uncertain.', $install);
+        // eGIRKv51: the Global Profile as a code profile was rejected (40003); the code step now sends controld_code_profile_id.
+        $this->assertStringContainsString('An HTTP 4xx refusal of POST `/provision` in the vendor error envelope is a definite rejection, and any other refusal of that POST is uncertain.', $install);
+        $this->assertStringNotContainsString('accepts a Global Profile PK as `profile_id` is NOT yet proven', $install);
         $this->assertStringContainsString('locked bind re-checks as the other steps; an HTTP 4xx vendor envelope rejection is `rejected`, any other failure after admission', $install);
         // #6327: no unqualified 'a vendor rejection ends rejected' claim survives.
         $this->assertStringNotContainsString('vendor rejection of the PUT ends the intent', $install);
