@@ -1548,9 +1548,9 @@ baseline among a sub-organization's own profiles, so the code preflight is expec
 it through arm (iii) above, which requires it to be the configured `controld_code_profile_id`
 and the main organization to list it exactly once with sharing on. Arm (iii) is consulted
 only when arms (i) and (ii) both miss: if arm (i) or (ii) accepts the code profile (for
-example, a sub-organization's own profiles list it exactly once), no main-organization read
-is made, so neither its listing in the main organization nor its sharing is checked on that
-path. If arm (iii) is consulted and refuses, the step refuses before the POST with
+example, a sub-organization's own profiles list it exactly once), no GET `/profiles` of the
+main organization is made (arm (i) does read the parent's `sub_organizations` inventory), so
+neither its listing in the main organization nor its sharing is checked on that path. If arm (iii) is consulted and refuses, the step refuses before the POST with
 nothing written at Control D; that code intent stays `staged` and holds the client's
 onboarding lock until an Admin releases it from the client page. Whether POST `/provision`
 accepts a shared main-organization profile is NOT yet proven: the first approved run decides
