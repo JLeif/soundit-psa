@@ -1795,7 +1795,10 @@ automatic beyond what its single approval runs, and nothing is retried on its ow
    runs the whole plan in order. On the button lane the approver must be a different Admin
    from the one who staged it. A step that Control D rejects stops the plan and spends the
    proposal; staging again proposes only the steps not yet bound. `done` alone is not success:
-   read the result, and the client page's Control D card, for the failed step.
+   read the result, and the client page's Control D card, for the failed step. An `executed`
+   label in the tool history is not proof either: one approval can write more than one
+   `executed` row (the plan and its code step), which can look like two codes. The proof is
+   the state of the client's rows in `controld_onboarding_intents`.
 4. **An `uncertain` step goes to Reconcile (an Admin, on the client page).** It is never
    retried and never re-staged over. **Reconcile with Control D** re-reads the vendor state
    (GETs only) and binds when that state matches the intent, or releases it otherwise (see
@@ -1811,6 +1814,10 @@ automatic beyond what its single approval runs, and nothing is retried on its ow
    approves (see **Invalidate code** above). Devices already enrolled stay enrolled, and the
    sub-organization, its Global Profile and the Tactical field are left as they are.
 
+This runbook covers PSA onboarding only. Moving a client's endpoints over (the pre-reads, any
+local holds, and keeping the old DNS filter until cut-over) follows the separate Control D
+migration plan, so the deploy in step 5 does not by itself migrate a client.
+
 **Lesson behind the code profile (error 40003).** A code is cut by POST `/provision` inside
 the client's sub-organization, so its `profile_id` must be a profile that sub-organization
 can use. The Global Profile is enforced on the sub-organization but is not accepted as a
@@ -1820,7 +1827,11 @@ appear in the sub-organization's own profile list, so the code preflight accepts
 arm (iii). The first approved run with it bound its code. **Read-back after an approved
 run:** the result names no failed step; `controld_onboarding_intents` holds one `bound` row
 for each step that ran, with the organization id the client record carries; and the client
-record holds a stored code, which is never displayed. Only then is the next client onboarded.
+record holds a stored code, which is never displayed. **Optional vendor-side read-back:** one
+read-only GET `provision` scoped to the client's sub-organization (`X-Force-Org-Id`) should list
+exactly one active code, whose `profile_id` is `controld_code_profile_id` and whose device
+limit and expiry match the values the plan pinned from the settings (asset count plus headroom;
+the configured expiry days). Only then is the next client onboarded.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
