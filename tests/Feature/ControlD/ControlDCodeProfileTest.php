@@ -291,6 +291,32 @@ class ControlDCodeProfileTest extends TestCase
         }
     }
 
+    /** contract-s1:7 (Jeeves r1 ruling): a blank global profile refuses; the global-profile exclusion cannot fail open. */
+    public function test_code_pins_refuse_a_blank_global_profile(): void
+    {
+        Setting::setValue(ControlDConfig::DEFAULT_PROFILE_SETTING, '  ');
+        $client = $this->fixture()['client'];
+
+        try {
+            ControlDOnboardingStaged::codePins($client);
+            $this->fail('codePins() must refuse a blank global profile');
+        } catch (ControlDClientException $e) {
+            $this->assertSame('controld_default_profile_id is required to onboard.', $e->getMessage());
+        }
+    }
+
+    /** context:1 (Jeeves r1 ruling, G-14): the verb description names the code profile, not the panel's enforced profile. */
+    public function test_the_verb_description_names_the_shared_baseline_profile(): void
+    {
+        $descriptions = json_encode(\App\Services\Mcp\StaffControlDOnboardingToolExecutor::definitions(), JSON_UNESCAPED_SLASHES);
+
+        $this->assertStringContainsString("(2) cut one provisioning code under that organization enforcing the shared baseline profile (the controld_code_profile_id setting, which is not a field on the Settings > Integrations > Control D panel), with the panel's expiry, device limit = asset count + headroom, analytics level and intercept mode, all pinned on the card;", $descriptions);
+        $this->assertStringNotContainsString('Control D defaults (enforced profile', $descriptions);
+        $install = file_get_contents(base_path('docs/INSTALL.md'));
+        $this->assertStringNotContainsString('cuts one provisioning code with the six defaults', $install);
+        $this->assertStringContainsString("cuts one provisioning code enforcing the shared baseline profile `controld_code_profile_id`, with the panel's expiry, device headroom, analytics level and intercept mode", $install);
+    }
+
     // ── Arm (iii) (Jeeves, eGIRKv51 17:1xZ 2026-10-10): the configured shared code profile ──
 
     private const NEITHER = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.';

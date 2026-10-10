@@ -1672,7 +1672,7 @@ panel's auto-detected analytics region; binds the returned id), then `code` once
 mapped and its sub-organization already enforces the configured Global Profile
 (`global-profile` comes first when it has none, so up to three steps; deciding which is a
 read-only GET of the parent organization list at staging and again at approval, and an
-unreadable list or a different global profile refuses) (cuts one provisioning code with the six defaults, icon `desktop-windows`, no
+unreadable list or a different global profile refuses) (cuts one provisioning code enforcing the shared baseline profile `controld_code_profile_id`, with the panel's expiry, device headroom, analytics level and intercept mode, icon `desktop-windows`, no
 deactivation PIN and no hostname prefix — both deferred to a later leg and never
 accepted from callers). Approval happens in the AI Technician cockpit under an active
 Admin, and the two-person rule is applied per lane (B4.1, #2043): a proposal staged from

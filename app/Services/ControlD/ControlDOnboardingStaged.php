@@ -77,6 +77,7 @@ class ControlDOnboardingStaged
         $intercept = ControlDConfig::codeInterceptMode();
         foreach ([
             ControlDConfig::TACTICAL_CLIENT_ORG_FIELD_SETTING => ControlDConfig::tacticalClientOrgFieldId(),
+            ControlDConfig::DEFAULT_PROFILE_SETTING => ControlDConfig::defaultProfileId(),
             ControlDConfig::CODE_EXPIRY_DAYS_SETTING => $days,
             ControlDConfig::CODE_DEVICE_LIMIT_HEADROOM_SETTING => $headroom,
             ControlDConfig::CODE_ANALYTICS_LEVEL_SETTING => $stats,
