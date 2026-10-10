@@ -161,7 +161,7 @@ class ControlDCodePinsTest extends TestCase
 
         $this->assertSame(['max' => 5, 'expiry_days' => 7, 'stats' => 0, 'intercept_mode' => 'standard', 'profile_id' => '444444synthDD'], $this->payload($run)['code_pins']);
         // P7A74iGD (b): the plan card shows the pinned values and says that approval re-derives the plan and refuses on any difference.
-        $this->assertStringContainsString('with these pinned values: enforced profile 444444synthDD (controld_code_profile_id); the global profile testprofile01 is inherited, expiry 7 days, device limit 5 (asset count 3 + headroom 2), analytics level 0, intercept mode standard', $run->proposed_content);
+        $this->assertStringContainsString('with these pinned values: enforced profile 444444synthDD, the shared baseline profile (controld_code_profile_id); the global profile testprofile01 is inherited, expiry 7 days, device limit 5 (asset count 3 + headroom 2), analytics level 0, intercept mode standard', $run->proposed_content);
         $this->assertStringContainsString('Approval derives the plan again from the client\'s current state and refuses, with nothing written, if it differs from this card (a step already done, a changed setting or pinned value, or a changed device link); stage again then.', $run->proposed_content);
         $this->assertStringNotContainsString('leaves all five unchanged does not refuse', $run->proposed_content, 'G-14 (contract:1): underivable values and other checks still refuse');
         $this->assertStringNotContainsString('if a setting or the client\'s asset count changes before approval, approval refuses', $run->proposed_content);

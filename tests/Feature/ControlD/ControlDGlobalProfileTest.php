@@ -290,7 +290,10 @@ class ControlDGlobalProfileTest extends TestCase
 
     public static function preflightRefusals(): array
     {
-        $neither = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.';
+        // eGIRKv51 arm (iii): the arms (i)/(ii) wording is kept and a reason naming arm (iii) is
+        // appended. Here the enforced profile is the global-profile setting, not the configured
+        // code profile, so arm (iii) does not apply and no main-organization read is made.
+        $neither = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles. Arm (iii) does not apply: it is not the configured shared code profile (controld_code_profile_id).';
         $unconfirmed = 'Control D global profile of this organization could not be confirmed.';
 
         return [

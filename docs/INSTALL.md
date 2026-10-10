@@ -1521,7 +1521,11 @@ client's lock and are never retried. The
 code preflight accepts the profile when it is exactly one of the sub-organization's
 own profiles, or, when it is not listed there at all, the sub-organization's
 `parent_profile.PK` (read live from the parent inventory); listed more than once is
-refused as ambiguous. An HTTP 4xx refusal of POST `/provision` in the vendor error
+refused as ambiguous. When neither holds, a third arm (iii) accepts the profile only when
+it equals `controld_code_profile_id` (and differs from `controld_default_profile_id`) and one
+read-only GET `/profiles` of the MAIN organization (no `X-Force-Org-Id`) lists it exactly
+once with its `shared` option on; anything else, including an unreadable or malformed main
+inventory, refuses before the POST with a reason naming arm (iii). An HTTP 4xx refusal of POST `/provision` in the vendor error
 envelope is a definite rejection, and any other refusal of that POST is uncertain.
 
 **Code profile (eGIRKv51).** Control D does not accept a sub-organization's Global Profile
@@ -1538,12 +1542,16 @@ onboarding plan that includes the code step **refuses with nothing staged** (no 
 call, no intent, no run) and the message names `controld_code_profile_id`; approving a card
 staged earlier refuses the same way and asks for a new proposal. The plan card names the
 code profile used and the inherited Global Profile. The organization and global-profile
-steps still send `controld_default_profile_id` unchanged. Whether POST `/provision` accepts
-a shared main-organization profile is NOT yet proven, and the code preflight (above) checks
-the profile only against the sub-organization's own profiles and its Global Profile, so a
-shared profile that Control D does not list there refuses at preflight before the POST,
-with nothing written at Control D; that code intent stays `staged` and holds the client's
-onboarding lock until an Admin releases it from the client page. Rollback: clearing the setting stops the code step at staging;
+steps still send `controld_default_profile_id` unchanged. The plan card calls the code profile the
+"shared baseline profile". A production read (card eGIRKv51) did not list the shared
+baseline among a sub-organization's own profiles, so the code preflight accepts it through
+arm (iii) above:
+it must be the configured `controld_code_profile_id` and the main organization must list it
+exactly once with sharing on. If that check fails, the step refuses before the POST with
+nothing written at Control D; that code intent stays `staged` and holds the client's
+onboarding lock until an Admin releases it from the client page. Whether POST `/provision`
+accepts a shared main-organization profile is NOT yet proven: the first approved run decides
+it, and a vendor refusal of that POST is recorded as usual. Rollback: clearing the setting stops the code step at staging;
 reverting this change restores the old behaviour (code cut with the Global Profile).
 
 Capability is observed ONLY at the intended write. HTTP403 with vendor `success:false`

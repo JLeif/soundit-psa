@@ -187,7 +187,7 @@ class ControlDCodeProfileTest extends TestCase
         $this->stageButton($fixture)->assertSessionHas('success');
         $run = TechnicianRun::where('client_id', $fixture['client']->id)->sole();
 
-        $this->assertStringContainsString('with these pinned values: enforced profile '.self::CODE.' (controld_code_profile_id); the global profile '.self::GLOBAL.' is inherited, expiry 7 days', $run->proposed_content);
+        $this->assertStringContainsString('with these pinned values: enforced profile '.self::CODE.', the shared baseline profile (controld_code_profile_id); the global profile '.self::GLOBAL.' is inherited, expiry 7 days', $run->proposed_content);
     }
 
     /** @return array<string, array{0: string, 1: string}> */
@@ -286,12 +286,204 @@ class ControlDCodeProfileTest extends TestCase
         }
     }
 
-    /**
-     * The measured production shape (card eGIRKv51, 2026-10-10): a shared main-org profile is NOT
-     * listed in the sub-organization's own GET profiles, and it is not the Global Profile. The
-     * existing preflight then refuses before the POST: no write, the intent stays staged.
-     */
-    public function test_a_code_profile_not_listed_in_the_sub_org_refuses_at_preflight_before_the_post(): void
+    // ── Arm (iii) (Jeeves, eGIRKv51 17:1xZ 2026-10-10): the configured shared code profile ──
+
+    private const NEITHER = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.';
+
+    private const OTHER = '555555synthEE';
+
+    /** A main-organization GET profiles row in the producer shape (body.profiles[].profile.opt.data[] {PK, value}). */
+    private static function mainRow(string $pk, array $options = [['PK' => 'shared', 'value' => 1]]): array
+    {
+        return ['PK' => $pk, 'name' => 'Synthetic baseline', 'updated' => 1700000000, 'stats' => 0,
+            'profile' => ['opt' => ['count' => count($options), 'data' => $options]]];
+    }
+
+    private function provisioning(array $responses): ControlDProvisioning
+    {
+        $this->history = [];
+        $stack = HandlerStack::create(new MockHandler([...$responses, ...array_fill(0, 4, new Response(503))]));
+        $stack->push(Middleware::history($this->history));
+
+        return new ControlDProvisioning(new ControlDClient(['api_key' => self::KEY, 'handler' => $stack]));
+    }
+
+    private function fields(string $profile): array
+    {
+        return ['icon' => 'desktop-windows', 'profile_id' => $profile, 'max' => 3, 'ts_exp' => 0, 'stats' => 0, 'intercept_mode' => 'standard'];
+    }
+
+    /** types, the sub-org's own profiles (the code profile is NOT there), the parent inventory (global = GLOBAL), then the main-org GET profiles. */
+    private function armThreeReads(Response $main): array
+    {
+        return [
+            $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
+            $this->ok(['profiles' => [['PK' => '222222synthBB']]]),
+            $this->ok(['sub_organizations' => [$this->listed()]]),
+            $main,
+        ];
+    }
+
+    private function calls(): array
+    {
+        return array_map(fn ($h) => $h['request']->getMethod().' '.$h['request']->getUri()->getPath(), $this->history);
+    }
+
+    public function test_arm_iii_accepts_the_configured_shared_code_profile_and_the_post_happens(): void
+    {
+        $row = json_decode(file_get_contents(base_path('tests/Fixtures/ControlD/provision.json')), true);
+        $row = array_merge($row, ['org' => self::ORG, 'max' => 3, 'ts_exp' => 0, 'profile_id' => self::CODE]);
+        $service = $this->provisioning([
+            ...$this->armThreeReads($this->ok(['profiles' => [self::mainRow('222222synthBB', []), self::mainRow(self::CODE)]])),
+            $this->ok(['provision' => $row]), $this->ok(['provisions' => [$row]]),
+        ]);
+
+        $this->assertSame('fixture001', $service->create(self::ORG, $this->fields(self::CODE))['PK']);
+
+        $this->assertSame(['GET /devices/types', 'GET /profiles', 'GET /organizations/sub_organizations', 'GET /profiles', 'POST /provision', 'GET /provision'], $this->calls());
+        $this->assertSame([self::ORG], $this->history[1]['request']->getHeader('X-Force-Org-Id'), 'the own-profiles read is the sub-organization\'s');
+        $this->assertFalse($this->history[3]['request']->hasHeader('X-Force-Org-Id'), 'arm (iii) reads the MAIN organization\'s profiles');
+        $this->assertSame('', (string) $this->history[3]['request']->getBody(), 'a read-only GET with no body');
+        $this->assertSame(self::CODE, json_decode((string) $this->history[4]['request']->getBody(), true)['profile_id']);
+    }
+
+    /** @return array<string, array{0: \Closure, 1: string}> */
+    public static function armThreeRefusals(): array
+    {
+        $not = self::NEITHER.' Arm (iii) refused: the configured code profile is not shared in the main organization.';
+        $count = self::NEITHER.' Arm (iii) refused: the configured shared code profile is not listed exactly once in the main organization\'s profiles.';
+        $bad = self::NEITHER.' Arm (iii) could not be confirmed: the main organization\'s profile inventory is unreadable or malformed.';
+        $ok = fn (array $body) => new Response(200, [], json_encode(['success' => true, 'body' => $body]));
+
+        return [
+            'not shared: no options' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE, [])]]), $not],
+            'not shared: value 0' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE, [['PK' => 'shared', 'value' => 0]])]]), $not],
+            'not shared: another option on' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE, [['PK' => 'block_rfc1918', 'value' => 1]])]]), $not],
+            'not shared: shared listed twice' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE, [['PK' => 'shared', 'value' => 1], ['PK' => 'shared', 'value' => 1]])]]), $not],
+            'missing from the main organization' => [fn () => $ok(['profiles' => [self::mainRow(self::OTHER)]]), $count],
+            'empty main-organization list' => [fn () => $ok(['profiles' => []]), $count],
+            'listed twice' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE), self::mainRow(self::CODE)]]), $count],
+            'malformed: profiles not a list' => [fn () => $ok(['profiles' => (object) []]), $bad],
+            'malformed: profiles absent' => [fn () => $ok([]), $bad],
+            'malformed: row without a PK' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE), ['name' => 'x']]]), $bad],
+            'malformed: opt.data absent' => [fn () => $ok(['profiles' => [['PK' => self::CODE, 'profile' => ['opt' => ['count' => 0]]]]]), $bad],
+            'malformed: option value not an integer' => [fn () => $ok(['profiles' => [self::mainRow(self::CODE, [['PK' => 'shared', 'value' => '1']])]]), $bad],
+            'unreadable: 503' => [fn () => new Response(503), $bad],
+            'unreadable: success false' => [fn () => new Response(200, [], json_encode(['success' => false, 'body' => ['profiles' => [self::mainRow(self::CODE)]]])), $bad],
+        ];
+    }
+
+    #[DataProvider('armThreeRefusals')]
+    public function test_arm_iii_refuses_with_no_post(\Closure $main, string $message): void
+    {
+        $service = $this->provisioning($this->armThreeReads($main()));
+
+        try {
+            $service->create(self::ORG, $this->fields(self::CODE));
+            $this->fail('arm (iii) must refuse');
+        } catch (ControlDClientException $e) {
+            $this->assertSame($message, $e->getMessage());
+        }
+        $this->assertSame(['GET /devices/types', 'GET /profiles', 'GET /organizations/sub_organizations', 'GET /profiles'], $this->calls(), 'no write');
+        $this->assertFalse($this->history[3]['request']->hasHeader('X-Force-Org-Id'));
+    }
+
+    /** @return array<string, array{0: string, 1: string, 2: string}> */
+    public static function armThreeNotApplicable(): array
+    {
+        $notConfigured = self::NEITHER.' Arm (iii) does not apply: it is not the configured shared code profile (controld_code_profile_id).';
+
+        return [
+            // The main organization lists the profile once, shared: only the equality check refuses.
+            'not the configured code profile' => [self::CODE, self::OTHER, $notConfigured],
+            'code profile setting unset' => ['', self::OTHER, $notConfigured],
+            // The configured code profile IS the global PK (not the sub-org's parent_profile here,
+            // so arm (i) does not take it) and is shared once in the main organization.
+            'the global PK' => [self::GLOBAL, self::GLOBAL, self::NEITHER.' Arm (iii) does not apply: the configured code profile is the global profile.'],
+        ];
+    }
+
+    #[DataProvider('armThreeNotApplicable')]
+    public function test_arm_iii_refuses_a_profile_it_does_not_cover_before_the_main_org_read(string $configured, string $sent, string $message): void
+    {
+        Setting::setValue(ControlDConfig::CODE_PROFILE_SETTING, $configured);
+        $parent = $this->listed();
+        $parent['parent_profile']['PK'] = '333333synthCC';
+        $service = $this->provisioning([
+            $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
+            $this->ok(['profiles' => [['PK' => '222222synthBB']]]),
+            $this->ok(['sub_organizations' => [$parent]]),
+            $this->ok(['profiles' => [self::mainRow($sent)]]),
+        ]);
+
+        try {
+            $service->create(self::ORG, $this->fields($sent));
+            $this->fail('arm (iii) must refuse');
+        } catch (ControlDClientException $e) {
+            $this->assertSame($message, $e->getMessage());
+        }
+        $this->assertNotContains('POST /provision', $this->calls(), 'no write');
+    }
+
+    /** The new parent read is exactly GET profiles with no body; nothing else on that path is allowed. */
+    public function test_the_main_org_profiles_read_is_get_only_without_a_body(): void
+    {
+        $transport = new ControlDClient(['api_key' => self::KEY, 'handler' => HandlerStack::create(new MockHandler([new Response(503)]))]);
+        foreach ([['POST', 'profiles', []], ['GET', 'profiles', []], ['PUT', 'profiles', null], ['DELETE', 'profiles', null], ['GET', 'profiles/'.self::CODE, null]] as [$method, $path, $body]) {
+            try {
+                $transport->requestParent($method, $path, $body);
+                $this->fail("{$method} {$path} must refuse");
+            } catch (ControlDClientException $e) {
+                $this->assertSame('Control D parent request is invalid or unconfigured.', $e->getMessage());
+            }
+        }
+    }
+
+    /** Arms (i) and (ii) never consult the main organization: no fourth read. */
+    public function test_arms_i_and_ii_make_no_main_org_read(): void
+    {
+        $row = json_decode(file_get_contents(base_path('tests/Fixtures/ControlD/provision.json')), true);
+        foreach ([[self::CODE, [['PK' => self::CODE]], false], [self::GLOBAL, [['PK' => '222222synthBB']], true]] as [$profile, $own, $parentRead]) {
+            $row = array_merge($row, ['org' => self::ORG, 'max' => 3, 'ts_exp' => 0, 'profile_id' => $profile]);
+            $service = $this->provisioning([
+                $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
+                $this->ok(['profiles' => $own]),
+                ...($parentRead ? [$this->ok(['sub_organizations' => [$this->listed()]])] : []),
+                $this->ok(['provision' => $row]), $this->ok(['provisions' => [$row]]),
+            ]);
+            $this->assertSame('fixture001', $service->create(self::ORG, $this->fields($profile))['PK']);
+            $this->assertSame([...['GET /devices/types', 'GET /profiles'], ...($parentRead ? ['GET /organizations/sub_organizations'] : []), 'POST /provision', 'GET /provision'], $this->calls());
+        }
+    }
+
+    /** End to end through approval: the measured production shape (shared baseline not in the sub-org's list, not the global) now reaches the POST. */
+    public function test_approval_cuts_the_code_with_the_shared_baseline_profile_via_arm_iii(): void
+    {
+        $fixture = $this->fixture();
+        $this->bindVendor([$this->ok(['sub_organizations' => [$this->listed()]])]);
+        $this->stageButton($fixture)->assertSessionHas('success');
+        $run = TechnicianRun::where('client_id', $fixture['client']->id)->sole();
+        $exchange = $this->codeExchange();
+        $this->bindVendor([
+            $this->ok(['sub_organizations' => [$this->listed()]]),
+            $exchange[0],
+            $this->ok(['profiles' => []]),
+            $this->ok(['sub_organizations' => [$this->listed()]]),
+            $this->ok(['profiles' => [self::mainRow(self::CODE)]]),
+            $exchange[2], $exchange[3],
+        ]);
+
+        $this->approve($run);
+
+        $this->assertSame('bound', ControlDOnboardingIntent::where('operation', 'code')->sole()->state);
+        $this->assertSame(self::CODE, $this->sentBody('/provision')['profile_id']);
+        $mainRead = collect($this->history)->filter(fn ($h) => $h['request']->getUri()->getPath() === '/profiles')->values();
+        $this->assertCount(2, $mainRead);
+        $this->assertFalse($mainRead[1]['request']->hasHeader('X-Force-Org-Id'));
+    }
+
+    /** The approval path refuses before any write when arm (iii) refuses: the intent stays staged. */
+    public function test_approval_refuses_before_the_post_when_the_baseline_is_not_shared(): void
     {
         $fixture = $this->fixture();
         $this->bindVendor([$this->ok(['sub_organizations' => [$this->listed()]])]);
@@ -302,12 +494,13 @@ class ControlDCodeProfileTest extends TestCase
             $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
             $this->ok(['profiles' => []]),
             $this->ok(['sub_organizations' => [$this->listed()]]),
+            $this->ok(['profiles' => [self::mainRow(self::CODE, [])]]),
         ]);
 
         $message = $this->approve($run);
 
         $this->assertStringContainsString('Control D onboarding was refused before any vendor write', $message);
-        $this->assertStringContainsString('Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.', $message);
+        $this->assertStringContainsString(self::NEITHER.' Arm (iii) refused: the configured code profile is not shared in the main organization.', $message);
         foreach ($this->history as $exchange) {
             $this->assertSame('GET', $exchange['request']->getMethod(), 'no vendor write');
         }
@@ -322,6 +515,8 @@ class ControlDCodeProfileTest extends TestCase
         $install = preg_replace('/\s+/', ' ', file_get_contents(base_path('docs/INSTALL.md')));
         $this->assertStringContainsString('It sends the setting **`controld_code_profile_id`** as the code\'s `profile_id`: the PK of a profile in the MAIN organization, toggled **Shared** in Control D, and **different from** `controld_default_profile_id`.', $install);
         $this->assertStringContainsString('staging any onboarding plan that includes the code step **refuses with nothing staged** (no Control D call, no intent, no run) and the message names `controld_code_profile_id`', $install);
+        $this->assertStringContainsString('When neither holds, a third arm (iii) accepts the profile only when it equals `controld_code_profile_id` (and differs from `controld_default_profile_id`) and one read-only GET `/profiles` of the MAIN organization (no `X-Force-Org-Id`) lists it exactly once with its `shared` option on;', $install);
+        $this->assertStringNotContainsString('checks the profile only against the sub-organization\'s own profiles and its Global Profile', $install);
     }
 
     public function test_code_profile_id_is_trimmed_and_blank_is_null(): void
