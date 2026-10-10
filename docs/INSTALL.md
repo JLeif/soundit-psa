@@ -1552,9 +1552,10 @@ example, a sub-organization's own profiles list it exactly once), no GET `/profi
 main organization is made (arm (i) does read the parent's `sub_organizations` inventory), so
 neither its listing in the main organization nor its sharing is checked on that path. If arm (iii) is consulted and refuses, the step refuses before the POST with
 nothing written at Control D; that code intent stays `staged` and holds the client's
-onboarding lock until an Admin releases it from the client page. Whether POST `/provision`
-accepts a shared main-organization profile is NOT yet proven: the first approved run decides
-it, and a vendor refusal of that POST is recorded as usual. Rollback: clearing the setting stops the code step at staging;
+onboarding lock until an Admin releases it from the client page. The first approved
+production run (card eGIRKv51) proved that POST `/provision` accepts a shared main-organization
+profile through arm (iii): the code was cut and bound. A vendor refusal of that POST is still
+recorded as usual. Rollback: clearing the setting stops the code step at staging;
 reverting this change restores the old behaviour (code cut with the Global Profile).
 
 Capability is observed ONLY at the intended write. HTTP403 with vendor `success:false`
@@ -1765,6 +1766,61 @@ stage and approve alone; the button lane was never affected. Then:
 
 Turning the switch back off returns both lanes to inert without touching vendor objects,
 mappings, stored codes or intent rows; revoking the grant does the same for the token lane.
+
+**Operator runbook: onboarding one client end to end (P7A74iGD).** Once onboarding is active,
+this is the whole repeatable sequence for one client. Each step names who acts. No step is
+automatic beyond what its single approval runs, and nothing is retried on its own.
+
+1. **Settings (operator, once per instance).** On Settings → Integrations → Control D:
+   complete the Client Onboarding Defaults and turn on **Client onboarding enabled**. Set the
+   Global Profile (`controld_default_profile_id`). For a deploy, also set the Tactical
+   client custom field ID and the Tactical deploy script ID. Then set
+   **`controld_code_profile_id`**. It has **no panel field**, so set it directly in the
+   `settings` table (key `controld_code_profile_id`). Its value is the PK of a profile in the
+   MAIN organization that is toggled Shared and differs from the Global Profile; a blank
+   shared profile is enough. **Undo:** delete that row or blank its value. While it is unset,
+   staging any plan with a code step refuses with nothing staged, and the message names the
+   setting. **Read-back before the first client:**
+   - in `php artisan tinker`, `ControlDConfig::codeProfileId()` returns the PK;
+   - `ControlDOnboardingStaged::codeProfile()` returns it without refusing;
+   - `ControlDConfig::isOnboardingActive()` is true;
+   - a read-only GET `/profiles` of the main organization (no `X-Force-Org-Id`) lists that PK
+     exactly once with its `shared` option on.
+2. **Stage (the granted ai_actor token, or an Admin with the client-page button).** Stage ONE
+   plan for the client, against a ticket of that client and with a reason. Add `deploy` only
+   if the deploy is meant to run in the same approval. Staging decides the steps from the
+   client record (organization or global profile, then code, then deploy) and pins every
+   input. A refusal at staging writes nothing; fix the cause it names and stage again.
+3. **Approve once (the owner, an active Admin in the AI Technician cockpit).** One approval
+   runs the whole plan in order. On the button lane the approver must be a different Admin
+   from the one who staged it. A step that Control D rejects stops the plan and spends the
+   proposal; staging again proposes only the steps not yet bound. `done` alone is not success:
+   read the result, and the client page's Control D card, for the failed step.
+4. **An `uncertain` step goes to Reconcile (an Admin, on the client page).** It is never
+   retried and never re-staged over. **Reconcile with Control D** re-reads the vendor state
+   (GETs only) and binds when that state matches the intent, or releases it otherwise (see
+   **Reconcile** above).
+5. **The Tactical deploy (owner-approved, never automatic).** Writing the code into the
+   Tactical client custom field is the deploy trigger for every agent under that client. It
+   happens only through the plan's `deploy` step (chosen at staging, run by the same one
+   approval) or through a separately staged `tactical_set_client_custom_field` write for the
+   `controld_org_id` key, which the owner approves in the cockpit. Both write the same field.
+   Neither is run by the PSA on its own; if neither is chosen, no Tactical request is made.
+6. **Undo (the owner's call).** Only the provisioning code can be undone from the PSA:
+   **Stage invalidating this code for approval** on the client page, then a second Admin
+   approves (see **Invalidate code** above). Devices already enrolled stay enrolled, and the
+   sub-organization, its Global Profile and the Tactical field are left as they are.
+
+**Lesson behind the code profile (error 40003).** A code is cut by POST `/provision` inside
+the client's sub-organization, so its `profile_id` must be a profile that sub-organization
+can use. The Global Profile is enforced on the sub-organization but is not accepted as a
+device profile there: a code cut with it was rejected with error 40003 ("This Profile does
+not exist") and nothing was created. A shared main-organization profile works. It does not
+appear in the sub-organization's own profile list, so the code preflight accepts it through
+arm (iii). The first approved run with it bound its code. **Read-back after an approved
+run:** the result names no failed step; `controld_onboarding_intents` holds one `bound` row
+for each step that ran, with the organization id the client record carries; and the client
+record holds a stored code, which is never displayed. Only then is the next client onboarded.
 
 Syncs endpoint and router device counts from Control D sub-organizations for license billing.
 
