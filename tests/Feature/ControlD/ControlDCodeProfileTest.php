@@ -188,6 +188,9 @@ class ControlDCodeProfileTest extends TestCase
         $run = TechnicianRun::where('client_id', $fixture['client']->id)->sole();
 
         $this->assertStringContainsString('with these pinned values: enforced profile '.self::CODE.', the shared baseline profile (controld_code_profile_id); the global profile '.self::GLOBAL.' is inherited, expiry 7 days', $run->proposed_content);
+        // diff:3 (G-14): arm (ii) accepts without the main-organization read, so the card states each arm and confines that check to arm (iii).
+        $this->assertStringContainsString('Before writing, the step reads Control D and accepts the enforced profile only when it is listed exactly once among the organization\'s own profiles; or, when it is not listed there, it is the organization\'s global profile; or, only when neither holds, it is the shared baseline profile and the main organization lists it exactly once with sharing on (the main organization is read only for this last check). Otherwise it refuses and writes nothing.', $run->proposed_content);
+        $this->assertStringNotContainsString('for the shared baseline profile: listed exactly once, with sharing on, in the main organization', $run->proposed_content);
     }
 
     /** @return array<string, array{0: string, 1: string}> */
@@ -517,6 +520,9 @@ class ControlDCodeProfileTest extends TestCase
         $this->assertStringContainsString('staging any onboarding plan that includes the code step **refuses with nothing staged** (no Control D call, no intent, no run) and the message names `controld_code_profile_id`', $install);
         $this->assertStringContainsString('When neither holds, a third arm (iii) accepts the profile only when it equals `controld_code_profile_id` (and differs from `controld_default_profile_id`) and one read-only GET `/profiles` of the MAIN organization (no `X-Force-Org-Id`) lists it exactly once with its `shared` option on;', $install);
         $this->assertStringNotContainsString('checks the profile only against the sub-organization\'s own profiles and its Global Profile', $install);
+        // diff:3 (G-14): the main-organization shared check is stated as arm (iii) only; arms (i)/(ii) make no main-organization read.
+        $this->assertStringContainsString('Arm (iii) is consulted only when arms (i) and (ii) both miss: if arm (i) or (ii) accepts the code profile (for example, a sub-organization\'s own profiles list it exactly once), no main-organization read is made, so neither its listing in the main organization nor its sharing is checked on that path. If arm (iii) is consulted and refuses, the step refuses before the POST with nothing written at Control D;', $install);
+        $this->assertStringNotContainsString('so the code preflight accepts it through arm (iii) above: it must be', $install);
     }
 
     public function test_code_profile_id_is_trimmed_and_blank_is_null(): void
