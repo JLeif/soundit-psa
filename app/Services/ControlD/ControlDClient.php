@@ -176,11 +176,13 @@ class ControlDClient
      * Parent-only B2 transport. Exact method/path pairs, never the legacy raw-error GET.
      * Producer: docs.controld.com/reference/post_organizations-suborg (OpenAPI 3.0.1).
      * Create accepts form encoding, not an assumed JSON contract.
+     * GET profiles (no body) reads the MAIN organization's own profile list for the code
+     * preflight's arm (iii) (eGIRKv51); it is read-only and sends no X-Force-Org-Id.
      */
     public function requestParent(string $method, string $endpoint, #[\SensitiveParameter] ?array $body = null): array
     {
         if (! (($method === 'POST' && $endpoint === 'organizations/suborg' && $body !== null)
-            || ($method === 'GET' && $endpoint === 'organizations/sub_organizations' && $body === null))
+            || ($method === 'GET' && in_array($endpoint, ['organizations/sub_organizations', 'profiles'], true) && $body === null))
             || ! $this->isConfigured()) {
             throw new ControlDClientException('Control D parent request is invalid or unconfigured.');
         }

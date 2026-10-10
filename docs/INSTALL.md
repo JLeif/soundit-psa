@@ -1521,9 +1521,41 @@ client's lock and are never retried. The
 code preflight accepts the profile when it is exactly one of the sub-organization's
 own profiles, or, when it is not listed there at all, the sub-organization's
 `parent_profile.PK` (read live from the parent inventory); listed more than once is
-refused as ambiguous. Whether POST `/provision` accepts a Global
-Profile PK as `profile_id` is NOT yet proven; an HTTP 4xx refusal there in the vendor
-error envelope is a definite rejection, and any other refusal of that POST is uncertain.
+refused as ambiguous. When neither holds, a third arm (iii) accepts the profile only when
+it equals `controld_code_profile_id` (and differs from `controld_default_profile_id`) and one
+read-only GET `/profiles` of the MAIN organization (no `X-Force-Org-Id`) lists it exactly
+once with its `shared` option on; anything else, including an unreadable or malformed main
+inventory, refuses before the POST with a reason naming arm (iii). An HTTP 4xx refusal of POST `/provision` in the vendor error
+envelope is a definite rejection, and any other refusal of that POST is uncertain.
+
+**Code profile (eGIRKv51).** Control D does not accept a sub-organization's Global Profile
+as the device profile inside that sub-organization (a code cut with it was rejected with
+error 40003), so the onboarding code step no longer sends the Global Profile. It sends the
+setting **`controld_code_profile_id`** as the code's `profile_id`: the PK of a profile in the
+MAIN organization, toggled **Shared** in Control D, and **different from**
+`controld_default_profile_id`. A blank (allow-all) shared profile is enough; the Global
+Profile is still enforced on every device through the sub-organization. The setting has no
+field on the settings panel and no default: set it directly in the `settings` table (key
+`controld_code_profile_id`; surrounding whitespace is trimmed). While it is unset,
+whitespace-only, not a well-formed PK, or equal to the Global Profile, staging any
+onboarding plan that includes the code step **refuses with nothing staged** (no Control D
+call, no intent, no run) and the message names `controld_code_profile_id`; approving a card
+staged earlier refuses the same way and asks for a new proposal. The plan card names the
+code profile used and the inherited Global Profile. The organization and global-profile
+steps still send `controld_default_profile_id` unchanged. The plan card calls the code profile the
+"shared baseline profile". A production read (card eGIRKv51) did not list the shared
+baseline among a sub-organization's own profiles, so the code preflight is expected to accept
+it through arm (iii) above, which requires it to be the configured `controld_code_profile_id`
+and the main organization to list it exactly once with sharing on. Arm (iii) is consulted
+only when arms (i) and (ii) both miss: if arm (i) or (ii) accepts the code profile (for
+example, a sub-organization's own profiles list it exactly once), no GET `/profiles` of the
+main organization is made (arm (i) does read the parent's `sub_organizations` inventory), so
+neither its listing in the main organization nor its sharing is checked on that path. If arm (iii) is consulted and refuses, the step refuses before the POST with
+nothing written at Control D; that code intent stays `staged` and holds the client's
+onboarding lock until an Admin releases it from the client page. Whether POST `/provision`
+accepts a shared main-organization profile is NOT yet proven: the first approved run decides
+it, and a vendor refusal of that POST is recorded as usual. Rollback: clearing the setting stops the code step at staging;
+reverting this change restores the old behaviour (code cut with the Global Profile).
 
 Capability is observed ONLY at the intended write. HTTP403 with vendor `success:false`
 and integer `error.code:40301` records terminal `rejected`, phase `post`, reason code
@@ -1640,7 +1672,7 @@ panel's auto-detected analytics region; binds the returned id), then `code` once
 mapped and its sub-organization already enforces the configured Global Profile
 (`global-profile` comes first when it has none, so up to three steps; deciding which is a
 read-only GET of the parent organization list at staging and again at approval, and an
-unreadable list or a different global profile refuses) (cuts one provisioning code with the six defaults, icon `desktop-windows`, no
+unreadable list or a different global profile refuses) (cuts one provisioning code enforcing the shared baseline profile `controld_code_profile_id`, with the panel's expiry, device headroom, analytics level and intercept mode, icon `desktop-windows`, no
 deactivation PIN and no hostname prefix — both deferred to a later leg and never
 accepted from callers). Approval happens in the AI Technician cockpit under an active
 Admin, and the two-person rule is applied per lane (B4.1, #2043): a proposal staged from

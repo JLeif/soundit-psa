@@ -70,14 +70,14 @@ class ControlDOnboardingStaged
      */
     public static function codePins(Client $client): array
     {
-        $profile = ControlDConfig::defaultProfileId();
+        $profile = self::codeProfile();
         $days = ControlDConfig::codeExpiryDays();
         $headroom = ControlDConfig::codeDeviceLimitHeadroom();
         $stats = ControlDConfig::codeAnalyticsLevel();
         $intercept = ControlDConfig::codeInterceptMode();
         foreach ([
             ControlDConfig::TACTICAL_CLIENT_ORG_FIELD_SETTING => ControlDConfig::tacticalClientOrgFieldId(),
-            ControlDConfig::DEFAULT_PROFILE_SETTING => $profile,
+            ControlDConfig::DEFAULT_PROFILE_SETTING => ControlDConfig::defaultProfileId(),
             ControlDConfig::CODE_EXPIRY_DAYS_SETTING => $days,
             ControlDConfig::CODE_DEVICE_LIMIT_HEADROOM_SETTING => $headroom,
             ControlDConfig::CODE_ANALYTICS_LEVEL_SETTING => $stats,
@@ -96,6 +96,31 @@ class ControlDOnboardingStaged
         }
 
         return ['max' => $count + $headroom, 'expiry_days' => $days, 'stats' => (int) $stats, 'intercept_mode' => $intercept, 'profile_id' => $profile];
+    }
+
+    /** codeProfile() refusal when the code profile equals the configured Global Profile (eGIRKv51). */
+    public const CODE_PROFILE_IS_GLOBAL = ControlDConfig::CODE_PROFILE_SETTING.' must be a shared main-organisation profile, not the global profile (Control D does not accept the global profile as a device profile inside a sub-organisation); nothing was written.';
+
+    /**
+     * eGIRKv51 (option 3): the profile a provisioning code enforces, from
+     * controld_code_profile_id, never the Global Profile. Read-only and local: no vendor call.
+     * Throws ControlDClientException naming the setting when it is unset, not a well-formed PK
+     * (the Global Profile's own shape check), or equal to the configured Global Profile.
+     */
+    public static function codeProfile(): string
+    {
+        $profile = ControlDConfig::codeProfileId();
+        if ($profile === null) {
+            throw new ControlDClientException(ControlDConfig::CODE_PROFILE_SETTING.' is required to onboard (a shared main-organisation profile, distinct from the global profile); nothing was written.');
+        }
+        if (! preg_match('/\A[A-Za-z0-9_-]{1,255}\z/', $profile)) {
+            throw new ControlDClientException(ControlDConfig::CODE_PROFILE_SETTING.' is not a valid Control D profile id; nothing was written.');
+        }
+        if ($profile === ControlDConfig::defaultProfileId()) {
+            throw new ControlDClientException(self::CODE_PROFILE_IS_GLOBAL);
+        }
+
+        return $profile;
     }
 
     /** Exactly the five keys, each of codePins()'s type. Values are range-checked again by codeFields(). */

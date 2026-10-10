@@ -290,7 +290,10 @@ class ControlDGlobalProfileTest extends TestCase
 
     public static function preflightRefusals(): array
     {
-        $neither = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.';
+        // eGIRKv51 arm (iii): the arms (i)/(ii) wording is kept and a reason naming arm (iii) is
+        // appended. Here the enforced profile is the global-profile setting, not the configured
+        // code profile, so arm (iii) does not apply and no main-organization read is made.
+        $neither = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles. Arm (iii) does not apply: it is not the configured shared code profile (controld_code_profile_id).';
         $unconfirmed = 'Control D global profile of this organization could not be confirmed.';
 
         return [
@@ -1032,7 +1035,9 @@ class ControlDGlobalProfileTest extends TestCase
         // XULQ2iix #6362 r2 context:5/contract:3, context:6/contract:7, diff:3.
         $this->assertStringNotContainsString('or the process stops after admission, the intent stays', $install);
         $this->assertStringNotContainsString('any other refusal (a 2xx without `success:true`, a 4xx without that envelope, a 5xx)', $install);
-        $this->assertStringContainsString('Whether POST `/provision` accepts a Global Profile PK as `profile_id` is NOT yet proven; an HTTP 4xx refusal there in the vendor error envelope is a definite rejection, and any other refusal of that POST is uncertain.', $install);
+        // eGIRKv51: the Global Profile as a code profile was rejected (40003); the code step now sends controld_code_profile_id.
+        $this->assertStringContainsString('An HTTP 4xx refusal of POST `/provision` in the vendor error envelope is a definite rejection, and any other refusal of that POST is uncertain.', $install);
+        $this->assertStringNotContainsString('accepts a Global Profile PK as `profile_id` is NOT yet proven', $install);
         $this->assertStringContainsString('locked bind re-checks as the other steps; an HTTP 4xx vendor envelope rejection is `rejected`, any other failure after admission', $install);
         // #6327: no unqualified 'a vendor rejection ends rejected' claim survives.
         $this->assertStringNotContainsString('vendor rejection of the PUT ends the intent', $install);

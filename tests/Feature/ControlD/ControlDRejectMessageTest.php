@@ -63,7 +63,7 @@ class ControlDRejectMessageTest extends TestCase
         Setting::setValue('controld_enabled', '1');
         Setting::setEncrypted('controld_api_key', self::KEY);
         Setting::setValue('controld_stats_endpoint', 'synthetic-region');
-        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_expiry_days' => '7',
+        foreach (['tactical_client_field_id' => '18', 'default_profile_id' => 'testprofile01', 'code_profile_id' => '444444synthDD', 'code_expiry_days' => '7',
             'code_device_limit_headroom' => '2', 'code_analytics_level' => '0', 'code_intercept_mode' => 'standard'] as $key => $value) {
             Setting::setValue('controld_'.$key, $value);
         }
@@ -174,7 +174,7 @@ class ControlDRejectMessageTest extends TestCase
         return [
             $this->ok(['sub_organizations' => [$this->listed()]]),
             $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
-            $this->ok(['profiles' => [['PK' => 'testprofile01']]]),
+            $this->ok(['profiles' => [['PK' => '444444synthDD']]]),
         ];
     }
 
@@ -405,7 +405,7 @@ class ControlDRejectMessageTest extends TestCase
             $client = Client::factory()->create(['controld_org_id' => self::ORG]);
             $transport = $this->transport([
                 $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
-                $this->ok(['profiles' => [['PK' => 'testprofile01']]]),
+                $this->ok(['profiles' => [['PK' => '444444synthDD']]]),
                 $this->envelope(40003, 'Zq vendor sentence'),
             ]);
             $writer = new ControlDOnboardingStaged($transport, new ControlDProvisioning($transport));
@@ -651,7 +651,7 @@ class ControlDRejectMessageTest extends TestCase
         $client = Client::factory()->create(['controld_org_id' => self::ORG]);
         $transport = $this->transport([
             $this->ok(['types' => ['os' => ['icons' => ['desktop-windows' => ['name' => 'Windows']]]]]),
-            $this->ok(['profiles' => [['PK' => 'testprofile01']]]),
+            $this->ok(['profiles' => [['PK' => '444444synthDD']]]),
             $this->envelope(40003, 'deactivation_pin 4821 is out of range'),
         ]);
         $writer = new ControlDOnboardingStaged($transport, new ControlDProvisioning($transport));

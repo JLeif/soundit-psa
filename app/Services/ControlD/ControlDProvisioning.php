@@ -211,6 +211,8 @@ class ControlDProvisioning
         // refusal whatever arm (i) would say; arm (i) is consulted only when the PK is not
         // listed at all, read live from the parent's GET sub_organizations with the org
         // listed exactly once, and an unreadable or malformed parent inventory refuses.
+        // Arm (iii) (eGIRKv51) is consulted only after (i) does not match: see
+        // sharedCodeProfile().
         if ($matches > 1) {
             $this->refuse('Enforced profile is listed more than once in this organization\'s own profiles (ambiguous).');
         }
@@ -221,7 +223,7 @@ class ControlDProvisioning
                 $this->refuse('Control D global profile of this organization could not be confirmed.');
             }
             if ($global !== $body['profile_id']) {
-                $this->refuse('Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.');
+                $this->sharedCodeProfile($body['profile_id']);
             }
         }
         if ($body['stats'] !== 0) {
@@ -231,6 +233,67 @@ class ControlDProvisioning
                 || ! is_string($org->stats_endpoint ?? null) || trim($org->stats_endpoint) === '') {
                 $this->refuse('Analytics requires a verified region for this organization.');
             }
+        }
+    }
+
+    /**
+     * Arm (iii) (Jeeves, card eGIRKv51, 2026-10-10 17:1xZ), consulted only when the profile is
+     * neither one of the sub-organization's own profiles (ii) nor its Global Profile (i): accept
+     * the profile only when it equals the configured controld_code_profile_id, differs from the
+     * configured Global Profile, and ONE read-only GET profiles of the MAIN organization (no
+     * X-Force-Org-Id, ControlDClient::requestParent()) lists that PK exactly once with the
+     * `shared` option on (profile.opt.data[] holds exactly one {PK: "shared"} entry and its value
+     * is 1; vendor OpenAPI "Profiles - List"). Anything else refuses with the arms (i)/(ii)
+     * wording plus a reason naming arm (iii). An unreadable or malformed main-organization
+     * inventory or row refuses; it is never read as an empty list.
+     */
+    private function sharedCodeProfile(string $profile): void
+    {
+        $neither = 'Enforced profile is neither this organization\'s global profile nor exactly one of its own profiles.';
+        $configured = ControlDConfig::codeProfileId();
+        if ($configured === null || $profile !== $configured) {
+            $this->refuse($neither.' Arm (iii) does not apply: it is not the configured shared code profile (controld_code_profile_id).');
+        }
+        if ($profile === ControlDConfig::defaultProfileId()) {
+            $this->refuse($neither.' Arm (iii) does not apply: the configured code profile is the global profile.');
+        }
+        $unreadable = $neither.' Arm (iii) could not be confirmed: the main organization\'s profile inventory is unreadable or malformed.';
+        try {
+            $response = $this->client->requestParent('GET', 'profiles');
+        } catch (ControlDClientException) {
+            $this->refuse($unreadable);
+        }
+        $profiles = $response['body']->profiles ?? null;
+        if (! is_array($profiles)) {
+            $this->refuse($unreadable);
+        }
+        $matches = [];
+        foreach ($profiles as $row) {
+            if (! $row instanceof stdClass || ! is_string($row->PK ?? null)) {
+                $this->refuse($unreadable);
+            }
+            if ($row->PK === $profile) {
+                $matches[] = $row;
+            }
+        }
+        if (count($matches) !== 1) {
+            $this->refuse($neither.' Arm (iii) refused: the configured shared code profile is not listed exactly once in the main organization\'s profiles.');
+        }
+        $options = $matches[0]->profile->opt->data ?? null;
+        if (! is_array($options)) {
+            $this->refuse($unreadable);
+        }
+        $shared = [];
+        foreach ($options as $option) {
+            if (! $option instanceof stdClass || ! is_string($option->PK ?? null) || ! is_int($option->value ?? null)) {
+                $this->refuse($unreadable);
+            }
+            if ($option->PK === 'shared') {
+                $shared[] = $option->value;
+            }
+        }
+        if ($shared !== [1]) {
+            $this->refuse($neither.' Arm (iii) refused: the configured code profile is not shared in the main organization.');
         }
     }
 
