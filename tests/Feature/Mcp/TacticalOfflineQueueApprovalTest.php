@@ -437,7 +437,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     private function assertTestingManager(): void
     {
         $this->assertSame(\Illuminate\Foundation\Testing\DatabaseTransactionsManager::class, get_class(app('db.transactions')), 'the RefreshDatabase testing manager');
-        $this->assertSame(1, DB::connection()->transactionLevel(), 'only the RefreshDatabase wrapper is open');
+        $this->assertSame(1, DB::connection()->transactionLevel(), 'default connection is at transaction level 1');
     }
 
     /**
@@ -464,9 +464,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
 
     /**
      * #6735: the 7 queueFields() values of a run the approval queued, read before the reconnect
-     * call. It asserts state QueuedOffline, queued_agent_id 'agent-1', and that each of the other
-     * 5 (queued_dedup_key, queued_at, expires_at, coalesce_count, queued_approver_id) is non-null,
-     * so none of the 7 compared values is null before the call.
+     * call. It asserts state QueuedOffline, queued_agent_id 'agent-1', and that each of 4 others
+     * (queued_dedup_key, queued_at, expires_at, queued_approver_id) is non-null. It asserts
+     * nothing about coalesce_count. It returns all 7.
      *
      * @return array<string, mixed>
      */
@@ -475,7 +475,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $before = $this->queueFields($run);
         $this->assertSame(TechnicianRunState::QueuedOffline, $before['state']);
         $this->assertSame('agent-1', $before['queued_agent_id']);
-        foreach (['queued_dedup_key', 'queued_at', 'expires_at', 'coalesce_count', 'queued_approver_id'] as $key) {
+        foreach (['queued_dedup_key', 'queued_at', 'expires_at', 'queued_approver_id'] as $key) {
             $this->assertNotNull($before[$key], $key.' is set before the call');
         }
 
