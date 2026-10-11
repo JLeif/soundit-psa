@@ -450,7 +450,9 @@ class TeamsMessageAttachmentsTest extends TestCase
 
     /**
      * #6017: at the hosted-content stage the message was already read, so the text says the
-     * attachment content was not read, never that nothing was read.
+     * attachment content was not read, never that nothing was read. #6202 / #6203: every record
+     * on this arm is read, the fetcher's hosted-content warning included (stage and status
+     * keys; C-56: no message text).
      */
     public function test_a_hosted_content_failure_does_not_say_nothing_was_read(): void
     {
@@ -463,7 +465,87 @@ class TeamsMessageAttachmentsTest extends TestCase
         $r = $this->fetch([]);
 
         $this->assertCount(2, $this->graphPaths(), 'positive control: the message read succeeded and the hosted content was requested');
+        $this->assertEveryRecord([
+            [Level::Error, 'Graph API request failed', ['method' => 'GET', 'operation' => 'hostedContents', 'status' => 503]],
+            [Level::Warning, self::ATTACHMENT_READ_FAILED, ['chat_id' => self::CHAT, 'stage' => 'hosted content', 'status' => 503]],
+        ], $logs);
         $this->assertOperatorResult('Teams hosted content read failed (HTTP 503); the attachment content was not read.', $r);
+    }
+
+    /**
+     * #6202: the other graphFailure() arms at the 'hosted content' stage. The message read
+     * succeeded first, so each says the attachment content was not read, never that nothing
+     * was read, and each writes its own hosted-content warning (#6203).
+     *
+     * [the responses after the message read, the number of Graph reads sent, every record, the
+     * operator error]. The token-not-obtained row drops the cached token as the message read is
+     * answered, so the hosted-content read needs a new one and the token endpoint refuses it.
+     * The non-Graph row stands in for a PSA-side throwable raised during the read.
+     *
+     * @return array<string, array{0: \Closure(): list<Response|\Closure|\Throwable>, 1: int, 2: list<array{0: Level, 1: string, 2: array<string, mixed>}>, 3: string}>
+     */
+    public static function hostedContentFailures(): array
+    {
+        $warning = fn (array $keys) => [Level::Warning, self::ATTACHMENT_READ_FAILED, ['chat_id' => self::CHAT, 'stage' => 'hosted content'] + $keys];
+        $refused = fn (int $status) => [Level::Error, 'Graph API request failed', ['method' => 'GET', 'operation' => 'hostedContents', 'status' => $status]];
+        $permission = fn (int $status) => "Teams refused the hosted content read (HTTP {$status}); the attachment content was not read. The status alone does not show why. Ask the operator to check that the PSA's Microsoft Graph app registration has the Chat.Read.All application permission with admin consent; a missing permission is one possible cause.";
+        $tokenRefused = fn () => new Response(400, [], (string) json_encode(['error' => 'invalid_client']));
+        $graph401 = fn () => new Response(401, [], '{}');
+
+        return [
+            'token refresh failed' => [fn () => [$graph401(), $tokenRefused()], 2, [
+                [Level::Error, 'Graph API token request failed', ['status' => 400, 'exception' => ClientException::class]],
+                [Level::Error, 'Graph API request failed', ['method' => 'GET', 'operation' => 'hostedContents', 'status' => 401, 'token_refresh' => 'failed']],
+                $warning(['status' => 401, 'token_refresh' => 'failed']),
+            ], "Teams hosted content read failed: Microsoft Graph answered HTTP 401 and the PSA's Graph token refresh then failed, so no fresh token was obtained; the attachment content was not read."],
+            'token not obtained' => [fn () => [$tokenRefused()], 1, [
+                [Level::Error, 'Graph API token request failed', ['status' => 400, 'exception' => ClientException::class]],
+                $warning(['status' => 0, 'token' => 'not obtained']),
+            ], 'Teams hosted content read failed: the PSA could not obtain a Microsoft Graph access token, so the read was not sent; the attachment content was not read.'],
+            'non-Graph failure' => [fn () => [new \RuntimeException('synthetic PSA-side failure')], 2, [
+                $warning(['exception' => \RuntimeException::class]),
+            ], 'Teams hosted content read failed inside the PSA, not as a Microsoft Graph HTTP error; the attachment content was not read.'],
+            '401 after a successful refresh' => [fn () => [$graph401(), new Response(200, [], (string) json_encode(['access_token' => self::REFRESHED_ACCESS_FIXTURE, 'expires_in' => 3600])), $graph401()], 3, [
+                $refused(401),
+                $warning(['status' => 401]),
+            ], $permission(401)],
+            '403' => [fn () => [new Response(403, [], '{}')], 2, [
+                $refused(403),
+                $warning(['status' => 403]),
+            ], $permission(403)],
+            'status 0 (no response)' => [fn () => [fn (RequestInterface $request) => new \GuzzleHttp\Exception\ConnectException('cURL error 28: synthetic', $request)], 2, [
+                [Level::Error, 'Graph API request failed', ['method' => 'GET', 'operation' => 'hostedContents', 'status' => 0, 'exception' => \GuzzleHttp\Exception\ConnectException::class]],
+                $warning(['status' => 0]),
+            ], 'Teams hosted content read failed with no HTTP status from Microsoft Graph; the attachment content was not read.'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('hostedContentFailures')]
+    public function test_every_hosted_content_failure_arm_says_the_attachment_content_was_not_read(\Closure $after, int $graphReads, array $records, string $error): void
+    {
+        $logs = $this->captureLogs();
+        $message = $this->graphJson($this->imageOnlyMessage());
+        $this->graphQueue(
+            new Response(200, [], (string) json_encode(['access_token' => self::ISSUED_ACCESS_FIXTURE, 'expires_in' => 3600])),
+            $graphReads === 1
+                ? function () use ($message) {
+                    cache()->store('array')->forget('graph_api_token');
+
+                    return $message;
+                }
+            : $message,
+            ...$after(),
+        );
+
+        $r = $this->fetch([]);
+
+        $this->assertSame('/v1.0/chats/'.self::CHAT.'/messages/'.self::MSG, $this->graphPaths()[0], 'positive control: the message read was sent first');
+        $this->assertCount($graphReads, $this->graphPaths(), 'the Graph reads sent: the hosted-content read (twice on the refreshed 401) unless no token was obtained');
+        $this->assertSame(0, $this->queue->count(), 'positive control: every scripted response was consumed');
+        $this->assertEveryRecord($records, $logs);
+        $this->assertNoVendorText($logs->getRecords(), $r);
+        $this->assertOperatorResult($error, $r);
+        $this->assertStringNotContainsString('nothing was read', (string) $r->json('result.content.0.text'));
     }
 
     /**

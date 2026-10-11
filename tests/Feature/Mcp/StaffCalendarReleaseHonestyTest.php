@@ -220,6 +220,8 @@ class StaffCalendarReleaseHonestyTest extends TestCase
         $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
         $records = array_values(array_filter($logged, fn (MessageLogged $m) => str_contains($m->message, 'was not reopened')));
         $this->assertCount(1, $records);
+        // #6201: the level is read too, so a demotion below warning fails here.
+        $this->assertSame('warning', $records[0]->level);
         $this->assertSame(['run_id' => $run->id, 'exception' => \RuntimeException::class], $records[0]->context);
     }
 
