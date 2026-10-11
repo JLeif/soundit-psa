@@ -429,7 +429,8 @@ class TeamsMessageAttachmentsTest extends TestCase
     /**
      * #6012: Graph answered 200 with a JSON body that is not an object, so get()'s array return
      * type throws a TypeError inside the PSA. That is not a Graph failure: the record names the
-     * class and the text does not say Graph gave no status.
+     * class and the text does not say Graph gave no status. #6200: the record carries no status
+     * key, since 0 there means no response arrived and Graph did answer.
      */
     public function test_a_non_graph_failure_after_a_graph_200_is_not_called_a_missing_status(): void
     {
@@ -441,7 +442,7 @@ class TeamsMessageAttachmentsTest extends TestCase
 
         $this->assertCount(1, $this->graphPaths(), 'positive control: Graph was read and answered');
         $this->assertEveryRecord([
-            [Level::Warning, self::ATTACHMENT_READ_FAILED, ['chat_id' => self::CHAT, 'stage' => 'message', 'status' => 0, 'exception' => \TypeError::class]],
+            [Level::Warning, self::ATTACHMENT_READ_FAILED, ['chat_id' => self::CHAT, 'stage' => 'message', 'exception' => \TypeError::class]],
         ], $logs);
         $this->assertStringNotContainsString('no HTTP status', $text);
         $this->assertOperatorResult('Teams message read failed inside the PSA, not as a Microsoft Graph HTTP error; nothing was read.', $r);
