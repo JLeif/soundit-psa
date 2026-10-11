@@ -222,6 +222,39 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $this->assertSame(['action' => 'calendar_stage_create_event', 'status' => 'executed', 'exception' => \RuntimeException::class], $records[0]->context);
     }
 
+    /**
+     * contract:1: the approver label is resolved once after Done, under a guard, so a failed users
+     * read drops neither audit row nor the back-link, and is not reported as a close failure. The
+     * rows carry the "approver:{id}" fallback.
+     */
+    public function test_an_approver_lookup_failure_after_an_approved_write_keeps_the_audit_rows_and_the_back_link(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturn(self::UNREADABLE_EVENT));
+        $approverId = $this->approver->id;
+        User::retrieved(function (User $user) use ($approverId): void {
+            if ((int) $user->getKey() === $approverId) {
+                throw new \RuntimeException('synthetic approver lookup failure');
+            }
+        });
+        $logged = $this->captureLogs();
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $approverId);
+
+        $this->assertSame('executed_with_fault', $r->status);
+        $this->assertSame('Calendar write executed (event EVT-NEW-6264), but the event Microsoft Graph returned could not be read. Do NOT re-approve it; check the calendar.', $r->message);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $rows = TechnicianActionLog::where('run_id', $run->id)->orderBy('id')->get();
+        $this->assertSame(['awaiting_approval', 'executed', 'executed_with_fault'], $rows->pluck('result_status')->all());
+        $this->assertSame(["approver:{$approverId}", "approver:{$approverId}"], [$rows[1]->actor_label, $rows[2]->actor_label]);
+        $this->assertStringContainsString('calendar event EVT-NEW-6264 in', (string) TicketNote::where('ticket_id', $run->ticket_id)->value('body'), 'the back-link records the event id');
+        $this->assertSame([], self::matching($logged(), 'closing the run failed'));
+        $records = self::matching($logged(), 'approver lookup failed');
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame(['run_id' => $run->id, 'exception' => \RuntimeException::class], $records[0]->context);
+    }
+
     public function test_an_immediate_create_graph_answered_but_the_psa_could_not_read_is_reported_landed(): void
     {
         $ticket = Ticket::factory()->create();

@@ -1104,10 +1104,19 @@ class StaffCalendarToolExecutor
             // reads it. #6511: the audit rows come before the back-link, so a back-link
             // failure cannot drop them. contract:1: each row is best-effort (safeAudit()), as on
             // the immediate path, so a failed audit insert drops neither the next row nor the
-            // back-link, which carries the event id.
-            $this->safeAudit($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
+            // back-link, which carries the event id. The approver label (a users read) is resolved
+            // once under a guard, so a failed lookup drops none of them either.
+            try {
+                $label = $this->approverLabel($approverId);
+            } catch (\Throwable $lookup) {
+                Log::error('[Calendar] approver lookup failed after an approved calendar write', [
+                    'run_id' => $run->id, 'exception' => $lookup::class,
+                ]);
+                $label = "approver:{$approverId}";
+            }
+            $this->safeAudit($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $label, $run->id, $approverId);
             if ($projectionFault !== null) {
-                $this->safeAudit($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, "Operator-approved calendar write EXECUTED (event {$eventId}), but the event Microsoft Graph returned could not be read ({$projectionFault}). Do NOT re-approve; check the calendar.", $this->approverLabel($approverId), $run->id, $approverId);
+                $this->safeAudit($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, "Operator-approved calendar write EXECUTED (event {$eventId}), but the event Microsoft Graph returned could not be read ({$projectionFault}). Do NOT re-approve; check the calendar.", $label, $run->id, $approverId);
             }
 
             try {
