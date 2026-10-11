@@ -85,7 +85,11 @@ class ReleaseClaimOwnerFenceTest extends TestCase
         $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state);
     }
 
-    /** releaseClaimTo() (the reconnect-run path) carries the same fence. */
+    /**
+     * releaseClaimTo() carries the same fence for an instance claimed through
+     * claimForExecution(). The reconnect-run claim (claimQueuedForExecution()) is covered by
+     * the two #6189 tests below.
+     */
     public function test_release_claim_to_carries_the_same_fence(): void
     {
         $this->travelTo(now()->startOfSecond());
@@ -98,6 +102,89 @@ class ReleaseClaimOwnerFenceTest extends TestCase
 
         $this->assertFalse($a->releaseClaimTo(TechnicianRunState::QueuedOffline));
         $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state);
+    }
+
+    /**
+     * #6189: a run claimed through claimQueuedForExecution() (QueuedOffline to Executing) is
+     * released to QueuedOffline under the stamp that claim wrote: the owner's release wins. A
+     * stale instance whose run was re-queued and claimed again a second later loses, and the
+     * re-claim stays in place.
+     */
+    public function test_a_queued_claim_releases_to_queued_offline_only_for_its_owner(): void
+    {
+        $this->travelTo(now()->startOfSecond());
+        $run = $this->queuedRun();
+        $owner = TechnicianRun::findOrFail($run->id);
+        $this->assertNull($owner->claimed_at, 'positive control: the loaded instance carries no stamp before its claim');
+        $this->assertTrue($owner->claimQueuedForExecution(), 'the owner claims');
+        $this->assertTrue($run->fresh()->claimed_at->equalTo($owner->claimed_at), 'the instance carries the stamp its claim wrote');
+
+        $this->assertTrue($owner->releaseClaimTo(TechnicianRunState::QueuedOffline), "the owner's release wins");
+        $this->assertSame(TechnicianRunState::QueuedOffline, $run->fresh()->state);
+        $this->assertSame(TechnicianRunState::QueuedOffline, $owner->state);
+
+        // Stale: A claims, the run is re-queued, B claims it a second later.
+        $a = TechnicianRun::findOrFail($run->id);
+        $this->assertTrue($a->claimQueuedForExecution(), 'A claims');
+        TechnicianRun::whereKey($run->id)->update(['state' => TechnicianRunState::QueuedOffline->value]);
+        $this->travel(1)->seconds();
+        $b = TechnicianRun::findOrFail($run->id);
+        $this->assertTrue($b->claimQueuedForExecution(), 'B claims');
+
+        $this->assertFalse($a->releaseClaimTo(TechnicianRunState::QueuedOffline), "A's stale release loses");
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, "B's claim is still in place");
+        $this->assertTrue($run->fresh()->claimed_at->equalTo($b->claimed_at), "the row still carries B's stamp");
+        $this->assertSame(TechnicianRunState::Executing, $a->state, 'A is not told it moved the run');
+
+        $this->assertTrue($b->releaseClaimTo(TechnicianRunState::QueuedOffline), "positive control: B's own release wins");
+        $this->assertSame(TechnicianRunState::QueuedOffline, $run->fresh()->state);
+    }
+
+    /**
+     * #6189: the real reconnect caller. StaffTacticalActionToolExecutor::runQueuedOnReconnect()
+     * claims through claimQueuedForExecution() and, on a payload it cannot read, releases with
+     * releaseClaimTo(QueuedOffline). With the claim its own, the run goes back to the queue,
+     * not stranded in Executing. When another claim's stamp is written to the row after this
+     * claim (the run stays Executing under that claim), the caller's release loses and that
+     * claim stays in place.
+     */
+    public function test_the_reconnect_run_caller_releases_its_own_claim_and_not_a_later_one(): void
+    {
+        \App\Models\Setting::setValue('tactical_api_url', 'https://tactical.example.test');
+        \App\Models\Setting::setEncrypted('tactical_api_key', 'synthetic-6189');
+        $executor = app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class);
+        $this->travelTo(now()->startOfSecond());
+
+        $run = $this->queuedRun('tactical_stage_reboot');
+        $result = $executor->runQueuedOnReconnect(TechnicianRun::findOrFail($run->id));
+        $this->assertSame('gate_declined', $result->status, 'positive control: the claim was taken and the unreadable-payload arm ran');
+        $this->assertSame(TechnicianRunState::QueuedOffline, $run->fresh()->state, 'released back to the queue, not stranded in Executing');
+        $this->assertNotNull($run->fresh()->claimed_at, 'positive control: the claim stamped the row');
+
+        $this->travel(1)->seconds();
+        $later = now()->addMinute();
+        $moved = false;
+        \Illuminate\Support\Facades\DB::listen(function (\Illuminate\Database\Events\QueryExecuted $q) use ($run, $later, &$moved): void {
+            if (! $moved && str_starts_with(strtolower($q->sql), 'update') && str_contains($q->sql, 'technician_runs')
+                && in_array(TechnicianRunState::Executing->value, $q->bindings, true)) {
+                $moved = true;
+                \Illuminate\Support\Facades\DB::table('technician_runs')->where('id', $run->id)->update(['claimed_at' => $later]);
+            }
+        });
+
+        $executor->runQueuedOnReconnect(TechnicianRun::findOrFail($run->id));
+        $this->assertTrue($moved, 'positive control: the other claim was written after this claim');
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, "the caller's release lost; the other claim stays");
+        $this->assertTrue($run->fresh()->claimed_at->equalTo($later));
+    }
+
+    /** A run parked in the offline queue, with no stamp and an unexpired window. */
+    private function queuedRun(string $actionType = 'calendar_stage_cancel_event'): TechnicianRun
+    {
+        $run = $this->awaitingRun(null, TechnicianRunState::QueuedOffline);
+        $run->update(['action_type' => $actionType, 'queued_agent_id' => 'agent-6189', 'queued_at' => now(), 'expires_at' => now()->addDays(7)]);
+
+        return $run;
     }
 
     /**

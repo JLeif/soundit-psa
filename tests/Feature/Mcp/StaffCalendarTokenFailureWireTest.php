@@ -251,8 +251,10 @@ class StaffCalendarTokenFailureWireTest extends TestCase
      *
      * #6186: the audit row's detail is the wrapped exception's class and status only. The
      * malformed-event row (200 with no id) is a GraphShapeDriftException with no status.
+     * #6199: the no-response row (ConnectException, Graph never answered) is a
+     * GraphClientException with no status; it is wrapped and reopens the same way.
      *
-     * @return array<string, array{0: \Closure(): list<Response>, 1: string}>
+     * @return array<string, array{0: \Closure(): list<Response|\Closure>, 1: string}>
      */
     public static function preReadFailures(): array
     {
@@ -260,6 +262,7 @@ class StaffCalendarTokenFailureWireTest extends TestCase
             '401, refresh fails' => [fn () => [self::tokenIssued(), new Response(401, [], '{}'), self::tokenRefused(), self::spare()], 'GraphTokenRefreshFailedException (HTTP status 401)'],
             '500' => [fn () => [self::tokenIssued(), new Response(500, [], '{}'), self::spare()], 'GraphClientException (HTTP status 500)'],
             'malformed event' => [fn () => [self::tokenIssued(), new Response(200, ['Content-Type' => 'application/json'], '{}'), self::spare()], 'GraphShapeDriftException (no HTTP status)'],
+            'no response' => [fn () => [self::tokenIssued(), fn (RequestInterface $request) => new \GuzzleHttp\Exception\ConnectException('cURL error 7: synthetic', $request), self::spare()], 'GraphClientException (no HTTP status)'],
         ];
     }
 
@@ -282,7 +285,11 @@ class StaffCalendarTokenFailureWireTest extends TestCase
         $this->assertSame(0, TechnicianActionLog::where('summary', 'like', '%indeterminate%')->count());
     }
 
-    /** #6121 / #6016: on the pre-read arm too, a lost CAS is not reported as a reopen. */
+    /**
+     * #6121 / #6016: on the pre-read arm too, a lost CAS is not reported as a reopen. #6195: a
+     * spare is queued after the failing GET, so a PATCH sent anyway would take it and be
+     * recorded; the history is exactly the one GET.
+     */
     public function test_a_failed_update_pre_read_whose_release_loses_does_not_say_reopened(): void
     {
         $run = $this->staged('calendar_stage_update_event', self::writes()['update with a body'][2]);
@@ -290,13 +297,15 @@ class StaffCalendarTokenFailureWireTest extends TestCase
             TechnicianRun::whereKey($run->id)->update(['state' => TechnicianRunState::Flagged->value]);
 
             return new Response(500, [], '{}');
-        });
+        }, self::spare());
 
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run, $this->approver->id);
 
         $this->assertSame('The calendar update was not sent: reading the event before the update failed. Nothing was written to the calendar; the run was not reopened; check its current state before acting on it again.', $r->message);
         $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
-        $this->assertSame(['GET'], array_map(fn (RequestInterface $q) => $q->getMethod(), $this->requestsTo('graph.microsoft.com')));
+        $this->assertSame(['GET'], array_map(fn (RequestInterface $q) => $q->getMethod(), $this->requestsTo('graph.microsoft.com')), 'only the pre-read was sent');
+        $this->assertCount(1, $this->mock, 'the spare response is still queued: no PATCH');
+        $this->assertCount(2, $this->history, 'the token request and the GET, nothing else');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('preReadFailures')]
@@ -308,6 +317,7 @@ class StaffCalendarTokenFailureWireTest extends TestCase
         $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', self::writes()['update with a body'][2] + ['ticket_id' => $ticket->id], 0, 'mcp-staff:chet');
 
         $this->assertSame(['GET'], array_map(fn (RequestInterface $q) => $q->getMethod(), $this->requestsTo('graph.microsoft.com')));
+        $this->assertCount(1, $this->mock, 'the spare response is still queued: no PATCH');
         $this->assertSame(['error' => 'The calendar update was not sent: reading the event before the update failed. Nothing was written to the calendar, so a retry cannot duplicate it.'], $result);
         $this->assertSame(0, TechnicianActionLog::where('summary', 'like', '%indeterminate%')->count());
         $this->assertSame(
