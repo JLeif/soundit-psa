@@ -1773,8 +1773,10 @@ automatic beyond what its single approval runs, and nothing is retried on its ow
 
 1. **Settings (operator, once per instance).** On Settings → Integrations → Control D:
    complete the Client Onboarding Defaults and turn on **Client onboarding enabled**. Set the
-   Global Profile (`controld_default_profile_id`). For a deploy, also set the Tactical
-   client custom field ID and the Tactical deploy script ID. Then set
+   Global Profile (`controld_default_profile_id`) and the Tactical client custom field ID: the
+   field ID is one of the six required onboarding defaults even when no deploy is planned, and
+   while it is unset `ControlDConfig::isOnboardingActive()` stays false. For a deploy, also set
+   the Tactical deploy script ID. Then set
    **`controld_code_profile_id`**. It has **no panel field**, so set it directly in the
    `settings` table (key `controld_code_profile_id`). Its value is the PK of a profile in the
    MAIN organization that is toggled Shared and differs from the Global Profile; a blank
@@ -1797,18 +1799,31 @@ automatic beyond what its single approval runs, and nothing is retried on its ow
    proposal; staging again proposes only the steps not yet bound. `done` alone is not success:
    read the result, and the client page's Control D card, for the failed step. An `executed`
    label in the tool history is not proof either: one approval can write more than one
-   `executed` row (the plan and its code step), which can look like two codes. The proof is
-   the state of the client's rows in `controld_onboarding_intents`.
-4. **An `uncertain` step goes to Reconcile (an Admin, on the client page).** It is never
-   retried and never re-staged over. **Reconcile with Control D** re-reads the vendor state
-   (GETs only) and binds when that state matches the intent, or releases it otherwise (see
-   **Reconcile** above).
+   `executed` row (the plan and its code step), which can look like two codes. For the
+   organization, global-profile and code steps the proof is the state of the client's rows in
+   `controld_onboarding_intents`; the deploy step writes no intent row (see step 5).
+4. **An `uncertain` organization, global-profile or code step goes to Reconcile (an Admin, on
+   the client page).** It is never retried and never re-staged over. **Reconcile with Control
+   D** re-reads the vendor state (GETs only). It binds the intent when that state matches it and
+   releases it only when Control D shows the object absent. On any other read (for example a
+   mismatch, more than one candidate, an inactive code or a failed read) it refuses and changes
+   nothing, and the intent keeps the client's lock, so staging again is refused (see
+   **Reconcile** above). An `uncertain` invalidate intent or a `posted` intent cannot be
+   reconciled: it is held for a by-hand ruling, and there is no in-app way out for it yet. A
+   refused reconcile also goes to a by-hand ruling, never to a re-stage. A deploy step that ends
+   `uncertain` holds no lock and needs no reconcile: check the devices and the client's
+   `controld_org_id` custom field in Tactical.
 5. **The Tactical deploy (owner-approved, never automatic).** Writing the code into the
-   Tactical client custom field is the deploy trigger for every agent under that client. It
-   happens only through the plan's `deploy` step (chosen at staging, run by the same one
-   approval) or through a separately staged `tactical_set_client_custom_field` write for the
-   `controld_org_id` key, which the owner approves in the cockpit. Both write the same field.
-   Neither is run by the PSA on its own; if neither is chosen, no Tactical request is made.
+   Tactical client custom field is the deploy trigger for every agent under that client. The
+   runbook writes it only through the plan's `deploy` step (chosen at staging, run by the same
+   one approval) or through a separately staged `tactical_set_client_custom_field` write for
+   the `controld_org_id` key, which the owner approves in the cockpit. Both write the same
+   field, and neither staged path runs on its own. `tactical_set_client_custom_field` also has
+   an explicit `:immediate` grant lane that writes the field unstaged (`staged=false`), with a
+   caller-supplied value and no refusal when the field already holds a different value. This
+   runbook never uses that lane. Granting it is the owner's call; audit any such grant as a
+   fleet-wide deploy trigger. A deploy writes no intent row, so read it back in Tactical: the
+   client's `controld_org_id` custom field and the deploy script run on the client's agents.
 6. **Undo (the owner's call).** Only the provisioning code can be undone from the PSA:
    **Stage invalidating this code for approval** on the client page, then a second Admin
    approves (see **Invalidate code** above). Devices already enrolled stay enrolled, and the
@@ -1825,8 +1840,10 @@ device profile there: a code cut with it was rejected with error 40003 ("This Pr
 not exist") and nothing was created. A shared main-organization profile works. It does not
 appear in the sub-organization's own profile list, so the code preflight accepts it through
 arm (iii). The first approved run with it bound its code. **Read-back after an approved
-run:** the result names no failed step; `controld_onboarding_intents` holds one `bound` row
-for each step that ran, with the organization id the client record carries; and the client
+run:** the result names no failed step. `controld_onboarding_intents` holds one `bound` row
+for each organization or code step that ran, with the organization id the client record
+carries. A global-profile row is `bound`, or `released` when the profile was already enforced
+(a no-op). A deploy writes no row, so check it in Tactical (step 5). The client
 record holds a stored code, which is never displayed. **Optional vendor-side read-back:** one
 read-only GET `provision` scoped to the client's sub-organization (`X-Force-Org-Id`) should list
 exactly one active code, whose `profile_id` is `controld_code_profile_id` and whose device
