@@ -414,6 +414,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     /** #6508 / #6516: the decline when a database transaction is open around the queue write. */
     private const NOT_QUEUED_OUTER_TRANSACTION_TEXT = "The Tactical call was classified as device offline, and the action was not queued: this request was running inside an open database transaction. Check the run's current state before acting on it again.";
 
+    /** #6508 / #6516: the same decline on a reconnect-run, whose run stays queued. */
+    private const QUEUE_NOT_UPDATED_OUTER_TRANSACTION_TEXT = "The Tactical call was classified as device offline on a queued re-run, and this request did not update the offline queue: it was running inside an open database transaction. Check the run's current state before acting on it again.";
+
     /** @return \Closure(): list<MessageLogged> */
     private function captureLogs(): \Closure
     {
@@ -459,7 +462,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     /**
      * #6508: the guard counts transactions on the run's connection beyond the RefreshDatabase
      * wrapper, so the same approval with no outer transaction is queued (the guard's negative
-     * control on the same fixture), and the reconnect path is guarded the same way.
+     * control on the same fixture), and the reconnect path is guarded too. Its run goes back to
+     * QueuedOffline with its queue entry intact, so neither its result nor its audit row may say
+     * it was not queued.
      */
     public function test_the_outer_transaction_guard_does_not_fire_without_one_and_guards_the_reconnect_run(): void
     {
@@ -475,8 +480,15 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $result = DB::transaction(fn () => $executor->runQueuedOnReconnect($run->fresh()));
 
         $this->assertSame('gate_declined', $result->status);
-        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT, $result->message);
-        $this->assertSame(TechnicianRunState::QueuedOffline, $run->fresh()->state, 'released back to the queue it came from');
+        $this->assertSame(self::QUEUE_NOT_UPDATED_OUTER_TRANSACTION_TEXT, $result->message);
+        $this->assertStringNotContainsString('not queued', (string) $result->message);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
+        $this->assertSame('agent-1', $fresh->queued_agent_id, 'its queue entry is untouched');
+        $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->get();
+        $this->assertCount(1, $rows, 'the reconnect-run guard decline is audited once');
+        $this->assertStringContainsString('offline queue not updated: a database transaction was open around this request.', (string) $rows->first()->summary);
+        $this->assertStringNotContainsString('not queued', (string) $rows->first()->summary);
     }
 
     /**

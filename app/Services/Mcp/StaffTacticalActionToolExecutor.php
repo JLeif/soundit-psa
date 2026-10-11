@@ -57,6 +57,13 @@ class StaffTacticalActionToolExecutor
      */
     private const NOT_QUEUED_OUTER_TRANSACTION = 'The Tactical call was classified as device offline, and the action was not queued: this request was running inside an open database transaction. Check the run\'s current state before acting on it again.';
 
+    /**
+     * #6508 / #6516: the same decline on a reconnect-run. That run was queued before this request
+     * and is released back to QueuedOffline with its queue fields untouched, so it is not told it
+     * was not queued.
+     */
+    private const QUEUE_NOT_UPDATED_OUTER_TRANSACTION = 'The Tactical call was classified as device offline on a queued re-run, and this request did not update the offline queue: it was running inside an open database transaction. Check the run\'s current state before acting on it again.';
+
     /** @var array<int, string> */
     private const UPSTREAM_IDENTIFIER_KEYS = [
         'agent_id',
@@ -461,9 +468,12 @@ class StaffTacticalActionToolExecutor
      * database transaction is open around this method, so parkOrCoalesce()'s DB::transaction is
      * the outermost one and has committed before the audit row is written. The premise is
      * enforced, not assumed: outerTransactionOpen() checks it before the queue write, and when it
-     * fails nothing is queued, the bus status is audited with a not-queued summary, the claim is
-     * released to $releaseState as when the offline queue is disabled, and the result is a decline
-     * (NOT_QUEUED_OUTER_TRANSACTION). With the premise holding, an audit insert failure cannot
+     * fails this request writes nothing to the queue, the bus status is audited, the claim is
+     * released to $releaseState as when the offline queue is disabled, and the result is a decline.
+     * A live approval is told it was not queued (NOT_QUEUED_OUTER_TRANSACTION); a reconnect-run,
+     * released back to QueuedOffline with its queue fields untouched, is told that the queue was
+     * not updated (QUEUE_NOT_UPDATED_OUTER_TRANSACTION), and its audit summary says the same.
+     * With the premise holding, an audit insert failure cannot
      * undo the queue outcome: it is caught and logged by class only (C-56: a QueryException's
      * message carries the INSERT's bound values), and the result is the normal-path result with
      * the AUDIT_NOT_WRITTEN note appended to its message (#6512). #6521: the cockpit renders
@@ -477,6 +487,9 @@ class StaffTacticalActionToolExecutor
     private function enqueueOfflineRun(TechnicianRun $run, string $agentId, string $directTool, array $params, int $approverId, Ticket $ticket, Asset $asset, TacticalActionResult $busResult, TechnicianRunState $releaseState): TechnicianApprovalResult
     {
         if ($this->outerTransactionOpen($run)) {
+            // A reconnect-run is released back to QueuedOffline with its queue fields intact, so
+            // only a live approval may be told it was not queued.
+            $requeued = $releaseState === TechnicianRunState::QueuedOffline;
             Log::error('[Tactical] offline queue refused: a database transaction is open around the queue write', [
                 'run_id' => $run->id, 'status' => $busResult->status,
             ]);
@@ -487,14 +500,16 @@ class StaffTacticalActionToolExecutor
                 $ticket,
                 $asset,
                 $run->content_hash,
-                "Operator-approved {$run->action_type} {$busResult->status}; not queued: a database transaction was open around this request.",
+                $requeued
+                    ? "Operator-approved {$run->action_type} {$busResult->status}; offline queue not updated: a database transaction was open around this request."
+                    : "Operator-approved {$run->action_type} {$busResult->status}; not queued: a database transaction was open around this request.",
                 $this->approverLabel($approverId),
                 $run->id,
                 $approverId,
             );
             $run->releaseClaimTo($releaseState);
 
-            return new TechnicianApprovalResult('gate_declined', message: self::NOT_QUEUED_OUTER_TRANSACTION);
+            return new TechnicianApprovalResult('gate_declined', message: $requeued ? self::QUEUE_NOT_UPDATED_OUTER_TRANSACTION : self::NOT_QUEUED_OUTER_TRANSACTION);
         }
 
         $dedupKey = $this->queueDedupKey($agentId, $directTool, $params);
