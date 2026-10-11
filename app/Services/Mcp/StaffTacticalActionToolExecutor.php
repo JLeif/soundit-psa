@@ -480,6 +480,10 @@ class StaffTacticalActionToolExecutor
      * fixed text for queued_offline and does not show that message, so on the queued arm the
      * note reaches the result, not the approver.
      *
+     * The guard arm's audit insert is best-effort like the other two (r1 diff:4): if it throws,
+     * its class is logged, the claim is still released and the decline still returned, with the
+     * AUDIT_NOT_WRITTEN note appended to its message.
+     *
      * #6312 scenario (b): when parkOrCoalesce() itself throws, a best-effort audit row records
      * the bus status and that the queue write raised an error; the exception is then rethrown
      * unchanged, and executeClaimedRun()'s catch releases the claim as before.
@@ -493,23 +497,31 @@ class StaffTacticalActionToolExecutor
             Log::error('[Tactical] offline queue refused: a database transaction is open around the queue write', [
                 'run_id' => $run->id, 'status' => $busResult->status,
             ]);
-            $this->auditAttempt(
-                $run->action_type,
-                $busResult->status,
-                (int) $run->client_id,
-                $ticket,
-                $asset,
-                $run->content_hash,
-                $requeued
-                    ? "Operator-approved {$run->action_type} {$busResult->status}; offline queue not updated: a database transaction was open around this request."
-                    : "Operator-approved {$run->action_type} {$busResult->status}; not queued: a database transaction was open around this request.",
-                $this->approverLabel($approverId),
-                $run->id,
-                $approverId,
-            );
+            $declined = new TechnicianApprovalResult('gate_declined', message: $requeued ? self::QUEUE_NOT_UPDATED_OUTER_TRANSACTION : self::NOT_QUEUED_OUTER_TRANSACTION);
+            try {
+                $this->auditAttempt(
+                    $run->action_type,
+                    $busResult->status,
+                    (int) $run->client_id,
+                    $ticket,
+                    $asset,
+                    $run->content_hash,
+                    $requeued
+                        ? "Operator-approved {$run->action_type} {$busResult->status}; offline queue not updated: a database transaction was open around this request."
+                        : "Operator-approved {$run->action_type} {$busResult->status}; not queued: a database transaction was open around this request.",
+                    $this->approverLabel($approverId),
+                    $run->id,
+                    $approverId,
+                );
+            } catch (\Throwable $auditError) {
+                Log::error('[Tactical] offline queue audit row not written', [
+                    'run_id' => $run->id, 'status' => $busResult->status, 'exception' => $auditError::class,
+                ]);
+                $declined = self::withAuditNotWritten($declined);
+            }
             $run->releaseClaimTo($releaseState);
 
-            return new TechnicianApprovalResult('gate_declined', message: $requeued ? self::QUEUE_NOT_UPDATED_OUTER_TRANSACTION : self::NOT_QUEUED_OUTER_TRANSACTION);
+            return $declined;
         }
 
         $dedupKey = $this->queueDedupKey($agentId, $directTool, $params);
@@ -571,8 +583,10 @@ class StaffTacticalActionToolExecutor
      * #6508 / #6516: whether a database transaction is open around the caller on the run's
      * connection. It asks the connection's transaction manager, whose
      * callbackApplicableTransactions() is the framework's own count of transactions that
-     * decide a commit: every pending one in production, and every one except the wrapping
-     * RefreshDatabase transaction under test. A raw DB::transactionLevel() reads 1 in tests,
+     * decide a commit: every pending one under the base manager production binds, and every
+     * one except the wrapping RefreshDatabase transaction under test. The base-manager branch
+     * is exercised by TacticalOfflineQueueProductionTransactionTest, which runs without
+     * RefreshDatabase (no outer transaction: queued; exactly one: declined). A raw DB::transactionLevel() reads 1 in tests,
      * so it cannot be compared against a fixed 0. Without a bound manager it falls back to
      * that raw level, which can only over-report an open transaction (fail closed).
      */

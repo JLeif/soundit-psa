@@ -359,8 +359,10 @@ class TacticalOfflineQueueApprovalTest extends TestCase
      * queued_offline result (never an error) with the audit-not-written note as its message
      * (#6512: derived, not a second copy of queued text); one error line names the exception's
      * class only (C-56). #6519: under RefreshDatabase this test can observe that the queue write
-     * is visible on this connection, not that it committed; the no-outer-transaction premise
-     * that makes it commit in production is pinned by the outer-transaction tests below. #6521:
+     * is visible on this connection, not that it committed. The outer-transaction tests below
+     * measure the guard under the RefreshDatabase testing manager only; the guard under the
+     * base manager production binds (no outer transaction: queued; exactly one: declined) is
+     * measured by TacticalOfflineQueueProductionTransactionTest. #6521:
      * the cockpit does not render this message for queued_offline, so this is the service-layer
      * result, not what the approver sees.
      */
@@ -462,7 +464,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     /**
      * #6508: the guard counts transactions on the run's connection beyond the RefreshDatabase
      * wrapper, so the same approval with no outer transaction is queued (the guard's negative
-     * control on the same fixture), and the reconnect path is guarded too. Its run goes back to
+     * control on the same fixture, under the testing manager only), and the reconnect path is
+     * guarded too. Its run goes back to
      * QueuedOffline with its queue entry intact, so neither its result nor its audit row may say
      * it was not queued.
      */
@@ -489,6 +492,34 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertCount(1, $rows, 'the reconnect-run guard decline is audited once');
         $this->assertStringContainsString('offline queue not updated: a database transaction was open around this request.', (string) $rows->first()->summary);
         $this->assertStringNotContainsString('not queued', (string) $rows->first()->summary);
+    }
+
+    /**
+     * r1 diff:4: on the guard arm, the not-queued audit insert throws. The claim is still
+     * released for re-approval, the decline is still returned (not an exception) with the
+     * audit-not-written note, and one error line names the exception's class only (C-56).
+     */
+    public function test_an_outer_transaction_decline_whose_audit_insert_fails_still_declines_and_releases(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $this->offlineClient();
+        $logged = $this->failTheAuditInsert('offline');
+
+        $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
+
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT.' '.self::AUDIT_NOT_WRITTEN, $result->message);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $fresh->state, 'the claim is released for re-approval');
+        $this->assertNull($fresh->queued_agent_id, 'nothing was queued');
+        $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->count(), 'positive control: the insert really failed');
+        $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'audit row not written')));
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame(['run_id' => $run->id, 'status' => 'offline', 'exception' => \RuntimeException::class], $records[0]->context);
+        $this->assertStringNotContainsString('SECRET-6312-MARKER', json_encode(array_map(fn (MessageLogged $m) => [$m->message, $m->context], $logged())) ?: '');
     }
 
     /**
