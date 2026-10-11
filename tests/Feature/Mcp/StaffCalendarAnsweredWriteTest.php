@@ -116,10 +116,77 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $this->assertSame('error', $records[0]->level);
         $this->assertSame(['tool' => $directTool, 'exception' => \TypeError::class, 'file' => 'app/Services/Mcp/StaffCalendarToolExecutor.php'], array_diff_key($records[0]->context, ['line' => 0]));
         $this->assertSame([], self::matching($logged(), 'unresolved'));
+        // #6509/#6514/#6518: the 'executed' row is written, then the fault row, as on the immediate path.
+        $this->assertSame(
+            ['awaiting_approval', 'executed', 'executed_with_fault'],
+            TechnicianActionLog::where('run_id', $run->id)->orderBy('id')->pluck('result_status')->all(),
+        );
 
-        // The landed write is not re-staged: its run is Done, which stageWrite() never revives.
+        // The landed write is not re-staged, and the audit-row guard (run_id null) refuses it
+        // before the Done-run check is reached.
         $again = app(StaffCalendarToolExecutor::class)->execute($stagedTool, $arguments + ['ticket_id' => $run->ticket_id], 0, 'mcp-staff:chet', 'chet');
         $this->assertTrue($again['already_executed'] ?? false);
+        $this->assertNull($again['run_id']);
+        $this->assertSame('This exact calendar write already executed; not staged.', $again['message']);
+    }
+
+    /**
+     * #6518: the audit-row guard alone refuses a re-stage of a landed write with a projection
+     * fault. The run is moved off Done (as another path could), so the Done-run check in
+     * stageWrite() no longer catches it; no second run is staged and nothing is re-approvable.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('answeredWrites')]
+    public function test_an_approved_write_with_a_projection_fault_is_refused_by_the_audit_row_guard(array $arguments, string $stagedTool, string $directTool, string $writeMethod): void
+    {
+        $run = $this->staged($arguments, $stagedTool);
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive($writeMethod)->once()->andReturn(self::UNREADABLE_EVENT));
+        $this->assertSame('executed_with_fault', app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id)->status);
+        TechnicianRun::whereKey($run->id)->update(['state' => TechnicianRunState::Denied->value]);
+
+        $again = app(StaffCalendarToolExecutor::class)->execute($stagedTool, $arguments + ['ticket_id' => $run->ticket_id], 0, 'mcp-staff:chet', 'chet');
+
+        $this->assertSame(['success' => true, 'staged' => false, 'idempotent' => true, 'already_executed' => true, 'run_id' => null, 'ticket_id' => $run->ticket_id, 'message' => 'This exact calendar write already executed; not staged.'], $again);
+        $this->assertSame(TechnicianRunState::Denied, $run->fresh()->state, 'the run is not revived');
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'awaiting_approval')->count(), 'nothing re-staged');
+    }
+
+    /**
+     * #6511: the audit rows are written before the back-link, so a back-link failure leaves the
+     * 'executed' row and (on a projection fault) the fault row, then the bookkeeping error row.
+     * The approver text is unchanged.
+     *
+     * @return array<string, array{0: array<string, mixed>, 1: list<string>, 2: string, 3: string}>
+     */
+    public static function backlinkFailures(): array
+    {
+        return [
+            'projection fault' => [self::UNREADABLE_EVENT, ['awaiting_approval', 'executed', 'executed_with_fault', 'error'], 'executed_with_fault', 'Calendar write executed (event EVT-NEW-6264), but the event Microsoft Graph returned could not be read. Do NOT re-approve it; check the calendar.'],
+            'no fault' => [['id' => 'EVT-NEW-6511', 'subject' => 'Onsite'], ['awaiting_approval', 'executed', 'error'], 'executed', 'Calendar write executed after approval.'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('backlinkFailures')]
+    public function test_a_back_link_failure_after_an_approved_write_keeps_the_audit_rows(array $event, array $statuses, string $status, string $message): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturn($event));
+        TicketNote::creating(function (): void {
+            throw new \RuntimeException('synthetic back-link failure');
+        });
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame($status, $r->status);
+        $this->assertSame($message, $r->message);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $this->assertSame(0, TicketNote::where('ticket_id', $run->ticket_id)->count(), 'the back-link was not written');
+        $rows = TechnicianActionLog::where('run_id', $run->id)->orderBy('id')->get();
+        $this->assertSame($statuses, $rows->pluck('result_status')->all());
+        $this->assertSame('Operator-approved calendar write executed.', $rows[1]->summary);
+        $this->assertSame('Calendar write EXECUTED but post-write back-link/audit failed (RuntimeException) — run left Done; verify the ticket record manually.', $rows->last()->summary);
+        if ($status === 'executed_with_fault') {
+            $this->assertSame('Operator-approved calendar write EXECUTED (event EVT-NEW-6264), but the event Microsoft Graph returned could not be read (TypeError). Do NOT re-approve; check the calendar.', $rows[2]->summary);
+        }
     }
 
     public function test_an_immediate_create_graph_answered_but_the_psa_could_not_read_is_reported_landed(): void
