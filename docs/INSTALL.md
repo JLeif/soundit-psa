@@ -1555,8 +1555,8 @@ nothing written at Control D; that code intent stays `staged` and holds the clie
 onboarding lock until an Admin releases it from the client page. The first approved
 production run (card eGIRKv51) proved that POST `/provision` accepts a shared main-organization
 profile through arm (iii): the code was cut and bound. A vendor refusal of that POST is still
-recorded as usual. Rollback: clearing the setting stops the code step at staging;
-reverting this change restores the old behaviour (code cut with the Global Profile).
+recorded as usual. Rollback: clear `controld_code_profile_id` and the code step stops at staging.
+Do not revert to the Global Profile: Control D refuses a code cut with it (error 40003).
 
 Capability is observed ONLY at the intended write. HTTP403 with vendor `success:false`
 and integer `error.code:40301` records terminal `rejected`, phase `post`, reason code
