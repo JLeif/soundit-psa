@@ -16,6 +16,8 @@ use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Psr\Log\LoggerInterface;
 use Tests\TestCase;
 
 /**
@@ -333,11 +335,11 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $approverId);
 
         $this->assertSame('executed_with_fault', $r->status);
-        $this->assertSame('Calendar write executed, but closing the run failed. Do NOT re-approve it; check the calendar and the run.', $r->message);
+        $this->assertSame('Calendar write executed (event EVT-NEW-6653), but closing the run failed. Do NOT re-approve it; check the calendar and the run.', $r->message);
         $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not reopened');
         $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', '!=', 'awaiting_approval')->orderBy('id')->get();
         $this->assertSame(['executed_with_fault'], $rows->pluck('result_status')->all());
-        $this->assertSame('Calendar write EXECUTED, but closing the run failed (RuntimeException). Do NOT re-approve; check the calendar and the run.', $rows[0]->summary);
+        $this->assertSame('Calendar write EXECUTED (event EVT-NEW-6653), but closing the run failed (RuntimeException). Do NOT re-approve; check the calendar and the run.', $rows[0]->summary);
         $this->assertSame("approver:{$approverId}", $rows[0]->actor_label);
         $this->assertCount(1, self::matching($logged(), 'closing the run failed'));
         $this->assertCount(1, self::matching($logged(), 'approver lookup failed'));
@@ -361,6 +363,123 @@ class StaffCalendarAnsweredWriteTest extends TestCase
             TechnicianActionLog::where('run_id', $run->id)->where('result_status', '!=', 'awaiting_approval')->pluck('summary')->all(),
         );
         $this->assertSame(0, TicketNote::where('ticket_id', $run->ticket_id)->count(), 'no back-link on this arm');
+    }
+
+    /** advanceTo(Done) throws: every UPDATE of the run to Done fails (the close fails). */
+    private static function failTheClose(): void
+    {
+        DB::beforeExecuting(function (string $sql, array $bindings): void {
+            if (str_starts_with(strtolower($sql), 'update') && str_contains($sql, 'technician_runs')
+                && in_array(TechnicianRunState::Done->value, $bindings, true)) {
+                throw new \RuntimeException('synthetic close failure');
+            }
+        });
+    }
+
+    /**
+     * #6510(b)/context:2 (r2): advanceTo(Done) throws AND the returned event could not be read.
+     * As on the lost fence, the close-failure row names the projection fault by class and both
+     * the row and the approver text carry the event id; nothing reopens the run.
+     */
+    public function test_a_close_failure_with_a_projection_fault_records_both_faults_and_the_event_id(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturnUsing(function () {
+            self::failTheClose();
+
+            return self::UNREADABLE_EVENT;
+        }));
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame('executed_with_fault', $r->status);
+        $this->assertSame('Calendar write executed (event EVT-NEW-6264), but closing the run failed. The event Microsoft Graph returned could not be read either. Do NOT re-approve it; check the calendar and the run.', $r->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not reopened');
+        $this->assertSame(
+            ['Calendar write EXECUTED (event EVT-NEW-6264), but closing the run failed (RuntimeException). The event Microsoft Graph returned could not be read either (TypeError). Do NOT re-approve; check the calendar and the run.'],
+            TechnicianActionLog::where('run_id', $run->id)->where('result_status', '!=', 'awaiting_approval')->pluck('summary')->all(),
+        );
+        $this->assertSame(0, TicketNote::where('ticket_id', $run->ticket_id)->count(), 'no back-link on this arm');
+    }
+
+    /**
+     * #6510(b) (r2): advanceTo(Done) throws with no projection fault. The row and the text carry
+     * the event id and claim no unreadable event.
+     */
+    public function test_a_close_failure_without_a_projection_fault_carries_the_event_id_and_claims_no_fault(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturnUsing(function () {
+            self::failTheClose();
+
+            return ['id' => 'EVT-NEW-6510', 'subject' => 'Onsite'];
+        }));
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame('executed_with_fault', $r->status);
+        $this->assertSame('Calendar write executed (event EVT-NEW-6510), but closing the run failed. Do NOT re-approve it; check the calendar and the run.', $r->message);
+        $this->assertStringNotContainsString('could not be read', (string) $r->message);
+        $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', '!=', 'awaiting_approval')->pluck('summary')->all();
+        $this->assertSame(['Calendar write EXECUTED (event EVT-NEW-6510), but closing the run failed (RuntimeException). Do NOT re-approve; check the calendar and the run.'], $rows);
+        $this->assertStringNotContainsString('could not be read', $rows[0]);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not reopened');
+    }
+
+    /**
+     * The users read throws, and so does every Log::error call (the error channel is down). Other
+     * levels are swallowed by the double, so the test isolates the guard's own error log.
+     */
+    private function failApproverLookupsAndTheLogger(int $approverId): void
+    {
+        $this->failApproverLookups($approverId);
+        $logger = \Mockery::mock(LoggerInterface::class)->shouldIgnoreMissing();
+        $logger->shouldReceive('error')->andThrow(new \RuntimeException('synthetic logger failure'));
+        Log::swap($logger);
+    }
+
+    /**
+     * diff:5/contract:1 (r2): the users read throws AND logging that failure throws. The guard
+     * swallows both, so the run still reaches Done, the 'executed' row carries the fallback label,
+     * the back-link is written and nothing escapes approveStagedRun.
+     */
+    public function test_a_throwing_logger_in_the_approver_guard_cannot_stop_the_run_closing(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturn(['id' => 'EVT-NEW-6653', 'subject' => 'Onsite']));
+        $approverId = $this->approver->id;
+        $this->failApproverLookupsAndTheLogger($approverId);
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $approverId);
+
+        $this->assertSame('executed', $r->status);
+        $this->assertSame('Calendar write executed after approval.', $r->message);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $rows = TechnicianActionLog::where('run_id', $run->id)->orderBy('id')->get();
+        $this->assertSame(['awaiting_approval', 'executed'], $rows->pluck('result_status')->all());
+        $this->assertSame("approver:{$approverId}", $rows[1]->actor_label);
+        $this->assertStringContainsString('calendar event EVT-NEW-6653 in', (string) TicketNote::where('ticket_id', $run->ticket_id)->value('body'));
+    }
+
+    /**
+     * diff:5/contract:1 (r2): the same double fault on the lost-fence arm. The lost-fence row is
+     * written with the fallback label, the other claim is untouched and nothing escapes.
+     */
+    public function test_a_throwing_logger_in_the_approver_guard_keeps_the_lost_fence_row(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mockFenceLosingCreate($run, ['id' => 'EVT-NEW-6653', 'subject' => 'Onsite']);
+        $approverId = $this->approver->id;
+        $this->failApproverLookupsAndTheLogger($approverId);
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $approverId);
+
+        $this->assertSame('executed_with_fault', $r->status);
+        $this->assertStringStartsWith('Calendar write executed (event EVT-NEW-6653), but this request did not close the run', (string) $r->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'the other claim is untouched');
+        $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', '!=', 'awaiting_approval')->get();
+        $this->assertSame(['executed_with_fault'], $rows->pluck('result_status')->all());
+        $this->assertSame("approver:{$approverId}", $rows[0]->actor_label);
     }
 
     public function test_an_immediate_create_graph_answered_but_the_psa_could_not_read_is_reported_landed(): void

@@ -972,10 +972,12 @@ class StaffCalendarToolExecutor
      *  - lost fence (advanceTo(Done) returns false): one 'executed_with_fault' row naming the lost
      *    fence and any projection fault; no 'executed' row, no back-link, the run is not closed;
      *  - a throwable after the write committed that no arm above catches, chiefly advanceTo(Done)
-     *    throwing (outer catch): one 'executed_with_fault' row saying closing the run failed;
-     *    nothing in that arm writes an 'executed' row or the back-link, or reopens the run.
-     * On these three arms the approver label is resolved under a guard (#6653); the arms before
-     * the write committed, and the unresolved-outcome arm, read it without one.
+     *    throwing (outer catch): one 'executed_with_fault' row saying closing the run failed,
+     *    with the event id and any projection fault, as on the lost fence; nothing in that arm
+     *    writes an 'executed' row or the back-link, or reopens the run.
+     * On these three arms the approver label is resolved under a guard that cannot throw
+     * (#6653), so it is set before any of them runs; the arms before the write committed, and
+     * the unresolved-outcome arm, read it without one.
      * A failure before the write call releases the claim. #6266: once
      * the write call was entered and its outcome is unknown, the run stays Executing on purpose,
      * where no cockpit lane lists it. External/non-idempotent, so it is deliberately absent from
@@ -996,7 +998,11 @@ class StaffCalendarToolExecutor
         // an unexpected (non-Graph) throwable leaves the write's outcome unknown.
         $writeEntered = false;
         $ticket = null;
+        // Set before the try, so the outer catch never reads an undefined variable. Once the
+        // write has committed, $label is assigned first, by a call that cannot throw.
         $label = null;
+        $eventId = '?';
+        $projectionFault = null;
 
         try {
             $payload = $this->decryptRunPayload($run);
@@ -1090,17 +1096,19 @@ class StaffCalendarToolExecutor
             // write (review blocker 2). Land the run terminal FIRST, then do best-effort
             // bookkeeping; a bookkeeping failure is recorded for a human, never reopened.
             $writeCommitted = true;
+            // contract:1/#6653: the approver label (a users read) is resolved once, under a guard
+            // that cannot throw, in the statement right after $writeCommitted is set, and every
+            // row from here on uses it: the lost-fence row, the Done arm's rows, the back-link
+            // failure row and the close-failure row in the outer catch. So whenever that catch
+            // sees $writeCommitted, $label is a string. A failed lookup (or a failed log of it)
+            // drops none of the rows and cannot turn the lost-fence arm into the close-failure arm.
+            $label = $this->guardedApproverLabel($run, $approverId);
             $eventId = (string) ($exec['event']['id'] ?? $exec['event_id'] ?? '?');
             // #6264: Graph answered with an event that passed its shape check, but the PSA could
             // not read it back (projectAnsweredEvent()). The write landed. #6510: read before the
-            // fence check, so the lost-fence arm records it as well as the Done arm.
+            // fence check, so the lost-fence arm and the close-failure arm record it as well as
+            // the Done arm.
             $projectionFault = isset($exec['projection_fault']) ? (string) $exec['projection_fault'] : null;
-            // contract:1/#6653: the approver label (a users read) is resolved once, under a guard,
-            // before the fence check, and every row from here on uses it: the lost-fence row, the
-            // Done arm's rows, the back-link failure row and the close-failure row in the outer
-            // catch. A failed lookup drops none of them and cannot turn the lost-fence arm into
-            // the close-failure arm.
-            $label = $this->guardedApproverLabel($run, $approverId);
             if (! $run->advanceTo(TechnicianRunState::Done)) {
                 // #6197: advanceTo() lost the claim-owner fence: the run is Executing under a
                 // claim this request does not hold (or the row is gone), so this request did
@@ -1159,16 +1167,19 @@ class StaffCalendarToolExecutor
             // reaper never reopens (this family is not in RECOVERY_SAFE_ACTION_TYPES).
             // #6314: nothing flags the run, so the record is this error line and an
             // executed_with_fault audit row, and the approver gets the fault on the error channel.
+            // #6510(b)/context:2: this arm skips the back-link too, so, as on the lost fence, the
+            // row and the text carry the event id and name a projection fault (by class in the
+            // row). $label was set, under the guard that cannot throw, in the statement right
+            // after $writeCommitted, so it is a string here and needs no fallback.
             if ($writeCommitted) {
                 Log::error('[Calendar] closing the run failed after an approved calendar write executed; run not reopened', [
                     'run_id' => $run->id, 'exception' => $e::class,
                 ]);
-                // #6653: the label is normally the one resolved under a guard above; if it is
-                // still null here, it is resolved now, under the same guard.
-                $label ??= $this->guardedApproverLabel($run, $approverId);
-                $this->safeAudit($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, 'Calendar write EXECUTED, but closing the run failed ('.class_basename($e).'). Do NOT re-approve; check the calendar and the run.', $label, $run->id, $approverId);
+                $auditFault = $projectionFault === null ? '' : " The event Microsoft Graph returned could not be read either ({$projectionFault}).";
+                $textFault = $projectionFault === null ? '' : ' The event Microsoft Graph returned could not be read either.';
+                $this->safeAudit($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, "Calendar write EXECUTED (event {$eventId}), but closing the run failed (".class_basename($e).').'.$auditFault.' Do NOT re-approve; check the calendar and the run.', $label, $run->id, $approverId);
 
-                return new TechnicianApprovalResult('executed_with_fault', message: 'Calendar write executed, but closing the run failed. Do NOT re-approve it; check the calendar and the run.');
+                return new TechnicianApprovalResult('executed_with_fault', message: "Calendar write executed (event {$eventId}), but closing the run failed.".$textFault.' Do NOT re-approve it; check the calendar and the run.');
             }
 
             // #6185: the write call was entered, and what failed is not a GraphClientException
@@ -1286,16 +1297,23 @@ class StaffCalendarToolExecutor
     /**
      * contract:1/#6653: the approver label for rows written after the calendar write committed. A
      * failed users read is logged by class (C-56) and falls back to "approver:{id}", so it can
-     * neither drop a row nor escape into another arm.
+     * neither drop a row nor escape into another arm. It never throws: a logger that throws
+     * while recording the failed read is swallowed too, so this call cannot stop
+     * advanceTo(Done) from running.
      */
     private function guardedApproverLabel(TechnicianRun $run, int $approverId): string
     {
         try {
             return $this->approverLabel($approverId);
         } catch (\Throwable $lookup) {
-            Log::error('[Calendar] approver lookup failed after an approved calendar write', [
-                'run_id' => $run->id, 'exception' => $lookup::class,
-            ]);
+            try {
+                Log::error('[Calendar] approver lookup failed after an approved calendar write', [
+                    'run_id' => $run->id, 'exception' => $lookup::class,
+                ]);
+            } catch (\Throwable) {
+                // diff:5/contract:1: the logger itself failed. Nothing more can be recorded
+                // here; the fallback label below still marks the row as written without one.
+            }
 
             return "approver:{$approverId}";
         }
