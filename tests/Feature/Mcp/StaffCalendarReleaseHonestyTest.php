@@ -84,7 +84,8 @@ class StaffCalendarReleaseHonestyTest extends TestCase
 
     /**
      * [arguments, staged tool, a change made before approval, the decline when the CAS wins,
-     * the decline's lead when it loses ('' for the join-link arm, whose fact leads instead)].
+     * the decline's fact when it loses]. #6198: the join-link fact is the executor's private
+     * JOIN_LINK_REFUSED, read here so the text and the test share it.
      *
      * @return array<string, array{0: array<string, mixed>, 1: string, 2: \Closure(TechnicianRun): mixed, 3: string, 4: string}>
      */
@@ -116,7 +117,7 @@ class StaffCalendarReleaseHonestyTest extends TestCase
             'join link cannot be preserved' => [['user_upn' => self::OWNER, 'event_id' => 'EVT-6124', 'body' => 'New agenda', 'reason' => 'Asked.'], 'calendar_stage_update_event',
                 fn () => null,
                 'This event is a Teams meeting and its join link could not be confidently located',
-                ''],
+                (new \ReflectionClassConstant(StaffCalendarToolExecutor::class, 'JOIN_LINK_REFUSED'))->getValue()],
         ];
     }
 
@@ -145,13 +146,12 @@ class StaffCalendarReleaseHonestyTest extends TestCase
 
         $this->assertSame('gate_declined', $r->status);
         $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
-        if ($lostLead === '') {
-            // The join-link refusal is long; the not-reopened fact leads so the 300-character cut keeps it.
-            $this->assertStringStartsWith(ucfirst(self::NOT_REOPENED).' '.$won, (string) $r->message);
-        } else {
-            $this->assertSame($lostLead.'; '.self::NOT_REOPENED, $r->message);
-        }
-        foreach (['re-stage', 'Add it back', 'Verify the ticket first'] as $advice) {
+        // #6198: every arm, the join-link one included, states its fact and ends with the
+        // not-reopened text, within declined()'s 300 characters so nothing is cut.
+        $this->assertSame($lostLead.'; '.self::NOT_REOPENED, $r->message);
+        $this->assertTrue(str_starts_with($won, $lostLead) || str_starts_with($lostLead, $won), 'the lost-CAS fact is the won decline\'s fact');
+        $this->assertLessThanOrEqual(300, mb_strlen((string) $r->message));
+        foreach (['re-stage', 'Add it back', 'Verify the ticket first', 'Update other fields', 'Outlook'] as $advice) {
             $this->assertStringNotContainsString($advice, (string) $r->message);
         }
     }
