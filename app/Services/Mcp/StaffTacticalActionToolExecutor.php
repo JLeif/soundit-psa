@@ -585,14 +585,17 @@ class StaffTacticalActionToolExecutor
 
     /**
      * #6508 / #6516: whether a database transaction is open around the caller on the run's
-     * connection. It asks the connection's transaction manager, whose
-     * callbackApplicableTransactions() is the framework's own count of transactions that
-     * decide a commit: every pending one under the base manager production binds, and every
-     * one except the wrapping RefreshDatabase transaction under test. The base-manager branch
-     * is exercised by TacticalOfflineQueueProductionTransactionTest, which runs without
-     * RefreshDatabase (no outer transaction: queued; exactly one: declined). A raw DB::transactionLevel() reads 1 in tests,
-     * so it cannot be compared against a fixed 0. Without a bound manager it falls back to
-     * that raw level, which can only over-report an open transaction (fail closed).
+     * connection. When the container has a 'db.transactions' binding, it calls
+     * callbackApplicableTransactions() on that bound manager and looks for an entry whose
+     * connection name is the run's; the call is the same whichever manager class is bound.
+     * When nothing is bound, it falls back to the connection's raw transactionLevel() > 0.
+     *
+     * Measured: TacticalOfflineQueueProductionTransactionTest asserts the base
+     * DatabaseTransactionsManager is bound and the default connection is at level 0, then shows
+     * that no outer transaction does not fire the guard and exactly one outer DB::transaction
+     * does. TacticalOfflineQueueApprovalTest runs under the RefreshDatabase testing manager and
+     * shows the same two outcomes there. Not measured: the no-bound-manager fallback; no test
+     * reaches it.
      */
     private function outerTransactionOpen(TechnicianRun $run): bool
     {

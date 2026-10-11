@@ -530,6 +530,42 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     }
 
     /**
+     * #6665: the reconnect (requeued) arm of the same guard-arm audit failure. The audit insert
+     * throws on runQueuedOnReconnect() under one outer transaction. The decline is still returned
+     * (not an exception) with the queue-not-updated text and the audit-not-written note, the run
+     * is released to QueuedOffline with its queue entry intact, one error line names the
+     * exception's class only (C-56), and the TacticalClient mock received exactly one runScript()
+     * call per path (approval, reconnect): the guard arm sends no further vendor call.
+     */
+    public function test_a_reconnect_run_decline_whose_audit_insert_fails_still_declines_and_requeues(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $tactical = $this->offlineClient();
+        $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
+        $this->travel(3)->minutes();
+        $logged = $this->failTheAuditInsert('offline');
+
+        $result = DB::transaction(fn () => app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class)->runQueuedOnReconnect($run->fresh()));
+
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertSame(self::QUEUE_NOT_UPDATED_OUTER_TRANSACTION_TEXT.' '.self::AUDIT_NOT_WRITTEN, $result->message);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
+        $this->assertSame('agent-1', $fresh->queued_agent_id, 'its queue entry is untouched');
+        $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->count(), 'positive control: the insert really failed');
+        $refused = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'offline queue refused')));
+        $this->assertCount(1, $refused, 'the guard arm ran');
+        $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'audit row not written')));
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame(['run_id' => $run->id, 'status' => 'offline', 'exception' => \RuntimeException::class], $records[0]->context);
+        $this->assertStringNotContainsString('SECRET-6312-MARKER', json_encode(array_map(fn (MessageLogged $m) => [$m->message, $m->context], $logged())) ?: '');
+        $tactical->shouldHaveReceived('runScript')->twice();
+    }
+
+    /**
      * #6312 scenario (b): the queue write itself throws. The offline-classified bus call still
      * leaves one audit row (bus status, status-only text), the exception is rethrown unchanged,
      * the claim is released for re-approval as before, and the log names the class only.

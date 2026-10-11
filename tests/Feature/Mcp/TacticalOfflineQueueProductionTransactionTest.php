@@ -33,12 +33,20 @@ use Tests\TestCase;
  * under the transaction manager production binds. This class does NOT use RefreshDatabase: it
  * migrates its own fresh :memory: connection, so 'db.transactions' is the framework's base
  * Illuminate\Database\DatabaseTransactionsManager, no wrapping test transaction exists, and the
- * connection's transaction level is 0 at the call, as in production. Each test asserts that
- * precondition before measuring anything.
+ * connection's transaction level is 0 at the call, as in production. #6661: each test method calls
+ * assertProductionManager() as its first statement (setUp() has already run the migration),
+ * and again immediately before the measured call. That check reads two things only: the class of the
+ * container's 'db.transactions' binding, and transactionLevel() on the default connection
+ * (DB::connection()); it does not read the run's own connection.
  *
  * What it measures: (a) with no outer transaction the guard does not fire, through the real
- * callers (the cockpit approve route, and the SweepQueuedActionsForAgent job for the reconnect
- * path); (b) with exactly one outer DB::transaction (level 1) the guard fires on both paths.
+ * callers (the cockpit approve route, and SweepQueuedActionsForAgent::dispatchSync for the
+ * reconnect path); (b) with exactly one outer DB::transaction (level 1) the guard fires. #6660:
+ * on the approval path (b) calls TechnicianApprovalService::approveStagedTacticalAction()
+ * directly, not the cockpit route. On the reconnect path (b) is measured twice: once calling
+ * StaffTacticalActionToolExecutor::runQueuedOnReconnect() directly, and once through
+ * SweepQueuedActionsForAgent::dispatchSync() on the sync queue, with the outer transaction
+ * around the dispatch.
  * TacticalOfflineQueueApprovalTest measures the same guard under the RefreshDatabase testing
  * manager; a guard reading transactionLevel() > 1 passes there and fails (b) here.
  */
@@ -117,6 +125,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      */
     public function test_without_an_outer_transaction_the_real_callers_queue_and_requeue(): void
     {
+        $this->assertProductionManager();
         ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
         $refusals = $this->captureRefusals();
         $this->assertProductionManager();
@@ -148,6 +157,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      */
     public function test_one_outer_transaction_on_the_approval_fires_the_guard(): void
     {
+        $this->assertProductionManager();
         ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
         $refusals = $this->captureRefusals();
         $this->assertProductionManager();
@@ -168,11 +178,14 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     }
 
     /**
-     * (b) on the reconnect path: one outer DB::transaction around the job's sweep fires the
-     * guard, and the run goes back to QueuedOffline with its queue entry intact.
+     * (b) on the reconnect path, calling the executor directly: one outer DB::transaction around
+     * StaffTacticalActionToolExecutor::runQueuedOnReconnect() fires the guard, and the run goes
+     * back to QueuedOffline with its queue entry intact. The job is not run here; the test
+     * below runs it.
      */
     public function test_one_outer_transaction_on_the_reconnect_run_fires_the_guard(): void
     {
+        $this->assertProductionManager();
         ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
         $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
         $this->travel(3)->minutes();
@@ -191,5 +204,38 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state);
         $this->assertSame('agent-1', $fresh->queued_agent_id);
         $this->assertCount(1, $refusals());
+    }
+
+    /**
+     * #6660: (b) on the reconnect path through the real caller. One outer DB::transaction around
+     * SweepQueuedActionsForAgent::dispatchSync() runs the job on the sync queue inside that
+     * transaction, and the guard fires: one refusal line, one audit row saying the offline queue
+     * was not updated, no second queued_offline audit row, and the run back in QueuedOffline
+     * with its queue entry intact. OfflineActionSweep::sweepAgent() returns a count, not the
+     * result, so the decline is observed through the refusal line and the audit row.
+     */
+    public function test_one_outer_transaction_around_the_sweep_job_fires_the_guard(): void
+    {
+        $this->assertProductionManager();
+        ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
+        $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
+        $this->travel(3)->minutes();
+        $refusals = $this->captureRefusals();
+        $this->assertProductionManager();
+
+        DB::transaction(function () use ($refusals) {
+            $this->assertSame(1, DB::connection()->transactionLevel(), 'exactly one outer transaction');
+            SweepQueuedActionsForAgent::dispatchSync('agent-1');
+            $this->assertCount(1, $refusals(), 'the job ran, and the guard fired, inside the outer transaction');
+        });
+
+        $this->assertCount(1, $refusals());
+        $this->assertSame(['run_id' => $run->id, 'status' => 'offline'], $refusals()[0]->context);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
+        $this->assertSame('agent-1', $fresh->queued_agent_id, 'its queue entry is untouched');
+        $notUpdated = TechnicianActionLog::where('run_id', $run->id)->where('summary', 'like', '%offline queue not updated: a database transaction was open around this request.%')->count();
+        $this->assertSame(1, $notUpdated, 'the guard decline is audited once');
+        $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_offline')->count(), 'only the approval queued it; the sweep did not re-queue');
     }
 }
