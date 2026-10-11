@@ -21,10 +21,12 @@ use Psr\Log\LoggerInterface;
 use Tests\TestCase;
 
 /**
- * #6264: Graph answered a create/update with an event that passed its shape check (a string id),
- * and projecting that event then threw (here 'attendees' is not an array, so array_map throws a
- * TypeError). The write landed, so it is reported as executed with a fault, never as an unknown
- * outcome, and the event id is recorded.
+ * #6264: Graph answered a create/update, and projecting the returned event then threw (here
+ * 'attendees' is not an array, so array_map throws a TypeError). The write landed, so it is
+ * reported as executed with a fault, never as an unknown outcome, and the event id is recorded.
+ * #6520: these tests mock GraphClient, so CalendarGraphShapes::assertEvent() does not run here;
+ * the mocked answer stands for the array GraphClient returns once assertEvent() has accepted the
+ * decoded event (it checks the id only), which is why this shape is reachable in production.
  *
  * #6265: the immediate write path tracks whether the write call was entered, as the approval
  * path does. A non-Graph throwable after that point is an unresolved outcome (audited, logged by
@@ -40,7 +42,12 @@ class StaffCalendarAnsweredWriteTest extends TestCase
 
     private const CREATE = ['user_upn' => self::OWNER, 'subject' => 'Onsite', 'start' => '2026-07-29T15:00:00', 'end' => '2026-07-29T16:00:00', 'reason' => 'Asked.'];
 
-    /** An event that passes CalendarGraphShapes::assertEvent() but that projectEvent() cannot read. */
+    /**
+     * #6520: models the array GraphClient::createEvent()/updateEvent() returns after
+     * CalendarGraphShapes::assertEvent() accepted the decoded stdClass event (assertEvent() checks
+     * the id, a string here, and not attendees). projectEvent() cannot read it. GraphClient is
+     * mocked in these tests, so assertEvent() itself does not run on this value.
+     */
     private const UNREADABLE_EVENT = ['id' => 'EVT-NEW-6264', 'subject' => 'Onsite', 'attendees' => 'not-a-list'];
 
     private User $approver;
@@ -117,7 +124,8 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $records = self::matching($logged(), 'could not be projected');
         $this->assertCount(1, $records);
         $this->assertSame('error', $records[0]->level);
-        $this->assertSame(['tool' => $directTool, 'exception' => \TypeError::class, 'file' => 'app/Services/Mcp/StaffCalendarToolExecutor.php'], array_diff_key($records[0]->context, ['line' => 0]));
+        // #6515: the line carries the ticket id and, on the approval path, the run id.
+        $this->assertSame(['tool' => $directTool, 'ticket_id' => $run->ticket_id, 'run_id' => $run->id, 'exception' => \TypeError::class, 'file' => 'app/Services/Mcp/StaffCalendarToolExecutor.php', 'line' => self::projectionFaultLine()], $records[0]->context);
         $this->assertSame([], self::matching($logged(), 'unresolved'));
         // #6509/#6514/#6518: the 'executed' row is written, then the fault row, as on the immediate path.
         $this->assertSame(
@@ -482,13 +490,43 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $this->assertSame("approver:{$approverId}", $rows[0]->actor_label);
     }
 
-    public function test_an_immediate_create_graph_answered_but_the_psa_could_not_read_is_reported_landed(): void
+    /** The source line of projectEvent()'s attendees array_map, where UNREADABLE_EVENT's TypeError is raised. */
+    private static function projectionFaultLine(): int
+    {
+        $lines = file(base_path('app/Services/Mcp/StaffCalendarToolExecutor.php'));
+        $hits = array_keys(array_filter($lines, fn (string $l) => str_contains($l, "array_map([\$this, 'projectAttendee']")));
+        self::assertCount(1, $hits);
+
+        return $hits[0] + 1;
+    }
+
+    /**
+     * Rows: [direct tool, arguments, write method, back-link verb]. The update carries no body, so
+     * it makes no pre-read.
+     *
+     * @return array<string, array{0: string, 1: array<string, mixed>, 2: string, 3: string}>
+     */
+    public static function immediateAnsweredWrites(): array
+    {
+        return [
+            'create' => ['calendar_create_event', self::CREATE, 'createEvent', 'created'],
+            'update' => ['calendar_update_event', ['user_upn' => self::OWNER, 'event_id' => 'EVT-NEW-6264', 'subject' => 'Moved', 'reason' => 'Asked.'], 'updateEvent', 'updated'],
+        ];
+    }
+
+    /**
+     * #6264 on the immediate path; #6517(2): the update arm too, which also goes through
+     * projectAnsweredEvent() and writes the executed_with_fault row and the warning. #6515: the
+     * log line carries the ticket id and no run id (the immediate path has no run).
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('immediateAnsweredWrites')]
+    public function test_an_immediate_write_graph_answered_but_the_psa_could_not_read_is_reported_landed(string $directTool, array $arguments, string $writeMethod, string $verb): void
     {
         $ticket = Ticket::factory()->create();
-        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturn(self::UNREADABLE_EVENT));
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive($writeMethod)->once()->andReturn(self::UNREADABLE_EVENT));
         $logged = $this->captureLogs();
 
-        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_create_event', self::CREATE + ['ticket_id' => $ticket->id], 0, 'mcp-staff:chet', 'chet');
+        $result = app(StaffCalendarToolExecutor::class)->execute($directTool, $arguments + ['ticket_id' => $ticket->id], 0, 'mcp-staff:chet', 'chet');
 
         $this->assertTrue($result['success'] ?? false);
         $this->assertSame(['id' => 'EVT-NEW-6264'], $result['event']);
@@ -496,8 +534,11 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         $rows = TechnicianActionLog::where('ticket_id', $ticket->id)->orderBy('id')->get();
         $this->assertSame(['executed', 'executed_with_fault'], $rows->pluck('result_status')->all());
         $this->assertSame('Calendar write EXECUTED (event EVT-NEW-6264), but the event Microsoft Graph returned could not be read (TypeError). Do NOT retry; check the calendar.', $rows[1]->summary);
-        $this->assertStringContainsString('calendar event EVT-NEW-6264 in', (string) TicketNote::where('ticket_id', $ticket->id)->value('body'));
-        $this->assertCount(1, self::matching($logged(), 'could not be projected'));
+        $this->assertStringContainsString("{$verb} calendar event EVT-NEW-6264 in", (string) TicketNote::where('ticket_id', $ticket->id)->value('body'));
+        $records = self::matching($logged(), 'could not be projected');
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame(['tool' => $directTool, 'ticket_id' => $ticket->id, 'exception' => \TypeError::class, 'file' => 'app/Services/Mcp/StaffCalendarToolExecutor.php', 'line' => self::projectionFaultLine()], $records[0]->context);
     }
 
     /**

@@ -48,8 +48,12 @@ class StaffTacticalActionToolExecutor
 {
     private const DIRECT_DEDUP_HOURS = 24;
 
-    /** #6312: the note appended to the offline-queue result when its audit row insert threw. */
-    private const AUDIT_NOT_WRITTEN = 'The audit row for this request was not written.';
+    /**
+     * #6312: the note appended to the offline-queue result when its technician_action_logs insert
+     * threw. #6507: it names that row, because the bus has already written a tactical_action_logs
+     * row for the same request.
+     */
+    private const AUDIT_NOT_WRITTEN = 'The technician action log row for this request was not written.';
 
     /**
      * #6508 / #6516: the decline when enqueueOfflineRun() finds a database transaction open

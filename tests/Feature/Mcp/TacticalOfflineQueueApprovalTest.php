@@ -351,8 +351,11 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         return fn () => $logged->getArrayCopy();
     }
 
-    /** #6312 / #6512: the note the catch arm appends to the normal-path result's message. */
-    private const AUDIT_NOT_WRITTEN = 'The audit row for this request was not written.';
+    /**
+     * #6312 / #6512: the note the catch arm appends to the normal-path result's message. #6507: it
+     * names the technician action log row, since the bus wrote a tactical_action_logs row.
+     */
+    private const AUDIT_NOT_WRITTEN = 'The technician action log row for this request was not written.';
 
     /**
      * #6312: the queue write ran, and then the audit insert threw. The result is the normal-path
@@ -392,6 +395,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     /**
      * #6312: on the lost-fence arm nothing was queued; if its audit insert then throws, the
      * approver still gets the not-queued decline (not an exception), plus the audit note.
+     * #6517(1): as on the queued arm, the log carries the class only, never the marker (C-56),
+     * and the 'offline' audit row really was not written (positive control).
      */
     public function test_a_lost_fence_whose_audit_insert_fails_still_says_not_queued(): void
     {
@@ -411,6 +416,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertCount(1, $records);
         $this->assertSame('error', $records[0]->level);
         $this->assertSame(['run_id' => $run->id, 'status' => 'offline', 'exception' => \RuntimeException::class], $records[0]->context);
+        $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->count(), 'positive control: the insert really failed');
+        $this->assertStringNotContainsString('SECRET-6312-MARKER', json_encode(array_map(fn (MessageLogged $m) => [$m->message, $m->context], $logged())) ?: '');
     }
 
     /** #6508 / #6516: the decline when a database transaction is open around the queue write. */
