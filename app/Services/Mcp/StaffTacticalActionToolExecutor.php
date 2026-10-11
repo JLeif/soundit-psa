@@ -593,9 +593,11 @@ class StaffTacticalActionToolExecutor
      * Measured: TacticalOfflineQueueProductionTransactionTest asserts the base
      * DatabaseTransactionsManager is bound and the default connection is at level 0, then shows
      * that no outer transaction does not fire the guard and exactly one outer DB::transaction
-     * does. TacticalOfflineQueueApprovalTest runs under the RefreshDatabase testing manager and
-     * shows the same two outcomes there. Not measured: the no-bound-manager fallback; no test
-     * reaches it.
+     * does. In TacticalOfflineQueueApprovalTest, test_an_approval_inside_an_outer_transaction_is_not_queued
+     * and test_the_outer_transaction_guard_does_not_fire_without_one_and_guards_the_reconnect_run
+     * assert the RefreshDatabase testing DatabaseTransactionsManager is bound and the default
+     * connection is at level 1 (its wrapper only), then show the same two outcomes there. Not
+     * measured: the no-bound-manager fallback; no test reaches it.
      */
     private function outerTransactionOpen(TechnicianRun $run): bool
     {
