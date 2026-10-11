@@ -427,9 +427,12 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     private const QUEUE_NOT_UPDATED_OUTER_TRANSACTION_TEXT = "The Tactical call was classified as device offline on a queued re-run, and this request did not update the offline queue: it was running inside an open database transaction. Check the run's current state before acting on it again.";
 
     /**
-     * #6738: asserts that the bound 'db.transactions' manager is the RefreshDatabase testing
-     * Illuminate\Foundation\Testing\DatabaseTransactionsManager and that the default connection is
-     * at level 1 (the RefreshDatabase wrapper only). Only the tests that call it measure this.
+     * #6738: asserts two things only: that the bound 'db.transactions' manager is the RefreshDatabase
+     * testing Illuminate\Foundation\Testing\DatabaseTransactionsManager, and that transactionLevel()
+     * on the default connection (DB::connection()) is 1. It reads the default connection, not the
+     * run's own. That the one open transaction is the RefreshDatabase wrapper is an inference (this
+     * class uses RefreshDatabase and the test has opened none yet), not something it asserts. Only
+     * the tests that call it measure this.
      */
     private function assertTestingManager(): void
     {
@@ -438,9 +441,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     }
 
     /**
-     * #6735: the queue fields parkOrCoalesce() writes (through queueForOffline(), or coalesce_count
-     * on a coalesce). OfflineActionSweep::sweepAgent() selects on state, queued_agent_id and
-     * expires_at > now(), and de-duplicates on queued_dedup_key.
+     * #6735: reads 7 values from a fresh copy of this run: the columns state, queued_agent_id,
+     * queued_dedup_key, queued_at, expires_at and coalesce_count, and one proposed_meta key,
+     * queued_approver_id (null when that key is absent). It reads no other proposed_meta key.
      *
      * @return array<string, mixed>
      */
@@ -460,9 +463,10 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     }
 
     /**
-     * #6735: the queue fields of a run the approval queued, read before the reconnect call. It
-     * asserts state QueuedOffline, queued_agent_id 'agent-1', and a non-null queued_dedup_key and
-     * expires_at, so the before/after comparison covers set values.
+     * #6735: the 7 queueFields() values of a run the approval queued, read before the reconnect
+     * call. It asserts state QueuedOffline, queued_agent_id 'agent-1', and that each of the other
+     * 5 (queued_dedup_key, queued_at, expires_at, coalesce_count, queued_approver_id) is non-null,
+     * so none of the 7 compared values is null before the call.
      *
      * @return array<string, mixed>
      */
@@ -471,8 +475,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $before = $this->queueFields($run);
         $this->assertSame(TechnicianRunState::QueuedOffline, $before['state']);
         $this->assertSame('agent-1', $before['queued_agent_id']);
-        $this->assertNotNull($before['queued_dedup_key']);
-        $this->assertNotNull($before['expires_at']);
+        foreach (['queued_dedup_key', 'queued_at', 'expires_at', 'coalesce_count', 'queued_approver_id'] as $key) {
+            $this->assertNotNull($before[$key], $key.' is set before the call');
+        }
 
         return $before;
     }
@@ -552,8 +557,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
         $this->assertSame('agent-1', $fresh->queued_agent_id);
-        $this->assertSame($before, $this->queueFields($run), 'every queue field is unchanged');
-        $this->assertTrue($fresh->expires_at->isFuture(), 'still inside its window for the next sweep');
+        $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
+        $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
         $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->get();
         $this->assertCount(1, $rows, 'the reconnect-run guard decline is audited once');
         $this->assertStringContainsString('offline queue not updated: a database transaction was open around this request.', (string) $rows->first()->summary);
@@ -563,7 +568,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     /**
      * r1 diff:4: on the guard arm, the not-queued audit insert throws. The claim is still
      * released for re-approval, the decline is still returned (not an exception) with the
-     * audit-not-written note, and one error line names the exception's class only (C-56).
+     * audit-not-written note, and one error line names the exception's class only (C-56). #6738:
+     * the testing manager is asserted before the outer transaction opens.
      */
     public function test_an_outer_transaction_decline_whose_audit_insert_fails_still_declines_and_releases(): void
     {
@@ -572,6 +578,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
         $this->offlineClient();
         $logged = $this->failTheAuditInsert('offline');
+        $this->assertTestingManager();
 
         $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
 
@@ -594,22 +601,24 @@ class TacticalOfflineQueueApprovalTest extends TestCase
      * (not an exception) with the queue-not-updated text and the audit-not-written note, the run
      * is released to QueuedOffline, and one error line names the exception's class only (C-56).
      * #6735: every field queueFields() reads is equal before and after the reconnect call, and
-     * expires_at is still later than now. #6737 / #6740: a fresh offline TacticalClient mock is
-     * bound after the approval and before runQueuedOnReconnect(), so it counts the reconnect
-     * path's calls only. It received runScript() exactly once during runQueuedOnReconnect(), so
-     * the reconnect path, guard arm included, made no second runScript() call through it.
+     * expires_at is still later than now. #6737 / #6740: two offline TacticalClient mocks. The
+     * first is bound before the approval and the second after it, before runQueuedOnReconnect().
+     * The test asserts that each received runScript() exactly once, counted at the end of the
+     * test: the first over the whole test, the second from its binding on. #6738: the testing
+     * manager is asserted before the reconnect call's outer transaction opens.
      */
     public function test_a_reconnect_run_decline_whose_audit_insert_fails_still_declines_and_requeues(): void
     {
         $approver = $this->configure();
         $fixture = $this->endpointFixture();
         $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
-        $this->offlineClient();
+        $approvalClient = $this->offlineClient();
         $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
         $this->travel(3)->minutes();
         $before = $this->queuedFieldsBefore($run);
         $reconnectClient = $this->offlineClient();
         $logged = $this->failTheAuditInsert('offline');
+        $this->assertTestingManager();
 
         $result = DB::transaction(fn () => app(\App\Services\Mcp\StaffTacticalActionToolExecutor::class)->runQueuedOnReconnect($run->fresh()));
 
@@ -618,8 +627,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
         $this->assertSame('agent-1', $fresh->queued_agent_id);
-        $this->assertSame($before, $this->queueFields($run), 'every queue field is unchanged');
-        $this->assertTrue($fresh->expires_at->isFuture(), 'still inside its window for the next sweep');
+        $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
+        $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
         $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->count(), 'positive control: the insert really failed');
         $refused = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'offline queue refused')));
         $this->assertCount(1, $refused, 'the guard arm ran');
@@ -628,6 +637,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertSame('error', $records[0]->level);
         $this->assertSame(['run_id' => $run->id, 'status' => 'offline', 'exception' => \RuntimeException::class], $records[0]->context);
         $this->assertStringNotContainsString('SECRET-6312-MARKER', json_encode(array_map(fn (MessageLogged $m) => [$m->message, $m->context], $logged())) ?: '');
+        $approvalClient->shouldHaveReceived('runScript')->once();
         $reconnectClient->shouldHaveReceived('runScript')->once();
     }
 

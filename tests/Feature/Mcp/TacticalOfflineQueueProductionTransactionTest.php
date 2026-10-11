@@ -50,6 +50,9 @@ use Tests\TestCase;
  * StaffTacticalActionToolExecutor::runQueuedOnReconnect() directly, and once through
  * SweepQueuedActionsForAgent::dispatchSync() on the sync queue, with the outer transaction
  * around the dispatch.
+ * #6739: one more test, under the same one outer DB::transaction around the dispatch, is the
+ * positive control for the sweep-job test's 'reconnect-run failed' filter; its runScript() mock
+ * throws, and it asserts nothing about the guard.
  * TacticalOfflineQueueApprovalTest measures the same guard under the RefreshDatabase testing
  * manager; a guard reading transactionLevel() > 1 passes there and fails (b) here.
  */
@@ -69,9 +72,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     }
 
     /**
-     * #6735: the queue fields parkOrCoalesce() writes (through queueForOffline(), or coalesce_count
-     * on a coalesce). OfflineActionSweep::sweepAgent() selects on state, queued_agent_id and
-     * expires_at > now(), and de-duplicates on queued_dedup_key.
+     * #6735: reads 7 values from a fresh copy of this run: the columns state, queued_agent_id,
+     * queued_dedup_key, queued_at, expires_at and coalesce_count, and one proposed_meta key,
+     * queued_approver_id (null when that key is absent). It reads no other proposed_meta key.
      *
      * @return array<string, mixed>
      */
@@ -91,9 +94,10 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     }
 
     /**
-     * #6735: the queue fields of a run the approval queued, read before the reconnect call. It
-     * asserts state QueuedOffline, queued_agent_id 'agent-1', and a non-null queued_dedup_key and
-     * expires_at, so the before/after comparison covers set values.
+     * #6735: the 7 queueFields() values of a run the approval queued, read before the reconnect
+     * call. It asserts state QueuedOffline, queued_agent_id 'agent-1', and that each of the other
+     * 5 (queued_dedup_key, queued_at, expires_at, coalesce_count, queued_approver_id) is non-null,
+     * so none of the 7 compared values is null before the call.
      *
      * @return array<string, mixed>
      */
@@ -102,10 +106,35 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $before = $this->queueFields($run);
         $this->assertSame(TechnicianRunState::QueuedOffline, $before['state']);
         $this->assertSame('agent-1', $before['queued_agent_id']);
-        $this->assertNotNull($before['queued_dedup_key']);
-        $this->assertNotNull($before['expires_at']);
+        foreach (['queued_dedup_key', 'queued_at', 'expires_at', 'coalesce_count', 'queued_approver_id'] as $key) {
+            $this->assertNotNull($before[$key], $key.' is set before the call');
+        }
 
         return $before;
+    }
+
+    /**
+     * #6739: the captured MessageLogged records whose message contains 'reconnect-run failed', the
+     * text OfflineActionSweep::sweepAgent() logs in its catch arm. Used by the negative assertion
+     * and by its positive control, so both read the same filter.
+     *
+     * @param  list<MessageLogged>  $logged
+     * @return list<MessageLogged>
+     */
+    private function reconnectRunFailures(array $logged): array
+    {
+        return array_values(array_filter($logged, fn (MessageLogged $m) => str_contains($m->message, 'reconnect-run failed')));
+    }
+
+    /** @return \Closure(): list<MessageLogged> every MessageLogged record from this point on */
+    private function captureLogs(): \Closure
+    {
+        $logged = new \ArrayObject;
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use ($logged): void {
+            $logged[] = $m;
+        });
+
+        return fn () => $logged->getArrayCopy();
     }
 
     /** @return array{approver: User, run: TechnicianRun} */
@@ -249,8 +278,8 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state);
         $this->assertSame('agent-1', $fresh->queued_agent_id);
-        $this->assertSame($before, $this->queueFields($run), 'every queue field is unchanged');
-        $this->assertTrue($fresh->expires_at->isFuture(), 'still inside its window for the next sweep');
+        $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
+        $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
         $this->assertCount(1, $refusals());
     }
 
@@ -261,10 +290,10 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * was not updated, no second queued_offline audit row, and the run back in QueuedOffline.
      * #6735: every field queueFields() reads is equal before and after the job, and expires_at is
      * still later than now. #6739: OfflineActionSweep::sweepAgent() returns a count, not the
-     * result, and catches any \Throwable from runQueuedOnReconnect(), logging
-     * '[OfflineQueue] reconnect-run failed' through the Log facade. The test asserts that no
-     * MessageLogged event, at any level, carries that text, so the guard arm's decline did not
-     * reach sweepAgent() as a throw it swallowed.
+     * result, and its catch arm logs '[OfflineQueue] reconnect-run failed'. The test asserts that
+     * reconnectRunFailures() finds no captured MessageLogged record carrying that text. The test
+     * below is its positive control: the same filter returns exactly 1 record when
+     * runQueuedOnReconnect() throws under sweepAgent().
      */
     public function test_one_outer_transaction_around_the_sweep_job_fires_the_guard(): void
     {
@@ -274,10 +303,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->travel(3)->minutes();
         $before = $this->queuedFieldsBefore($run);
         $refusals = $this->captureRefusals();
-        $logged = new \ArrayObject;
-        Event::listen(MessageLogged::class, function (MessageLogged $m) use ($logged): void {
-            $logged[] = $m;
-        });
+        $logged = $this->captureLogs();
         $this->assertProductionManager();
 
         DB::transaction(function () use ($refusals) {
@@ -291,12 +317,45 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'released back to the queue it came from');
         $this->assertSame('agent-1', $fresh->queued_agent_id);
-        $this->assertSame($before, $this->queueFields($run), 'every queue field is unchanged');
-        $this->assertTrue($fresh->expires_at->isFuture(), 'still inside its window for the next sweep');
-        $swallowed = array_filter($logged->getArrayCopy(), fn (MessageLogged $m) => str_contains($m->message, 'reconnect-run failed'));
-        $this->assertSame([], array_values($swallowed), 'sweepAgent() caught no exception from the reconnect-run');
+        $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
+        $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
+        $this->assertSame([], $this->reconnectRunFailures($logged()), "no 'reconnect-run failed' warning was logged");
         $notUpdated = TechnicianActionLog::where('run_id', $run->id)->where('summary', 'like', '%offline queue not updated: a database transaction was open around this request.%')->count();
         $this->assertSame(1, $notUpdated, 'the guard decline is audited once');
         $this->assertSame(1, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_offline')->count(), 'only the approval queued it; the sweep did not re-queue');
+    }
+
+    /**
+     * #6739 positive control for the test above, on the same fixture and under one outer
+     * DB::transaction around SweepQueuedActionsForAgent::dispatchSync(). After the approval, a
+     * TacticalClient mock whose runScript() throws a \RuntimeException (not a
+     * TacticalClientException) is bound. The test asserts that dispatchSync() returned without
+     * throwing, that the mock received runScript() once, and that reconnectRunFailures() returns
+     * exactly 1 record: a warning whose context is this run's id, agent-1 and the exception's
+     * message.
+     */
+    public function test_the_reconnect_run_failed_filter_finds_the_warning_when_the_reconnect_run_throws(): void
+    {
+        $this->assertProductionManager();
+        ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
+        $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
+        $this->travel(3)->minutes();
+        $this->queuedFieldsBefore($run);
+        $throwing = Mockery::mock(TacticalClient::class);
+        $throwing->shouldReceive('runScript')->andThrow(new \RuntimeException('positive control 6739'));
+        $this->app->instance(TacticalClient::class, $throwing);
+        $logged = $this->captureLogs();
+        $this->assertProductionManager();
+
+        DB::transaction(function () {
+            $this->assertSame(1, DB::connection()->transactionLevel(), 'exactly one outer transaction');
+            SweepQueuedActionsForAgent::dispatchSync('agent-1');
+        });
+
+        $throwing->shouldHaveReceived('runScript')->once();
+        $records = $this->reconnectRunFailures($logged());
+        $this->assertCount(1, $records, "one 'reconnect-run failed' warning was logged");
+        $this->assertSame('warning', $records[0]->level);
+        $this->assertSame(['run_id' => $run->id, 'agent_id' => 'agent-1', 'error' => 'positive control 6739'], $records[0]->context);
     }
 }
