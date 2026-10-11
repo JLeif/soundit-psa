@@ -67,6 +67,14 @@ class StaffCalendarToolExecutor
     private const NOT_REOPENED = 'the run was not reopened; check its current state before acting on it again.';
 
     /**
+     * #6198: the join-link refusal's fact without its advice. The refusal thrown before any Graph
+     * write is this fact plus its advice (285 characters). When releaseClaim()'s CAS lost, the
+     * decline is this fact plus NOT_REOPENED instead, because the advice treats the run as still
+     * pending. Both texts fit declined()'s 300-character cut.
+     */
+    private const JOIN_LINK_REFUSED = 'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused';
+
+    /**
      * #6121: the audit summary prefix when the event read an update with a body makes before its
      * PATCH failed (CalendarPreReadFailedException). Only that GET was sent. #6186: the row is
      * completed by preReadFailureDetail(), never by the wrapped exception's message.
@@ -835,11 +843,11 @@ class StaffCalendarToolExecutor
             || $joinAt === false
             || $sepAt < 0
             || $joinAt < $sepAt) {
+            // #6198: the fact is JOIN_LINK_REFUSED, so the won and lost declines cannot drift, and
+            // the whole text (285 characters) fits declined()'s 300, so its advice arrives whole.
             throw new CalendarWriteRefusedException(
-                'This event is a Teams meeting and its join link could not be confidently located in the '.
-                'current event body, so editing the agenda here would risk removing the "Join" link. Update '.
-                'other fields (subject/time/location/attendees) without the body, or edit the agenda in '.
-                'Outlook/Teams where the join block is preserved automatically.'
+                self::JOIN_LINK_REFUSED.'. Update other fields (subject/time/location/attendees) without the body, '.
+                'or edit the agenda in Outlook/Teams, which preserves the "Join" link.'
             );
         }
 
@@ -1045,11 +1053,13 @@ class StaffCalendarToolExecutor
                 // so release and decline. NOT a retry: re-approving would only refuse again.
                 $this->auditWrite($run->action_type, 'blocked', $ticket, $run->content_hash, 'Calendar update refused to protect a Teams join link: '.mb_substr($e->getMessage(), 0, 160), $this->approverLabel($approverId), $run->id, $approverId);
 
-                // #6124: on a lost CAS the not-reopened fact leads, so declined()'s 300-character
-                // cut cannot drop it from this long refusal.
+                // #6198: on a lost CAS the decline states the refusal fact without its advice and
+                // ends with NOT_REOPENED, like releaseAndDecline(); the whole text fits in
+                // declined()'s 300 characters. When the CAS won, the refusal's message (fact plus
+                // advice, also within 300) is returned whole.
                 return $run->releaseClaim()
                     ? $this->declined($e->getMessage())
-                    : $this->declined(ucfirst(self::NOT_REOPENED).' '.$e->getMessage());
+                    : $this->declined(self::JOIN_LINK_REFUSED.'; '.self::NOT_REOPENED);
             } catch (GraphTokenException $e) {
                 // #5833: no token, so the write request was never sent and nothing committed.
                 // Release the claim as on the refusal above; re-approving cannot double-send.

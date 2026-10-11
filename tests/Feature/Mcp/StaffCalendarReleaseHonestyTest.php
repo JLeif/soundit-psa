@@ -37,6 +37,9 @@ class StaffCalendarReleaseHonestyTest extends TestCase
 
     private const NOT_REOPENED = 'the run was not reopened; check its current state before acting on it again.';
 
+    /** #6198: the join-link refusal as thrown, fact and advice, which the won arm returns whole. */
+    private const JOIN_LINK_DECLINE = 'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused. Update other fields (subject/time/location/attendees) without the body, or edit the agenda in Outlook/Teams, which preserves the "Join" link.';
+
     private const UPDATE = ['user_upn' => self::OWNER, 'event_id' => 'EVT-6124', 'body' => 'New agenda', 'reason' => 'Asked.'];
 
     private User $approver;
@@ -83,8 +86,10 @@ class StaffCalendarReleaseHonestyTest extends TestCase
     }
 
     /**
-     * [arguments, staged tool, a change made before approval, the decline when the CAS wins,
-     * the decline's lead when it loses ('' for the join-link arm, whose fact leads instead)].
+     * [arguments, staged tool, a change made before approval, the whole decline when the CAS
+     * wins, the decline's fact when it loses]. #6198: both are literals, the join-link row's
+     * included (its won text is the refusal's fact plus its advice), so a change to the
+     * executor's text fails here rather than being read back from it.
      *
      * @return array<string, array{0: array<string, mixed>, 1: string, 2: \Closure(TechnicianRun): mixed, 3: string, 4: string}>
      */
@@ -115,8 +120,8 @@ class StaffCalendarReleaseHonestyTest extends TestCase
                 'The ticket this write traced to is an unverified contact intake held for staff verification; the staged write was refused'],
             'join link cannot be preserved' => [['user_upn' => self::OWNER, 'event_id' => 'EVT-6124', 'body' => 'New agenda', 'reason' => 'Asked.'], 'calendar_stage_update_event',
                 fn () => null,
-                'This event is a Teams meeting and its join link could not be confidently located',
-                ''],
+                self::JOIN_LINK_DECLINE,
+                'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused'],
         ];
     }
 
@@ -129,7 +134,10 @@ class StaffCalendarReleaseHonestyTest extends TestCase
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
 
         $this->assertSame('gate_declined', $r->status);
-        $this->assertStringStartsWith($won, (string) $r->message);
+        // #6198: the whole decline, advice included, arrives uncut: the text handed to declined()
+        // is within its 300 characters and the caller receives exactly that text.
+        $this->assertLessThanOrEqual(300, mb_strlen($won), 'the won decline fits declined()\'s cut');
+        $this->assertSame($won, $r->message);
         $this->assertStringNotContainsString('not reopened', (string) $r->message);
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'positive control: the CAS won');
     }
@@ -145,15 +153,28 @@ class StaffCalendarReleaseHonestyTest extends TestCase
 
         $this->assertSame('gate_declined', $r->status);
         $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
-        if ($lostLead === '') {
-            // The join-link refusal is long; the not-reopened fact leads so the 300-character cut keeps it.
-            $this->assertStringStartsWith(ucfirst(self::NOT_REOPENED).' '.$won, (string) $r->message);
-        } else {
-            $this->assertSame($lostLead.'; '.self::NOT_REOPENED, $r->message);
-        }
-        foreach (['re-stage', 'Add it back', 'Verify the ticket first'] as $advice) {
+        // #6198: every arm, the join-link one included, states its fact and ends with the
+        // not-reopened text, within declined()'s 300 characters so nothing is cut.
+        $this->assertLessThanOrEqual(300, mb_strlen($lostLead.'; '.self::NOT_REOPENED), 'the lost decline fits declined()\'s cut');
+        $this->assertSame($lostLead.'; '.self::NOT_REOPENED, $r->message);
+        $this->assertStringStartsWith($lostLead, $won, 'the lost-CAS fact is the won decline\'s fact');
+        foreach (['re-stage', 'Add it back', 'Verify the ticket first', 'Update other fields', 'Outlook'] as $advice) {
             $this->assertStringNotContainsString($advice, (string) $r->message);
         }
+    }
+
+    /**
+     * #6198: the join-link refusal before declined() can cut it. The direct tool path returns the
+     * thrown message untruncated, so its length here is the length the won arm hands declined().
+     */
+    public function test_the_join_link_refusal_as_thrown_fits_the_decline_whole(): void
+    {
+        $ticket = Ticket::factory()->create();
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', self::UPDATE + ['ticket_id' => $ticket->id], 0, 'mcp-staff:chet', 'chet');
+
+        $this->assertLessThanOrEqual(300, mb_strlen((string) ($result['error'] ?? '')), 'the thrown refusal fits declined()\'s cut');
+        $this->assertSame(self::JOIN_LINK_DECLINE, $result['error'] ?? null);
     }
 
     /**
