@@ -8,15 +8,20 @@ use App\Models\Client;
 use App\Models\Setting;
 use App\Models\TacticalAsset;
 use App\Models\TacticalScript;
+use App\Models\TechnicianActionLog;
 use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
+use App\Services\Mcp\StaffTacticalActionToolExecutor;
 use App\Services\Tactical\OfflineActionSweep;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalClientException;
 use Carbon\CarbonInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Mockery;
 use Tests\TestCase;
 
@@ -129,6 +134,58 @@ class OfflineActionSweepTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state);
         $this->assertSame($originalExpiry, $fresh->expires_at->timestamp, 'expiry window must not reset on a failed reconnect');
+    }
+
+    /**
+     * #6506: the reconnect-sweep arm of the AUDIT_NOT_WRITTEN note (#6312 / #6507). The sweep
+     * re-runs a queued action, the device is still offline, the run is queued again, and then the
+     * technician_action_logs insert throws. The sweep reads only the result's status, so the
+     * executor is wrapped to record what runQueuedOnReconnect() returned to it: the queued_offline
+     * result with the note as its whole message. One error line names the exception's class only
+     * (C-56); the run is back in the queue with its window kept; the bus's own tactical_action_logs
+     * row for the call exists, which is why the note names the technician action log row.
+     */
+    public function test_a_reconnect_run_whose_audit_insert_fails_still_reports_queued_with_the_note(): void
+    {
+        $run = $this->queuedRun('agent-1', 'online');
+        $originalExpiry = $run->expires_at->timestamp;
+        $this->fakeClient(fn ($m) => $m->shouldReceive('runScript')->once()
+            ->andThrow(new TacticalClientException('offline', transportFailure: true)));
+        DB::beforeExecuting(function (string $sql, array $bindings): void {
+            if (str_contains($sql, 'insert into "technician_action_logs"') && in_array('queued_offline', $bindings, true)) {
+                throw new \RuntimeException('synthetic audit failure SECRET-6506-MARKER');
+            }
+        });
+        $logged = new \ArrayObject;
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use ($logged): void {
+            $logged[] = $m;
+        });
+        $real = app(StaffTacticalActionToolExecutor::class);
+        $results = new \ArrayObject;
+        $executor = Mockery::mock(StaffTacticalActionToolExecutor::class);
+        $executor->shouldReceive('runQueuedOnReconnect')->once()->andReturnUsing(function (TechnicianRun $queued) use ($real, $results) {
+            return $results[] = $real->runQueuedOnReconnect($queued);
+        });
+
+        $ran = (new OfflineActionSweep($executor))->sweepAgent('agent-1');
+
+        $this->assertSame(0, $ran);
+        $this->assertCount(1, $results);
+        $this->assertSame('queued_offline', $results[0]->status);
+        $this->assertSame('The technician action log row for this request was not written.', $results[0]->message);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'queued again for the next sweep');
+        $this->assertSame('agent-1', $fresh->queued_agent_id);
+        $this->assertSame($originalExpiry, $fresh->expires_at->timestamp, 'the window is kept');
+        $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_offline')->count(), 'positive control: the insert really failed');
+        $this->assertDatabaseHas('tactical_action_logs', ['action_key' => 'tactical.run_script', 'agent_id' => 'agent-1', 'result_status' => 'offline']);
+        $records = array_values(array_filter($logged->getArrayCopy(), fn (MessageLogged $m) => str_contains($m->message, 'audit row not written')));
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame('[Tactical] offline queue audit row not written', $records[0]->message);
+        $this->assertSame(['run_id' => $run->id, 'status' => 'queued_offline', 'exception' => \RuntimeException::class], $records[0]->context);
+        $this->assertSame([], array_values(array_filter($logged->getArrayCopy(), fn (MessageLogged $m) => str_contains($m->message, 'reconnect-run failed'))), 'nothing escaped to the sweep');
+        $this->assertStringNotContainsString('SECRET-6506-MARKER', json_encode(array_map(fn (MessageLogged $m) => [$m->message, $m->context], $logged->getArrayCopy())) ?: '');
     }
 
     public function test_expire_due_marks_past_window_runs_without_running_them(): void

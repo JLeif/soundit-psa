@@ -498,7 +498,7 @@ class StaffCalendarToolExecutor
         // #6265: as on the approval path (#6185), true once the Graph write call was entered.
         $writeEntered = false;
         try {
-            $exec = $this->executeCalendarWrite($directTool, $upn, $prep['plan'], $ticket, $contentHash, $writeEntered);
+            $exec = $this->executeCalendarWrite($directTool, $upn, $prep['plan'], $ticket, $contentHash, null, $writeEntered);
         } catch (CalendarWriteRefusedException $e) {
             // Blocker 3 join-link guard — refused before any Graph write; surface it as a clean
             // tool error rather than letting it bubble to a generic MCP 500.
@@ -716,9 +716,10 @@ class StaffCalendarToolExecutor
      *
      * @param  array<string, mixed>  $plan
      * @param  string  $contentHash  the WHOLE-plan hash (owner+plan+ticket) — reused as create's transactionId
+     * @param  int|null  $runId  the approved run's id on the approval path, null on the immediate path (#6515)
      * @return array<string, mixed>
      */
-    private function executeCalendarWrite(string $directTool, string $upn, array $plan, Ticket $ticket, string $contentHash, bool &$writeEntered = false): array
+    private function executeCalendarWrite(string $directTool, string $upn, array $plan, Ticket $ticket, string $contentHash, ?int $runId, bool &$writeEntered = false): array
     {
         // #6185: $writeEntered turns true immediately before the Graph write call (never before
         // the update's getEvent() pre-read), so a caller can tell a throwable raised before the
@@ -736,7 +737,7 @@ class StaffCalendarToolExecutor
             $body['transactionId'] = $contentHash;
             $writeEntered = true;
 
-            return $this->projectAnsweredEvent($directTool, $this->graph->createEvent($upn, $body));
+            return $this->projectAnsweredEvent($directTool, $this->graph->createEvent($upn, $body), $ticket->id, $runId);
         }
         if ($directTool === 'calendar_update_event') {
             $patch = $plan['patch'];
@@ -748,7 +749,7 @@ class StaffCalendarToolExecutor
             }
             $writeEntered = true;
 
-            return $this->projectAnsweredEvent($directTool, $this->graph->updateEvent($upn, $plan['event_id'], $patch));
+            return $this->projectAnsweredEvent($directTool, $this->graph->updateEvent($upn, $plan['event_id'], $patch), $ticket->id, $runId);
         }
         if ($directTool === 'calendar_cancel_event') {
             $writeEntered = true;
@@ -770,17 +771,21 @@ class StaffCalendarToolExecutor
      * that event is therefore not an unknown outcome: it is caught here, logged by class, file and
      * line (never its message, C-56), and the result keeps the event id (assertEvent() proved it a
      * string) with 'projection_fault' set, so each caller reports an executed write with a fault.
+     * #6515: the log line carries the ticket id, and the run id on the approval path (the
+     * immediate path has no run), so it can be matched to its audit rows.
      *
      * @param  array<string, mixed>  $answered
      * @return array<string, mixed>
      */
-    private function projectAnsweredEvent(string $directTool, array $answered): array
+    private function projectAnsweredEvent(string $directTool, array $answered, int $ticketId, ?int $runId): array
     {
         try {
             return ['event' => $this->projectEvent($answered)];
         } catch (\Throwable $e) {
             Log::error('[Calendar] Graph answered the calendar write, but the returned event could not be projected', [
-                'tool' => $directTool, 'exception' => $e::class,
+                'tool' => $directTool, 'ticket_id' => $ticketId,
+                ...($runId === null ? [] : ['run_id' => $runId]),
+                'exception' => $e::class,
                 'file' => self::relativeSourcePath($e->getFile()), 'line' => $e->getLine(),
             ]);
 
@@ -1047,7 +1052,7 @@ class StaffCalendarToolExecutor
             }
 
             try {
-                $exec = $this->executeCalendarWrite($directTool, $upn, $plan, $ticket, $run->content_hash, $writeEntered);
+                $exec = $this->executeCalendarWrite($directTool, $upn, $plan, $ticket, $run->content_hash, $run->id, $writeEntered);
             } catch (CalendarWriteRefusedException $e) {
                 // Refused BEFORE any Graph write (blocker 3 join-link guard) — nothing committed,
                 // so release and decline. NOT a retry: re-approving would only refuse again.

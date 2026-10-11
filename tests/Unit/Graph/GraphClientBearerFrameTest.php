@@ -316,11 +316,13 @@ class GraphClientBearerFrameTest extends TestCase
      * array argument holds the request headers, the bearer among them. This is why GraphClient's
      * docblock claims nothing below the middleware frames.
      *
-     * #6259: no request can leave the process, whatever Guzzle's version does. The CurlHandler's
-     * handle factory is the real CurlFactory wrapped in a guard: CurlHandler calls curl_exec()
-     * only on a handle the factory returned, and the guard never returns one. If a Guzzle change
-     * stops the CA-bundle check from throwing, the guard releases the unused handle and throws a
-     * LogicException, so this test fails on the guard's message instead of opening a socket.
+     * #6259 / #6513: the CurlHandler's handle factory is the real CurlFactory wrapped in a guard
+     * that never returns a handle. This keeps the request in the process only while CurlHandler
+     * honours its 'handle_factory' option and builds every handle through create() before
+     * curl_exec(); it is not a guarantee against every Guzzle version. Under that dependency, if
+     * a Guzzle change stops the CA-bundle check from throwing, the guard releases the unused
+     * handle and throws a LogicException, so this test fails on the guard's message instead of
+     * opening a socket.
      */
     public function test_the_curl_handler_frames_are_outside_the_claim(): void
     {
@@ -338,23 +340,22 @@ class GraphClientBearerFrameTest extends TestCase
     /**
      * #6259 positive control for the guard above: with no CA-bundle path to refuse (verify off),
      * the real CurlFactory builds a handle, and the guard is what stops the send. The handler
-     * never reaches curl_exec(), so this request does not leave the process either.
+     * never reaches curl_exec() on a handle the guard saw, under the same 'handle_factory'
+     * dependency as above. #6513: what this measures is that the guard's create() ran once and its
+     * LogicException is what the send raised; it does not observe the network. The host is
+     * graph.invalid (never resolves), so no response could arrive whether or not a request left,
+     * and an absence of response headers would prove nothing; no such assertion is made.
      */
     public function test_the_curl_handler_guard_stops_a_handle_the_factory_built(): void
     {
-        $sent = false;
         [$client, $factory] = self::guardedCurlClient();
 
         $thrown = self::attempt(fn () => $client->send(new \GuzzleHttp\Psr7\Request('GET', 'https://graph.invalid/v1.0/me'), [
             'verify' => false,
-            'on_headers' => function () use (&$sent): void {
-                $sent = true;
-            },
         ]));
 
         $this->assertSame(1, $factory->created, 'the factory built a handle');
         $this->assertInstanceOf(\LogicException::class, $thrown);
         $this->assertSame('b4n guard: CurlFactory built a handle; refusing to let CurlHandler send it', $thrown->getMessage());
-        $this->assertFalse($sent, 'no response headers: nothing was sent');
     }
 }
