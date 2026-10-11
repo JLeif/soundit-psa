@@ -405,11 +405,11 @@ class StaffCalendarReleaseHonestyTest extends TestCase
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
 
         $this->assertSame('executed_with_fault', $r->status);
-        $this->assertSame('Calendar write executed, but closing the run failed. Do NOT re-approve it; check the calendar and the run.', $r->message);
+        $this->assertSame('Calendar write executed (event EVT-6124), but closing the run failed. Do NOT re-approve it; check the calendar and the run.', $r->message);
         $this->assertStringNotContainsString('flagged', (string) $r->message);
         $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'not reopened');
         $this->assertSame(
-            ['Calendar write EXECUTED, but closing the run failed (RuntimeException). Do NOT re-approve; check the calendar and the run.'],
+            ['Calendar write EXECUTED (event EVT-6124), but closing the run failed (RuntimeException). Do NOT re-approve; check the calendar and the run.'],
             TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'executed_with_fault')->pluck('summary')->all(),
         );
         $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'closing the run failed')));

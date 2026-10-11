@@ -299,7 +299,8 @@ class StaffCalendarStagedWriteTest extends TestCase
         // #6268 (C-56): the bookkeeping failure is recorded by class, never by its message (a
         // QueryException's SQL bindings carry the back-link body, which names the mailbox).
         $row = \App\Models\TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'error')->sole();
-        $this->assertMatchesRegularExpression('/^Calendar write EXECUTED but post-write back-link\\/audit failed \\([A-Za-z]+\\) — run left Done/', $row->summary);
+        // #6510(a): the row names the back-link, the only step that can have failed here.
+        $this->assertMatchesRegularExpression('/^Calendar write EXECUTED \\(event AAMkAG\\) and the run is Done, but the ticket back-link failed \\([A-Za-z]+\\)\\./', $row->summary);
         $record = collect($logged)->first(fn ($m) => str_contains($m->message, 'post-write bookkeeping failed'));
         $this->assertNotNull($record);
         $this->assertSame(['run_id', 'action', 'exception'], array_keys($record->context));
