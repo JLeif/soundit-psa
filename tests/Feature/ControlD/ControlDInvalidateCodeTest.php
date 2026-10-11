@@ -48,7 +48,12 @@ class ControlDInvalidateCodeTest extends TestCase
 
     private const CODE = '0123456789abcdef0123456789abcdef';
 
-    private const PIN = '4821';
+    /**
+     * The secret-absence checks match the PIN as a substring of audit summaries and log records,
+     * which also carry random UUIDs. A 4-digit PIN can occur inside a UUID's hex and fail
+     * spuriously; nine fixed digits in a row (the rule allows 1-10, leading 1-9) practically cannot.
+     */
+    private const PIN = '905551234';
 
     private array $history = [];
 
