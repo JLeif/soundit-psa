@@ -254,7 +254,7 @@ class StaffCalendarTokenFailureWireTest extends TestCase
      * #6199: the no-response row (ConnectException, Graph never answered) is a
      * GraphClientException with no status; it is wrapped and reopens the same way.
      *
-     * @return array<string, array{0: \Closure(): list<Response>, 1: string}>
+     * @return array<string, array{0: \Closure(): list<Response|\Closure>, 1: string}>
      */
     public static function preReadFailures(): array
     {

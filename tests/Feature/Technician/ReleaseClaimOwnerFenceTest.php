@@ -146,7 +146,7 @@ class ReleaseClaimOwnerFenceTest extends TestCase
      * releaseClaimTo(QueuedOffline). With the claim its own, the run goes back to the queue,
      * not stranded in Executing. When another claim's stamp is written to the row after this
      * claim (the run stays Executing under that claim), the caller's release loses and that
-     * claim stays in place. No Tactical request is made on this arm (no client is bound).
+     * claim stays in place.
      */
     public function test_the_reconnect_run_caller_releases_its_own_claim_and_not_a_later_one(): void
     {
