@@ -306,11 +306,13 @@ class TeamsMessageAttachmentFetcher
 
         // #6012: a throwable that is not a GraphClientException is named in the record by its
         // class only (never its message), so a PSA-side failure is not read as a Graph one.
+        // #6200: that record carries no status key, because status 0 here means no response
+        // arrived and Graph may have answered (for example a 200).
         Log::warning('[ChetDataSurface] Teams message attachment read failed', [
             'chat_id' => $chatId,
             'stage' => $what,
-            'status' => $status,
-        ] + ($tokenRefreshFailed ? ['token_refresh' => 'failed'] : [])
+        ] + ($graphFailure ? ['status' => $status] : [])
+          + ($tokenRefreshFailed ? ['token_refresh' => 'failed'] : [])
           + ($tokenFailed ? ['token' => 'not obtained'] : [])
           + (! $graphFailure ? ['exception' => $e::class] : []));
 
