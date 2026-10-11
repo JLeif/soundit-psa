@@ -1842,8 +1842,10 @@ appear in the sub-organization's own profile list, so the code preflight accepts
 arm (iii). The first approved run with it bound its code. **Read-back after an approved
 run:** the result names no failed step. `controld_onboarding_intents` holds one `bound` row
 for each organization or code step that ran, with the organization id the client record
-carries. A global-profile row is `bound`, or `released` when the profile was already enforced
-(a no-op). A deploy writes no row, so check it in Tactical (step 5). The client
+carries. When the plan has a global-profile step, a successful run shows that row `bound`. A
+`released` global-profile row is not success: the profile was already enforced, so that step
+refused as a no-op and the plan stopped there, and no code was cut. Read the result, deny any
+proposal still waiting, and stage the client again. A deploy writes no row, so check it in Tactical (step 5). The client
 record holds a stored code, which is never displayed. **Optional vendor-side read-back:** one
 read-only GET `provision` scoped to the client's sub-organization (`X-Force-Org-Id`) should list
 exactly one active code, whose `profile_id` is `controld_code_profile_id` and whose device
