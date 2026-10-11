@@ -1099,15 +1099,18 @@ class StaffCalendarToolExecutor
             // back-link and an executed_with_fault row record it, and the approver gets the fault.
             $projectionFault = isset($exec['projection_fault']) ? (string) $exec['projection_fault'] : null;
 
+            // #6509/#6514/#6518: the 'executed' row is written on every landed write, a
+            // projection fault included, as on the immediate path: calendarWriteAlreadyExecuted()
+            // reads it. #6511: the audit rows come before the back-link, so a back-link
+            // failure cannot drop them. contract:1: each row is best-effort (safeAudit()), as on
+            // the immediate path, so a failed audit insert drops neither the next row nor the
+            // back-link, which carries the event id.
+            $this->safeAudit($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
+            if ($projectionFault !== null) {
+                $this->safeAudit($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, "Operator-approved calendar write EXECUTED (event {$eventId}), but the event Microsoft Graph returned could not be read ({$projectionFault}). Do NOT re-approve; check the calendar.", $this->approverLabel($approverId), $run->id, $approverId);
+            }
+
             try {
-                // #6509/#6514/#6518: the 'executed' row is written on every landed write, a
-                // projection fault included, as on the immediate path: calendarWriteAlreadyExecuted()
-                // reads it. #6511: the audit rows come before the back-link, so a back-link
-                // failure cannot drop them.
-                $this->auditWrite($run->action_type, 'executed', $ticket, $run->content_hash, 'Operator-approved calendar write executed.', $this->approverLabel($approverId), $run->id, $approverId);
-                if ($projectionFault !== null) {
-                    $this->auditWrite($run->action_type, 'executed_with_fault', $ticket, $run->content_hash, "Operator-approved calendar write EXECUTED (event {$eventId}), but the event Microsoft Graph returned could not be read ({$projectionFault}). Do NOT re-approve; check the calendar.", $this->approverLabel($approverId), $run->id, $approverId);
-                }
                 $this->backlinkNote($ticket, $this->writeBacklinkBody($directTool, $upn, $eventId, (string) ($payload['reason'] ?? ''), approved: true));
             } catch (\Throwable $bookkeeping) {
                 // Write done + run already Done: record the partial failure for a human and

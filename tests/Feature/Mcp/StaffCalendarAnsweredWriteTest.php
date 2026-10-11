@@ -189,6 +189,39 @@ class StaffCalendarAnsweredWriteTest extends TestCase
         }
     }
 
+    /**
+     * contract:1: each audit row is best-effort, as on the immediate path, so a failed 'executed'
+     * insert after an approved write drops neither the fault row nor the back-link, which carries
+     * the event id. The run stays Done and the approver text is unchanged.
+     */
+    public function test_an_executed_row_failure_after_an_approved_write_keeps_the_fault_row_and_the_back_link(): void
+    {
+        $run = $this->staged(self::CREATE, 'calendar_stage_create_event');
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('createEvent')->once()->andReturn(self::UNREADABLE_EVENT));
+        TechnicianActionLog::creating(function (TechnicianActionLog $row): void {
+            if ($row->result_status === 'executed') {
+                throw new \RuntimeException('synthetic audit failure');
+            }
+        });
+        $logged = $this->captureLogs();
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame('executed_with_fault', $r->status);
+        $this->assertSame('Calendar write executed (event EVT-NEW-6264), but the event Microsoft Graph returned could not be read. Do NOT re-approve it; check the calendar.', $r->message);
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $this->assertSame(
+            ['awaiting_approval', 'executed_with_fault'],
+            TechnicianActionLog::where('run_id', $run->id)->orderBy('id')->pluck('result_status')->all(),
+            'the fault row is still written and no bookkeeping error row is needed',
+        );
+        $this->assertStringContainsString('calendar event EVT-NEW-6264 in', (string) TicketNote::where('ticket_id', $run->ticket_id)->value('body'), 'the back-link records the event id');
+        $records = self::matching($logged(), 'audit write failed');
+        $this->assertCount(1, $records);
+        $this->assertSame('error', $records[0]->level);
+        $this->assertSame(['action' => 'calendar_stage_create_event', 'status' => 'executed', 'exception' => \RuntimeException::class], $records[0]->context);
+    }
+
     public function test_an_immediate_create_graph_answered_but_the_psa_could_not_read_is_reported_landed(): void
     {
         $ticket = Ticket::factory()->create();
