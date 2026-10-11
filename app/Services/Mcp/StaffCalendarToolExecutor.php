@@ -67,10 +67,10 @@ class StaffCalendarToolExecutor
     private const NOT_REOPENED = 'the run was not reopened; check its current state before acting on it again.';
 
     /**
-     * #6198: the join-link refusal's fact without its advice, for the decline when releaseClaim()'s
-     * CAS lost. The refusal's own message (thrown before any Graph write) tells the operator to
-     * edit the event, which treats the run as still pending; with NOT_REOPENED appended this text
-     * stays under declined()'s 300-character cut.
+     * #6198: the join-link refusal's fact without its advice. The refusal thrown before any Graph
+     * write is this fact plus its advice (285 characters). When releaseClaim()'s CAS lost, the
+     * decline is this fact plus NOT_REOPENED instead, because the advice treats the run as still
+     * pending. Both texts fit declined()'s 300-character cut.
      */
     private const JOIN_LINK_REFUSED = 'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused';
 
@@ -843,11 +843,11 @@ class StaffCalendarToolExecutor
             || $joinAt === false
             || $sepAt < 0
             || $joinAt < $sepAt) {
+            // #6198: the fact is JOIN_LINK_REFUSED, so the won and lost declines cannot drift, and
+            // the whole text (285 characters) fits declined()'s 300, so its advice arrives whole.
             throw new CalendarWriteRefusedException(
-                'This event is a Teams meeting and its join link could not be confidently located in the '.
-                'current event body, so editing the agenda here would risk removing the "Join" link. Update '.
-                'other fields (subject/time/location/attendees) without the body, or edit the agenda in '.
-                'Outlook/Teams where the join block is preserved automatically.'
+                self::JOIN_LINK_REFUSED.'. Update other fields (subject/time/location/attendees) without the body, '.
+                'or edit the agenda in Outlook/Teams, which preserves the "Join" link.'
             );
         }
 
@@ -1055,7 +1055,8 @@ class StaffCalendarToolExecutor
 
                 // #6198: on a lost CAS the decline states the refusal fact without its advice and
                 // ends with NOT_REOPENED, like releaseAndDecline(); the whole text fits in
-                // declined()'s 300 characters. When the CAS won, the refusal's message is returned.
+                // declined()'s 300 characters. When the CAS won, the refusal's message (fact plus
+                // advice, also within 300) is returned whole.
                 return $run->releaseClaim()
                     ? $this->declined($e->getMessage())
                     : $this->declined(self::JOIN_LINK_REFUSED.'; '.self::NOT_REOPENED);
