@@ -966,7 +966,8 @@ class StaffCalendarToolExecutor
      * RE-VERIFY the owner allowlist AND the master switch AT APPROVAL (the TOCTOU close: the
      * allowlist can change between staging and approval, and it is the one boundary that matters on
      * a tenant-wide Calendars.ReadWrite token) → execute the SAME plan an immediate call would →
-     * back-link → audit → Done. A failure before the write call releases the claim. #6266: once
+     * Done → audit ('executed', then 'executed_with_fault' on a projection fault) → back-link. A
+     * failure before the write call releases the claim. #6266: once
      * the write call was entered and its outcome is unknown, the run stays Executing on purpose,
      * where no cockpit lane lists it. External/non-idempotent, so it is deliberately absent from
      * TechnicianRun::RECOVERY_SAFE_ACTION_TYPES: the stale-claim reaper never reopens it (that
@@ -1099,9 +1100,10 @@ class StaffCalendarToolExecutor
             // back-link and an executed_with_fault row record it, and the approver gets the fault.
             $projectionFault = isset($exec['projection_fault']) ? (string) $exec['projection_fault'] : null;
 
-            // #6509/#6514/#6518: the 'executed' row is written on every landed write, a
-            // projection fault included, as on the immediate path: calendarWriteAlreadyExecuted()
-            // reads it. #6511: the audit rows come before the back-link, so a back-link
+            // #6509/#6514/#6518: once this request has closed the run, the 'executed' row is written,
+            // a projection fault included, as on the immediate path: calendarWriteAlreadyExecuted()
+            // reads it. The lost-fence arm above and the close-failure arm below write only
+            // executed_with_fault. #6511: the audit rows come before the back-link, so a back-link
             // failure cannot drop them. contract:1: each row is best-effort (safeAudit()), as on
             // the immediate path, so a failed audit insert drops neither the next row nor the
             // back-link, which carries the event id. The approver label (a users read) is resolved
