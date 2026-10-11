@@ -48,11 +48,14 @@ class StaffTacticalActionToolExecutor
 {
     private const DIRECT_DEDUP_HOURS = 24;
 
-    /** #6312: the tail when the offline-queue outcome committed but its audit row insert threw. */
+    /** #6312: the note appended to the offline-queue result when its audit row insert threw. */
     private const AUDIT_NOT_WRITTEN = 'The audit row for this request was not written.';
 
-    /** #6312: the queued result's message when the queue committed and its audit row was not written. */
-    private const QUEUED_AUDIT_NOT_WRITTEN = 'Device offline: the action is queued to run when the device comes back online. '.self::AUDIT_NOT_WRITTEN;
+    /**
+     * #6508 / #6516: the decline when enqueueOfflineRun() finds a database transaction open
+     * around it, so a queue write could not commit on its own.
+     */
+    private const NOT_QUEUED_OUTER_TRANSACTION = 'The Tactical call was classified as device offline, and the action was not queued: this request was running inside an open database transaction. Check the run\'s current state before acting on it again.';
 
     /** @var array<int, string> */
     private const UPSTREAM_IDENTIFIER_KEYS = [
@@ -361,7 +364,7 @@ class StaffTacticalActionToolExecutor
             // #6254: the queue attempt is audited by enqueueOfflineRun() once its outcome is
             // known, so a lost claim-owner fence never leaves a queued_offline row behind.
             if ($willQueue) {
-                return $this->enqueueOfflineRun($run, $agentId, $directTool, $params, $approverId, $ticket, $asset, $result);
+                return $this->enqueueOfflineRun($run, $agentId, $directTool, $params, $approverId, $ticket, $asset, $result, $releaseState);
             }
 
             $status = $result->isOk() ? 'executed' : $result->status;
@@ -454,16 +457,76 @@ class StaffTacticalActionToolExecutor
      * queued or coalesced, and the bus status with a not-queued summary when the claim-owner
      * fence was lost.
      *
-     * #6312: parkOrCoalesce() has committed by the time the audit row is written, so an audit
-     * failure cannot undo the queue outcome. It is caught, logged by class only (C-56: a
-     * QueryException's message carries the INSERT's bound values), and the result still reports
-     * the committed outcome, with a note that the audit row was not written.
+     * #6312 / #6508 / #6516: the catch around the audit insert below relies on one premise: no
+     * database transaction is open around this method, so parkOrCoalesce()'s DB::transaction is
+     * the outermost one and has committed before the audit row is written. The premise is
+     * enforced, not assumed: outerTransactionOpen() checks it before the queue write, and when it
+     * fails nothing is queued, the bus status is audited with a not-queued summary, the claim is
+     * released to $releaseState as when the offline queue is disabled, and the result is a decline
+     * (NOT_QUEUED_OUTER_TRANSACTION). With the premise holding, an audit insert failure cannot
+     * undo the queue outcome: it is caught and logged by class only (C-56: a QueryException's
+     * message carries the INSERT's bound values), and the result is the normal-path result with
+     * the AUDIT_NOT_WRITTEN note appended to its message (#6512). #6521: the cockpit renders
+     * fixed text for queued_offline and does not show that message, so on the queued arm the
+     * note reaches the result, not the approver.
+     *
+     * #6312 scenario (b): when parkOrCoalesce() itself throws, a best-effort audit row records
+     * the bus status and that the queue write raised an error; the exception is then rethrown
+     * unchanged, and executeClaimedRun()'s catch releases the claim as before.
      */
-    private function enqueueOfflineRun(TechnicianRun $run, string $agentId, string $directTool, array $params, int $approverId, Ticket $ticket, Asset $asset, TacticalActionResult $busResult): TechnicianApprovalResult
+    private function enqueueOfflineRun(TechnicianRun $run, string $agentId, string $directTool, array $params, int $approverId, Ticket $ticket, Asset $asset, TacticalActionResult $busResult, TechnicianRunState $releaseState): TechnicianApprovalResult
     {
+        if ($this->outerTransactionOpen($run)) {
+            Log::error('[Tactical] offline queue refused: a database transaction is open around the queue write', [
+                'run_id' => $run->id, 'status' => $busResult->status,
+            ]);
+            $this->auditAttempt(
+                $run->action_type,
+                $busResult->status,
+                (int) $run->client_id,
+                $ticket,
+                $asset,
+                $run->content_hash,
+                "Operator-approved {$run->action_type} {$busResult->status}; not queued: a database transaction was open around this request.",
+                $this->approverLabel($approverId),
+                $run->id,
+                $approverId,
+            );
+            $run->releaseClaimTo($releaseState);
+
+            return new TechnicianApprovalResult('gate_declined', message: self::NOT_QUEUED_OUTER_TRANSACTION);
+        }
+
         $dedupKey = $this->queueDedupKey($agentId, $directTool, $params);
-        $queued = $this->parkOrCoalesce($run, $agentId, $dedupKey, $approverId);
+
+        try {
+            $queued = $this->parkOrCoalesce($run, $agentId, $dedupKey, $approverId);
+        } catch (\Throwable $e) {
+            Log::error('[Tactical] offline queue write failed', ['run_id' => $run->id, 'exception' => $e::class]);
+            try {
+                $this->auditAttempt(
+                    $run->action_type,
+                    $busResult->status,
+                    (int) $run->client_id,
+                    $ticket,
+                    $asset,
+                    $run->content_hash,
+                    "Operator-approved {$run->action_type} {$busResult->status}; the offline queue write raised an error.",
+                    $this->approverLabel($approverId),
+                    $run->id,
+                    $approverId,
+                );
+            } catch (\Throwable $auditError) {
+                Log::error('[Tactical] offline queue audit row not written', [
+                    'run_id' => $run->id, 'status' => $busResult->status, 'exception' => $auditError::class,
+                ]);
+            }
+
+            throw $e;
+        }
+
         $status = $queued ? 'queued_offline' : $busResult->status;
+        $result = $queued ? new TechnicianApprovalResult('queued_offline') : self::notQueuedOffline();
 
         try {
             $this->auditAttempt(
@@ -483,12 +546,42 @@ class StaffTacticalActionToolExecutor
                 'run_id' => $run->id, 'status' => $status, 'exception' => $e::class,
             ]);
 
-            return $queued
-                ? new TechnicianApprovalResult('queued_offline', message: self::QUEUED_AUDIT_NOT_WRITTEN)
-                : new TechnicianApprovalResult('gate_declined', message: self::notQueuedOffline()->message.' '.self::AUDIT_NOT_WRITTEN);
+            return self::withAuditNotWritten($result);
         }
 
-        return $queued ? new TechnicianApprovalResult('queued_offline') : self::notQueuedOffline();
+        return $result;
+    }
+
+    /**
+     * #6508 / #6516: whether a database transaction is open around the caller on the run's
+     * connection. It asks the connection's transaction manager, whose
+     * callbackApplicableTransactions() is the framework's own count of transactions that
+     * decide a commit: every pending one in production, and every one except the wrapping
+     * RefreshDatabase transaction under test. A raw DB::transactionLevel() reads 1 in tests,
+     * so it cannot be compared against a fixed 0. Without a bound manager it falls back to
+     * that raw level, which can only over-report an open transaction (fail closed).
+     */
+    private function outerTransactionOpen(TechnicianRun $run): bool
+    {
+        $connection = $run->getConnection();
+        if (! app()->bound('db.transactions')) {
+            return $connection->transactionLevel() > 0;
+        }
+        $connection = $connection->getName();
+
+        return app('db.transactions')->callbackApplicableTransactions()
+            ->contains(fn ($transaction) => $transaction->connection === $connection);
+    }
+
+    /** #6512: the normal-path result with the audit-not-written note appended to its message. */
+    private static function withAuditNotWritten(TechnicianApprovalResult $result): TechnicianApprovalResult
+    {
+        return new TechnicianApprovalResult(
+            $result->status,
+            noteId: $result->noteId,
+            message: ltrim(($result->message ?? '').' '.self::AUDIT_NOT_WRITTEN),
+            secret: $result->secret,
+        );
     }
 
     /** Park the run, or coalesce it onto an identical queued row. False when the fence was lost. */
