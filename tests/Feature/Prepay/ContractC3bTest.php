@@ -118,6 +118,7 @@ class ContractC3bTest extends TestCase
     public function test_move_from_hours_mode_adjusts_columns(): void
     {
         $this->moveFromMode(false, 9.5, 0.5);
+        $this->assertSame([$this->b->id, $this->b->id], \App\Models\ContractActivity::whereIn('action', ['entry_moved_in', 'entry_moved_out'])->get()->map(fn ($activity) => $activity->changes['requested_contract_id'] ?? null)->all());
     }
 
     private function moveFromMode(bool $amount, ?float $balance, float $used): void
@@ -205,8 +206,7 @@ class ContractC3bTest extends TestCase
         Ticket::whereKey($this->ticket->id)->update(['contract_id' => $held ? null : $d->id]);
         $reads = 0;
         $expired = false;
-        // ContractResolver::activeContractOf produces this active read. Expire B after
-        // resolution but before lockedActiveContract; real debit/retry code runs unmocked.
+        // Expire B at its Nth active-status read (1st for a note, 2nd for a phone call). This counts queries; it does not identify the caller. Real debit/retry code runs unmocked.
         \Illuminate\Support\Facades\DB::listen(function ($query) use (&$reads, &$expired, $isNote) {
             $sql = str_replace(['"', '`'], '', $query->sql);
             if (! $expired && str_starts_with($sql, 'select * from contracts')
@@ -217,7 +217,7 @@ class ContractC3bTest extends TestCase
             }
         });
         $result = app(PrepayService::class)->moveEntryContract($entry, $this->b, 'Synthetic retry', $this->user);
-        $this->assertTrue($expired, 'resolution/debit race seam reached');
+        $this->assertTrue($expired, 'contract B expired at its counted active-status read');
         $destinationId = $held ? null : $d->id;
         $destination = $held ? 'no contract' : $d->name;
         $this->assertSame($held ? $this->b->id : $d->id, $entry->fresh()->contract_id);

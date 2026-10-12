@@ -792,10 +792,10 @@ class PrepayService
      *
      * drawn_hours is the draw recorded on the entry's ledger row after that follow-on debit (0 for
      * a ledgered move, or when no draw is found): the row the debit returned, or, after a caught
-     * debit fault, the row read back from the ledger; null when that read-back also failed. The
-     * move's system note and ContractActivity rows then report a found draw in place of 0.
+     * debit fault, the row read back from the ledger; null when that read-back also failed.
+     * After an unledgered move, the system note and ContractActivity rows report the entry's re-read stamp (a held or unstamped entry as on no contract, to_contract_id null) and any found draw in place of 0.
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: ?float}
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: ?int, hours: float, ledger: bool, drawn_hours: ?float}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -911,9 +911,7 @@ class PrepayService
                 'to_contract_id' => $target->id,
                 'to_contract' => $target->name,
             ];
-            if (! $row) {
-                $changes['requested_contract_id'] = $target->id;
-            }
+            $changes['requested_contract_id'] = $target->id;
             foreach (array_filter([$from, $target]) as $contract) {
                 $report['activity_ids'][] = ContractActivity::create([
                     'contract_id' => $contract->id,
