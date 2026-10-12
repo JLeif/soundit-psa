@@ -53,9 +53,91 @@ class StaffCalendarReleaseHonestyTest extends TestCase
         Setting::setValue('calendar_enabled', '1');
         Setting::setValue('calendar_allowed_owner_upns', json_encode([self::OWNER]));
         $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('getEvent')->andReturn([
-            'id' => 'EVT-6124', 'isOnlineMeeting' => true, 'onlineMeeting' => ['joinUrl' => 'https://teams.example.test/join'],
+            'id' => 'EVT-6124', 'isOnlineMeeting' => true, 'onlineMeetingProvider' => 'teamsForBusiness', 'onlineMeeting' => ['joinUrl' => 'https://teams.example.test/join'],
             'body' => ['contentType' => 'text', 'content' => 'no join block'],
         ]));
+    }
+
+    /** #6701: the join-link refusal's fact for an online meeting whose provider is not teamsForBusiness. */
+    private const ONLINE_MEETING_JOIN_LINK_FACT = 'This event is an online meeting and its join link could not be confidently located in the current event body, so the calendar update was refused';
+
+    /** #6701: that refusal as thrown, fact and advice, which the won arm returns whole. */
+    private const ONLINE_MEETING_JOIN_LINK_DECLINE = self::ONLINE_MEETING_JOIN_LINK_FACT.'. Update other fields (subject/time/location/attendees) without the body.';
+
+    /** #6701: getEvent() answers an online meeting with no locatable join block, for $provider (null: the key is absent). */
+    private function onlineMeetingFrom(?string $provider): void
+    {
+        $event = ['id' => 'EVT-6124', 'isOnlineMeeting' => true, 'onlineMeeting' => ['joinUrl' => 'https://meet.example.test/join'],
+            'body' => ['contentType' => 'text', 'content' => 'no join block']];
+        if ($provider !== null) {
+            $event['onlineMeetingProvider'] = $provider;
+        }
+        $this->mock(GraphClient::class, fn ($m) => $m->shouldReceive('getEvent')->andReturn($event)->shouldReceive('updateEvent')->never());
+    }
+
+    /**
+     * #6701: [provider, the whole thrown refusal, the lost-CAS decline's fact]. Graph sets
+     * isOnlineMeeting for every provider, so only teamsForBusiness gets the Teams text.
+     *
+     * @return array<string, array{0: ?string, 1: string, 2: string}>
+     */
+    public static function meetingProviders(): array
+    {
+        return [
+            'teamsForBusiness' => ['teamsForBusiness', self::JOIN_LINK_DECLINE, 'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused'],
+            'skypeForBusiness' => ['skypeForBusiness', self::ONLINE_MEETING_JOIN_LINK_DECLINE, self::ONLINE_MEETING_JOIN_LINK_FACT],
+            'skypeForConsumer' => ['skypeForConsumer', self::ONLINE_MEETING_JOIN_LINK_DECLINE, self::ONLINE_MEETING_JOIN_LINK_FACT],
+            'provider absent' => [null, self::ONLINE_MEETING_JOIN_LINK_DECLINE, self::ONLINE_MEETING_JOIN_LINK_FACT],
+        ];
+    }
+
+    /** #6701: the thrown refusal (immediate path, returned uncut) names Teams only for teamsForBusiness, within 300 characters. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('meetingProviders')]
+    public function test_the_thrown_join_link_refusal_names_teams_only_for_teams_for_business(?string $provider, string $thrown, string $lostFact): void
+    {
+        $this->onlineMeetingFrom($provider);
+        $ticket = Ticket::factory()->create();
+
+        $result = app(StaffCalendarToolExecutor::class)->execute('calendar_update_event', self::UPDATE + ['ticket_id' => $ticket->id], 0, 'mcp-staff:chet', 'chet');
+
+        $this->assertLessThanOrEqual(300, mb_strlen($thrown), 'the thrown refusal fits declined()\'s cut');
+        $this->assertSame($thrown, $result['error'] ?? null);
+        if ($provider !== 'teamsForBusiness') {
+            $this->assertStringNotContainsString('Teams', (string) ($result['error'] ?? ''));
+        }
+    }
+
+    /** #6701: on the staged path, the won decline is that whole refusal and names Teams only for teamsForBusiness. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('meetingProviders')]
+    public function test_a_join_link_refusal_whose_release_wins_names_teams_only_for_teams_for_business(?string $provider, string $thrown, string $lostFact): void
+    {
+        $run = $this->staged(self::UPDATE, 'calendar_stage_update_event');
+        $this->onlineMeetingFrom($provider);
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state, 'positive control: the CAS won');
+        $this->assertSame('gate_declined', $r->status);
+        $this->assertSame($thrown, $r->message);
+    }
+
+    /** #6701: the lost-CAS decline states the provider-accurate fact plus NOT_REOPENED, within 300 characters. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('meetingProviders')]
+    public function test_a_join_link_refusal_whose_release_loses_names_teams_only_for_teams_for_business(?string $provider, string $thrown, string $lostFact): void
+    {
+        $run = $this->staged(self::UPDATE, 'calendar_stage_update_event');
+        $this->onlineMeetingFrom($provider);
+        $this->loseTheCasAfterTheClaim($run);
+
+        $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run->fresh(), $this->approver->id);
+
+        $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
+        $this->assertSame('gate_declined', $r->status);
+        $this->assertLessThanOrEqual(300, mb_strlen($lostFact.'; '.self::NOT_REOPENED), 'the lost decline fits declined()\'s cut');
+        $this->assertSame($lostFact.'; '.self::NOT_REOPENED, $r->message);
+        if ($provider !== 'teamsForBusiness') {
+            $this->assertStringNotContainsString('Teams', (string) $r->message);
+        }
     }
 
     private function staged(array $arguments, string $stagedTool = 'calendar_stage_cancel_event'): TechnicianRun

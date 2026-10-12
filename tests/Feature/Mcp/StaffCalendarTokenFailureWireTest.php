@@ -9,6 +9,7 @@ use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Graph\GraphClient;
+use App\Services\Mcp\CalendarPreReadFailedException;
 use App\Services\Mcp\StaffCalendarToolExecutor;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
@@ -17,6 +18,8 @@ use GuzzleHttp\Psr7\Response;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Psr\Http\Message\RequestInterface;
 use Tests\TestCase;
@@ -271,9 +274,12 @@ class StaffCalendarTokenFailureWireTest extends TestCase
     {
         $run = $this->staged('calendar_stage_update_event', self::writes()['update with a body'][2]);
         $this->graph(...$responses());
+        $logged = $this->captureLogs();
 
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run, $this->approver->id);
 
+        // #6729 negative arm: the release won, so no record at any level says not reopened.
+        $this->assertSame([], array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'not reopened'))), 'no not-reopened record when the release won');
         $this->assertSame(['GET'], array_map(fn (RequestInterface $q) => $q->getMethod(), $this->requestsTo('graph.microsoft.com')), 'positive control: only the pre-read was sent');
         $this->assertCount(1, $this->mock, 'the spare response is still queued: no PATCH');
         $this->assertSame('gate_declined', $r->status);
@@ -288,7 +294,8 @@ class StaffCalendarTokenFailureWireTest extends TestCase
     /**
      * #6121 / #6016: on the pre-read arm too, a lost CAS is not reported as a reopen. #6195: a
      * spare is queued after the failing GET, so a PATCH sent anyway would take it and be
-     * recorded; the history is exactly the one GET.
+     * recorded; the history is exactly the one GET. #6729: one warning record, whose context is
+     * the run id and the exception class only, says the run was not reopened.
      */
     public function test_a_failed_update_pre_read_whose_release_loses_does_not_say_reopened(): void
     {
@@ -298,8 +305,15 @@ class StaffCalendarTokenFailureWireTest extends TestCase
 
             return new Response(500, [], '{}');
         }, self::spare());
+        $logged = $this->captureLogs();
 
         $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run, $this->approver->id);
+
+        $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'not reopened')));
+        $this->assertCount(1, $records, 'one not-reopened record');
+        $this->assertSame('warning', $records[0]->level);
+        $this->assertSame('[Calendar] approval pre-read failed and the run was not reopened', $records[0]->message);
+        $this->assertSame(['run_id' => $run->id, 'exception' => CalendarPreReadFailedException::class], $records[0]->context);
 
         $this->assertSame('The calendar update was not sent: reading the event before the update failed. Nothing was written to the calendar; the run was not reopened; check its current state before acting on it again.', $r->message);
         $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
@@ -489,5 +503,16 @@ class StaffCalendarTokenFailureWireTest extends TestCase
         $this->assertSame([], $this->history, 'staging calls nothing');
 
         return TechnicianRun::findOrFail($staged['run_id']);
+    }
+
+    /** @return \Closure(): list<MessageLogged> every record logged from this call on, at any level */
+    private function captureLogs(): \Closure
+    {
+        $logged = new \ArrayObject;
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use ($logged): void {
+            $logged[] = $m;
+        });
+
+        return fn () => $logged->getArrayCopy();
     }
 }

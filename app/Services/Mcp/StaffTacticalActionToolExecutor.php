@@ -472,8 +472,10 @@ class StaffTacticalActionToolExecutor
      * database transaction is open around this method, so parkOrCoalesce()'s DB::transaction is
      * the outermost one and has committed before the audit row is written. The premise is
      * enforced, not assumed: outerTransactionOpen() checks it before the queue write, and when it
-     * fails this request writes nothing to the queue, the bus status is audited, the claim is
-     * released to $releaseState as when the offline queue is disabled, and the result is a decline.
+     * fails this request writes nothing to the queue, the bus status is audited, the claim release
+     * to $releaseState is attempted as when the offline queue is disabled, and the result is a
+     * decline. #6675: when that fenced release returns false, a warning names the run as not
+     * released; the decline and the audit row say nothing about the release either way.
      * A live approval is told it was not queued (NOT_QUEUED_OUTER_TRANSACTION); a reconnect-run,
      * released back to QueuedOffline with its queue fields untouched, is told that the queue was
      * not updated (QUEUE_NOT_UPDATED_OUTER_TRANSACTION), and its audit summary says the same.
@@ -485,8 +487,9 @@ class StaffTacticalActionToolExecutor
      * note reaches the result, not the approver.
      *
      * The guard arm's audit insert is best-effort like the other two (r1 diff:4): if it throws,
-     * its class is logged, the claim is still released and the decline still returned, with the
-     * AUDIT_NOT_WRITTEN note appended to its message.
+     * its class is logged, the claim release is still attempted and the decline still returned,
+     * with the AUDIT_NOT_WRITTEN note appended to its message. #6664: that error log is itself
+     * best-effort, so a log call that throws there does not skip the release or the decline.
      *
      * #6312 scenario (b): when parkOrCoalesce() itself throws, a best-effort audit row records
      * the bus status and that the queue write raised an error; the exception is then rethrown
@@ -518,12 +521,23 @@ class StaffTacticalActionToolExecutor
                     $approverId,
                 );
             } catch (\Throwable $auditError) {
-                Log::error('[Tactical] offline queue audit row not written', [
-                    'run_id' => $run->id, 'status' => $busResult->status, 'exception' => $auditError::class,
-                ]);
+                // #6664: the log is best-effort, so a throwing log channel cannot skip the release
+                // below or replace the decline with an exception.
+                try {
+                    Log::error('[Tactical] offline queue audit row not written', [
+                        'run_id' => $run->id, 'status' => $busResult->status, 'exception' => $auditError::class,
+                    ]);
+                } catch (\Throwable) {
+                }
                 $declined = self::withAuditNotWritten($declined);
             }
-            $run->releaseClaimTo($releaseState);
+            // #6675: releaseClaimTo() is a claim-owner-fenced compare-and-set. When it returns
+            // false this request did not release the run, so a warning records that instead.
+            if (! $run->releaseClaimTo($releaseState)) {
+                Log::warning('[Tactical] offline queue refused and the run was not released', [
+                    'run_id' => $run->id, 'status' => $busResult->status,
+                ]);
+            }
 
             return $declined;
         }
