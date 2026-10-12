@@ -420,6 +420,7 @@ class StaffCalendarWriteToolExecutorTest extends TestCase
             $m->shouldReceive('getEvent')->once()->andReturn([
                 'id' => 'AAMkAG',
                 'isOnlineMeeting' => true,
+                'onlineMeetingProvider' => 'teamsForBusiness',
                 'onlineMeeting' => ['joinUrl' => 'https://teams.microsoft.com/l/meetup-join/xyz'],
                 // No separator and the join URL is absent from the body — not confidently preservable.
                 'body' => ['contentType' => 'html', 'content' => '<div>Just an agenda, no meeting block</div>'],

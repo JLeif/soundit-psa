@@ -480,6 +480,111 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertCount(1, $records);
         $this->assertSame('error', $records[0]->level);
         $this->assertSame(['run_id' => $run->id, 'status' => 'offline'], $records[0]->context);
+        // #6675 negative arm: the release won (state AwaitingApproval above), so no record at any
+        // level says the run was not released.
+        $this->assertSame([], array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'not released'))), 'no not-released record when the release won');
+    }
+
+    /**
+     * #6675: under one outer transaction, Tactical answers offline while another claim now holds
+     * the run (offlineClientThatLosesTheClaim() restamps claimed_at during runScript()), so the
+     * guard arm's fenced releaseClaimTo() returns false. The run stays Executing under that other
+     * claim; one warning record, whose context is run_id and status only, says the run was not
+     * released; neither the decline nor the audit row contains 'released'.
+     */
+    public function test_an_outer_transaction_decline_whose_release_loses_the_fence_logs_a_lost_release(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $this->offlineClientThatLosesTheClaim($run);
+        $logged = $this->captureLogs();
+        $this->assertTestingManager();
+
+        $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
+
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT, $result->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'positive control: the release lost the fence and the other claim is in place');
+        $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'not released')));
+        $this->assertCount(1, $records, 'one not-released record');
+        $this->assertSame('warning', $records[0]->level);
+        $this->assertSame('[Tactical] offline queue refused and the run was not released', $records[0]->message);
+        $this->assertSame(['run_id' => $run->id, 'status' => 'offline'], $records[0]->context);
+        $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->get();
+        $this->assertCount(1, $rows, 'one offline audit row for this run');
+        $this->assertStringNotContainsString('released', (string) $rows->first()->summary);
+        $this->assertStringNotContainsString('released', (string) $result->message);
+    }
+
+    /**
+     * #6675 r2: the lost-fence fixture above, plus a MessageLogged listener that throws for every
+     * warning-level record (standing in for a log channel that throws); error-level records do
+     * not throw. The not-released warning throws once, and the approver still gets the
+     * gate_declined decline with its exact text, not an exception.
+     */
+    public function test_an_outer_transaction_decline_whose_lost_release_warning_throws_still_declines(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $this->offlineClientThatLosesTheClaim($run);
+        $warningsThrown = [];
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use (&$warningsThrown): void {
+            if ($m->level === 'warning') {
+                $warningsThrown[] = $m->message;
+
+                throw new \RuntimeException('synthetic log channel failure');
+            }
+        });
+        $this->assertTestingManager();
+
+        $thrown = null;
+        $result = null;
+        try {
+            $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
+        } catch (\Throwable $e) {
+            $thrown = $e;
+        }
+
+        $this->assertSame(['[Tactical] offline queue refused and the run was not released'], $warningsThrown, 'positive control: the not-released warning threw once');
+        $this->assertNull($thrown, 'no exception escaped the approval');
+        $this->assertSame('gate_declined', $result?->status);
+        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT, $result?->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'positive control: the release lost the fence');
+    }
+
+    /**
+     * #6664: on the guard arm the audit insert throws, and then the 'audit row not written' error
+     * log throws too (a MessageLogged listener throws for that record, standing in for a log
+     * channel that throws). The approver still gets the gate_declined decline with the
+     * audit-not-written note, not an exception, and the run is released to AwaitingApproval.
+     */
+    public function test_an_outer_transaction_decline_whose_audit_and_error_log_both_throw_still_declines_and_releases(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $this->offlineClient();
+        $this->failTheAuditInsert('offline');
+        $logThrew = 0;
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use (&$logThrew): void {
+            if (str_contains($m->message, 'audit row not written')) {
+                $logThrew++;
+
+                throw new \RuntimeException('synthetic log channel failure');
+            }
+        });
+        $this->assertTestingManager();
+
+        $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
+
+        $this->assertSame(1, $logThrew, 'positive control: the error log threw once');
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT.' '.self::AUDIT_NOT_WRITTEN, $result->message);
+        $fresh = $run->fresh();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $fresh->state, 'the claim was released to AwaitingApproval');
+        $this->assertNull($fresh->queued_agent_id, 'queued_agent_id is null');
     }
 
     /**

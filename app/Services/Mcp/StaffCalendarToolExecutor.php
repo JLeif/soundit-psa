@@ -70,9 +70,17 @@ class StaffCalendarToolExecutor
      * #6198: the join-link refusal's fact without its advice. The refusal thrown before any Graph
      * write is this fact plus its advice (285 characters). When releaseClaim()'s CAS lost, the
      * decline is this fact plus NOT_REOPENED instead, because the advice treats the run as still
-     * pending. Both texts fit declined()'s 300-character cut.
+     * pending. Both texts fit declined()'s 300-character cut. #6701: used only when the re-read
+     * event's onlineMeetingProvider is 'teamsForBusiness'; joinLinkRefusal() picks it.
      */
     private const JOIN_LINK_REFUSED = 'This event is a Teams meeting and its join link could not be confidently located in the current event body, so the calendar update was refused';
+
+    /**
+     * #6701: the same fact for an online meeting whose onlineMeetingProvider is not
+     * 'teamsForBusiness' (or is absent), so it names no provider. Thrown with its advice it is
+     * 217 characters; with NOT_REOPENED, 222. Both fit declined()'s 300-character cut.
+     */
+    private const ONLINE_MEETING_JOIN_LINK_REFUSED = 'This event is an online meeting and its join link could not be confidently located in the current event body, so the calendar update was refused';
 
     /**
      * #6121: the audit summary prefix when the event read an update with a body makes before its
@@ -848,12 +856,10 @@ class StaffCalendarToolExecutor
             || $joinAt === false
             || $sepAt < 0
             || $joinAt < $sepAt) {
-            // #6198: the fact is JOIN_LINK_REFUSED, so the won and lost declines cannot drift, and
-            // the whole text (285 characters) fits declined()'s 300, so its advice arrives whole.
-            throw new CalendarWriteRefusedException(
-                self::JOIN_LINK_REFUSED.'. Update other fields (subject/time/location/attendees) without the body, '.
-                'or edit the agenda in Outlook/Teams, which preserves the "Join" link.'
-            );
+            // #6198 / #6701: the fact is JOIN_LINK_REFUSED when the provider is teamsForBusiness and
+            // ONLINE_MEETING_JOIN_LINK_REFUSED otherwise; either whole text fits declined()'s 300,
+            // so its advice arrives whole.
+            throw new CalendarWriteRefusedException(self::joinLinkRefusal($event));
         }
 
         // Keep the meeting block verbatim; put the new agenda (escaped) above it.
@@ -861,6 +867,35 @@ class StaffCalendarToolExecutor
         $agendaHtml = nl2br(e((string) ($newBody['content'] ?? '')), false);
 
         return ['contentType' => 'HTML', 'content' => '<div>'.$agendaHtml.'</div>'.$meetingBlock];
+    }
+
+    /**
+     * #6701: the thrown join-link refusal, fact plus advice. Graph sets isOnlineMeeting for
+     * every online-meeting provider, so the Teams fact and its Outlook/Teams advice are used only
+     * when the re-read event's onlineMeetingProvider is 'teamsForBusiness'; any other or absent
+     * provider gets the provider-neutral fact and only the advice that names no client.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private static function joinLinkRefusal(array $event): string
+    {
+        if (($event['onlineMeetingProvider'] ?? null) === 'teamsForBusiness') {
+            return self::JOIN_LINK_REFUSED.'. Update other fields (subject/time/location/attendees) without the body, '
+                .'or edit the agenda in Outlook/Teams, which preserves the "Join" link.';
+        }
+
+        return self::ONLINE_MEETING_JOIN_LINK_REFUSED.'. Update other fields (subject/time/location/attendees) without the body.';
+    }
+
+    /**
+     * #6701: the refusal fact the lost-CAS decline repeats. The only throw of
+     * CalendarWriteRefusedException in this class is in updateBodyPreservingTeamsJoin(), and its
+     * message is built by joinLinkRefusal(), which starts with one of the two facts, so the fact
+     * is the one the thrown message starts with; anything else gets the neutral fact.
+     */
+    private static function joinLinkRefusedFact(string $thrown): string
+    {
+        return str_starts_with($thrown, self::JOIN_LINK_REFUSED) ? self::JOIN_LINK_REFUSED : self::ONLINE_MEETING_JOIN_LINK_REFUSED;
     }
 
     /**
@@ -1064,7 +1099,7 @@ class StaffCalendarToolExecutor
                 // advice, also within 300) is returned whole.
                 return $run->releaseClaim()
                     ? $this->declined($e->getMessage())
-                    : $this->declined(self::JOIN_LINK_REFUSED.'; '.self::NOT_REOPENED);
+                    : $this->declined(self::joinLinkRefusedFact($e->getMessage()).'; '.self::NOT_REOPENED);
             } catch (GraphTokenException $e) {
                 // #5833: no token, so the write request was never sent and nothing committed.
                 // Release the claim as on the refusal above; re-approving cannot double-send.
@@ -1083,6 +1118,17 @@ class StaffCalendarToolExecutor
                 // no update was sent). The text says reopened only when the CAS won (#6016).
                 $this->safeAudit($run->action_type, 'error', $ticket, $run->content_hash, self::PRE_READ_FAILURE_AUDIT.self::preReadFailureDetail($e), $this->approverLabel($approverId), $run->id, $approverId);
                 $reopened = $run->releaseClaim();
+                // #6729: a lost release on this arm is logged at warning, like the outer catch's
+                // (run_id and class only, C-56). The warning is best-effort like the #6664 log: a
+                // log call that throws is swallowed and the decline is still returned.
+                if (! $reopened) {
+                    try {
+                        Log::warning('[Calendar] approval pre-read failed and the run was not reopened', [
+                            'run_id' => $run->id, 'exception' => $e::class,
+                        ]);
+                    } catch (\Throwable) {
+                    }
+                }
 
                 return $this->declined(self::PRE_READ_FAILURE_TEXT.'; '
                     .($reopened ? 'the run is reopened, so re-approve to retry.' : self::NOT_REOPENED));
