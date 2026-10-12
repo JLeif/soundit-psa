@@ -175,6 +175,86 @@ class ContractC3bTest extends TestCase
         $this->assertSame('Moved phone call #'.$call->id.' time (0.50 h) from Synthetic A to Synthetic C; it had no prepay ledger row, so 0.50h was drawn from Synthetic C: Synthetic retry', $body);
     }
 
+    public function test_phone_retry_without_draw_reports_stamp(): void
+    {
+        $this->retryReportsStamp(false, false);
+    }
+
+    /** Draw reporting is an r1 control; requested_contract_id is new in r2. */
+    public function test_note_retry_draw_reports_stamp(): void
+    {
+        $this->retryReportsStamp(true, false);
+    }
+
+    public function test_phone_retry_held_reports_no_contract_on_requested_activity(): void
+    {
+        $this->retryReportsStamp(false, true);
+    }
+
+    private function retryReportsStamp(bool $isNote, bool $held): void
+    {
+        // Replace the legacy setup's wildcard fake for these isolated, vendor-free cases.
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::fake(['https://synthetic.invalid/*' => Http::response([], 200)]);
+        Http::preventStrayRequests();
+        $entry = $isNote ? $this->note() : $this->phone();
+        $d = $this->a->replicate();
+        $d->name = 'Synthetic D';
+        $d->prepay_as_amount = ! $isNote;
+        $d->save();
+        Ticket::whereKey($this->ticket->id)->update(['contract_id' => $held ? null : $d->id]);
+        $reads = 0;
+        $expired = false;
+        // ContractResolver::activeContractOf produces this active read. Expire B after
+        // resolution but before lockedActiveContract; real debit/retry code runs unmocked.
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$reads, &$expired, $isNote, $held, $entry) {
+            $sql = str_replace(['"', '`'], '', $query->sql);
+            if (! $expired && str_starts_with($sql, 'select * from contracts')
+                && str_contains($sql, 'status = ?') && in_array($this->b->id, $query->bindings, false)
+                && ++$reads === ($isNote ? 1 : 2)) {
+                $expired = true;
+                Contract::whereKey($this->b->id)->update(['status' => 'expired']);
+                if ($held) {
+                    // Model an unstamping writer before the retry reloads the call.
+                    PhoneCall::whereKey($entry->id)->update(['contract_id' => null]);
+                }
+            }
+        });
+        $result = app(PrepayService::class)->moveEntryContract($entry, $this->b, 'Synthetic retry', $this->user);
+        $this->assertTrue($expired, 'resolution/debit race seam reached');
+        $destinationId = $held ? null : $d->id;
+        $destination = $held ? 'no contract' : $d->name;
+        $this->assertSame($destinationId, $entry->fresh()->contract_id);
+        if ($held) {
+            $this->assertNotNull($entry->fresh()->contract_held_at);
+        }
+        $key = $isNote ? 'ticket_note_id' : 'phone_call_id';
+        if ($isNote) {
+            $row = PrepayTransaction::where($key, $entry->id)->sole();
+            $this->assertSame($d->id, $row->contract_id);
+            $this->assertEquals(-0.5, $row->hours);
+        } else {
+            $this->assertSame(0, PrepayTransaction::where($key, $entry->id)->count());
+            $this->assertEquals(10, $d->fresh()->prepay_balance);
+        }
+        $this->assertSame($destinationId, $result['to_contract_id']);
+        $this->assertSame($isNote ? 0.5 : 0.0, $result['drawn_hours']);
+        $activities = \App\Models\ContractActivity::whereIn('action', ['entry_moved_in', 'entry_moved_out'])->get();
+        $this->assertCount(2, $activities);
+        foreach ($activities as $activity) {
+            $this->assertSame($destinationId, $activity->changes['to_contract_id']);
+            $this->assertSame($held ? null : $d->name, $activity->changes['to_contract']);
+            $this->assertArrayHasKey('requested_contract_id', $activity->changes);
+            $this->assertSame($this->b->id, $activity->changes['requested_contract_id']);
+            $this->assertSame($activity->action === 'entry_moved_in' ? ($destinationId ?? $this->b->id) : $this->a->id, $activity->contract_id);
+        }
+        $what = $isNote ? 'note' : 'phone call';
+        $draw = $isNote ? '; it had no prepay ledger row, so 0.50h was drawn from Synthetic D' : '';
+        $body = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body;
+        $this->assertSame("Moved {$what} #{$entry->id} time (0.50 h) from Synthetic A to {$destination}{$draw}: Synthetic retry", $body);
+        Http::assertNothingSent();
+    }
+
     public function test_backfill_excludes_detached_note_and_includes_undebited_note(): void
     {
         $detached = $this->note();
