@@ -973,7 +973,7 @@ class PrepayService
                 }
                 $result['message'] = match ($debitRecorded) {
                     true => 'Time entry moved and its prepay debit was recorded, but a step after the debit failed; check the ledger before acting.',
-                    false => 'Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.',
+                    false => 'Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.',
                     null => 'Time entry moved, but whether its follow-on prepay debit was recorded could not be confirmed; check the ledger before acting.',
                 };
                 Log::error('[Prepay] Contract move follow-on fault', [

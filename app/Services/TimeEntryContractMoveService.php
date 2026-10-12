@@ -186,9 +186,9 @@ class TimeEntryContractMoveService
                 if (($result['status'] ?? null) === 'executed_with_fault') {
                     $errors[] = 'Entry '.$move['type'].' #'.$move['id'].': '.$result['message'];
                 }
-                // A ledgered move reports the hours it moved; an unledgered one, its drawn_hours (the
-                // follow-on debit's ledger row, read back after a caught fault). A null drawn_hours
-                // (that read-back failed) leaves the batch total unknown, so hours is null.
+                // A ledgered move reports the hours it moved; an unledgered one, its drawn_hours (the hours
+                // the follow-on debit drew, 0.0 when none was recorded). A null drawn_hours (the ledger
+                // read-back after a caught fault failed) leaves the batch total unknown, so hours is null.
                 if (! $result['ledger'] && $result['drawn_hours'] === null) {
                     $unread = true;
                 } else {

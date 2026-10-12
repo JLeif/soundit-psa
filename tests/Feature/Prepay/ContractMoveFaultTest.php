@@ -78,7 +78,7 @@ class ContractMoveFaultTest extends TestCase
     {
         $this->assertSame('executed_with_fault', $result['status'] ?? null);
         $this->assertFalse($result['success']);
-        $this->assertSame('Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.', $result['message']);
+        $this->assertSame('Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.', $result['message']);
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
         $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count());
         $this->assertFaultLog($note, false);
@@ -131,7 +131,7 @@ class ContractMoveFaultTest extends TestCase
         ], 'Synthetic move', $this->user);
         $this->assertSame(2, $result['moved']);
         $this->assertSame(0.5, $result['hours']);
-        $this->assertSame(['Entry note #'.$first->id.': Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.'], $result['errors']);
+        $this->assertSame(['Entry note #'.$first->id.': Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.'], $result['errors']);
         $this->assertSame($this->to->id, $first->fresh()->contract_id);
         $this->assertSame($this->to->id, $second->fresh()->contract_id);
         $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $first->id)->count());
@@ -185,6 +185,35 @@ class ContractMoveFaultTest extends TestCase
         ], $records[0]->context);
     }
 
+    public function test_non_billable_phone_alert_fault_reports_no_debit_and_preserves_move(): void
+    {
+        $call = \App\Models\PhoneCall::withoutEvents(fn () => \App\Models\PhoneCall::forceCreate([
+            'call_uuid' => 'synthetic-non-billable-alert-fault', 'direction' => 'inbound', 'status' => 'completed', 'from_number' => '+15555550142',
+            'ticket_id' => $this->ticket->id, 'contract_id' => $this->from->id,
+            'duration' => 1800, 'is_billable' => false, 'started_at' => now(),
+        ]));
+        $alerts = \Mockery::mock(\App\Services\PrepayAlertService::class);
+        $alerts->shouldReceive('checkThreshold')->once()->withArgs(fn (Contract $contract) => $contract->id === $this->to->id)
+            ->andThrow(new \RuntimeException('Synthetic alert fault'));
+        $this->app->instance(\App\Services\PrepayAlertService::class, $alerts);
+        $result = app(TimeEntryContractMoveService::class)->agentMove([
+            'entry_type' => 'call', 'entry_id' => $call->id, 'contract_id' => $this->to->id, 'reason' => 'Synthetic move',
+        ], 'synthetic', false);
+        $this->assertSame('executed_with_fault', $result['status'] ?? null);
+        $this->assertFalse($result['success']);
+        $this->assertSame('Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.', $result['message']);
+        $this->assertSame($this->to->id, $call->fresh()->contract_id);
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count());
+        $records = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->message === '[Prepay] Contract move follow-on fault'));
+        $this->assertCount(1, $records);
+        $this->assertSame(\Monolog\Level::Error, $records[0]->level);
+        $this->assertSame([
+            'phone_call_id' => $call->id, 'from_contract_id' => $this->from->id,
+            'to_contract_id' => $this->to->id, 'exception_class' => \RuntimeException::class,
+            'debit_recorded' => false,
+        ], $records[0]->context);
+    }
+
     public function test_approve_route_flashes_fault_instead_of_success(): void
     {
         $this->user->forceFill(['role' => 'admin', 'is_active' => true])->save();
@@ -192,7 +221,7 @@ class ContractMoveFaultTest extends TestCase
         $staged = app(TimeEntryContractMoveService::class)->agentMove($this->args($note), 'synthetic', true);
         $this->injectFault($note);
         $this->actingAs($this->user)->post(route('time-entry-moves.approve', $staged['proposal_id']))
-            ->assertRedirect()->assertSessionHas('error', 'Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.')
+            ->assertRedirect()->assertSessionHas('error', 'Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.')
             ->assertSessionMissing('success');
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
     }
@@ -204,7 +233,7 @@ class ContractMoveFaultTest extends TestCase
         $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
             'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
         ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.00 h).')
-            ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.');
+            ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.');
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
     }
 
@@ -254,7 +283,7 @@ class ContractMoveFaultTest extends TestCase
             }
         });
         $result = app(PrepayService::class)->moveEntryContract($note, $this->to, 'Synthetic move', $this->user);
-        $this->assertSame('Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.', $result['message'] ?? null);
+        $this->assertSame('Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.', $result['message'] ?? null);
         $this->assertFaultLog($note, false);
     }
 
