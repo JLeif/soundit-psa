@@ -80,7 +80,9 @@ class ContractMoveC3aRefusalTest extends TestCase
     {
         $this->assertTrue($this->move()['staged']);
         foreach ([true, false] as $staged) {
-            $this->assertSame('A staged contract move on this entry is awaiting approval.', $this->move($staged)['error'] ?? null);
+            $r = $this->move($staged);
+            $this->assertSame('A staged contract move on this entry is awaiting approval.', $r['error'] ?? null);
+            $this->assertArrayNotHasKey('error_code', $r);
             $this->unchanged(1);
         }
     }
@@ -100,21 +102,27 @@ class ContractMoveC3aRefusalTest extends TestCase
     public function test_system_note_is_refused(): void
     {
         $this->note->updateQuietly(['note_type' => 'system']);
-        $this->assertSame('System notes cannot be moved.', $this->move()['error'] ?? null);
+        $r = $this->move();
+        $this->assertSame('System notes cannot be moved.', $r['error'] ?? null);
+        $this->assertArrayNotHasKey('error_code', $r);
         $this->unchanged();
     }
 
     public function test_zero_priced_minutes_is_refused(): void
     {
         $this->note->forceFill(['time_adjustment_minutes' => -30])->saveQuietly();
-        $this->assertSame('This note has no positive priced minutes.', $this->move()['error'] ?? null);
+        $r = $this->move();
+        $this->assertSame('This note has no positive priced minutes.', $r['error'] ?? null);
+        $this->assertArrayNotHasKey('error_code', $r);
         $this->unchanged();
     }
 
     public function test_non_billable_note_is_refused(): void
     {
         $this->note->updateQuietly(['is_billable' => false]);
-        $this->assertSame('This note is not billable.', $this->move()['error'] ?? null);
+        $r = $this->move();
+        $this->assertSame('This note is not billable.', $r['error'] ?? null);
+        $this->assertArrayNotHasKey('error_code', $r);
         $this->unchanged();
     }
 
@@ -185,6 +193,22 @@ class ContractMoveC3aRefusalTest extends TestCase
         $this->unchanged();
     }
 
+    public function test_foreign_active_contract_is_refused_for_client_ownership(): void
+    {
+        $other = Client::create(['name' => 'Synthetic other']);
+        $foreign = Contract::create(['client_id' => $other->id, 'name' => 'Synthetic foreign', 'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01']);
+        foreach ([[], [['type' => 'note', 'id' => $this->note->id]]] as $moves) {
+            try {
+                app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $foreign->id, $moves, 'Synthetic', $this->user);
+                $this->fail('Expected refusal');
+            } catch (\InvalidArgumentException $e) {
+                $this->assertSame("Contract {$foreign->id} is not a contract of this ticket's client.", $e->getMessage());
+            }
+        }
+        $this->assertSame($this->a->id, $this->ticket->fresh()->contract_id);
+        $this->unchanged();
+    }
+
     private function selectorOptions(): array
     {
         $response = $this->actingAs($this->user)->get(route('tickets.show', $this->ticket));
@@ -221,14 +245,15 @@ class ContractMoveC3aRefusalTest extends TestCase
         $this->assertCount(3, $options);
     }
 
-    public function test_modal_draw_data_excludes_inactive_contract(): void
+    public function test_modal_prepay_data_keeps_inactive_contract_flagged_not_active(): void
     {
         $this->a->update(['prepay_total' => 10, 'prepay_balance' => 10]);
         $this->b->update(['status' => 'expired', 'prepay_total' => 10, 'prepay_balance' => 10]);
         $html = view('tickets._contract-change-modal', ['ticket' => $this->ticket->fresh(), 'contractEntries' => collect()])->render();
         preg_match("/data-prepay='([^']*)'/", $html, $match);
         $data = json_decode(html_entity_decode($match[1]), true);
-        $this->assertArrayHasKey($this->a->id, $data);
-        $this->assertArrayNotHasKey($this->b->id, $data);
+        $this->assertTrue($data[$this->a->id]['active'] ?? null);
+        $this->assertFalse($data[$this->b->id]['active'] ?? null);
+        $this->assertSame($this->b->name, $data[$this->b->id]['name'] ?? null);
     }
 }

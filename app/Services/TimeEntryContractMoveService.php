@@ -148,9 +148,11 @@ class TimeEntryContractMoveService
             return ['moved' => 0, 'hours' => 0.0, 'errors' => []];
         }
 
-        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
-            ->where('status', ContractStatus::Active)->first();
-        if ($moves === [] && $contractId !== null && ! $to) {
+        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)->first();
+        if ($contractId !== null && ! $to) {
+            throw new \InvalidArgumentException("Contract {$contractId} is not a contract of this ticket's client.");
+        }
+        if ($moves === [] && $to && $to->status !== ContractStatus::Active) {
             throw new \InvalidArgumentException("Contract {$contractId} is not an ACTIVE contract of this ticket's client.");
         }
         if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {
@@ -251,6 +253,10 @@ class TimeEntryContractMoveService
         $ticket = $entry?->ticket;
         if (! $entry || ! $ticket) {
             return ['error' => "No {$type} {$id} on a ticket."];
+        }
+        $refusal = $this->entryRefusal($entry, $type);
+        if ($refusal !== null) {
+            return ['error' => $refusal];
         }
         $refusal = $this->moveRefusal($ticket, $entry, $type, $contractId);
         if ($refusal !== null) {
@@ -431,7 +437,8 @@ class TimeEntryContractMoveService
         return $effect.' Nothing has moved yet.';
     }
 
-    private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string
+    /** Refusals about the entry itself, not the contract; agentMove returns them without an error_code. */
+    private function entryRefusal(TicketNote|PhoneCall $entry, string $type): ?string
     {
         if ($this->hasPendingMove($type, (int) $entry->id)) {
             return 'A staged contract move on this entry is awaiting approval.';
@@ -447,6 +454,12 @@ class TimeEntryContractMoveService
                 return 'This note is not billable.';
             }
         }
+
+        return null;
+    }
+
+    private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string
+    {
         $active = Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
             ->where('status', ContractStatus::Active)->exists();
         if (! $active) {

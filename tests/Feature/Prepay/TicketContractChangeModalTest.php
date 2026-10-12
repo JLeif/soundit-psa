@@ -216,11 +216,11 @@ class TicketContractChangeModalTest extends TestCase
         $this->assertStringContainsString('"'.$this->b->id.'":{"name":"Synthetic Project B"', html_entity_decode($html), 'the target prepay contract name the JS names');
 
         $js = file_get_contents(public_path('js/ticket-contract-change.js'));
-        $this->assertStringContainsString("'will draw ' + fmt(draw) + 'h from ' + prepay[toId].name", $js);
+        $this->assertStringContainsString("'will draw ' + fmt(draw) + 'h from ' + target.name", $js);
         $this->assertStringContainsString("'If this time was already invoiced by hand, untick billable instead of moving.'", $js);
         $this->assertStringContainsString("el('br'), el('span', 'text-muted', INVOICED_ADVICE)", $js, 'the advice is shown in the row, not only declared');
         $this->assertStringContainsString("r.dataset.ledger === '1'", $js);
-        $this->assertMatchesRegularExpression('/if \(!ledgered\) \{\s*if \(prepay\[toId\] && draw > 0\) \{\s*effect\.append\(el\(\'span\', \'text-danger fw-semibold\', \'will draw \'/', $js,
+        $this->assertMatchesRegularExpression('/const target = prepay\[toId\] && prepay\[toId\]\.active \? prepay\[toId\] : null;[\s\S]*if \(!ledgered\) \{\s*if \(target && draw > 0\) \{\s*effect\.append\(el\(\'span\', \'text-danger fw-semibold\', \'will draw \'/', $js,
             'the no-ledger-row branch is the one that states the draw');
         $this->assertStringContainsString('r.dataset.drawHours', $js);
     }

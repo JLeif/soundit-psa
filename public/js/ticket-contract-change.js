@@ -30,6 +30,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function refresh() {
+        // The preview draws or debits only an Active new contract (#4984); prepay also holds
+        // inactive contracts for the credit back to an entry's old contract.
+        const target = prepay[toId] && prepay[toId].active ? prepay[toId] : null;
         const ticked = rows.filter((r) => r.querySelector('.js-cc-move').checked);
         count.textContent = String(ticked.length);
         moveBtn.disabled = ticked.length === 0;
@@ -51,8 +54,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 return;
             }
             if (!ledgered) {
-                if (prepay[toId] && draw > 0) {
-                    effect.append(el('span', 'text-danger fw-semibold', 'will draw ' + fmt(draw) + 'h from ' + prepay[toId].name),
+                if (target && draw > 0) {
+                    effect.append(el('span', 'text-danger fw-semibold', 'will draw ' + fmt(draw) + 'h from ' + target.name),
                         el('br'), el('span', 'text-muted', INVOICED_ADVICE));
                     deltas[toId] = (deltas[toId] || 0) - draw;
                 } else {
@@ -64,9 +67,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 effect.append(el('span', 'text-success fw-semibold', '+' + fmt(hours) + ' h'), ' back to ' + prepay[from].name);
                 deltas[from] = (deltas[from] || 0) + hours;
             }
-            if (prepay[toId] && (hours > 0 || !prepay[from])) {
+            if (target && (hours > 0 || !prepay[from])) {
                 if (effect.childNodes.length) effect.append(' · ');
-                effect.append(el('span', 'text-danger fw-semibold', '−' + fmt(hours) + ' h'), ' from ' + prepay[toId].name);
+                effect.append(el('span', 'text-danger fw-semibold', '−' + fmt(hours) + ' h'), ' from ' + target.name);
                 deltas[toId] = (deltas[toId] || 0) - hours;
             }
             if (!effect.childNodes.length) {
