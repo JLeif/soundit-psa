@@ -388,9 +388,12 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * TechnicianRun 'retrieved' model-event listener that throws an exception of the data set's
      * class (#6766) while armed. Inferred from reading the code, not asserted: sweepAgent()'s run
      * query hydrates TechnicianRun models before its per-run try, so the throw leaves sweepAgent()
-     * and reaches sweepDue()'s catch. sweepDue()'s per-agent queries pluck(); its expireDue() call
-     * does hydrate TechnicianRun models, outside the per-agent try, but only expired queued rows,
-     * and this fixture has none at sweep time (expired 0 is asserted below). Measured: the
+     * and reaches sweepDue()'s catch. sweepDue()'s two agent-listing queries run once, before the
+     * per-agent loop and outside its try, and pluck(), so they do not hydrate TechnicianRun models.
+     * Its expireDue() call runs first, also outside every try, and does hydrate TechnicianRun
+     * models, but only expired queued rows; with the listener armed such a row would throw out of
+     * sweepDue() uncaught, so sweepDue() returning normally, with the listener having thrown
+     * exactly once, is what shows this fixture had none at sweep time. Measured: the
      * listener threw exactly once, and the results below. The test asserts that sweepDue()
      * returns ran 0 and expired 0, and that exactly 1 captured record has a
      * message containing 'agent sweep failed'. #6764: that message is exactly
