@@ -790,10 +790,12 @@ class PrepayService
      * before the contracts are, with the locked entry, its row and the contract it is on
      * now; it refuses by throwing InvalidArgumentException, and nothing is written.
      *
-     * drawn_hours is what that follow-on debit drew (0 for a ledgered move, or when nothing was
-     * drawn); the move's system note and ContractActivity rows then report it in place of 0.
+     * drawn_hours is the draw recorded on the entry's ledger row after that follow-on debit (0 for
+     * a ledgered move, or when no draw is found): the row the debit returned, or, after a caught
+     * debit fault, the row read back from the ledger; null when that read-back also failed. The
+     * move's system note and ContractActivity rows then report a found draw in place of 0.
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: float}
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: ?float}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -964,11 +966,18 @@ class PrepayService
                     'to_contract_id' => $result['to_contract_id'],
                     'exception_class' => $e::class,
                 ]);
-                $result['drawn_hours'] = null;
                 $result['status'] = 'executed_with_fault';
                 $result['message'] = 'Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.';
+                // The fault can follow the debit's own commit (debitFromTicketNote and
+                // debitFromPhoneCall check the alert threshold after it), so the entry's ledger
+                // row is read back and any draw it records is reported as on the normal path.
+                try {
+                    $drawn = PrepayTransaction::where($key, $entry->id)->first();
+                } catch (\Throwable) {
+                    $result['drawn_hours'] = null;
 
-                return $result;
+                    return $result;
+                }
             }
             if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
                 $result['drawn_hours'] = abs((float) $drawn->hours);

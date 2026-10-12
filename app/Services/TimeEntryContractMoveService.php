@@ -140,7 +140,7 @@ class TimeEntryContractMoveService
      * The ticket change alone moves no money, and releases no held "Needs contract" entry.
      *
      * @param  list<array{type: string, id: int}>  $moves
-     * @return array{moved: int, hours: float, errors: list<string>}
+     * @return array{moved: int, hours: ?float, errors: list<string>}
      */
     public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
     {
@@ -171,6 +171,7 @@ class TimeEntryContractMoveService
 
         $moved = 0;
         $hours = 0.0;
+        $unread = false;
         $errors = [];
         foreach ($moves as $move) {
             $entry = $this->entry($ticket, $move['type'] ?? '', (int) ($move['id'] ?? 0));
@@ -185,15 +186,20 @@ class TimeEntryContractMoveService
                 if (($result['status'] ?? null) === 'executed_with_fault') {
                     $errors[] = 'Entry '.$move['type'].' #'.$move['id'].': '.$result['message'];
                 }
-                // A ledgered move reports the hours it moved; an unledgered one, the hours its
-                // follow-on debit drew (from the ledger row written), not 0.
-                $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
+                // A ledgered move reports the hours it moved; an unledgered one, its drawn_hours (the
+                // follow-on debit's ledger row, read back after a caught fault). A null drawn_hours
+                // (that read-back failed) leaves the batch total unknown, so hours is null.
+                if (! $result['ledger'] && $result['drawn_hours'] === null) {
+                    $unread = true;
+                } else {
+                    $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
+                }
             } catch (\InvalidArgumentException $e) {
                 $errors[] = $e->getMessage();
             }
         }
 
-        return ['moved' => $moved, 'hours' => round($hours, 4), 'errors' => $errors];
+        return ['moved' => $moved, 'hours' => $unread ? null : round($hours, 4), 'errors' => $errors];
     }
 
     public function entry(Ticket $ticket, string $type, int $id): TicketNote|PhoneCall|null

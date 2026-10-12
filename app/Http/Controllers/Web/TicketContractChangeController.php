@@ -40,7 +40,7 @@ class TicketContractChangeController extends Controller
         $message = 'Ticket contract updated.';
         if ($result['moved'] > 0) {
             $message .= ' Moved '.$result['moved'].' time '.($result['moved'] === 1 ? 'entry' : 'entries')
-                .' ('.number_format($result['hours'], 2).' h).';
+                .($result['hours'] === null ? '.' : ' ('.number_format($result['hours'], 2).' h).');
         }
         $redirect = redirect()->route('tickets.show', $ticket)->with('success', $message);
 

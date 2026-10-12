@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\PrepayService;
 use App\Services\TimeEntryContractMoveService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Monolog\Handler\TestHandler;
@@ -131,7 +132,7 @@ class ContractMoveFaultTest extends TestCase
         $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $second->id)->sole()->hours);
     }
 
-    public function test_debit_alert_fault_does_not_claim_zero_drawn_hours(): void
+    public function test_debit_alert_fault_reports_committed_draw(): void
     {
         $note = $this->note();
         $alerts = \Mockery::mock(\App\Services\PrepayAlertService::class);
@@ -140,7 +141,11 @@ class ContractMoveFaultTest extends TestCase
         $result = app(TimeEntryContractMoveService::class)->agentMove($this->args($note), 'synthetic', false);
         $this->assertSame('executed_with_fault', $result['status'] ?? null);
         $this->assertFalse($result['success']);
-        $this->assertNull($result['drawn_hours']);
+        $this->assertSame(0.5, $result['drawn_hours']);
+        $this->assertStringContainsString('so 0.50h was drawn from Synthetic block', TicketNote::where('ticket_id', $this->ticket->id)
+            ->where('body', 'like', 'Moved note #'.$note->id.' %')->sole()->body);
+        $this->assertEquals(0.5, \App\Models\ContractActivity::where('contract_id', $this->to->id)
+            ->where('action', 'entry_moved_in')->sole()->changes['drawn_hours']);
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
         $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
     }
@@ -192,6 +197,42 @@ class ContractMoveFaultTest extends TestCase
         ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.00 h).')
             ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.');
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
+    }
+
+    public function test_modal_alert_fault_flashes_committed_draw_hours(): void
+    {
+        $this->ticket->forceFill(['contract_id' => $this->to->id])->saveQuietly();
+        $note = $this->note();
+        $alerts = \Mockery::mock(\App\Services\PrepayAlertService::class);
+        $alerts->shouldReceive('checkThreshold')->once()->andThrow(new \RuntimeException('Synthetic alert fault'));
+        $this->app->instance(\App\Services\PrepayAlertService::class, $alerts);
+        $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
+            'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
+        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.50 h).')
+            ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.');
+        $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
+    }
+
+    public function test_modal_omits_hours_when_fault_leaves_ledger_unread(): void
+    {
+        $note = $this->note();
+        $service = \Mockery::mock(PrepayService::class)->makePartial();
+        $service->shouldReceive('debitFromTicketNote')->withArgs(fn ($entry) => $entry->id === $note->id)
+            ->once()->andReturnUsing(function () {
+                DB::statement('ALTER TABLE prepay_transactions RENAME TO synthetic_unread_ledger');
+
+                throw new \RuntimeException('Synthetic private exception text');
+            });
+        $service->shouldReceive('debitFromTicketNote')->withAnyArgs()->passthru();
+        $this->app->instance(PrepayService::class, $service);
+        $response = $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
+            'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
+        ]);
+        DB::statement('ALTER TABLE synthetic_unread_ledger RENAME TO prepay_transactions');
+        $response->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.')
+            ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.');
+        $this->assertSame($this->to->id, $note->fresh()->contract_id);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count());
     }
 
     public function test_no_injected_fault_returns_normal_agent_success(): void
