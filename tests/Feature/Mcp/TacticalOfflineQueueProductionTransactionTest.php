@@ -341,8 +341,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * record's message or JSON_THROW_ON_ERROR-encoded context, at any level, and no top-level
      * context value that is a \Throwable. #6748 / #6767: that record's context is exactly
      * run_id (this run's id), agent_id ('agent-1') and exception (the thrown class), in that
-     * order, so it has no error key and no other key. #6768: no captured record other than
-     * these is asserted on; the scope of the scan is stated on assertNoCapturedRecordCarries().
+     * order, so it has no error key and no other key. #6768: for any other captured record the
+     * only assertions are assertNoCapturedRecordCarries()'s, whose scope is stated on it; nothing
+     * about the run's state after the job is asserted.
      *
      * @param  class-string<\Throwable>  $thrownClass
      */
@@ -393,8 +394,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * '[OfflineQueue] agent sweep failed', at warning level. #6772 / #6765:
      * assertNoCapturedRecordCarries() finds the thrown message in no captured record. #6767: the
      * context is exactly agent_id ('agent-1') and exception (the thrown class), in that order, so
-     * it has no error key and no other key. #6768: no captured record other than these is
-     * asserted on; nothing about the run's state after the sweep is asserted.
+     * it has no error key and no other key. #6768: for any other captured record the only
+     * assertions are assertNoCapturedRecordCarries()'s, whose scope is stated on it; nothing
+     * about the run's state after the sweep is asserted.
      *
      * @param  class-string<\Throwable>  $thrownClass
      */
