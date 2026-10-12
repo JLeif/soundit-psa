@@ -1,0 +1,188 @@
+<?php
+
+namespace Tests\Feature\Prepay;
+
+use App\Models\Client;
+use App\Models\Contract;
+use App\Models\PhoneCall;
+use App\Models\PrepayTransaction;
+use App\Models\Ticket;
+use App\Models\TicketNote;
+use App\Models\User;
+use App\Services\PrepayAlertService;
+use App\Services\PrepayService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+class ContractC3bTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private Contract $a;
+
+    private Contract $b;
+
+    private Ticket $ticket;
+
+    private User $user;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Http::fake();
+        Http::preventStrayRequests();
+        $client = Client::create(['name' => 'Synthetic C3b']);
+        $attributes = ['client_id' => $client->id, 'type' => 'managed', 'status' => 'active',
+            'start_date' => '2026-01-01', 'prepay_total' => 10, 'prepay_used' => 0,
+            'prepay_balance' => 10, 'prepay_as_amount' => false];
+        $this->a = Contract::create(['name' => 'Synthetic A'] + $attributes);
+        $this->b = Contract::create(['name' => 'Synthetic B'] + $attributes);
+        $this->ticket = Ticket::factory()->create(['client_id' => $client->id, 'contract_id' => $this->a->id, 'halo_id' => null]);
+        $this->user = User::factory()->create();
+    }
+
+    private function phone(bool $billable = true): PhoneCall
+    {
+        return PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+            'call_uuid' => 'synthetic-c3b', 'direction' => 'inbound', 'status' => 'completed',
+            'from_number' => '+15555550142', 'ticket_id' => $this->ticket->id,
+            'contract_id' => $this->a->id, 'duration' => 1800, 'is_billable' => $billable,
+            'started_at' => now(),
+        ]));
+    }
+
+    private function note(): TicketNote
+    {
+        return TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $this->ticket->id, 'contract_id' => $this->a->id,
+            'author_id' => $this->user->id, 'body' => 'Synthetic time', 'time_minutes' => 30,
+            'is_billable' => true, 'noted_at' => now(),
+        ]));
+    }
+
+    public function test_phone_without_reversal_does_not_alert(): void
+    {
+        $alerts = \Mockery::mock(PrepayAlertService::class);
+        $seen = [];
+        $alerts->shouldReceive('checkThreshold')->andReturnUsing(function ($contract) use (&$seen) {
+            $seen[] = $contract->id;
+        });
+        $this->app->instance(PrepayAlertService::class, $alerts);
+        $call = $this->phone(false);
+        $this->assertNull(app(PrepayService::class)->debitFromPhoneCall($call));
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count());
+        $this->assertSame([], $seen);
+    }
+
+    public function test_phone_live_debit_and_reversal_alert(): void
+    {
+        $alerts = \Mockery::mock(PrepayAlertService::class);
+        $alerts->shouldReceive('checkThreshold')->twice()->withArgs(fn ($contract) => $contract->id === $this->a->id);
+        $this->app->instance(PrepayAlertService::class, $alerts);
+        $call = $this->phone();
+        $this->assertNotNull(app(PrepayService::class)->debitFromPhoneCall($call));
+        $call->is_billable = false;
+        $this->assertNull(app(PrepayService::class)->debitFromPhoneCall($call));
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count());
+        $this->assertEquals(10, $this->a->fresh()->prepay_balance);
+    }
+
+    public function test_phone_trashed_contract_reversal_does_not_alert(): void
+    {
+        $call = $this->phone();
+        app(PrepayService::class)->debitFromPhoneCall($call);
+        $this->a->delete();
+        $alerts = \Mockery::mock(PrepayAlertService::class);
+        $seen = [];
+        $alerts->shouldReceive('checkThreshold')->andReturnUsing(function ($contract) use (&$seen) {
+            $seen[] = $contract->id;
+        });
+        $this->app->instance(PrepayAlertService::class, $alerts);
+        $call->is_billable = false;
+        $this->assertNull(app(PrepayService::class)->debitFromPhoneCall($call));
+        $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count());
+        $this->assertSame([], $seen);
+    }
+
+    public function test_move_from_amount_mode_keeps_columns_and_detaches_hours(): void
+    {
+        $this->moveFromMode(true, 9.5, 0.5);
+    }
+
+    public function test_move_from_no_prepay_keeps_columns_and_detaches_hours(): void
+    {
+        $this->moveFromMode(false, null, 0.5);
+    }
+
+    public function test_move_from_hours_mode_adjusts_columns(): void
+    {
+        $this->moveFromMode(false, 9.5, 0.5);
+    }
+
+    private function moveFromMode(bool $amount, ?float $balance, float $used): void
+    {
+        $note = $this->note();
+        $row = PrepayTransaction::create(['contract_id' => $this->a->id, 'source' => 'ticket_time',
+            'ticket_note_id' => $note->id, 'date' => now(), 'hours' => -0.5]);
+        $this->a->updateQuietly(['prepay_as_amount' => $amount, 'prepay_balance' => $balance, 'prepay_used' => $used]);
+        app(PrepayService::class)->moveEntryContract($note, $this->b, 'Synthetic move', $this->user);
+        $hoursMode = ! $amount && $balance !== null;
+        $this->assertEquals($hoursMode ? 10 : $balance, $this->a->fresh()->prepay_balance);
+        $this->assertEquals($hoursMode ? 0 : $used, $this->a->fresh()->prepay_used);
+        $this->assertNull($row->fresh()->ticket_note_id);
+        $this->assertSame($note->id, $row->fresh()->moved_ticket_note_id);
+        $this->assertEquals(0.5, PrepayTransaction::where('contract_id', $this->a->id)->where('source', 'entry_moved_out')->sole()->hours);
+        $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
+    }
+
+    public function test_unledgered_retry_reports_the_debited_contract(): void
+    {
+        $call = $this->phone();
+        $c = $this->a->replicate();
+        $c->name = 'Synthetic C';
+        $c->save();
+        Ticket::whereKey($this->ticket->id)->update(['contract_id' => $c->id]);
+        $ordinary = new PrepayService;
+        $service = \Mockery::mock(PrepayService::class)->makePartial();
+        $changed = false;
+        $service->shouldReceive('resolveContractForPhoneCall')->andReturnUsing(function ($entry) use ($ordinary, &$changed) {
+            $contract = $ordinary->resolveContractForPhoneCall($entry);
+            if (! $changed && $contract?->id === $this->b->id) {
+                $changed = true;
+                Contract::whereKey($this->b->id)->update(['status' => 'expired']);
+            }
+
+            return $contract;
+        });
+        $result = $service->moveEntryContract($call, $this->b, 'Synthetic retry', $this->user);
+        $row = PrepayTransaction::where('phone_call_id', $call->id)->sole();
+        $this->assertTrue($changed);
+        $this->assertSame($c->id, $row->contract_id);
+        $this->assertSame($row->contract_id, $call->fresh()->contract_id);
+        $this->assertSame($row->contract_id, $result['to_contract_id']);
+        $activities = \App\Models\ContractActivity::whereIn('action', ['entry_moved_in', 'entry_moved_out'])->get();
+        $this->assertCount(2, $activities);
+        foreach ($activities as $activity) {
+            $this->assertSame($c->id, $activity->changes['to_contract_id']);
+            $this->assertSame($c->name, $activity->changes['to_contract']);
+            $this->assertSame($c->id, $activity->changes['drawn_contract_id']);
+            if ($activity->action === 'entry_moved_in') {
+                $this->assertSame($c->id, $activity->contract_id);
+            }
+        }
+        $body = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body;
+        $this->assertSame('Moved phone call #'.$call->id.' time (0.50 h) from Synthetic A to Synthetic C; it had no prepay ledger row, so 0.50h was drawn from Synthetic C: Synthetic retry', $body);
+    }
+
+    public function test_backfill_excludes_detached_note_and_includes_undebited_note(): void
+    {
+        $detached = $this->note();
+        $undebited = $this->note();
+        PrepayTransaction::create(['contract_id' => $this->a->id, 'source' => 'ticket_time',
+            'moved_ticket_note_id' => $detached->id, 'date' => now(), 'hours' => -0.5]);
+        $this->artisan('prepay:backfill-debits', ['--since' => '2026-01-01'])->assertExitCode(0);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $detached->id)->count());
+        $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $undebited->id)->sole()->hours);
+    }
+}

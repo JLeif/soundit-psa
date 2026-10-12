@@ -872,9 +872,11 @@ class PrepayService
                     'description' => mb_substr("Moved to {$target->name}: ".($row->description ?? $row->source?->label() ?? ''), 0, 255),
                     'note' => mb_substr($reason, 0, 255),
                 ]);
-                $from->decrement('prepay_used', $hours);
-                $from->increment('prepay_balance', $hours);
-                $alert[] = $from;
+                if ($this->hoursPrepayOrNull($from)) {
+                    $from->decrement('prepay_used', $hours);
+                    $from->increment('prepay_balance', $hours);
+                    $alert[] = $from;
+                }
 
                 if ($this->hoursPrepayOrNull($target)) {
                     $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
@@ -920,8 +922,8 @@ class PrepayService
             }
 
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
-            $report['body'] = fn (float $h, string $drew = '') => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
-                .($from?->name ?? 'no contract').' to '.$target->name.$drew.': '.$reason;
+            $report['body'] = fn (float $h, string $drew = '', ?string $destination = null) => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
+                .($from?->name ?? 'no contract').' to '.($destination ?? $target->name).$drew.': '.$reason;
             $body = $report['body']($hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600));
             $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
@@ -989,6 +991,7 @@ class PrepayService
             }
             if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
                 $result['drawn_hours'] = abs((float) $drawn->hours);
+                $result['to_contract_id'] = (int) $drawn->contract_id;
                 $this->reportMoveDraw($report, $drawn, $result['drawn_hours']);
             }
         }
@@ -1011,13 +1014,17 @@ class PrepayService
     private function reportMoveDraw(array $report, PrepayTransaction $drawn, float $hours): void
     {
         $name = Contract::withTrashed()->find($drawn->contract_id)?->name ?? "contract {$drawn->contract_id}";
-        $body = $report['body']($hours, '; it had no prepay ledger row, so '.number_format($hours, 2).'h was drawn from '.$name);
+        $body = $report['body']($hours, '; it had no prepay ledger row, so '.number_format($hours, 2).'h was drawn from '.$name, $name);
         // Query builder: a report correction is not an edit and must not re-enter the observers.
         TicketNote::whereKey($report['note_id'])->update(['body' => $body, 'body_html' => \App\Helpers\MarkdownRenderer::render($body)]);
         foreach (ContractActivity::whereKey($report['activity_ids'] ?? [])->get() as $activity) {
-            $activity->update(['changes' => array_merge($activity->changes ?? [], [
-                'hours' => $hours, 'drawn_hours' => $hours, 'drawn_contract_id' => (int) $drawn->contract_id,
-            ])]);
+            $activity->update([
+                'contract_id' => $activity->action === 'entry_moved_in' ? $drawn->contract_id : $activity->contract_id,
+                'changes' => array_merge($activity->changes ?? [], [
+                    'hours' => $hours, 'drawn_hours' => $hours, 'drawn_contract_id' => (int) $drawn->contract_id,
+                    'to_contract_id' => (int) $drawn->contract_id, 'to_contract' => $name,
+                ]),
+            ]);
         }
     }
 
@@ -1198,6 +1205,9 @@ class PrepayService
             $durationSeconds = $call->effectiveDurationSeconds();
             if (! $call->is_billable || ! $durationSeconds || $durationSeconds <= 0) {
                 $this->reverseDebitForPhoneCall($call);
+                if (! $existing) {
+                    $alertContract = null;
+                }
 
                 return null;
             }
@@ -1297,7 +1307,9 @@ class PrepayService
 
         if ($alertContract) {
             $alertContract->refresh();
-            app(PrepayAlertService::class)->checkThreshold($alertContract);
+            if (! $alertContract->trashed()) {
+                app(PrepayAlertService::class)->checkThreshold($alertContract);
+            }
         }
 
         return $txn;
