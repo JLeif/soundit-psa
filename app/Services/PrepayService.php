@@ -960,22 +960,30 @@ class PrepayService
                 $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
                 $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
             } catch (\Throwable $e) {
-                Log::error('[Prepay] Contract move debit fault', [
-                    $key => $entry->id,
-                    'from_contract_id' => $result['from_contract_id'],
-                    'to_contract_id' => $result['to_contract_id'],
-                    'exception_class' => $e::class,
-                ]);
                 $result['status'] = 'executed_with_fault';
-                $result['message'] = 'Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.';
                 // The fault can follow the debit's own commit (debitFromTicketNote and
                 // debitFromPhoneCall check the alert threshold after it), so the entry's ledger
                 // row is read back and any draw it records is reported as on the normal path.
                 try {
                     $drawn = PrepayTransaction::where($key, $entry->id)->first();
+                    $debitRecorded = $drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0;
                 } catch (\Throwable) {
                     $result['drawn_hours'] = null;
-
+                    $debitRecorded = null;
+                }
+                $result['message'] = match ($debitRecorded) {
+                    true => 'Time entry moved and its prepay debit was recorded, but a step after the debit failed; check the ledger before acting.',
+                    false => 'Time entry moved, but its follow-on prepay debit did not complete and no ledger row was found; check the ledger before acting.',
+                    null => 'Time entry moved, but whether its follow-on prepay debit was recorded could not be confirmed; check the ledger before acting.',
+                };
+                Log::error('[Prepay] Contract move follow-on fault', [
+                    $key => $entry->id,
+                    'from_contract_id' => $result['from_contract_id'],
+                    'to_contract_id' => $result['to_contract_id'],
+                    'exception_class' => $e::class,
+                    'debit_recorded' => $debitRecorded,
+                ]);
+                if ($debitRecorded === null) {
                     return $result;
                 }
             }
