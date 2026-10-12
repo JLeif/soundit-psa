@@ -596,13 +596,11 @@ class StaffTacticalActionToolExecutor
      * does. In TacticalOfflineQueueApprovalTest, the four tests that call assertTestingManager()
      * assert the RefreshDatabase testing DatabaseTransactionsManager is bound and the default
      * connection is at level 1, and with one outer DB::transaction the guard fires (in all four).
-     * Only test_the_outer_transaction_guard_does_not_fire_without_one_and_guards_the_reconnect_run
-     * has a no-outer-transaction arm with the testing manager asserted before it.
-     * test_a_reconnect_run_decline_whose_audit_insert_fails_still_declines_and_ends_queued_offline
-     * also approves with no outer transaction, but asserts the testing manager only after that
-     * approval. In both, that the guard does not fire is read from the approval's queued_offline
-     * result status, not from the absence of a refusal record, which neither test captures during
-     * the approval. Both test classes read the default connection
+     * Two of them also approve with no outer transaction,
+     * test_the_outer_transaction_guard_does_not_fire_without_one_and_guards_the_reconnect_run and
+     * test_a_reconnect_run_decline_whose_audit_insert_fails_still_declines_and_ends_queued_offline;
+     * in both, that the guard does not fire is read from the approval's queued_offline result
+     * status. Both test classes read the default connection
      * (DB::connection()), not the run's own: that the guard's connection is the default one, and
      * that the one transaction at level 1 is the RefreshDatabase wrapper, are inferred, not
      * asserted. Not measured: the no-bound-manager fallback; no test reaches it.
