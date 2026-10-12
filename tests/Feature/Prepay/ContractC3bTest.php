@@ -207,24 +207,20 @@ class ContractC3bTest extends TestCase
         $expired = false;
         // ContractResolver::activeContractOf produces this active read. Expire B after
         // resolution but before lockedActiveContract; real debit/retry code runs unmocked.
-        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$reads, &$expired, $isNote, $held, $entry) {
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$reads, &$expired, $isNote) {
             $sql = str_replace(['"', '`'], '', $query->sql);
             if (! $expired && str_starts_with($sql, 'select * from contracts')
                 && str_contains($sql, 'status = ?') && in_array($this->b->id, $query->bindings, false)
                 && ++$reads === ($isNote ? 1 : 2)) {
                 $expired = true;
                 Contract::whereKey($this->b->id)->update(['status' => 'expired']);
-                if ($held) {
-                    // Model an unstamping writer before the retry reloads the call.
-                    PhoneCall::whereKey($entry->id)->update(['contract_id' => null]);
-                }
             }
         });
         $result = app(PrepayService::class)->moveEntryContract($entry, $this->b, 'Synthetic retry', $this->user);
         $this->assertTrue($expired, 'resolution/debit race seam reached');
         $destinationId = $held ? null : $d->id;
         $destination = $held ? 'no contract' : $d->name;
-        $this->assertSame($destinationId, $entry->fresh()->contract_id);
+        $this->assertSame($held ? $this->b->id : $d->id, $entry->fresh()->contract_id);
         if ($held) {
             $this->assertNotNull($entry->fresh()->contract_held_at);
         }
@@ -253,6 +249,42 @@ class ContractC3bTest extends TestCase
         $body = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body;
         $this->assertSame("Moved {$what} #{$entry->id} time (0.50 h) from Synthetic A to {$destination}{$draw}: Synthetic retry", $body);
         Http::assertNothingSent();
+    }
+
+    public function test_note_soft_deleted_after_move_reports_its_stamp(): void
+    {
+        $note = $this->note();
+        $inserted = false;
+        $deleted = false;
+        // Soft-delete the note at the first read of it after the move's system note is written.
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$inserted, &$deleted, $note) {
+            $sql = str_replace(['"', '`'], '', $query->sql);
+            if (str_starts_with($sql, 'insert into ticket_notes')) {
+                $inserted = true;
+            } elseif ($inserted && ! $deleted && in_array($note->id, $query->bindings, false)
+                && str_starts_with($sql, 'select * from ticket_notes where ticket_notes.id = ? and ticket_notes.deleted_at is null')) {
+                $deleted = true;
+                TicketNote::whereKey($note->id)->update(['deleted_at' => now()]);
+            }
+        });
+        $result = app(PrepayService::class)->moveEntryContract($note, $this->b, 'Synthetic delete race', $this->user);
+        $this->assertTrue($deleted, 'soft-delete seam reached');
+        $trashed = TicketNote::withTrashed()->find($note->id);
+        $this->assertNotNull($trashed->deleted_at);
+        $this->assertSame($this->b->id, $trashed->contract_id);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count());
+        $this->assertSame($this->b->id, $result['to_contract_id']);
+        $this->assertSame(0.0, $result['drawn_hours']);
+        $activities = \App\Models\ContractActivity::whereIn('action', ['entry_moved_in', 'entry_moved_out'])->get();
+        $this->assertCount(2, $activities);
+        foreach ($activities as $activity) {
+            $this->assertSame($this->b->id, $activity->changes['to_contract_id']);
+            $this->assertSame($this->b->name, $activity->changes['to_contract']);
+            $this->assertSame($this->b->id, $activity->changes['requested_contract_id']);
+            $this->assertSame($activity->action === 'entry_moved_in' ? $this->b->id : $this->a->id, $activity->contract_id);
+        }
+        $body = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body;
+        $this->assertSame("Moved note #{$note->id} time (0.50 h) from Synthetic A to Synthetic B: Synthetic delete race", $body);
     }
 
     public function test_backfill_excludes_detached_note_and_includes_undebited_note(): void

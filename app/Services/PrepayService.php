@@ -998,8 +998,10 @@ class PrepayService
             } else {
                 $drawn = null;
             }
-            $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
-            $result['to_contract_id'] = $fresh?->contract_id === null ? null : (int) $fresh->contract_id;
+            // A held entry can keep its stamp; it is reported as on no contract.
+            $fresh = $isNote ? TicketNote::withTrashed()->find($entry->id) : PhoneCall::find($entry->id);
+            $held = $fresh?->contract_id === null || (! $drawn && $fresh->contract_held_at !== null);
+            $result['to_contract_id'] = $held ? null : (int) $fresh->contract_id;
             $this->reportMoveStamp($report, $result['to_contract_id'], $drawn, $result['drawn_hours']);
         }
 
