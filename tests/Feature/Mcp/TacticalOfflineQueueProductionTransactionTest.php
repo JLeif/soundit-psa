@@ -16,6 +16,7 @@ use App\Models\TechnicianRun;
 use App\Models\Ticket;
 use App\Models\User;
 use App\Services\Mcp\StaffTacticalActionToolExecutor;
+use App\Services\Tactical\OfflineActionSweep;
 use App\Services\Tactical\TacticalClient;
 use App\Services\Tactical\TacticalClientException;
 use App\Services\Technician\TechnicianApprovalService;
@@ -27,6 +28,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -293,18 +295,59 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     }
 
     /**
+     * #6763 / #6764 / #6765 / #6772: asserts that at least one record was captured, then that no
+     * MessageLogged record captured by captureLogs() (every level) carries $thrownMessage in
+     * its message or in the json_encode() of its context, encoded with JSON_THROW_ON_ERROR so an
+     * unencodable context errors the test instead of encoding to false. It also asserts that no
+     * top-level context value is a \Throwable. Not asserted: a \Throwable nested deeper in a
+     * context, a truncated or transformed copy of the message, or a write that does not dispatch
+     * a MessageLogged event.
+     *
+     * @param  list<MessageLogged>  $logged
+     */
+    private function assertNoCapturedRecordCarries(array $logged, string $thrownMessage): void
+    {
+        $this->assertNotSame([], $logged, 'captureLogs() captured at least one record');
+        foreach ($logged as $i => $m) {
+            $this->assertStringNotContainsString($thrownMessage, $m->message, "captured record {$i}'s message does not contain the thrown exception's message");
+            $this->assertStringNotContainsString($thrownMessage, json_encode($m->context, JSON_THROW_ON_ERROR), "captured record {$i}'s JSON_THROW_ON_ERROR-encoded context does not contain the thrown exception's message");
+            foreach ($m->context as $key => $value) {
+                $this->assertNotInstanceOf(\Throwable::class, $value, "captured record {$i}'s context key {$key} is not a Throwable");
+            }
+        }
+    }
+
+    /**
+     * #6766: two distinct throwable classes, so a hard-coded class literal in a catch arm's
+     * context fails one of the two data sets.
+     *
+     * @return array<string, array{class-string<\Throwable>}>
+     */
+    public static function thrownClasses(): array
+    {
+        return ['runtime' => [\RuntimeException::class], 'logic' => [\LogicException::class]];
+    }
+
+    /**
      * #6739 positive control for the test above, on the same fixture and under one outer
      * DB::transaction around SweepQueuedActionsForAgent::dispatchSync(). After the approval, a
-     * TacticalClient mock whose runScript() throws a \RuntimeException (not a
-     * TacticalClientException) is bound, so runScript() throws inside dispatchSync(). The test
-     * asserts that the mock received runScript() once, and that reconnectRunFailures() then finds
-     * exactly 1 captured record whose message contains 'reconnect-run failed'. That record is at
-     * warning level, and its context has run_id equal to this run's id and agent_id equal to
-     * 'agent-1'. #6748: its context also has exception equal to \RuntimeException::class and has
-     * no error key, and the json_encode() of its context does not contain the thrown exception's
-     * message string.
+     * TacticalClient mock whose runScript() throws an exception of the data set's class (#6766: a
+     * \RuntimeException, then a \LogicException; neither is a TacticalClientException) is bound,
+     * so runScript() throws inside dispatchSync(). The test asserts that the mock received
+     * runScript() once, and that reconnectRunFailures() then finds exactly 1 captured record whose
+     * message contains 'reconnect-run failed'. #6764: that record's message is exactly
+     * '[OfflineQueue] reconnect-run failed', and it is at warning level. #6772 / #6765:
+     * assertNoCapturedRecordCarries() then finds the thrown exception's message in no captured
+     * record's message or JSON_THROW_ON_ERROR-encoded context, at any level, and no top-level
+     * context value that is a \Throwable. #6748 / #6767: that record's context is exactly
+     * run_id (this run's id), agent_id ('agent-1') and exception (the thrown class), in that
+     * order, so it has no error key and no other key. #6768: no captured record other than
+     * these is asserted on; the scope of the scan is stated on assertNoCapturedRecordCarries().
+     *
+     * @param  class-string<\Throwable>  $thrownClass
      */
-    public function test_the_reconnect_run_failed_filter_finds_the_warning_when_the_reconnect_run_throws(): void
+    #[DataProvider('thrownClasses')]
+    public function test_the_reconnect_run_failed_filter_finds_the_warning_when_the_reconnect_run_throws(string $thrownClass): void
     {
         $this->assertProductionManager();
         ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
@@ -312,8 +355,8 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->travel(3)->minutes();
         $this->queuedFieldsBefore($run);
         $throwing = Mockery::mock(TacticalClient::class);
-        $thrownMessage = 'positive control 6739 synthetic message b13-6748';
-        $throwing->shouldReceive('runScript')->andThrow(new \RuntimeException($thrownMessage));
+        $thrownMessage = 'positive control 6739 synthetic message b14-6763';
+        $throwing->shouldReceive('runScript')->andThrow(new $thrownClass($thrownMessage));
         $this->app->instance(TacticalClient::class, $throwing);
         $logged = $this->captureLogs();
         $this->assertProductionManager();
@@ -326,14 +369,71 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $throwing->shouldHaveReceived('runScript')->once();
         $records = $this->reconnectRunFailures($logged());
         $this->assertCount(1, $records, "one 'reconnect-run failed' warning was logged");
+        $this->assertSame('[OfflineQueue] reconnect-run failed', $records[0]->message, 'the message is exactly the reconnect-run failed label');
         $this->assertSame('warning', $records[0]->level, 'the record is at warning level');
-        $this->assertArrayHasKey('run_id', $records[0]->context, 'the record has a run_id');
-        $this->assertSame($run->id, $records[0]->context['run_id'], "run_id is this run's id");
-        $this->assertArrayHasKey('agent_id', $records[0]->context, 'the record has an agent_id');
-        $this->assertSame('agent-1', $records[0]->context['agent_id'], "agent_id is 'agent-1'");
-        $this->assertArrayHasKey('exception', $records[0]->context, 'the record has an exception key');
-        $this->assertSame(\RuntimeException::class, $records[0]->context['exception'], 'exception is \RuntimeException::class');
-        $this->assertArrayNotHasKey('error', $records[0]->context, 'the record has no error key');
-        $this->assertStringNotContainsString($thrownMessage, (string) json_encode($records[0]->context), "the json_encode() of the context does not contain the thrown exception's message");
+        $this->assertNoCapturedRecordCarries($logged(), $thrownMessage);
+        $this->assertSame(
+            ['run_id' => $run->id, 'agent_id' => 'agent-1', 'exception' => $thrownClass],
+            $records[0]->context,
+            "the context is exactly run_id, agent_id and the thrown exception's class",
+        );
+    }
+
+    /**
+     * #6763: the positive control for OfflineActionSweep::sweepDue()'s per-agent catch arm (the
+     * '[OfflineQueue] agent sweep failed' warning). The run is queued for 'agent-1' through the
+     * approval, then agent-1's TacticalAsset row is set to 'online'. The fault is a
+     * TechnicianRun 'retrieved' model-event listener that throws an exception of the data set's
+     * class (#6766) while armed. Inferred from reading the code, not asserted: sweepDue()'s own
+     * queries pluck() and do not hydrate TechnicianRun models, and sweepAgent()'s run query
+     * hydrates before its per-run try, so the throw leaves sweepAgent() and reaches sweepDue()'s
+     * catch. Measured: the listener threw exactly once, and the results below. The test asserts
+     * that sweepDue() returns ran 0 and expired 0, and that exactly 1 captured record has a
+     * message containing 'agent sweep failed'. #6764: that message is exactly
+     * '[OfflineQueue] agent sweep failed', at warning level. #6772 / #6765:
+     * assertNoCapturedRecordCarries() finds the thrown message in no captured record. #6767: the
+     * context is exactly agent_id ('agent-1') and exception (the thrown class), in that order, so
+     * it has no error key and no other key. #6768: no captured record other than these is
+     * asserted on; nothing about the run's state after the sweep is asserted.
+     *
+     * @param  class-string<\Throwable>  $thrownClass
+     */
+    #[DataProvider('thrownClasses')]
+    public function test_the_agent_sweep_failed_warning_logs_the_exception_class_when_sweep_agent_throws(string $thrownClass): void
+    {
+        $this->assertProductionManager();
+        ['approver' => $approver, 'run' => $run] = $this->stagedOfflineRun();
+        $this->assertSame('queued_offline', app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id)->status);
+        $this->travel(3)->minutes();
+        $this->queuedFieldsBefore($run);
+        $this->assertSame(1, TacticalAsset::where('agent_id', 'agent-1')->update(['status' => 'online']), "agent-1's row is set online");
+        $thrownMessage = 'positive control 6763 synthetic message b14-sweepdue';
+        $armed = true;
+        $fired = 0;
+        TechnicianRun::retrieved(function () use (&$armed, &$fired, $thrownClass, $thrownMessage): void {
+            if ($armed) {
+                $fired++;
+
+                throw new $thrownClass($thrownMessage);
+            }
+        });
+        $logged = $this->captureLogs();
+        $this->assertProductionManager();
+
+        $result = app(OfflineActionSweep::class)->sweepDue();
+        $armed = false;
+
+        $this->assertSame(1, $fired, 'the retrieved listener threw exactly once');
+        $this->assertSame(['ran' => 0, 'expired' => 0], $result, 'sweepDue() returned ran 0 and expired 0');
+        $records = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'agent sweep failed')));
+        $this->assertCount(1, $records, "one 'agent sweep failed' warning was logged");
+        $this->assertSame('[OfflineQueue] agent sweep failed', $records[0]->message, 'the message is exactly the agent sweep failed label');
+        $this->assertSame('warning', $records[0]->level, 'the record is at warning level');
+        $this->assertNoCapturedRecordCarries($logged(), $thrownMessage);
+        $this->assertSame(
+            ['agent_id' => 'agent-1', 'exception' => $thrownClass],
+            $records[0]->context,
+            "the context is exactly agent_id and the thrown exception's class",
+        );
     }
 }

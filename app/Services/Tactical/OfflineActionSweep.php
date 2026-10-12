@@ -105,7 +105,7 @@ class OfflineActionSweep
                     // Isolate a failing agent so the rest of the pass still runs.
                     Log::warning('[OfflineQueue] agent sweep failed', [
                         'agent_id' => $agentId,
-                        'error' => $e->getMessage(),
+                        'exception' => $e::class,
                     ]);
                 }
             }
