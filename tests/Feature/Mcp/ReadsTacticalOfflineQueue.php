@@ -80,8 +80,9 @@ trait ReadsTacticalOfflineQueue
      *   inside the SET list cuts it there.
      * It reads the SQL text only, never the bindings. state is not in QUEUE_COLUMNS, so an update
      * that sets only state (and updated_at) is not recorded. Other SQL shapes are not recorded,
-     * among them `insert or ignore`, raw SQL that is uppercase or unquoted, a table alias, a table
-     * prefix, and backtick-quoted (MySQL/MariaDB grammar) identifiers; this list is read from the
+     * among them `insert or ignore`, raw SQL that is uppercase or unquoted, an update through a
+     * table alias, a table prefix, and backtick-quoted (MySQL/MariaDB grammar) identifiers; this
+     * list is read from the
      * matching code below, and no test here runs any of these shapes. Which connections it hears
      * is not measured: no test here runs a statement on a second connection. By inference from
      * DB::listen() and the shared event dispatcher, statements on other connections reach the
