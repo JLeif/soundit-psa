@@ -300,7 +300,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * asserts that the mock received runScript() once, and that reconnectRunFailures() then finds
      * exactly 1 captured record whose message contains 'reconnect-run failed'. That record is at
      * warning level, and its context has run_id equal to this run's id and agent_id equal to
-     * 'agent-1'. No other context key is asserted.
+     * 'agent-1'. #6748: its context also has exception equal to \RuntimeException::class and has
+     * no error key, and the json_encode() of its context does not contain the thrown exception's
+     * message string.
      */
     public function test_the_reconnect_run_failed_filter_finds_the_warning_when_the_reconnect_run_throws(): void
     {
@@ -310,7 +312,8 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->travel(3)->minutes();
         $this->queuedFieldsBefore($run);
         $throwing = Mockery::mock(TacticalClient::class);
-        $throwing->shouldReceive('runScript')->andThrow(new \RuntimeException('positive control 6739'));
+        $thrownMessage = 'positive control 6739 synthetic message b13-6748';
+        $throwing->shouldReceive('runScript')->andThrow(new \RuntimeException($thrownMessage));
         $this->app->instance(TacticalClient::class, $throwing);
         $logged = $this->captureLogs();
         $this->assertProductionManager();
@@ -328,5 +331,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->assertSame($run->id, $records[0]->context['run_id'], "run_id is this run's id");
         $this->assertArrayHasKey('agent_id', $records[0]->context, 'the record has an agent_id');
         $this->assertSame('agent-1', $records[0]->context['agent_id'], "agent_id is 'agent-1'");
+        $this->assertArrayHasKey('exception', $records[0]->context, 'the record has an exception key');
+        $this->assertSame(\RuntimeException::class, $records[0]->context['exception'], 'exception is \RuntimeException::class');
+        $this->assertArrayNotHasKey('error', $records[0]->context, 'the record has no error key');
+        $this->assertStringNotContainsString($thrownMessage, (string) json_encode($records[0]->context), "the json_encode() of the context does not contain the thrown exception's message");
     }
 }

@@ -65,7 +65,7 @@ class OfflineActionSweep
                 Log::warning('[OfflineQueue] reconnect-run failed', [
                     'run_id' => $run->id,
                     'agent_id' => $agentId,
-                    'error' => $e->getMessage(),
+                    'exception' => $e::class,
                 ]);
             }
         }
