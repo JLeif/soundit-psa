@@ -27,7 +27,7 @@ class TicketContractChangeController extends Controller
             [$type, $id] = explode(':', $key);
 
             return ['type' => $type, 'id' => (int) $id];
-        }, $validated['move'] ?? []);
+        }, $request->boolean('change_only') ? [] : ($validated['move'] ?? []));
 
         try {
             $result = $moves->changeTicketContract($ticket, $validated['contract_id'] ?? null, $selected,
