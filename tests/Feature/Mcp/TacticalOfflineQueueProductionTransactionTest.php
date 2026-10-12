@@ -295,7 +295,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     }
 
     /**
-     * #6763 / #6764 / #6765 / #6772: asserts that at least one record was captured, then that no
+     * #6765 / #6772: asserts that at least one record was captured, then that no
      * MessageLogged record captured by captureLogs() (every level) carries $thrownMessage in
      * its message or in the json_encode() of its context, encoded with JSON_THROW_ON_ERROR so an
      * unencodable context errors the test instead of encoding to false. It also asserts that no
@@ -341,9 +341,10 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * record's message or JSON_THROW_ON_ERROR-encoded context, at any level, and no top-level
      * context value that is a \Throwable. #6748 / #6767: that record's context is exactly
      * run_id (this run's id), agent_id ('agent-1') and exception (the thrown class), in that
-     * order, so it has no error key and no other key. #6768: for any other captured record the
-     * only assertions are assertNoCapturedRecordCarries()'s, whose scope is stated on it; nothing
-     * about the run's state after the job is asserted.
+     * order, so it has no error key and no other key. #6768: any other captured record is
+     * asserted on only by assertNoCapturedRecordCarries() (scope stated on it) and by the count
+     * above, which requires that no other captured record's message contains
+     * 'reconnect-run failed'; nothing about the run's state after the job is asserted.
      *
      * @param  class-string<\Throwable>  $thrownClass
      */
@@ -385,17 +386,20 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * '[OfflineQueue] agent sweep failed' warning). The run is queued for 'agent-1' through the
      * approval, then agent-1's TacticalAsset row is set to 'online'. The fault is a
      * TechnicianRun 'retrieved' model-event listener that throws an exception of the data set's
-     * class (#6766) while armed. Inferred from reading the code, not asserted: sweepDue()'s own
-     * queries pluck() and do not hydrate TechnicianRun models, and sweepAgent()'s run query
-     * hydrates before its per-run try, so the throw leaves sweepAgent() and reaches sweepDue()'s
-     * catch. Measured: the listener threw exactly once, and the results below. The test asserts
-     * that sweepDue() returns ran 0 and expired 0, and that exactly 1 captured record has a
+     * class (#6766) while armed. Inferred from reading the code, not asserted: sweepAgent()'s run
+     * query hydrates TechnicianRun models before its per-run try, so the throw leaves sweepAgent()
+     * and reaches sweepDue()'s catch. sweepDue()'s per-agent queries pluck(); its expireDue() call
+     * does hydrate TechnicianRun models, outside the per-agent try, but only expired queued rows,
+     * and this fixture has none at sweep time (expired 0 is asserted below). Measured: the
+     * listener threw exactly once, and the results below. The test asserts that sweepDue()
+     * returns ran 0 and expired 0, and that exactly 1 captured record has a
      * message containing 'agent sweep failed'. #6764: that message is exactly
      * '[OfflineQueue] agent sweep failed', at warning level. #6772 / #6765:
      * assertNoCapturedRecordCarries() finds the thrown message in no captured record. #6767: the
      * context is exactly agent_id ('agent-1') and exception (the thrown class), in that order, so
-     * it has no error key and no other key. #6768: for any other captured record the only
-     * assertions are assertNoCapturedRecordCarries()'s, whose scope is stated on it; nothing
+     * it has no error key and no other key. #6768: any other captured record is asserted on only
+     * by assertNoCapturedRecordCarries() (scope stated on it) and by the count above, which
+     * requires that no other captured record's message contains 'agent sweep failed'; nothing
      * about the run's state after the sweep is asserted.
      *
      * @param  class-string<\Throwable>  $thrownClass
