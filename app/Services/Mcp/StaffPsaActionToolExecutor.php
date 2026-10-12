@@ -232,7 +232,7 @@ class StaffPsaActionToolExecutor
         $contentHash = $this->ticketCreator->contentHashFromPayload($payload);
         $existing = $this->alreadyCreatedTicketLog($clientId, $contentHash);
         if ($existing !== null) {
-            return $this->idempotentCreateTicketResult($existing);
+            return $this->idempotentCreateTicketResult($existing, $clientId);
         }
 
         $ticket = DB::transaction(function () use ($payload, $actorLabel, $contentHash, $reason): Ticket {
@@ -3623,9 +3623,16 @@ class StaffPsaActionToolExecutor
     }
 
     /** @return array<string, mixed> */
-    private function idempotentCreateTicketResult(TechnicianActionLog $log): array
+    private function idempotentCreateTicketResult(TechnicianActionLog $log, int $clientId): array
     {
         $ticket = $log->ticket_id ? Ticket::find($log->ticket_id) : null;
+
+        if ($ticket !== null && (int) $ticket->client_id !== $clientId) {
+            return [
+                'error_code' => 'ticket_moved',
+                'error' => 'The previously created ticket is no longer under the requested client.',
+            ];
+        }
 
         return [
             'success' => true,
