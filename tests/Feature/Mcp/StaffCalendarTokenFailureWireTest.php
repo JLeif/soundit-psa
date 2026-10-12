@@ -17,8 +17,10 @@ use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Psr\Http\Message\RequestInterface;
@@ -320,6 +322,55 @@ class StaffCalendarTokenFailureWireTest extends TestCase
         $this->assertSame(['GET'], array_map(fn (RequestInterface $q) => $q->getMethod(), $this->requestsTo('graph.microsoft.com')), 'only the pre-read was sent');
         $this->assertCount(1, $this->mock, 'the spare response is still queued: no PATCH');
         $this->assertCount(2, $this->history, 'the token request and the GET, nothing else');
+    }
+
+    /**
+     * #6729 r2: the lost-release fixture above, plus a MessageLogged listener that throws for
+     * every warning-level record (standing in for a log channel that throws). The not-reopened
+     * warning throws once, and the arm still returns PRE_READ_FAILURE_TEXT with NOT_REOPENED.
+     * The outer catch is not entered: no exception escapes, and from the failing GET on exactly
+     * one release UPDATE (state set to awaiting_approval) runs.
+     */
+    public function test_a_failed_update_pre_read_whose_lost_release_warning_throws_still_declines(): void
+    {
+        $run = $this->staged('calendar_stage_update_event', self::writes()['update with a body'][2]);
+        $armed = false;
+        $releases = 0;
+        DB::listen(function (QueryExecuted $q) use (&$armed, &$releases): void {
+            if ($armed && str_starts_with(strtolower($q->sql), 'update "technician_runs" set "state" = ?')
+                && ($q->bindings[0] ?? null) === TechnicianRunState::AwaitingApproval->value) {
+                $releases++;
+            }
+        });
+        $this->graph(self::tokenIssued(), function () use ($run, &$armed) {
+            TechnicianRun::whereKey($run->id)->update(['state' => TechnicianRunState::Flagged->value]);
+            $armed = true;
+
+            return new Response(500, [], '{}');
+        }, self::spare());
+        $warningsThrown = [];
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use (&$warningsThrown): void {
+            if ($m->level === 'warning') {
+                $warningsThrown[] = $m->message;
+
+                throw new \RuntimeException('synthetic log channel failure');
+            }
+        });
+
+        $thrown = null;
+        $r = null;
+        try {
+            $r = app(StaffCalendarToolExecutor::class)->approveStagedRun($run, $this->approver->id);
+        } catch (\Throwable $e) {
+            $thrown = $e;
+        }
+
+        $this->assertSame(1, $releases, 'one release UPDATE: the outer catch did not release again');
+        $this->assertNull($thrown, 'no exception escaped the approval');
+        $this->assertSame(['[Calendar] approval pre-read failed and the run was not reopened'], $warningsThrown, 'positive control: the not-reopened warning threw once');
+        $this->assertSame('gate_declined', $r?->status);
+        $this->assertSame('The calendar update was not sent: reading the event before the update failed. Nothing was written to the calendar; the run was not reopened; check its current state before acting on it again.', $r?->message);
+        $this->assertSame(TechnicianRunState::Flagged, $run->fresh()->state, 'positive control: the CAS lost');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('preReadFailures')]

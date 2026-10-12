@@ -521,8 +521,8 @@ class StaffTacticalActionToolExecutor
                     $approverId,
                 );
             } catch (\Throwable $auditError) {
-                // #6664: the log is best-effort, so a throwing log channel cannot skip the release
-                // below or replace the decline with an exception.
+                // #6664: this log is best-effort: if it throws, the release below still runs and
+                // the decline is still returned.
                 try {
                     Log::error('[Tactical] offline queue audit row not written', [
                         'run_id' => $run->id, 'status' => $busResult->status, 'exception' => $auditError::class,
@@ -533,10 +533,14 @@ class StaffTacticalActionToolExecutor
             }
             // #6675: releaseClaimTo() is a claim-owner-fenced compare-and-set. When it returns
             // false this request did not release the run, so a warning records that instead.
+            // #6675: the warning is best-effort like the #6664 log.
             if (! $run->releaseClaimTo($releaseState)) {
-                Log::warning('[Tactical] offline queue refused and the run was not released', [
-                    'run_id' => $run->id, 'status' => $busResult->status,
-                ]);
+                try {
+                    Log::warning('[Tactical] offline queue refused and the run was not released', [
+                        'run_id' => $run->id, 'status' => $busResult->status,
+                    ]);
+                } catch (\Throwable) {
+                }
             }
 
             return $declined;

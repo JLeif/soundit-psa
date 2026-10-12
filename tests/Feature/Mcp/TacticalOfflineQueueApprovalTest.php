@@ -518,6 +518,43 @@ class TacticalOfflineQueueApprovalTest extends TestCase
     }
 
     /**
+     * #6675 r2: the lost-fence fixture above, plus a MessageLogged listener that throws for every
+     * warning-level record (standing in for a log channel that throws); error-level records do
+     * not throw. The not-released warning throws once, and the approver still gets the
+     * gate_declined decline with its exact text, not an exception.
+     */
+    public function test_an_outer_transaction_decline_whose_lost_release_warning_throws_still_declines(): void
+    {
+        $approver = $this->configure();
+        $fixture = $this->endpointFixture();
+        $run = $this->stageScript($fixture['client'], $fixture['ticket'], $this->script());
+        $this->offlineClientThatLosesTheClaim($run);
+        $warningsThrown = [];
+        Event::listen(MessageLogged::class, function (MessageLogged $m) use (&$warningsThrown): void {
+            if ($m->level === 'warning') {
+                $warningsThrown[] = $m->message;
+
+                throw new \RuntimeException('synthetic log channel failure');
+            }
+        });
+        $this->assertTestingManager();
+
+        $thrown = null;
+        $result = null;
+        try {
+            $result = DB::transaction(fn () => app(TechnicianApprovalService::class)->approveStagedTacticalAction($run, $approver->id));
+        } catch (\Throwable $e) {
+            $thrown = $e;
+        }
+
+        $this->assertSame(['[Tactical] offline queue refused and the run was not released'], $warningsThrown, 'positive control: the not-released warning threw once');
+        $this->assertNull($thrown, 'no exception escaped the approval');
+        $this->assertSame('gate_declined', $result?->status);
+        $this->assertSame(self::NOT_QUEUED_OUTER_TRANSACTION_TEXT, $result?->message);
+        $this->assertSame(TechnicianRunState::Executing, $run->fresh()->state, 'positive control: the release lost the fence');
+    }
+
+    /**
      * #6664: on the guard arm the audit insert throws, and then the 'audit row not written' error
      * log throws too (a MessageLogged listener throws for that record, standing in for a log
      * channel that throws). The approver still gets the gate_declined decline with the
