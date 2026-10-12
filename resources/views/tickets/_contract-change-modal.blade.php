@@ -5,7 +5,8 @@
     an unledgered entry: a draw from the new contract only when that is hours-prepay). Expects $ticket and $contractEntries.
 --}}
 @php
-    $ccContracts = ($ticket->client?->contracts ?? collect())->keyBy('id');
+    $ccContracts = ($ticket->client?->contracts ?? collect())
+        ->filter(fn ($c) => $c->status === \App\Enums\ContractStatus::Active)->keyBy('id');
     $ccPrepay = $ccContracts->filter(fn ($c) => $c->has_prepay && ! $c->prepay_as_amount)
         ->map(fn ($c) => ['name' => $c->name, 'balance' => (float) $c->prepay_balance]);
 @endphp

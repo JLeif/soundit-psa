@@ -144,9 +144,10 @@ class TimeEntryContractMoveService
      */
     public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
     {
-        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)->first();
+        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
+            ->where('status', ContractStatus::Active)->first();
         if ($contractId !== null && ! $to) {
-            throw new \InvalidArgumentException("Contract {$contractId} is not a contract of this ticket's client.");
+            throw new \InvalidArgumentException("Contract {$contractId} is not an ACTIVE contract of this ticket's client.");
         }
         if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {
             throw new \InvalidArgumentException('Entries can only be moved to an active contract.');
@@ -177,6 +178,11 @@ class TimeEntryContractMoveService
             $entry = $this->entry($ticket, $move['type'] ?? '', (int) ($move['id'] ?? 0));
             if (! $entry) {
                 $errors[] = 'Entry '.($move['type'] ?? '?').' #'.(int) ($move['id'] ?? 0).' is not a time entry on this ticket.';
+
+                continue;
+            }
+            if ($this->hasPendingMove($move['type'], (int) $entry->id)) {
+                $errors[] = 'A staged contract move on this entry is awaiting approval.';
 
                 continue;
             }
@@ -423,6 +429,20 @@ class TimeEntryContractMoveService
 
     private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string
     {
+        if ($this->hasPendingMove($type, (int) $entry->id)) {
+            return 'A staged contract move on this entry is awaiting approval.';
+        }
+        if ($entry instanceof TicketNote) {
+            if ($entry->note_type === \App\Enums\NoteType::System) {
+                return 'System notes cannot be moved.';
+            }
+            if ($entry->pricedMinutes() <= 0) {
+                return 'This note has no positive priced minutes.';
+            }
+            if (! $entry->is_billable) {
+                return 'This note is not billable.';
+            }
+        }
         $active = Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
             ->where('status', ContractStatus::Active)->exists();
         if (! $active) {
@@ -453,6 +473,12 @@ class TimeEntryContractMoveService
         $id = $ledger ?? $entry->contract_id;
 
         return $id === null ? null : (int) $id;
+    }
+
+    private function hasPendingMove(string $type, int $id): bool
+    {
+        return TimeEntryMoveProposal::where('entry_type', $type)->where('entry_id', $id)
+            ->where('state', 'pending')->exists();
     }
 
     private function hasPendingCallAction(int $callId): bool

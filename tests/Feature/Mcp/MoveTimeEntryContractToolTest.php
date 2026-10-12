@@ -242,7 +242,11 @@ class MoveTimeEntryContractToolTest extends TestCase
         $token = McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract']);
         $draw = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $unledgered->id])));
         $pair = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args()));
-        $noDebit = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['contract_id' => $managed->id])));
+        $second = TicketNote::forceCreate([
+            'body' => 'Synthetic', 'ticket_id' => $this->ticket->id, 'contract_id' => $this->a->id,
+            'is_billable' => true, 'time_minutes' => 45, 'noted_at' => now(),
+        ]);
+        $noDebit = $this->toolResult($this->callTool($token, 'move_time_entry_contract', $this->args(['entry_id' => $second->id, 'contract_id' => $managed->id])));
 
         $moves = app(\App\Services\TimeEntryContractMoveService::class);
         $this->assertSame('It has no prepay ledger row, so the move will draw 0.50h from Synthetic Project B. '.$advice.' Nothing has moved yet.',

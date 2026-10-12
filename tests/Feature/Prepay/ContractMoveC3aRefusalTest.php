@@ -1,0 +1,165 @@
+<?php
+
+namespace Tests\Feature\Prepay;
+
+use App\Models\Client;
+use App\Models\Contract;
+use App\Models\Setting;
+use App\Models\Ticket;
+use App\Models\TicketNote;
+use App\Models\TimeEntryMoveProposal;
+use App\Models\User;
+use App\Services\TimeEntryContractMoveService;
+use App\Support\McpConfig;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+class ContractMoveC3aRefusalTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private Ticket $ticket;
+
+    private Contract $a;
+
+    private Contract $b;
+
+    private User $user;
+
+    private TicketNote $note;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Http::fake();
+        Http::preventStrayRequests();
+        $this->user = User::factory()->create();
+        Setting::setValue('triage_system_user_id', (string) $this->user->id);
+        $client = Client::create(['name' => 'Synthetic C3a']);
+        foreach (['a', 'b'] as $key) {
+            $this->$key = Contract::create(['client_id' => $client->id, 'name' => 'Synthetic '.$key, 'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01']);
+        }
+        $this->ticket = Ticket::factory()->create(['client_id' => $client->id, 'contract_id' => $this->a->id]);
+        $this->note = TicketNote::withoutEvents(fn () => TicketNote::forceCreate(['id' => 100, 'ticket_id' => $this->ticket->id, 'contract_id' => $this->a->id, 'body' => 'Synthetic time', 'note_type' => 'note', 'is_billable' => true, 'time_minutes' => 30]));
+    }
+
+    private function move(bool $staged = true): array
+    {
+        $token = McpConfig::rotateStaffToken(allowedTools: ['move_time_entry_contract'.($staged ? '' : ':immediate')]);
+        $r = $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/mcp/staff', ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => $staged ? 'stage_move_time_entry_contract' : 'move_time_entry_contract', 'arguments' => ['entry_type' => 'note', 'entry_id' => $this->note->id, 'contract_id' => $this->b->id, 'reason' => 'Synthetic correction']]]);
+        $r->assertOk();
+
+        return json_decode($r->json('result.content.0.text'), true);
+    }
+
+    private function unchanged(int $count = 0): void
+    {
+        $this->assertSame($this->a->id, $this->note->fresh()->contract_id);
+        $this->assertDatabaseCount('time_entry_move_proposals', $count);
+    }
+
+    public function test_web_pending_entry_is_refused(): void
+    {
+        $this->assertTrue($this->move()['staged']);
+        $r = app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->b->id, [['type' => 'note', 'id' => $this->note->id]], 'Synthetic', $this->user);
+        $this->assertSame(['A staged contract move on this entry is awaiting approval.'], $r['errors']);
+        $this->assertSame(0, $r['moved']);
+        $this->unchanged(1);
+    }
+
+    public function test_web_unblocked_entry_moves(): void
+    {
+        $r = app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->b->id, [['type' => 'note', 'id' => $this->note->id]], 'Synthetic', $this->user);
+        $this->assertSame([], $r['errors']);
+        $this->assertSame(1, $r['moved']);
+        $this->assertSame($this->b->id, $this->note->fresh()->contract_id);
+    }
+
+    public function test_mcp_pending_entry_is_refused(): void
+    {
+        $this->assertTrue($this->move()['staged']);
+        foreach ([true, false] as $staged) {
+            $this->assertSame('A staged contract move on this entry is awaiting approval.', $this->move($staged)['error'] ?? null);
+            $this->unchanged(1);
+        }
+    }
+
+    public function test_other_entry_and_denied_proposals_do_not_block(): void
+    {
+        $this->assertTrue($this->move()['staged']);
+        $first = $this->note;
+        $this->note = TicketNote::withoutEvents(fn () => $first->replicate());
+        $this->note->saveQuietly();
+        $this->assertTrue($this->move()['staged']);
+        TimeEntryMoveProposal::query()->update(['state' => 'denied']);
+        $this->assertTrue($this->move(false)['success']);
+        $this->assertSame($this->b->id, $this->note->fresh()->contract_id);
+    }
+
+    public function test_system_note_is_refused(): void
+    {
+        $this->note->updateQuietly(['note_type' => 'system']);
+        $this->assertSame('System notes cannot be moved.', $this->move()['error'] ?? null);
+        $this->unchanged();
+    }
+
+    public function test_zero_priced_minutes_is_refused(): void
+    {
+        $this->note->forceFill(['time_adjustment_minutes' => -30])->saveQuietly();
+        $this->assertSame('This note has no positive priced minutes.', $this->move()['error'] ?? null);
+        $this->unchanged();
+    }
+
+    public function test_non_billable_note_is_refused(): void
+    {
+        $this->note->updateQuietly(['is_billable' => false]);
+        $this->assertSame('This note is not billable.', $this->move()['error'] ?? null);
+        $this->unchanged();
+    }
+
+    public function test_positive_adjusted_minutes_are_accepted(): void
+    {
+        $this->note->forceFill(['time_minutes' => 0, 'time_adjustment_minutes' => 15])->saveQuietly();
+        $this->assertTrue($this->move(false)['success'] ?? false);
+        $this->assertSame($this->b->id, $this->note->fresh()->contract_id);
+    }
+
+    public function test_change_only_inactive_is_refused(): void
+    {
+        $this->b->update(['status' => 'expired']);
+        try {
+            app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->b->id, [], null, $this->user);
+            $this->fail('Expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame("Contract {$this->b->id} is not an ACTIVE contract of this ticket's client.", $e->getMessage());
+        }
+        $this->assertSame($this->a->id, $this->ticket->fresh()->contract_id);
+        $this->unchanged();
+    }
+
+    public function test_active_and_null_change_only_are_accepted(): void
+    {
+        foreach ([$this->b->id, null] as $id) {
+            try {
+                $r = app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket->fresh(), $id, [], null, $this->user);
+            } catch (\InvalidArgumentException $e) {
+                $this->fail($e->getMessage());
+            }
+            $this->assertSame([], $r['errors']);
+            $this->assertSame($id, $this->ticket->fresh()->contract_id);
+            $this->unchanged();
+        }
+    }
+
+    public function test_modal_draw_data_excludes_inactive_contract(): void
+    {
+        $this->a->update(['prepay_total' => 10, 'prepay_balance' => 10]);
+        $this->b->update(['status' => 'expired', 'prepay_total' => 10, 'prepay_balance' => 10]);
+        $html = view('tickets._contract-change-modal', ['ticket' => $this->ticket->fresh(), 'contractEntries' => collect()])->render();
+        preg_match("/data-prepay='([^']*)'/", $html, $match);
+        $data = json_decode(html_entity_decode($match[1]), true);
+        $this->assertArrayHasKey($this->a->id, $data);
+        $this->assertArrayNotHasKey($this->b->id, $data);
+    }
+}
