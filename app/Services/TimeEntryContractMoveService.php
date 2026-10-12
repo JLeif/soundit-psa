@@ -144,9 +144,13 @@ class TimeEntryContractMoveService
      */
     public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
     {
+        if ($moves === [] && $contractId === $ticket->contract_id) {
+            return ['moved' => 0, 'hours' => 0.0, 'errors' => []];
+        }
+
         $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
             ->where('status', ContractStatus::Active)->first();
-        if ($contractId !== null && ! $to) {
+        if ($moves === [] && $contractId !== null && ! $to) {
             throw new \InvalidArgumentException("Contract {$contractId} is not an ACTIVE contract of this ticket's client.");
         }
         if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {

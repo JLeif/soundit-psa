@@ -152,6 +152,75 @@ class ContractMoveC3aRefusalTest extends TestCase
         }
     }
 
+    public function test_unchanged_inactive_without_moves_is_a_no_op(): void
+    {
+        $this->a->update(['status' => 'expired']);
+        $before = $this->ticket->fresh()->getAttributes();
+        $notes = TicketNote::where('ticket_id', $this->ticket->id)->count();
+        $queries = [];
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$queries) {
+            $queries[] = $query->sql;
+        });
+        try {
+            $result = app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->a->id, [], null, $this->user);
+        } catch (\InvalidArgumentException $e) {
+            $this->fail($e->getMessage());
+        }
+        $this->assertSame(['moved' => 0, 'hours' => 0.0, 'errors' => []], $result);
+        $this->assertSame($before, $this->ticket->fresh()->getAttributes());
+        $this->assertSame($notes, TicketNote::where('ticket_id', $this->ticket->id)->count());
+        $this->assertSame([], array_values(array_filter($queries, fn ($sql) => preg_match('/^\s*(update|insert|delete)\b/i', $sql))));
+        $this->unchanged();
+    }
+
+    public function test_unchanged_inactive_with_moves_is_refused(): void
+    {
+        $this->a->update(['status' => 'expired']);
+        try {
+            app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->a->id, [['type' => 'note', 'id' => $this->note->id]], 'Synthetic', $this->user);
+            $this->fail('Expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame('Entries can only be moved to an active contract.', $e->getMessage());
+        }
+        $this->unchanged();
+    }
+
+    private function selectorOptions(): array
+    {
+        $response = $this->actingAs($this->user)->get(route('tickets.show', $this->ticket));
+        $response->assertOk();
+        $dom = new \DOMDocument;
+        @$dom->loadHTML($response->getContent());
+        $options = (new \DOMXPath($dom))->query('//select[@id="ticketContractSelect"]/option');
+        $this->assertGreaterThan(0, $options->length);
+        $result = [];
+        foreach ($options as $option) {
+            $result[$option->getAttribute('value')] = [trim($option->textContent), $option->hasAttribute('selected')];
+        }
+
+        return $result;
+    }
+
+    public function test_selector_keeps_current_inactive_and_filters_other_inactive(): void
+    {
+        $this->a->update(['status' => 'expired']);
+        $other = Contract::create(['client_id' => $this->ticket->client_id, 'name' => 'Synthetic omitted', 'type' => 'managed', 'status' => 'expired', 'start_date' => '2026-01-01']);
+        $options = $this->selectorOptions();
+        $this->assertSame(['None', false], $options['']);
+        $this->assertSame([$this->a->name.' (inactive)', true], $options[$this->a->id] ?? null);
+        $this->assertSame([$this->b->name, false], $options[$this->b->id] ?? null);
+        $this->assertArrayNotHasKey($other->id, $options);
+        $this->assertCount(3, $options);
+    }
+
+    public function test_selector_active_current_has_no_suffix(): void
+    {
+        $options = $this->selectorOptions();
+        $this->assertSame([$this->a->name, true], $options[$this->a->id] ?? null);
+        $this->assertSame([$this->b->name, false], $options[$this->b->id] ?? null);
+        $this->assertCount(3, $options);
+    }
+
     public function test_modal_draw_data_excludes_inactive_contract(): void
     {
         $this->a->update(['prepay_total' => 10, 'prepay_balance' => 10]);

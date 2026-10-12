@@ -883,10 +883,17 @@
                                             data-current="{{ $ticket->contract_id }}" aria-label="Ticket contract">
                                         <option value="">None</option>
                                         @foreach($ticket->client?->contracts ?? [] as $ct)
-                                            <option value="{{ $ct->id }}" {{ $ticket->contract_id == $ct->id ? 'selected' : '' }}>
-                                                {{ $ct->name }}
-                                            </option>
+                                            @if($ct->status === \App\Enums\ContractStatus::Active)
+                                                <option value="{{ $ct->id }}" {{ $ticket->contract_id == $ct->id ? 'selected' : '' }}>
+                                                    {{ $ct->name }}
+                                                </option>
+                                            @endif
                                         @endforeach
+                                        @if($ticket->contract && $ticket->contract->status !== \App\Enums\ContractStatus::Active)
+                                            <option value="{{ $ticket->contract->id }}" selected>
+                                                {{ $ticket->contract->name }} (inactive)
+                                            </option>
+                                        @endif
                                     </select>
                                 </form>
                                 @if(!$ticket->contract && $ticket->assets->isNotEmpty())
