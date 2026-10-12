@@ -70,11 +70,22 @@ trait ReadsTacticalOfflineQueue
     }
 
     /**
-     * #6743: from this point on, records the SQL of every executed statement that is either an
-     * insert into technician_runs, or an update of technician_runs whose SET list names one of
-     * the columns in QUEUE_COLUMNS. Only the SET list is read, not the WHERE clause. state is not
-     * in QUEUE_COLUMNS, so an update that sets only state (and updated_at) is not recorded. It
-     * reads statements on every connection.
+     * #6743: registers a DB::listen() callback (this trait never removes it). The returned closure
+     * gives the statements recorded between registration and the moment the closure is called.
+     * The callback records the SQL text of a QueryExecuted statement in exactly two shapes, both
+     * lowercase with double-quoted identifiers:
+     * - SQL that starts with `insert into "technician_runs"`;
+     * - SQL matching `^update "technician_runs" set `, where the text from `set ` up to the first
+     *   ' where ' (or the end) contains one of the QUEUE_COLUMNS names in double quotes. A ' where '
+     *   inside the SET list cuts it there.
+     * It reads the SQL text only, never the bindings. state is not in QUEUE_COLUMNS, so an update
+     * that sets only state (and updated_at) is not recorded. Other SQL shapes are not recorded,
+     * among them `insert or ignore`, raw SQL that is uppercase or unquoted, a table alias, a table
+     * prefix, and backtick-quoted (MySQL/MariaDB grammar) identifiers; this list is read from the
+     * matching code below, and no test here runs any of these shapes. Which connections it hears
+     * is not measured: no test here runs a statement on a second connection. By inference from
+     * DB::listen() and the shared event dispatcher, statements on other connections reach the
+     * callback, which records them only in the double-quoted shapes above.
      *
      * @return \Closure(): list<string>
      */

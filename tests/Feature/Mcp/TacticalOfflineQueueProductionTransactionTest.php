@@ -145,9 +145,10 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
     /**
      * (a) The false-positive control: with no outer transaction under the base manager, the
      * cockpit approve route leaves the run in QueuedOffline for 'agent-1'. Then, with the device
-     * still offline, during SweepQueuedActionsForAgent::dispatchSync() captureQueueWrites()
-     * records at least one statement, the run is still QueuedOffline for 'agent-1', and the run
-     * has 2 queued_offline audit rows. No 'offline queue refused' record is logged and no audit
+     * still offline, captureQueueWrites() records at least one matching statement between its
+     * registration and readout, a window that includes the sweep job
+     * (SweepQueuedActionsForAgent::dispatchSync()); the run is still QueuedOffline for 'agent-1',
+     * and the run has 2 queued_offline audit rows. No 'offline queue refused' record is logged and no audit
      * row says a database transaction was open. #6743: this is also the positive control for
      * captureQueueWrites().
      */
@@ -173,7 +174,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(TechnicianRunState::QueuedOffline, $fresh->state, 'state is QueuedOffline after the sweep job');
         $this->assertSame('agent-1', $fresh->queued_agent_id);
-        $this->assertNotSame([], $queueWrites(), 'positive control: captureQueueWrites() recorded a statement during the sweep job');
+        $this->assertNotSame([], $queueWrites(), 'positive control: captureQueueWrites() recorded a matching statement between registration and readout, a window that includes the sweep job');
         $this->assertSame([], $refusals(), "no 'offline queue refused' record was logged");
         $this->assertSame(2, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_offline')->count(), 'two queued_offline audit rows for this run');
         $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('summary', 'like', '%database transaction was open%')->count());
@@ -213,9 +214,11 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * back to QueuedOffline. #6735: every field queueFields() reads (state, queued_agent_id,
      * queued_dedup_key, queued_at, expires_at, coalesce_count, queued_approver_id) is equal
      * before and after the call, and expires_at is still later than now. The job is not run
-     * here; the test below runs it. #6743: captureQueueWrites() records no statement during the
-     * call: no insert into technician_runs, and no update of it whose SET list names a column in
-     * QUEUE_COLUMNS, whether or not the values it writes differ from the stored ones.
+     * here; the test below runs it. #6743: captureQueueWrites() records no matching statement
+     * between its registration and readout, a window that includes the call (the two shapes it
+     * matches are listed on captureQueueWrites()). That it would also record a matching update
+     * whose values equal the stored ones is a reading of the probe's code, which matches SQL
+     * text and never reads the bindings; no test here asserts that it records one.
      */
     public function test_one_outer_transaction_on_the_reconnect_run_fires_the_guard(): void
     {
@@ -241,7 +244,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->assertSame('agent-1', $fresh->queued_agent_id);
         $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
         $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
-        $this->assertSame([], $queueWrites(), 'no insert into technician_runs and no update setting a queue column');
+        $this->assertSame([], $queueWrites(), 'captureQueueWrites() recorded no matching statement');
         $this->assertCount(1, $refusals());
     }
 
@@ -251,9 +254,9 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
      * transaction, and the guard fires: one refusal line, one audit row saying the offline queue
      * was not updated, no second queued_offline audit row, and the run back in QueuedOffline.
      * #6735: every field queueFields() reads is equal before and after the job, and expires_at is
-     * still later than now. #6743: captureQueueWrites() records no statement during the job, as in
-     * the test above. #6739: the test asserts that reconnectRunFailures() finds no captured
-     * MessageLogged record whose message contains 'reconnect-run failed'. The test below is its
+     * still later than now. #6743: captureQueueWrites() records no matching statement between its
+     * registration and readout, a window that includes the job, as in the test above. #6739: the
+     * test asserts that reconnectRunFailures() finds no captured MessageLogged record whose message contains 'reconnect-run failed'. The test below is its
      * positive control: there, after runScript() throws inside dispatchSync(), the same filter
      * finds exactly 1 such record, at warning level.
      */
@@ -282,7 +285,7 @@ class TacticalOfflineQueueProductionTransactionTest extends TestCase
         $this->assertSame('agent-1', $fresh->queued_agent_id);
         $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
         $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
-        $this->assertSame([], $queueWrites(), 'no insert into technician_runs and no update setting a queue column');
+        $this->assertSame([], $queueWrites(), 'captureQueueWrites() recorded no matching statement');
         $this->assertSame([], $this->reconnectRunFailures($logged()), "no 'reconnect-run failed' warning was logged");
         $notUpdated = TechnicianActionLog::where('run_id', $run->id)->where('summary', 'like', '%offline queue not updated: a database transaction was open around this request.%')->count();
         $this->assertSame(1, $notUpdated, 'one audit row for this run carries the not-updated summary');

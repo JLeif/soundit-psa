@@ -490,7 +490,8 @@ class TacticalOfflineQueueApprovalTest extends TestCase
      * is QueuedOffline for 'agent-1'; and the run has one offline audit row, whose summary says the
      * offline queue was not updated and does not contain 'not queued'. #6735: every field
      * queueFields() reads is equal before and after the reconnect call, and expires_at is still
-     * later than now. #6743: captureQueueWrites() records no statement during the reconnect call.
+     * later than now. #6743: captureQueueWrites() records no matching statement between its
+     * registration and readout, a window that includes the reconnect call.
      * #6738: the testing manager is asserted before the approval and before the reconnect call's
      * outer transaction. That the one transaction open at level 1 before that call is the
      * RefreshDatabase wrapper is inferred, not asserted.
@@ -520,7 +521,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertSame('agent-1', $fresh->queued_agent_id);
         $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
         $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
-        $this->assertSame([], $queueWrites(), 'no insert into technician_runs and no update setting a queue column');
+        $this->assertSame([], $queueWrites(), 'captureQueueWrites() recorded no matching statement');
         $rows = TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->get();
         $this->assertCount(1, $rows, 'one offline audit row for this run');
         $this->assertStringContainsString('offline queue not updated: a database transaction was open around this request.', (string) $rows->first()->summary);
@@ -565,8 +566,9 @@ class TacticalOfflineQueueApprovalTest extends TestCase
      * logged; and one error record whose message contains 'audit row not written' has a context
      * of run_id, status and the exception's class only (C-56).
      * #6735: every field queueFields() reads is equal before and after the reconnect call, and
-     * expires_at is still later than now. #6743: captureQueueWrites() records no statement during
-     * the reconnect call. #6737 / #6740: two offline TacticalClient mocks. The
+     * expires_at is still later than now. #6743: captureQueueWrites() records no matching
+     * statement between its registration and readout, a window that includes the reconnect call.
+     * #6737 / #6740: two offline TacticalClient mocks. The
      * first is bound before the approval and the second after it, before runQueuedOnReconnect().
      * The test asserts that each received runScript() exactly once, counted at the end of the
      * test: the first over the whole test, the second from its binding on. #6738: the testing
@@ -595,7 +597,7 @@ class TacticalOfflineQueueApprovalTest extends TestCase
         $this->assertSame('agent-1', $fresh->queued_agent_id);
         $this->assertSame($before, $this->queueFields($run), 'the 7 pinned queue fields are unchanged');
         $this->assertTrue($fresh->expires_at->isFuture(), 'expires_at is in the future');
-        $this->assertSame([], $queueWrites(), 'no insert into technician_runs and no update setting a queue column');
+        $this->assertSame([], $queueWrites(), 'captureQueueWrites() recorded no matching statement');
         $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'offline')->count(), 'no offline audit row for this run');
         $refused = array_values(array_filter($logged(), fn (MessageLogged $m) => str_contains($m->message, 'offline queue refused')));
         $this->assertCount(1, $refused, "one 'offline queue refused' record was logged");
