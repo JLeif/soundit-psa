@@ -182,6 +182,9 @@ class TimeEntryContractMoveService
             try {
                 $result = $this->prepay->moveEntryContract($entry, $to, (string) $reason, $by);
                 $moved++;
+                if (($result['status'] ?? null) === 'executed_with_fault') {
+                    $errors[] = 'Entry '.$move['type'].' #'.$move['id'].': '.$result['message'];
+                }
                 // A ledgered move reports the hours it moved; an unledgered one, the hours its
                 // follow-on debit drew (from the ledger row written), not 0.
                 $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
@@ -245,6 +248,10 @@ class TimeEntryContractMoveService
                 $result = $this->prepay->moveEntryContract($entry, Contract::findOrFail($contractId), $reason, $by);
             } catch (\InvalidArgumentException $e) {
                 return ['error' => $e->getMessage()];
+            }
+
+            if (($result['status'] ?? null) === 'executed_with_fault') {
+                return ['success' => false, 'staged' => false, 'ticket_id' => $ticket->id] + $result;
             }
 
             $message = 'Time entry moved. '.$this->ledgeredMoveStatement($result);
@@ -330,7 +337,7 @@ class TimeEntryContractMoveService
             return $stale($e->getMessage());
         }
 
-        return ['success' => true] + $result;
+        return ['success' => ($result['status'] ?? null) !== 'executed_with_fault'] + $result;
     }
 
     /**

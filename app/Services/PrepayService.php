@@ -377,6 +377,8 @@ class PrepayService
         $unit = $isAmount ? 'dollars' : 'hours';
 
         return DB::transaction(function () use ($from, $to, $value, $note, $isAmount, $userId, $unit) {
+            Contract::withTrashed()->whereIn('id', [$from->id, $to->id])->orderBy('id')->lockForUpdate()->get();
+
             $out = PrepayTransaction::create([
                 'contract_id' => $from->id,
                 'source' => PrepayTransactionSource::TransferOut,
@@ -952,8 +954,22 @@ class PrepayService
         if (! $result['ledger']) {
             // No ledger row moved: the entry is now stamped on $to, and the ordinary debit
             // path decides (billable time on an hours-prepay $to is debited there).
-            $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
-            $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
+            try {
+                $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
+                $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
+            } catch (\Throwable $e) {
+                Log::error('[Prepay] Contract move debit fault', [
+                    $key => $entry->id,
+                    'from_contract_id' => $result['from_contract_id'],
+                    'to_contract_id' => $result['to_contract_id'],
+                    'exception_class' => $e::class,
+                ]);
+                $result['drawn_hours'] = null;
+                $result['status'] = 'executed_with_fault';
+                $result['message'] = 'Time entry moved. Follow-on prepay debit fault; check the ledger before retrying.';
+
+                return $result;
+            }
             if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
                 $result['drawn_hours'] = abs((float) $drawn->hours);
                 $this->reportMoveDraw($report, $drawn, $result['drawn_hours']);

@@ -51,6 +51,9 @@ class TicketContractChangeController extends Controller
     {
         abort_unless(app(PhoneCallActionService::class)->canApprove($request->user()), 403);
         $result = $moves->approve($proposal, $request->user());
+        if (($result['status'] ?? null) === 'executed_with_fault') {
+            return back()->with('error', $result['message']);
+        }
 
         return back()->with(isset($result['error']) ? 'error' : 'success', $result['error'] ?? 'Time entry moved.');
     }
