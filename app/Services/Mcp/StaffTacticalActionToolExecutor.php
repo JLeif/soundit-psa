@@ -474,8 +474,9 @@ class StaffTacticalActionToolExecutor
      * enforced, not assumed: outerTransactionOpen() checks it before the queue write, and when it
      * fails this request writes nothing to the queue, the bus status is audited, the claim release
      * to $releaseState is attempted as when the offline queue is disabled, and the result is a
-     * decline. #6675: when that fenced release returns false, a warning names the run as not
-     * released; the decline and the audit row say nothing about the release either way.
+     * decline. #6675: when that fenced release returns false, a best-effort warning names the run
+     * as not released (a log call that throws is swallowed, as for #6664); the decline and the
+     * audit row say nothing about the release either way.
      * A live approval is told it was not queued (NOT_QUEUED_OUTER_TRANSACTION); a reconnect-run,
      * released back to QueuedOffline with its queue fields untouched, is told that the queue was
      * not updated (QUEUE_NOT_UPDATED_OUTER_TRANSACTION), and its audit summary says the same.
@@ -532,8 +533,8 @@ class StaffTacticalActionToolExecutor
                 $declined = self::withAuditNotWritten($declined);
             }
             // #6675: releaseClaimTo() is a claim-owner-fenced compare-and-set. When it returns
-            // false this request did not release the run, so a warning records that instead.
-            // #6675: the warning is best-effort like the #6664 log.
+            // false this request did not release the run, so a best-effort warning records that:
+            // like the #6664 log, a log call that throws is swallowed and the decline is still returned.
             if (! $run->releaseClaimTo($releaseState)) {
                 try {
                     Log::warning('[Tactical] offline queue refused and the run was not released', [

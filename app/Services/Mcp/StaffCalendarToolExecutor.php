@@ -888,9 +888,9 @@ class StaffCalendarToolExecutor
     }
 
     /**
-     * #6701: the refusal fact the lost-CAS decline repeats. updateBodyPreservingTeamsJoin() is
-     * the only thrower of CalendarWriteRefusedException in this class, and every message it
-     * throws is built by joinLinkRefusal(), which starts with one of the two facts, so the fact
+     * #6701: the refusal fact the lost-CAS decline repeats. The only throw of
+     * CalendarWriteRefusedException in this class is in updateBodyPreservingTeamsJoin(), and its
+     * message is built by joinLinkRefusal(), which starts with one of the two facts, so the fact
      * is the one the thrown message starts with; anything else gets the neutral fact.
      */
     private static function joinLinkRefusedFact(string $thrown): string
@@ -1119,8 +1119,8 @@ class StaffCalendarToolExecutor
                 $this->safeAudit($run->action_type, 'error', $ticket, $run->content_hash, self::PRE_READ_FAILURE_AUDIT.self::preReadFailureDetail($e), $this->approverLabel($approverId), $run->id, $approverId);
                 $reopened = $run->releaseClaim();
                 // #6729: a lost release on this arm is logged at warning, like the outer catch's
-                // (run_id and class only, C-56), so a run left unreleased here is not silent.
-                // #6729: the warning is best-effort like the #6664 log.
+                // (run_id and class only, C-56). The warning is best-effort like the #6664 log: a
+                // log call that throws is swallowed and the decline is still returned.
                 if (! $reopened) {
                     try {
                         Log::warning('[Calendar] approval pre-read failed and the run was not reopened', [
