@@ -40,7 +40,7 @@ class TicketContractChangeController extends Controller
         $message = 'Ticket contract updated.';
         if ($result['moved'] > 0) {
             $message .= ' Moved '.$result['moved'].' time '.($result['moved'] === 1 ? 'entry' : 'entries')
-                .' ('.number_format($result['hours'], 2).' h).';
+                .($result['hours'] === null ? '.' : ' ('.number_format($result['hours'], 2).' h).');
         }
         $redirect = redirect()->route('tickets.show', $ticket)->with('success', $message);
 
@@ -51,6 +51,9 @@ class TicketContractChangeController extends Controller
     {
         abort_unless(app(PhoneCallActionService::class)->canApprove($request->user()), 403);
         $result = $moves->approve($proposal, $request->user());
+        if (($result['status'] ?? null) === 'executed_with_fault') {
+            return back()->with('error', $result['message']);
+        }
 
         return back()->with(isset($result['error']) ? 'error' : 'success', $result['error'] ?? 'Time entry moved.');
     }

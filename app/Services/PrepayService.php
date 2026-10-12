@@ -377,6 +377,8 @@ class PrepayService
         $unit = $isAmount ? 'dollars' : 'hours';
 
         return DB::transaction(function () use ($from, $to, $value, $note, $isAmount, $userId, $unit) {
+            Contract::withTrashed()->whereIn('id', [$from->id, $to->id])->orderBy('id')->lockForUpdate()->get();
+
             $out = PrepayTransaction::create([
                 'contract_id' => $from->id,
                 'source' => PrepayTransactionSource::TransferOut,
@@ -788,10 +790,12 @@ class PrepayService
      * before the contracts are, with the locked entry, its row and the contract it is on
      * now; it refuses by throwing InvalidArgumentException, and nothing is written.
      *
-     * drawn_hours is what that follow-on debit drew (0 for a ledgered move, or when nothing was
-     * drawn); the move's system note and ContractActivity rows then report it in place of 0.
+     * drawn_hours is the draw recorded on the entry's ledger row after that follow-on debit (0 for
+     * a ledgered move, or when no draw is found): the row the debit returned, or, after a caught
+     * debit fault, the row read back from the ledger; null when that read-back also failed. The
+     * move's system note and ContractActivity rows then report a found draw in place of 0.
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: float}
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: ?float}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -952,8 +956,37 @@ class PrepayService
         if (! $result['ledger']) {
             // No ledger row moved: the entry is now stamped on $to, and the ordinary debit
             // path decides (billable time on an hours-prepay $to is debited there).
-            $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
-            $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
+            try {
+                $fresh = $isNote ? TicketNote::find($entry->id) : PhoneCall::find($entry->id);
+                $drawn = $fresh ? ($isNote ? $this->debitFromTicketNote($fresh) : $this->debitFromPhoneCall($fresh)) : null;
+            } catch (\Throwable $e) {
+                $result['status'] = 'executed_with_fault';
+                // The fault can follow the debit's own commit (debitFromTicketNote and
+                // debitFromPhoneCall check the alert threshold after it), so the entry's ledger
+                // row is read back and any draw it records is reported as on the normal path.
+                try {
+                    $drawn = PrepayTransaction::where($key, $entry->id)->first();
+                    $debitRecorded = $drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0;
+                } catch (\Throwable) {
+                    $result['drawn_hours'] = null;
+                    $debitRecorded = null;
+                }
+                $result['message'] = match ($debitRecorded) {
+                    true => 'Time entry moved and its prepay debit was recorded, but a step after the debit failed; check the ledger before acting.',
+                    false => 'Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.',
+                    null => 'Time entry moved, but whether its follow-on prepay debit was recorded could not be confirmed; check the ledger before acting.',
+                };
+                Log::error('[Prepay] Contract move follow-on fault', [
+                    $key => $entry->id,
+                    'from_contract_id' => $result['from_contract_id'],
+                    'to_contract_id' => $result['to_contract_id'],
+                    'exception_class' => $e::class,
+                    'debit_recorded' => $debitRecorded,
+                ]);
+                if ($debitRecorded === null) {
+                    return $result;
+                }
+            }
             if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
                 $result['drawn_hours'] = abs((float) $drawn->hours);
                 $this->reportMoveDraw($report, $drawn, $result['drawn_hours']);

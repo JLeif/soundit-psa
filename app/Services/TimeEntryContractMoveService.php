@@ -140,7 +140,7 @@ class TimeEntryContractMoveService
      * The ticket change alone moves no money, and releases no held "Needs contract" entry.
      *
      * @param  list<array{type: string, id: int}>  $moves
-     * @return array{moved: int, hours: float, errors: list<string>}
+     * @return array{moved: int, hours: ?float, errors: list<string>}
      */
     public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
     {
@@ -171,6 +171,7 @@ class TimeEntryContractMoveService
 
         $moved = 0;
         $hours = 0.0;
+        $unread = false;
         $errors = [];
         foreach ($moves as $move) {
             $entry = $this->entry($ticket, $move['type'] ?? '', (int) ($move['id'] ?? 0));
@@ -182,15 +183,23 @@ class TimeEntryContractMoveService
             try {
                 $result = $this->prepay->moveEntryContract($entry, $to, (string) $reason, $by);
                 $moved++;
-                // A ledgered move reports the hours it moved; an unledgered one, the hours its
-                // follow-on debit drew (from the ledger row written), not 0.
-                $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
+                if (($result['status'] ?? null) === 'executed_with_fault') {
+                    $errors[] = 'Entry '.$move['type'].' #'.$move['id'].': '.$result['message'];
+                }
+                // A ledgered move reports the hours it moved; an unledgered one, its drawn_hours (the hours
+                // the follow-on debit drew, 0.0 when none was recorded). A null drawn_hours (the ledger
+                // read-back after a caught fault failed) leaves the batch total unknown, so hours is null.
+                if (! $result['ledger'] && $result['drawn_hours'] === null) {
+                    $unread = true;
+                } else {
+                    $hours += $result['ledger'] ? $result['hours'] : $result['drawn_hours'];
+                }
             } catch (\InvalidArgumentException $e) {
                 $errors[] = $e->getMessage();
             }
         }
 
-        return ['moved' => $moved, 'hours' => round($hours, 4), 'errors' => $errors];
+        return ['moved' => $moved, 'hours' => $unread ? null : round($hours, 4), 'errors' => $errors];
     }
 
     public function entry(Ticket $ticket, string $type, int $id): TicketNote|PhoneCall|null
@@ -245,6 +254,10 @@ class TimeEntryContractMoveService
                 $result = $this->prepay->moveEntryContract($entry, Contract::findOrFail($contractId), $reason, $by);
             } catch (\InvalidArgumentException $e) {
                 return ['error' => $e->getMessage()];
+            }
+
+            if (($result['status'] ?? null) === 'executed_with_fault') {
+                return ['success' => false, 'staged' => false, 'ticket_id' => $ticket->id] + $result;
             }
 
             $message = 'Time entry moved. '.$this->ledgeredMoveStatement($result);
@@ -330,7 +343,7 @@ class TimeEntryContractMoveService
             return $stale($e->getMessage());
         }
 
-        return ['success' => true] + $result;
+        return ['success' => ($result['status'] ?? null) !== 'executed_with_fault'] + $result;
     }
 
     /**
