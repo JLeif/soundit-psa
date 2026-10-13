@@ -32,7 +32,7 @@ class ContractAtCreationToolsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const LINE = 'Optional. Must be an active contract of this ticket\'s client; omit it and the server uses the client\'s default contract, else its only active contract, else none — the response says which. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied, and the response\'s contract block is authoritative.';
+    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract.';
 
     private Client $client;
 
@@ -165,6 +165,91 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertNothingWritten();
         $this->assertNull($call->fresh()->ticket_id);
         $this->assertNull($call->fresh()->contract_id);
+    }
+
+    private function expireBeforeCreate(Contract $contract): void
+    {
+        $service = app(\App\Services\TicketService::class);
+        $mock = \Mockery::mock(\App\Services\TicketService::class)->makePartial();
+        $mock->shouldReceive('createTicket')->once()->andReturnUsing(function (array $data, ?int $actorId) use ($service, $contract) {
+            Contract::whereKey($contract->id)->update(['status' => 'expired']);
+
+            return $service->createTicket($data, $actorId);
+        });
+        $this->app->instance(\App\Services\TicketService::class, $mock);
+    }
+
+    public function test_staff_create_refuses_contract_expired_after_precheck(): void
+    {
+        $contract = $this->contract('Synthetic Race');
+        $this->expireBeforeCreate($contract);
+
+        $r = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $contract->id]));
+
+        $this->assertRefused($r, $contract);
+        $this->assertTrue($r['isError']);
+        $this->assertNothingWritten();
+        $this->assertDatabaseCount('ticket_notes', 0);
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        $this->assertSame('active', $contract->fresh()->status->value);
+    }
+
+    public function test_call_create_refuses_contract_expired_after_precheck(): void
+    {
+        $contract = $this->contract('Synthetic Race');
+        $call = $this->phoneCall();
+        $before = $call->fresh()->getAttributes();
+        $this->expireBeforeCreate($contract);
+
+        $r = $this->callTool(['create_ticket_from_call'], 'create_ticket_from_call', [
+            'phone_call_id' => $call->id, 'reason' => 'Synthetic', 'contract_id' => $contract->id,
+        ]);
+
+        $this->assertRefused($r, $contract);
+        $this->assertTrue($r['isError']);
+        $this->assertNothingWritten();
+        $this->assertDatabaseCount('ticket_notes', 0);
+        $this->assertSame($before, $call->fresh()->getAttributes());
+        $this->assertSame('active', $contract->fresh()->status->value);
+    }
+
+    public function test_email_vendor_burst_flags_link_and_does_not_apply_passed_contract(): void
+    {
+        $stored = $this->contract('Synthetic Stored');
+        $passed = $this->contract('Synthetic Passed');
+        $ticket = Ticket::factory()->create([
+            'client_id' => $this->client->id, 'contract_id' => $stored->id,
+            'subject' => 'Email Delivery Request: user@example.test', 'status' => \App\Enums\TicketStatus::New,
+        ]);
+        $email = $this->email();
+        $email->update(['from_address' => 'noreply@emailsecurity.app', 'subject' => $ticket->subject]);
+
+        $r = $this->callTool(['create_ticket_from_email'], 'create_ticket_from_email', [
+            'email_id' => $email->id, 'reason' => 'Synthetic', 'contract_id' => $passed->id,
+        ]);
+
+        $this->assertSame(true, $r['linked_existing'] ?? null);
+        $this->assertSame($ticket->id, $r['ticket_id']);
+        $this->assertSame(['id' => $stored->id, 'name' => 'Synthetic Stored', 'rule' => 'ticket'], $r['contract']);
+        $this->assertSame('ticket', $r['contract_rule']);
+        $this->assertSame($stored->id, $ticket->fresh()->contract_id);
+        $this->assertSame($ticket->id, $email->fresh()->ticket_id);
+        $this->assertSame(1, Ticket::count());
+    }
+
+    public function test_email_fresh_create_flags_not_linked(): void
+    {
+        $passed = $this->contract('Synthetic Passed');
+        $email = $this->email();
+
+        $r = $this->callTool(['create_ticket_from_email'], 'create_ticket_from_email', [
+            'email_id' => $email->id, 'reason' => 'Synthetic', 'contract_id' => $passed->id,
+        ]);
+
+        $this->assertSame(false, $r['linked_existing'] ?? null);
+        $this->assertSame(['id' => $passed->id, 'name' => 'Synthetic Passed', 'rule' => 'picked'], $r['contract']);
+        $this->assertSame($passed->id, Ticket::sole()->contract_id);
+        $this->assertSame(Ticket::sole()->id, $email->fresh()->ticket_id);
     }
 
     // ── C2: an inactive contract of the same client ─────────────────────────
