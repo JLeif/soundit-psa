@@ -97,12 +97,14 @@ if (dueAtDirty) {
         }
 JS, $html);
         $this->assertStringContainsString(<<<'JS'
-if (h !== null && h !== undefined) {
+const hours = (typeof h === 'number' || typeof h === 'string') && /^\d+$/.test(String(h)) ? Number(h) : 0;
+        if (Number.isSafeInteger(hours) && hours > 0) {
             dueAtInput.value = '';
-            dueAtHint.textContent = 'Leave blank and this contract\'s ' + h + 'h resolution SLA sets the due date.';
+            dueAtHint.textContent = 'Leave blank and this contract\'s ' + hours + 'h resolution SLA sets the due date.';
             return;
         }
 JS, $html);
+        $this->assertStringNotContainsString('if (h !== null && h !== undefined) {', $html);
         $this->assertStringContainsString('let dueAtDirty = !!dueAtInput.value;', $html);
         $this->assertStringContainsString("dueAtInput.addEventListener('input', function() {\n        dueAtDirty = true;\n        updateDueDate();\n    });", $html);
         $this->assertStringContainsString('JSON.parse(selectedContract.dataset.resolutionSlaHours || \'{}\')', $html);
@@ -124,5 +126,30 @@ JS, $html);
             ->assertOk()->assertSee('value="'.$explicit.'"', false)
             ->assertSee('<small class="form-text text-muted" id="dueAtHint">Optional due date override</small>', false)
             ->assertDontSee('<small class="form-text text-muted" id="dueAtHint">Auto-set from priority SLA</small>', false);
+    }
+
+    /** The contract arm is pinned as rendered source only; the store controls show which stored values the server applies. */
+    public function test_contract_arm_is_limited_to_whole_positive_hours_the_store_applies(): void
+    {
+        $this->travelTo(now()->startOfMinute());
+        $client = Client::create(['name' => 'Synthetic C7 string SLA client']);
+        $data = ['client_id' => $client->id, 'subject' => 'Synthetic C7 string SLA', 'priority' => 'p3', 'type' => 'incident', 'due_at' => ''];
+        foreach ([['8', 8], ['0', null]] as $i => [$stored, $hours]) {
+            $contract = Contract::create([
+                'client_id' => $client->id, 'name' => 'Synthetic C7 string '.$i, 'type' => 'managed',
+                'status' => 'active', 'start_date' => '2026-01-01',
+                'sla_terms' => ['resolution' => ['p3' => $stored]],
+            ]);
+            $this->post(route('tickets.store'), $data + ['contract_id' => $contract->id])->assertSessionHasNoErrors()->assertRedirect();
+            $due = Ticket::latest('id')->first()->due_at;
+            if ($hours === null) {
+                $this->assertNull($due, 'stored '.$stored);
+            } else {
+                $this->assertTrue($due->equalTo(now()->addHours($hours)), 'stored '.$stored);
+            }
+        }
+        $html = $this->get(route('tickets.create'))->assertOk()->getContent();
+        $this->assertStringContainsString("const hours = (typeof h === 'number' || typeof h === 'string') && /^\\d+$/.test(String(h)) ? Number(h) : 0;", $html);
+        $this->assertStringContainsString('if (Number.isSafeInteger(hours) && hours > 0) {', $html);
     }
 }

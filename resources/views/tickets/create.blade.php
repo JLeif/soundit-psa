@@ -361,9 +361,11 @@ document.addEventListener('DOMContentLoaded', function() {
         const selectedContract = contractSelect.disabled ? null : contractSelect.selectedOptions[0];
         const terms = selectedContract ? JSON.parse(selectedContract.dataset.resolutionSlaHours || '{}') : {};
         const h = terms[prioritySelect.value];
-        if (h !== null && h !== undefined) {
+        // Only whole positive hours take the contract arm; for any other stored value the priority arm fills the date.
+        const hours = (typeof h === 'number' || typeof h === 'string') && /^\d+$/.test(String(h)) ? Number(h) : 0;
+        if (Number.isSafeInteger(hours) && hours > 0) {
             dueAtInput.value = '';
-            dueAtHint.textContent = 'Leave blank and this contract\'s ' + h + 'h resolution SLA sets the due date.';
+            dueAtHint.textContent = 'Leave blank and this contract\'s ' + hours + 'h resolution SLA sets the due date.';
             return;
         }
         const selected = prioritySelect.options[prioritySelect.selectedIndex];
