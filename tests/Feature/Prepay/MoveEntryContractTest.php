@@ -290,6 +290,27 @@ class MoveEntryContractTest extends TestCase
         $this->assertSame($columns, $this->columns($this->a));
     }
 
+    public function test_round_trip_move_does_not_reduce_the_forfeiture(): void
+    {
+        $this->expiredMoveFixture();
+        $note = TicketNote::findOrFail(PrepayTransaction::whereNotNull('moved_ticket_note_id')->value('moved_ticket_note_id'));
+        $expiry = app(PrepayExpirationService::class);
+
+        $this->travelTo(\Carbon\Carbon::parse('2026-06-20 12:00:00'));
+        $this->move($note->fresh(), $this->a, 'Moved back');
+        $back = $expiry->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $back['forfeited_hours']);
+        $this->assertSame([0, 0, 0], [$back['created'], $back['updated'], $back['deleted']]);
+        $this->assertSame([2.0, 1.0, 1.0, 0.0], $this->columns($this->a));
+
+        $this->travelTo(\Carbon\Carbon::parse('2026-06-25 12:00:00'));
+        $this->move($note->fresh(), $this->b, 'Moved out again');
+        $again = $expiry->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $again['forfeited_hours']);
+        $this->assertSame([0, 0, 0], [$again['created'], $again['updated'], $again['deleted']]);
+        $this->assertSame([2.0, 0.0, 1.0, 1.0], $this->columns($this->a));
+    }
+
     /** (d): later edit, unbill, rebill, re-debit and delete act on the new contract only. */
     public function test_d_later_changes_act_on_the_new_contract_only(): void
     {
