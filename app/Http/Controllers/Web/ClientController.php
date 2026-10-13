@@ -567,7 +567,7 @@ class ClientController extends Controller
             ->where('client_id', $client->id)
             ->where('status', \App\Enums\ContractStatus::Active)
             ->orderBy('name')
-            ->get(['id', 'name', 'type', 'prepay_balance', 'prepay_as_amount']);
+            ->get(['id', 'name', 'type', 'prepay_balance', 'prepay_as_amount', 'sla_terms']);
 
         return response()->json($contracts->map(fn ($c) => [
             'id' => $c->id,
@@ -577,6 +577,7 @@ class ClientController extends Controller
             'prepay_balance' => $c->prepay_balance,
             'prepay_unit' => $c->prepay_balance === null ? null : ($c->prepay_as_amount ? 'dollars' : 'hours'),
             'is_default' => $c->id === $defaultId,
+            'resolution_sla_hours' => (object) ($c->sla_terms['resolution'] ?? []),
         ])->values());
     }
 
