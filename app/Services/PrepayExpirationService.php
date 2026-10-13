@@ -156,8 +156,8 @@ class PrepayExpirationService
         // Rule (b): a moved debit keeps its consumption of lots already expired
         // at the move date. Its consumption of lots still live then is freed.
         // The move credit is not a new lot in the expiration replay. Once the entry
-        // has a later debit here (moved back, or debited again), that debit draws
-        // the entry's hours and the moved debit keeps none.
+        // has a later debit here (moved back, or debited again), the moved debit
+        // keeps none.
         $txns = $contract->prepayTransactions()
             ->orderByRaw('COALESCE(date, created_at) asc')
             ->orderBy('id')
@@ -203,8 +203,8 @@ class PrepayExpirationService
                             && $credit->source === PrepayTransactionSource::EntryMovedOut
                             && $credit->moved_ticket_note_id === $t->moved_ticket_note_id
                             && $credit->moved_phone_call_id === $t->moved_phone_call_id);
-                        // A later debit for the same entry, linked or detached again,
-                        // draws the entry's hours, so this debit then keeps none.
+                        // Once a later debit for the same entry, linked or detached again,
+                        // follows the move, this debit keeps none.
                         $returned = $move !== null && $txns->contains(fn ($later) => $later->id > $move->id
                             && (float) $later->hours < 0
                             && ($t->moved_ticket_note_id !== null
