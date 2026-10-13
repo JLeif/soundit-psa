@@ -47,7 +47,9 @@ class PrepayBackfillDebits extends Command
                 ->whereNotExists(function ($q) {
                     $q->select(DB::raw(1))
                         ->from('prepay_transactions')
-                        ->whereColumn('prepay_transactions.ticket_note_id', 'ticket_notes.id');
+                        ->where(fn ($links) => $links
+                            ->whereColumn('prepay_transactions.ticket_note_id', 'ticket_notes.id')
+                            ->orWhereColumn('prepay_transactions.moved_ticket_note_id', 'ticket_notes.id'));
                 })
                 ->with('ticket.latestTriageRun')
                 ->get();

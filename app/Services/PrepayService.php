@@ -792,10 +792,10 @@ class PrepayService
      *
      * drawn_hours is the draw recorded on the entry's ledger row after that follow-on debit (0 for
      * a ledgered move, or when no draw is found): the row the debit returned, or, after a caught
-     * debit fault, the row read back from the ledger; null when that read-back also failed. The
-     * move's system note and ContractActivity rows then report a found draw in place of 0.
+     * debit fault, the row read back from the ledger; null when that read-back also failed.
+     * After an unledgered move, the system note and ContractActivity rows report the entry's re-read stamp (a held or unstamped entry as on no contract, to_contract_id null) and any found draw in place of 0.
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: int, hours: float, ledger: bool, drawn_hours: ?float}
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: ?int, hours: float, ledger: bool, drawn_hours: ?float}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -872,9 +872,11 @@ class PrepayService
                     'description' => mb_substr("Moved to {$target->name}: ".($row->description ?? $row->source?->label() ?? ''), 0, 255),
                     'note' => mb_substr($reason, 0, 255),
                 ]);
-                $from->decrement('prepay_used', $hours);
-                $from->increment('prepay_balance', $hours);
-                $alert[] = $from;
+                if ($this->hoursPrepayOrNull($from)) {
+                    $from->decrement('prepay_used', $hours);
+                    $from->increment('prepay_balance', $hours);
+                    $alert[] = $from;
+                }
 
                 if ($this->hoursPrepayOrNull($target)) {
                     $subject = mb_substr($ticket->subject ?? 'No subject', 0, 60);
@@ -909,6 +911,7 @@ class PrepayService
                 'to_contract_id' => $target->id,
                 'to_contract' => $target->name,
             ];
+            $changes['requested_contract_id'] = $target->id;
             foreach (array_filter([$from, $target]) as $contract) {
                 $report['activity_ids'][] = ContractActivity::create([
                     'contract_id' => $contract->id,
@@ -920,9 +923,10 @@ class PrepayService
             }
 
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
-            $report['body'] = fn (float $h, string $drew = '') => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
-                .($from?->name ?? 'no contract').' to '.$target->name.$drew.': '.$reason;
-            $body = $report['body']($hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600));
+            $report['body'] = fn (float $h, string $drew = '', ?string $destination = null) => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
+                .($from?->name ?? 'no contract').' to '.($destination ?? $target->name).$drew.': '.$reason;
+            $report['hours'] = $hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600);
+            $body = $report['body']($report['hours']);
             $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
                 'author_id' => $by->id,
@@ -983,14 +987,20 @@ class PrepayService
                     'exception_class' => $e::class,
                     'debit_recorded' => $debitRecorded,
                 ]);
-                if ($debitRecorded === null) {
+                if ($debitRecorded !== true) {
                     return $result;
                 }
             }
             if ($drawn && (int) $drawn->getAttribute($key) === (int) $entry->id && $drawn->hours !== null && (float) $drawn->hours < 0) {
                 $result['drawn_hours'] = abs((float) $drawn->hours);
-                $this->reportMoveDraw($report, $drawn, $result['drawn_hours']);
+            } else {
+                $drawn = null;
             }
+            // A held entry can keep its stamp; it is reported as on no contract.
+            $fresh = $isNote ? TicketNote::withTrashed()->find($entry->id) : PhoneCall::find($entry->id);
+            $held = $fresh?->contract_id === null || (! $drawn && $fresh->contract_held_at !== null);
+            $result['to_contract_id'] = $held ? null : (int) $fresh->contract_id;
+            $this->reportMoveStamp($report, $result['to_contract_id'], $drawn, $result['drawn_hours']);
         }
 
         foreach ($alert as $contract) {
@@ -1003,21 +1013,24 @@ class PrepayService
         return $result;
     }
 
-    /**
-     * An unledgered move's follow-on debit drew $hours: the move's system note and its
-     * ContractActivity rows, written before the debit existed, report that draw (the hours
-     * and the contract of the ledger row written) in place of 0.
-     */
-    private function reportMoveDraw(array $report, PrepayTransaction $drawn, float $hours): void
+    /** Report the re-read stamp after an unledgered move's follow-on step. */
+    private function reportMoveStamp(array $report, ?int $contractId, ?PrepayTransaction $drawn, float $hours): void
     {
-        $name = Contract::withTrashed()->find($drawn->contract_id)?->name ?? "contract {$drawn->contract_id}";
-        $body = $report['body']($hours, '; it had no prepay ledger row, so '.number_format($hours, 2).'h was drawn from '.$name);
+        $name = $contractId === null ? null : (Contract::withTrashed()->find($contractId)?->name ?? "contract {$contractId}");
+        $drawName = $drawn ? (Contract::withTrashed()->find($drawn->contract_id)?->name ?? "contract {$drawn->contract_id}") : null;
+        $drew = $drawn ? '; it had no prepay ledger row, so '.number_format($hours, 2).'h was drawn from '.$drawName : '';
+        $body = $report['body']($drawn ? $hours : $report['hours'], $drew, $name ?? 'no contract');
         // Query builder: a report correction is not an edit and must not re-enter the observers.
         TicketNote::whereKey($report['note_id'])->update(['body' => $body, 'body_html' => \App\Helpers\MarkdownRenderer::render($body)]);
         foreach (ContractActivity::whereKey($report['activity_ids'] ?? [])->get() as $activity) {
-            $activity->update(['changes' => array_merge($activity->changes ?? [], [
-                'hours' => $hours, 'drawn_hours' => $hours, 'drawn_contract_id' => (int) $drawn->contract_id,
-            ])]);
+            $activity->update([
+                'contract_id' => $activity->action === 'entry_moved_in' && $contractId !== null ? $contractId : $activity->contract_id,
+                'changes' => array_merge($activity->changes ?? [], $drawn ? [
+                    'hours' => $hours, 'drawn_hours' => $hours, 'drawn_contract_id' => (int) $drawn->contract_id,
+                ] : [], [
+                    'to_contract_id' => $contractId, 'to_contract' => $name,
+                ]),
+            ]);
         }
     }
 
@@ -1198,6 +1211,9 @@ class PrepayService
             $durationSeconds = $call->effectiveDurationSeconds();
             if (! $call->is_billable || ! $durationSeconds || $durationSeconds <= 0) {
                 $this->reverseDebitForPhoneCall($call);
+                if (! $existing) {
+                    $alertContract = null;
+                }
 
                 return null;
             }
@@ -1297,7 +1313,9 @@ class PrepayService
 
         if ($alertContract) {
             $alertContract->refresh();
-            app(PrepayAlertService::class)->checkThreshold($alertContract);
+            if (! $alertContract->trashed()) {
+                app(PrepayAlertService::class)->checkThreshold($alertContract);
+            }
         }
 
         return $txn;

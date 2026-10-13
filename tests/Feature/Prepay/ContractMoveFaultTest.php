@@ -185,7 +185,7 @@ class ContractMoveFaultTest extends TestCase
         ], $records[0]->context);
     }
 
-    public function test_non_billable_phone_alert_fault_reports_no_debit_and_preserves_move(): void
+    public function test_non_billable_phone_without_debit_skips_alert_and_preserves_move(): void
     {
         $call = \App\Models\PhoneCall::withoutEvents(fn () => \App\Models\PhoneCall::forceCreate([
             'call_uuid' => 'synthetic-non-billable-alert-fault', 'direction' => 'inbound', 'status' => 'completed', 'from_number' => '+15555550142',
@@ -193,25 +193,18 @@ class ContractMoveFaultTest extends TestCase
             'duration' => 1800, 'is_billable' => false, 'started_at' => now(),
         ]));
         $alerts = \Mockery::mock(\App\Services\PrepayAlertService::class);
-        $alerts->shouldReceive('checkThreshold')->once()->withArgs(fn (Contract $contract) => $contract->id === $this->to->id)
-            ->andThrow(new \RuntimeException('Synthetic alert fault'));
+        $alerts->shouldNotReceive('checkThreshold');
         $this->app->instance(\App\Services\PrepayAlertService::class, $alerts);
         $result = app(TimeEntryContractMoveService::class)->agentMove([
             'entry_type' => 'call', 'entry_id' => $call->id, 'contract_id' => $this->to->id, 'reason' => 'Synthetic move',
         ], 'synthetic', false);
-        $this->assertSame('executed_with_fault', $result['status'] ?? null);
-        $this->assertFalse($result['success']);
-        $this->assertSame('Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.', $result['message']);
+        $this->assertNull($result['status'] ?? null);
+        $this->assertTrue($result['success']);
+        $this->assertSame('Time entry moved. It had no prepay ledger row and no prepay hours were drawn.', $result['message']);
         $this->assertSame($this->to->id, $call->fresh()->contract_id);
         $this->assertSame(0, PrepayTransaction::where('phone_call_id', $call->id)->count());
         $records = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->message === '[Prepay] Contract move follow-on fault'));
-        $this->assertCount(1, $records);
-        $this->assertSame(\Monolog\Level::Error, $records[0]->level);
-        $this->assertSame([
-            'phone_call_id' => $call->id, 'from_contract_id' => $this->from->id,
-            'to_contract_id' => $this->to->id, 'exception_class' => \RuntimeException::class,
-            'debit_recorded' => false,
-        ], $records[0]->context);
+        $this->assertCount(0, $records);
     }
 
     public function test_approve_route_flashes_fault_instead_of_success(): void
