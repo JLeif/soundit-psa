@@ -40,8 +40,8 @@ class TicketService
      * THE contract rule for a new ticket (card I3EvQKUV PR 3, spec §7), enforced in this
      * one place for every creating surface. A supplied contract_id must be an ACTIVE
      * contract of $clientId, otherwise ContractNotAllowedException (an
-     * InvalidArgumentException: "contract_id <id> is not an active contract of this
-     * client"). Omitted (absent, null or ''), ContractResolver's client rules apply:
+     * InvalidArgumentException: "contract_id <id> cannot be used for this ticket.").
+     * Omitted (absent, null or ''), ContractResolver's client rules apply:
      * the client default, else the only active contract, else none; several active
      * and no default leaves it unset (ambiguous). Writes nothing.
      */

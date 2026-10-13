@@ -6,9 +6,14 @@ use App\Models\Contract;
 use Illuminate\Support\Collection;
 
 /**
- * Which contract a NEW ticket took, and by which rule (card I3EvQKUV PR 3,
- * spec §7): picked | client_default | only_active | none | ambiguous.
- * Built only from a ContractResolver answer; this class decides nothing.
+ * A resolved contract outcome: picked | ticket | client_default | only_active | none | ambiguous.
+ * Rule ticket identifies an existing ticket's contract: in a resolver answer, its active contract.
+ * The deleted-ticket block in StaffPsaActionToolExecutor::existingTicketContractBlock is built by
+ * hand, not by this class, and reports the stored contract under rule ticket whatever its status.
+ * For a live existing ticket, callers add ticket_contract_id when the stored id differs; the
+ * deleted-ticket block always adds it. Instances are built from a ContractResolution:
+ * a ContractResolver answer, or ContractResolution::none() where there is no client or no ticket;
+ * this class decides nothing.
  */
 final class TicketContractOutcome
 {
@@ -37,7 +42,7 @@ final class TicketContractOutcome
     }
 
     /**
-     * The response block every agent create/update reports.
+     * Serialize this resolution for agent responses.
      *
      * @return array<string, mixed>
      */

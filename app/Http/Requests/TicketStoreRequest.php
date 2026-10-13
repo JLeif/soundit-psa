@@ -67,18 +67,18 @@ class TicketStoreRequest extends FormRequest
             ],
             'assignee_id' => ['nullable', 'exists:users,id'],
             'due_at' => ['nullable', 'date'],
-            // Card I3EvQKUV PR 3: an ACTIVE contract of the chosen client, the closure
-            // InvoiceStoreRequest uses for ownership plus the active check. Blank = let the
-            // server apply the client default / only active contract (TicketService).
+            // Card I3EvQKUV PR 3: an ACTIVE contract of the chosen client. The id must be a positive int or digit
+            // string (not true or 1.0), the same test TicketService::contractForNewTicket applies.
+            // Blank = let the server apply the client default / only active contract (TicketService).
             'contract_id' => [
                 'nullable',
                 function (string $attribute, $value, $fail): void {
-                    if (blank($value)) {
+                    if ($value === null || $value === '') {
                         return;
                     }
 
                     $clientId = $this->input('client_id');
-                    $isActiveOfClient = is_scalar($value) && ctype_digit((string) $value)
+                    $isActiveOfClient = (is_int($value) || (is_string($value) && ctype_digit($value))) && (int) $value > 0
                         && is_scalar($clientId) && ctype_digit((string) $clientId)
                         && Contract::query()
                             ->whereKey((int) $value)

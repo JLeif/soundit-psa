@@ -656,16 +656,18 @@ class McpToolRegistry
      * The one-line contract_id description every ticket-creating agent tool carries
      * (card I3EvQKUV PR 3, spec §7). The portal create_ticket has no contract_id (Q8).
      */
-    public const CREATE_CONTRACT_ID_DESCRIPTION = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract, except that a replay whose earlier ticket has since been deleted returns contract: null and contract_rule: none with no ticket_contract_id.';
+    public const CREATE_CONTRACT_ID_DESCRIPTION = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract. Rule ticket identifies the ticket contract. On create_ticket, a replay of a soft-deleted ticket still under this client instead reports its stored contract (rule ticket, or none if unset), ticket_contract_id and ticket_deleted: true.';
 
     /**
      * The contract_id property of a ticket-creating tool schema.
      *
      * @return array{type: array<int, string>, description: string}
      */
-    public static function createContractIdProperty(): array
+    public static function createContractIdProperty(bool $existingTicketPaths = true): array
     {
-        return ['type' => ['integer', 'null'], 'description' => self::CREATE_CONTRACT_ID_DESCRIPTION];
+        $description = $existingTicketPaths ? self::CREATE_CONTRACT_ID_DESCRIPTION : explode(' When the call returns an existing ticket', self::CREATE_CONTRACT_ID_DESCRIPTION)[0];
+
+        return ['type' => ['integer', 'null'], 'description' => $description];
     }
 
     /** @return array<string, mixed> */

@@ -32,7 +32,7 @@ class ContractAtCreationToolsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract, except that a replay whose earlier ticket has since been deleted returns contract: null and contract_rule: none with no ticket_contract_id.';
+    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract. Rule ticket identifies the ticket contract. On create_ticket, a replay of a soft-deleted ticket still under this client instead reports its stored contract (rule ticket, or none if unset), ticket_contract_id and ticket_deleted: true.';
 
     private Client $client;
 
@@ -114,7 +114,7 @@ class ContractAtCreationToolsTest extends TestCase
         $id = $contract instanceof Contract ? $contract->id : $contract;
         $this->assertSame('contract_not_allowed', $r['error_code'] ?? null, json_encode($r));
         $this->assertSame(
-            "contract_id must be an ACTIVE contract of this ticket's client; contract {$id} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default or only active contract.",
+            "contract_id {$id} cannot be used for this ticket. Use an active contract of this ticket's client (list_client_contracts lists them), or omit contract_id for automatic selection (which may leave the contract unset).",
             $r['error'],
         );
     }
@@ -252,7 +252,7 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertSame(Ticket::sole()->id, $email->fresh()->ticket_id);
     }
 
-    public function test_create_ticket_replay_of_a_deleted_ticket_reports_no_contract(): void
+    public function test_create_ticket_replay_of_a_deleted_ticket_reports_stored_contract(): void
     {
         $contract = $this->contract('Synthetic Replay');
         $first = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $contract->id]));
@@ -260,16 +260,28 @@ class ContractAtCreationToolsTest extends TestCase
         $ticket = Ticket::sole();
         $this->assertSame($contract->id, $ticket->contract_id);
         $ticket->delete();
+        $contract->update(['status' => 'expired']);
+        $this->contract('Synthetic replacement');
 
-        $r = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $contract->id]));
+        $r = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs());
 
         $this->assertTrue($r['idempotent'] ?? false, json_encode($r));
         $this->assertSame($ticket->id, $r['ticket_id']);
         $this->assertArrayHasKey('contract', $r);
-        $this->assertNull($r['contract']);
-        $this->assertSame('none', $r['contract_rule']);
-        $this->assertArrayNotHasKey('ticket_contract_id', $r);
+        $this->assertSame($contract->id, $r['contract']['id'] ?? null);
+        $this->assertSame('ticket', $r['contract_rule']);
+        $this->assertTrue($r['ticket_deleted']);
+        $this->assertArrayHasKey('url', $r);
+        $this->assertNull($r['url']);
+        $this->assertSame($contract->id, $r['ticket_contract_id']);
         $this->assertSame(1, Ticket::withTrashed()->count());
+
+        Ticket::withTrashed()->whereKey($ticket->id)->update(['contract_id' => null]);
+        $r = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs());
+        $this->assertTrue($r['ticket_deleted']);
+        $this->assertNull($r['contract']);
+        $this->assertNull($r['ticket_contract_id']);
+        $this->assertSame('none', $r['contract_rule']);
     }
 
     // ── C2: an inactive contract of the same client ─────────────────────────
@@ -529,13 +541,20 @@ class ContractAtCreationToolsTest extends TestCase
         $ticket = Ticket::factory()->create(['client_id' => $this->client->id, 'contract_id' => $a->id]);
 
         $r = $this->callTool(['update_ticket'], 'update_ticket', ['ticket_id' => $ticket->id, 'contract_id' => $b->id]);
-        $this->assertSame(['id' => $b->id, 'name' => 'Synthetic B', 'rule' => 'picked'], $r['contract']);
-        $this->assertSame('picked', $r['contract_rule']);
+        $this->assertSame(['id' => $b->id, 'name' => 'Synthetic B', 'rule' => 'ticket'], $r['contract']);
+        $this->assertSame('ticket', $r['contract_rule']);
         $this->assertSame([], $r['entries_on_other_contracts']);
 
         $r = $this->callTool(['update_ticket'], 'update_ticket', ['ticket_id' => $ticket->id, 'contract_id' => null]);
         $this->assertNull($r['contract']);
-        $this->assertSame('none', $r['contract_rule']);
+        $this->assertSame('ambiguous', $r['contract_rule']);
+
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $b->id]);
+        $r = $this->callTool(['update_ticket'], 'update_ticket', ['ticket_id' => $ticket->id, 'contract_id' => null]);
+        $this->assertSame($b->id, $r['contract']['id']);
+        $this->assertSame('client_default', $r['contract_rule']);
+        $this->assertNull($r['ticket_contract_id']);
+        $this->assertNull($ticket->fresh()->contract_id);
 
         $r = $this->callTool(['update_ticket'], 'update_ticket', ['ticket_id' => $ticket->id, 'contract_id' => $this->foreign->id]);
         $this->assertSame('contract_not_allowed', $r['error_code']);
@@ -614,7 +633,8 @@ class ContractAtCreationToolsTest extends TestCase
             $schema = $tool['input_schema'] ?? $tool['inputSchema'] ?? [];
             $this->assertArrayHasKey('contract_id', $schema['properties'] ?? [], $key);
             $this->assertSame(['integer', 'null'], $schema['properties']['contract_id']['type'], $key);
-            $this->assertSame(self::LINE, $schema['properties']['contract_id']['description'], $key);
+            $expected = $key === 'assistant:create_ticket' ? explode(' When the call returns an existing ticket', self::LINE)[0] : self::LINE;
+            $this->assertSame($expected, $schema['properties']['contract_id']['description'], $key);
             $this->assertNotContains('contract_id', $schema['required'] ?? [], $key);
         }
     }
