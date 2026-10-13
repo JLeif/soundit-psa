@@ -197,7 +197,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // One hint per picker state (review r1 context:8, contract-s1:4): only a state that shows
     // a contract says new time goes to it.
     const contractHints = {
-        chosen: "Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.",
+        chosen: "Select a contract for this ticket.",
         none: 'This client has no active contracts, so the ticket is created without one.',
         failed: "Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.",
     };

@@ -15,12 +15,12 @@ class ContractNotAllowedException extends InvalidArgumentException
 {
     public function __construct(public readonly string $renderedContractId)
     {
-        parent::__construct("contract_id {$renderedContractId} is not an active contract of this client");
+        parent::__construct("contract_id {$renderedContractId} cannot be used for this ticket.");
     }
 
     public static function for(mixed $contractId): self
     {
-        return new self(is_scalar($contractId) ? (string) $contractId : get_debug_type($contractId));
+        return new self(is_bool($contractId) ? ($contractId ? 'true' : 'false') : (is_scalar($contractId) ? (string) $contractId : get_debug_type($contractId)));
     }
 
     /**
@@ -31,7 +31,7 @@ class ContractNotAllowedException extends InvalidArgumentException
     public function toolRefusal(): array
     {
         return [
-            'error' => "contract_id must be an ACTIVE contract of this ticket's client; contract {$this->renderedContractId} is not. Call list_client_contracts for valid ids, or omit contract_id to use the client's default or only active contract.",
+            'error' => $this->getMessage().' Select a client and an active contract belonging to it, or omit contract_id for automatic selection (which may leave the contract unset).',
             'error_code' => 'contract_not_allowed',
         ];
     }

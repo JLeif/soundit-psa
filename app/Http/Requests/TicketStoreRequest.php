@@ -73,12 +73,12 @@ class TicketStoreRequest extends FormRequest
             'contract_id' => [
                 'nullable',
                 function (string $attribute, $value, $fail): void {
-                    if (blank($value)) {
+                    if ($value === null || $value === '') {
                         return;
                     }
 
                     $clientId = $this->input('client_id');
-                    $isActiveOfClient = is_scalar($value) && ctype_digit((string) $value)
+                    $isActiveOfClient = (is_int($value) || (is_string($value) && ctype_digit($value))) && (int) $value > 0
                         && is_scalar($clientId) && ctype_digit((string) $clientId)
                         && Contract::query()
                             ->whereKey((int) $value)

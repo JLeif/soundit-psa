@@ -6,8 +6,9 @@ use App\Models\Contract;
 use Illuminate\Support\Collection;
 
 /**
- * Which contract a NEW ticket took, and by which rule (card I3EvQKUV PR 3,
- * spec §7): picked | client_default | only_active | none | ambiguous.
+ * A resolved contract outcome: picked | ticket | client_default | only_active | none | ambiguous.
+ * Rule ticket identifies an existing ticket's active contract in a resolver answer.
+ * Existing-ticket callers add ticket_contract_id when the stored id differs.
  * Built only from a ContractResolver answer; this class decides nothing.
  */
 final class TicketContractOutcome
@@ -37,7 +38,7 @@ final class TicketContractOutcome
     }
 
     /**
-     * The response block every agent create/update reports.
+     * Serialize this resolution for agent responses.
      *
      * @return array<string, mixed>
      */

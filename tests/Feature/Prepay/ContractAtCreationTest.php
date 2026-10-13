@@ -87,7 +87,7 @@ class ContractAtCreationTest extends TestCase
             $this->fail('A foreign contract must be refused.');
         } catch (ContractNotAllowedException $e) {
             $this->assertInstanceOf(\InvalidArgumentException::class, $e);
-            $this->assertSame("contract_id {$foreign->id} is not an active contract of this client", $e->getMessage());
+            $this->assertSame("contract_id {$foreign->id} cannot be used for this ticket.", $e->getMessage());
         }
         $this->assertSame(0, Ticket::withTrashed()->count());
     }
@@ -100,7 +100,7 @@ class ContractAtCreationTest extends TestCase
                 $this->create(['contract_id' => $inactive->id]);
                 $this->fail("A {$status} contract must be refused.");
             } catch (ContractNotAllowedException $e) {
-                $this->assertSame("contract_id {$inactive->id} is not an active contract of this client", $e->getMessage());
+                $this->assertSame("contract_id {$inactive->id} cannot be used for this ticket.", $e->getMessage());
             }
         }
         $deleted = $this->contract('Synthetic deleted');
@@ -369,18 +369,14 @@ class ContractAtCreationTest extends TestCase
         $this->assertSame([false, false], array_column($rows, 'is_default'));
     }
 
-    /**
-     * r2 (review r1 context:8, contract-s1:4): the hint claims "goes to this contract" only
-     * in the state that shows one; the zero-contract and load-failure states say what is
-     * true there, and the several-no-default copy says time is held as "Needs contract".
-     */
+    /** Pin the create-form picker copy. */
     public function test_r2_create_form_contract_copy_fits_each_picker_state(): void
     {
         $html = $this->actingAs($this->staff())->get(route('tickets.create'))->assertOk()->getContent();
 
         $this->assertMatchesRegularExpression('#<div class="form-text" id="contractHint">Only the chosen client\'s active contracts are listed\.</div>#', $html);
-        $this->assertSame(1, substr_count($html, 'goes to this contract'), 'only the contract-shown state says it');
-        $this->assertStringContainsString("chosen: \"Only this client's active contracts are listed. New time on this ticket goes to this contract unless a time entry picks another.\"", $html);
+        $this->assertStringNotContainsString('goes to this contract', $html);
+        $this->assertStringContainsString('chosen: "Select a contract for this ticket."', $html);
         $this->assertStringContainsString("none: 'This client has no active contracts, so the ticket is created without one.'", $html);
         $this->assertStringContainsString('contractHint.textContent = contractHints.none;', $html);
         $this->assertStringContainsString("failed: \"Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.\"", $html);

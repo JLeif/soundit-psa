@@ -283,8 +283,8 @@ class StaffPsaActionToolExecutor
     }
 
     /**
-     * The contract block for an EXISTING ticket (idempotent replay, a linked email):
-     * ContractResolver::forEntry($ticket), the resolution a new time entry on it gets,
+     * For a deleted ticket, report the stored contract and ticket_deleted.
+     * For a live existing ticket, report ContractResolver::forEntry($ticket),
      * in the same shape as a fresh create (r2, review r1 diff:8). The stored
      * tickets.contract_id (null included) is added as ticket_contract_id only when it
      * differs from the resolved contract's id.
@@ -295,6 +295,21 @@ class StaffPsaActionToolExecutor
     {
         if ($ticket === null) {
             return \App\Services\TicketContractOutcome::fromResolution(\App\Services\ContractResolution::none())->toArray();
+        }
+
+        if ($ticket->trashed()) {
+            $stored = $ticket->contract_id === null ? null : (int) $ticket->contract_id;
+
+            return [
+                'contract' => $stored === null ? null : [
+                    'id' => $stored,
+                    'name' => \App\Models\Contract::withTrashed()->whereKey($stored)->value('name'),
+                    'rule' => 'ticket',
+                ],
+                'contract_rule' => $stored === null ? 'none' : 'ticket',
+                'ticket_contract_id' => $stored,
+                'ticket_deleted' => true,
+            ];
         }
 
         $resolution = app(\App\Services\ContractResolver::class)->forEntry($ticket);
@@ -385,14 +400,7 @@ class StaffPsaActionToolExecutor
         ];
         if (array_key_exists('contract_id', $validated)) {
             $response['contract_id'] = $updated->contract_id;
-            // Card I3EvQKUV PR 3: the same contract block create responses carry. An
-            // explicit id is "picked"; null clears the ticket contract.
-            $response += $updated->contract_id === null
-                ? ['contract' => null, 'contract_rule' => 'none']
-                : [
-                    'contract' => ['id' => (int) $updated->contract_id, 'name' => \App\Models\Contract::withTrashed()->whereKey($updated->contract_id)->value('name'), 'rule' => \App\Services\ContractResolver::RULE_PICKED],
-                    'contract_rule' => \App\Services\ContractResolver::RULE_PICKED,
-                ];
+            $response += $this->existingTicketContractBlock($updated);
             $response['entries_on_other_contracts'] = app(\App\Services\TimeEntryContractMoveService::class)->entriesOnOtherContracts($updated);
             $response['message'] = 'Ticket updated. No time moved: entries_on_other_contracts stay where they were logged; move one with move_time_entry_contract.';
         }
@@ -3634,7 +3642,7 @@ class StaffPsaActionToolExecutor
     /** @return array<string, mixed> */
     private function idempotentCreateTicketResult(TechnicianActionLog $log, int $clientId): array
     {
-        $ticket = $log->ticket_id ? Ticket::find($log->ticket_id) : null;
+        $ticket = $log->ticket_id ? Ticket::withTrashed()->find($log->ticket_id) : null;
 
         if ($ticket !== null && (int) $ticket->client_id !== $clientId) {
             return [
