@@ -154,7 +154,7 @@
                     <label for="due_at" class="form-label">Due Date</label>
                     <input type="datetime-local" name="due_at" id="due_at"
                            class="form-control" value="{{ old('due_at') }}">
-                    <small class="form-text text-muted">Auto-set from priority SLA</small>
+                    <small class="form-text text-muted">Optional due date override</small>
                 </div>
 
                 {{-- ITIL taxonomy SOP category (so-0ftg) — the node that carries the
@@ -187,8 +187,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const assetSelect = document.getElementById('asset_id');
     const categorySelect = document.getElementById('category');
     const subcategorySelect = document.getElementById('subcategory');
-    const prioritySelect = document.getElementById('priority');
-    const dueAtInput = document.getElementById('due_at');
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
     const contractSelect = document.getElementById('contract_id');
@@ -346,27 +344,6 @@ document.addEventListener('DOMContentLoaded', function() {
             subcategorySelect.disabled = true;
         }
     });
-
-    // Priority change → auto-set due date.
-    // NOTE: new Date() uses the browser's local timezone, not the app timezone. For a
-    // single-location MSP where browser tz == app tz this is correct. Full fix deferred.
-    function updateDueDate() {
-        const selected = prioritySelect.options[prioritySelect.selectedIndex];
-        const slaHours = parseInt(selected.dataset.slaHours || 24);
-        const due = new Date();
-        due.setHours(due.getHours() + slaHours);
-        // Format as datetime-local value
-        const pad = n => String(n).padStart(2, '0');
-        dueAtInput.value = due.getFullYear() + '-' + pad(due.getMonth() + 1) + '-' +
-                           pad(due.getDate()) + 'T' + pad(due.getHours()) + ':' + pad(due.getMinutes());
-    }
-
-    prioritySelect.addEventListener('change', updateDueDate);
-
-    // Set initial due date on page load
-    if (!dueAtInput.value) {
-        updateDueDate();
-    }
 
     // Reload contracts for the submitted client.
     if (clientSelect.value) {
