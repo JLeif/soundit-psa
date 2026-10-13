@@ -1250,7 +1250,7 @@ class PrepayService
             if ($existing) {
                 // Preserve the ledger's target even when this delivery resolves elsewhere.
                 // Lock order remains call -> prepay transaction -> contract.
-                $originalContract = $existing->contract()->lockForUpdate()->first();
+                $originalContract = $existing->contract()->withTrashed()->lockForUpdate()->first();
                 $alertContract = $originalContract;
                 // A call relinked to another client's ticket keeps its time on the old client's
                 // contract (card I3EvQKUV); that contract's ledger keeps its own description (#4924).
@@ -1269,7 +1269,6 @@ class PrepayService
                         $originalContract->increment('prepay_used', $diff);
                         $originalContract->decrement('prepay_balance', $diff);
                     } else {
-                        // Like reversal, mutate the ledger even without a live contract.
                         Log::warning('[Prepay] Phone call difference skipped', [
                             'phone_call_id' => $call->id,
                             'contract_id' => $existing->contract_id,

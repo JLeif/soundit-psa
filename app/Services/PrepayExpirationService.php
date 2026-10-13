@@ -163,7 +163,7 @@ class PrepayExpirationService
             ->orderBy('id')
             ->get();
 
-        // FIFO queue of credit lots (all positive-hours credits, oldest first).
+        // FIFO queue of credit lots (positive-hours credits other than EntryMovedOut move credits, oldest first).
         // Legacy/Halo lots participate in consumption allocation for accuracy but
         // never forfeit (eligible = false), protecting pre-PSA balances.
         $lots = [];
