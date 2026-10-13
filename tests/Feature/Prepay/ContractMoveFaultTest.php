@@ -225,7 +225,7 @@ class ContractMoveFaultTest extends TestCase
         $this->injectFault($note);
         $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
             'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
-        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.00 h).')
+        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.')
             ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.');
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
     }
@@ -239,7 +239,7 @@ class ContractMoveFaultTest extends TestCase
         $this->app->instance(\App\Services\PrepayAlertService::class, $alerts);
         $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
             'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
-        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.50 h).')
+        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.')
             ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved and its prepay debit was recorded, but a step after the debit failed; check the ledger before acting.');
         $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
     }

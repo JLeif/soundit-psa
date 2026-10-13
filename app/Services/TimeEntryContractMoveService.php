@@ -167,7 +167,7 @@ class TimeEntryContractMoveService
             DB::transaction(function () use ($ticket, $contractId, $old, $to, $by) {
                 \App\Observers\TicketObserver::withoutHeldRelease(fn () => app(TicketService::class)->updateTicket($ticket, ['contract_id' => $contractId]));
                 $body = 'Ticket contract changed from '.($old?->name ?? 'none').' to '.($to?->name ?? 'none')
-                    .'. Time already logged stays on the contract it was logged against.';
+                    .'.';
                 TicketNote::create([
                     'ticket_id' => $ticket->id, 'author_id' => $by->id, 'body' => $body,
                     'body_html' => \App\Helpers\MarkdownRenderer::render($body),
@@ -298,9 +298,7 @@ class TimeEntryContractMoveService
 
         $draw = $this->stagedDrawHours($entry, $type, $contractId);
         $message = 'Move held for staff approval in the technician cockpit; no prepay hours moved.';
-        if ($draw > 0) {
-            $message .= ' On approval: '.self::drawStatement($draw, (string) Contract::find($contractId)?->name, false);
-        }
+        $message .= ' On approval: '.$this->approvalEffect($proposal);
 
         return [
             'success' => true, 'staged' => true, 'proposal_id' => $proposal->id, 'ticket_id' => $ticket->id,
@@ -357,6 +355,14 @@ class TimeEntryContractMoveService
             }
 
             return $stale($e->getMessage());
+        }
+
+        if (($result['status'] ?? null) !== 'executed_with_fault') {
+            $result['message'] = 'Time entry moved. '.($result['ledger']
+                ? $this->ledgeredMoveStatement($result)
+                : ($result['drawn_hours'] > 0
+                    ? self::drawStatement($result['drawn_hours'], Contract::withTrashed()->find($result['to_contract_id'])?->name ?? "contract {$result['to_contract_id']}", true)
+                    : 'It had no prepay ledger row and no prepay hours were drawn.'));
         }
 
         return ['success' => ($result['status'] ?? null) !== 'executed_with_fault'] + $result;
@@ -421,7 +427,7 @@ class TimeEntryContractMoveService
         } elseif ($to->trashed() || $to->status !== ContractStatus::Active) {
             $effect = $to->name.' is no longer an active contract, so approving refuses the move.';
         } elseif ($ledger && (! $from || (int) $from->client_id !== (int) $to->client_id)) {
-            $effect = "Its time is on another client's contract, so approving refuses the move.";
+            $effect = 'Its ledger source contract is missing or belongs to another client, so approving refuses the move.';
         } elseif ($ledger && $ledger->hours === null) {
             $effect = 'Its ledger row is not in hours, so approving refuses the move.';
         } elseif ($ledger) {

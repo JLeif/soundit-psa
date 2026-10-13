@@ -857,7 +857,7 @@ class PrepayService
             if ($row) {
                 if (! $from || (int) $from->client_id !== (int) $target->client_id) {
                     // Ruling Q5: time stays on the old client's contracts.
-                    throw new \InvalidArgumentException("That {$type}'s time is on another client's contract; it stays there.");
+                    throw new \InvalidArgumentException("That {$type}'s ledger source contract is missing or belongs to another client; nothing moved.");
                 }
                 if ($row->hours === null) {
                     throw new \InvalidArgumentException("That {$type}'s ledger row is not in hours.");
@@ -930,7 +930,11 @@ class PrepayService
             $report['body'] = fn (float $h, string $drew = '', ?string $destination = null) => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
                 .($from?->name ?? 'no contract').' to '.($destination ?? $target->name).$drew.': '.$reason;
             $report['hours'] = $hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600);
-            $body = $report['body']($report['hours']);
+            $effect = $row ? '; credited '.number_format($hours, 2).'h back to '.$from->name
+                .($this->hoursPrepayOrNull($target)
+                    ? ' and debited '.number_format($hours, 2).'h from '.$target->name
+                    : '; no prepay hours debited from '.$target->name) : '';
+            $body = $report['body']($report['hours'], $effect);
             $report['note_id'] = TicketNote::create([
                 'ticket_id' => $ticket->id,
                 'author_id' => $by->id,
@@ -1309,8 +1313,7 @@ class PrepayService
         });
 
         if ($retry && ! $statusRetry) {
-            // The contract stopped being active between resolution and debit (#4931): the
-            // stale stamp was cleared, so the call re-resolves once, on committed state.
+            // Retry once on committed state.
             return $this->debitFromPhoneCall($call, true);
         }
 

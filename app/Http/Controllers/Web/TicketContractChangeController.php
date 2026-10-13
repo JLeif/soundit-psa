@@ -40,7 +40,7 @@ class TicketContractChangeController extends Controller
         $message = 'Ticket contract updated.';
         if ($result['moved'] > 0) {
             $message .= ' Moved '.$result['moved'].' time '.($result['moved'] === 1 ? 'entry' : 'entries')
-                .($result['hours'] === null ? '.' : ' ('.number_format($result['hours'], 2).' h).');
+                .'.';
         }
         $redirect = redirect()->route('tickets.show', $ticket)->with('success', $message);
 
@@ -55,7 +55,7 @@ class TicketContractChangeController extends Controller
             return back()->with('error', $result['message']);
         }
 
-        return back()->with(isset($result['error']) ? 'error' : 'success', $result['error'] ?? 'Time entry moved.');
+        return back()->with(isset($result['error']) ? 'error' : 'success', $result['error'] ?? $result['message']);
     }
 
     public function deny(Request $request, TimeEntryMoveProposal $proposal, TimeEntryContractMoveService $moves)

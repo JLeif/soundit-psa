@@ -33,7 +33,7 @@ class TicketContractChangeModalTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Http::fake();
+        Http::fake(['*' => Http::response([], 200)]);
         Http::preventStrayRequests();
         $client = Client::create(['name' => 'Synthetic Client W']);
         $this->a = $this->contract($client, 'Synthetic Block A');
@@ -74,7 +74,7 @@ class TicketContractChangeModalTest extends TestCase
         $this->assertSame($this->a->id, $note->fresh()->contract_id, 'the entry stays where it was logged');
         $this->assertEquals(9.25, (float) $this->a->fresh()->prepay_balance);
         $this->assertEquals(10, (float) $this->b->fresh()->prepay_balance);
-        $this->assertStringContainsString('Time already logged stays',
+        $this->assertSame('Ticket contract changed from Synthetic Block A to Synthetic Project B.',
             TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole()->body);
     }
 
@@ -118,8 +118,10 @@ class TicketContractChangeModalTest extends TestCase
         $this->actingAs($this->user)
             ->patch(route('tickets.contract.update', $this->ticket), [
                 'contract_id' => $this->b->id, 'move' => ['note:'.$n1->id], 'move_reason' => 'Part of the office move',
-            ])->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.75 h).');
+            ])->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.');
 
+        $this->assertSame('Ticket contract changed from Synthetic Block A to Synthetic Project B.',
+            TicketNote::where('ticket_id', $this->ticket->id)->where('body', 'like', 'Ticket contract changed%')->sole()->body);
         $this->assertSame($this->b->id, PrepayTransaction::where('ticket_note_id', $n1->id)->sole()->contract_id);
         $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $n2->id)->sole()->contract_id, 'unticked stays');
         $this->assertEquals(9.5, (float) $this->a->fresh()->prepay_balance);
@@ -127,9 +129,7 @@ class TicketContractChangeModalTest extends TestCase
     }
 
     /**
-     * diff:17: an unledgered move that draws reports the hours actually drawn (the ledger row
-     * written) on the web flash, the system note and the ContractActivity rows, not 0.00 h,
-     * for a note and a call; a ledgered move keeps its moved figure.
+     * Unledgered and ledgered move reporting.
      */
     public function test_unledgered_move_reports_the_hours_drawn(): void
     {
@@ -151,7 +151,7 @@ class TicketContractChangeModalTest extends TestCase
         $this->actingAs($this->user)
             ->patch(route('tickets.contract.update', $this->ticket), [
                 'contract_id' => $this->b->id, 'move' => ['note:'.$note->id, 'call:'.$call->id], 'move_reason' => 'Synthetic reclassification',
-            ])->assertSessionHas('success', 'Ticket contract updated. Moved 2 time entries (0.70 h).');
+            ])->assertSessionHas('success', 'Ticket contract updated. Moved 2 time entries.');
 
         $this->assertEquals(-0.5, (float) PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
         $this->assertEquals(-0.2, (float) PrepayTransaction::where('phone_call_id', $call->id)->sole()->hours);
@@ -170,13 +170,40 @@ class TicketContractChangeModalTest extends TestCase
             [$managed->id, 'entry_moved_out', 'call', 0.2, 0.2], [$this->b->id, 'entry_moved_in', 'call', 0.2, 0.2],
         ], $activity);
 
-        // A ledgered move keeps its figure: the hours it moved, with no draw clause.
+        // Ledgered move.
         $this->actingAs($this->user)
             ->patch(route('tickets.contract.update', $this->ticket), [
                 'contract_id' => $this->b->id, 'move' => ['note:'.$ledgered->id], 'move_reason' => 'Synthetic reclassification',
-            ])->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.75 h).');
-        $this->assertSame("Moved note #{$ledgered->id} time (0.75 h) from Synthetic Block A to Synthetic Project B: Synthetic reclassification",
+            ])->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.');
+        $this->assertSame("Moved note #{$ledgered->id} time (0.75 h) from Synthetic Block A to Synthetic Project B; credited 0.75h back to Synthetic Block A and debited 0.75h from Synthetic Project B: Synthetic reclassification",
             TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->orderByDesc('id')->value('body'));
+    }
+
+    public function test_staged_ledgered_result_and_approval_flash(): void
+    {
+        $note = $this->note(45);
+        $moves = app(\App\Services\TimeEntryContractMoveService::class);
+        $result = $moves->agentMove(['entry_type' => 'note', 'entry_id' => $note->id, 'contract_id' => $this->b->id, 'reason' => 'Synthetic correction'], 'synthetic', true);
+        $this->assertSame('Move held for staff approval in the technician cockpit; no prepay hours moved. On approval: Approving credits 0.75h back to Synthetic Block A and debits 0.75h from Synthetic Project B. Nothing has moved yet.', $result['message']);
+        $this->actingAs($this->user)->post(route('time-entry-moves.approve', $result['proposal_id']))
+            ->assertSessionHas('success', 'Time entry moved. It credited 0.75h back to Synthetic Block A and debited 0.75h from Synthetic Project B.');
+    }
+
+    public function test_approval_reports_draw_and_ledgered_no_debit(): void
+    {
+        $managed = Contract::create(['client_id' => $this->ticket->client_id, 'name' => 'Synthetic Managed', 'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01']);
+        $ledgered = $this->note(45);
+        $moves = app(\App\Services\TimeEntryContractMoveService::class);
+        $staged = $moves->agentMove(['entry_type' => 'note', 'entry_id' => $ledgered->id, 'contract_id' => $managed->id, 'reason' => 'Synthetic correction'], 'synthetic', true);
+        $this->actingAs($this->user)->post(route('time-entry-moves.approve', $staged['proposal_id']))
+            ->assertSessionHas('success', 'Time entry moved. It credited 0.75h back to Synthetic Block A; Synthetic Managed is not an hours-prepay contract, so nothing was debited.');
+        $this->assertSame("Moved note #{$ledgered->id} time (0.75 h) from Synthetic Block A to Synthetic Managed; credited 0.75h back to Synthetic Block A; no prepay hours debited from Synthetic Managed: Synthetic correction (staged by synthetic)",
+            TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->sole()->body);
+        $this->ticket->update(['contract_id' => $managed->id]);
+        $note = $this->note(30);
+        $staged = $moves->agentMove(['entry_type' => 'note', 'entry_id' => $note->id, 'contract_id' => $this->b->id, 'reason' => 'Synthetic correction'], 'synthetic', true);
+        $this->actingAs($this->user)->post(route('time-entry-moves.approve', $staged['proposal_id']))
+            ->assertSessionHas('success', 'Time entry moved. It had no prepay ledger row, so it drew 0.50h from Synthetic Project B. If this time was already invoiced by hand, untick billable instead of moving.');
     }
 
     /** An entry on another ticket cannot be smuggled into the move list. */
