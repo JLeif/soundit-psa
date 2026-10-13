@@ -32,7 +32,7 @@ class ContractAtCreationToolsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract. Rule ticket identifies the ticket contract. A replay of a soft-deleted ticket instead reports its stored contract (rule ticket, or none if unset), ticket_contract_id and ticket_deleted: true.';
+    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract. Rule ticket identifies the ticket contract. On create_ticket, a replay of a soft-deleted ticket still under this client instead reports its stored contract (rule ticket, or none if unset), ticket_contract_id and ticket_deleted: true.';
 
     private Client $client;
 
@@ -114,7 +114,7 @@ class ContractAtCreationToolsTest extends TestCase
         $id = $contract instanceof Contract ? $contract->id : $contract;
         $this->assertSame('contract_not_allowed', $r['error_code'] ?? null, json_encode($r));
         $this->assertSame(
-            "contract_id {$id} cannot be used for this ticket. Select a client and an active contract belonging to it, or omit contract_id for automatic selection (which may leave the contract unset).",
+            "contract_id {$id} cannot be used for this ticket. Use an active contract of this ticket's client (list_client_contracts lists them), or omit contract_id for automatic selection (which may leave the contract unset).",
             $r['error'],
         );
     }

@@ -7,9 +7,12 @@ use Illuminate\Support\Collection;
 
 /**
  * A resolved contract outcome: picked | ticket | client_default | only_active | none | ambiguous.
- * Rule ticket identifies an existing ticket's active contract in a resolver answer.
- * Existing-ticket callers add ticket_contract_id when the stored id differs.
- * Built only from a ContractResolver answer; this class decides nothing.
+ * Rule ticket identifies an existing ticket's contract: in a resolver answer, its active contract.
+ * The deleted-ticket block in StaffPsaActionToolExecutor::existingTicketContractBlock is built by
+ * hand, not by this class, and reports the stored contract under rule ticket whatever its status.
+ * For a live existing ticket, callers add ticket_contract_id when the stored id differs; the
+ * deleted-ticket block always adds it. Instances are built only from a ContractResolver answer;
+ * this class decides nothing.
  */
 final class TicketContractOutcome
 {

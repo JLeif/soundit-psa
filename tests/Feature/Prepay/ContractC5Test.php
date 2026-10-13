@@ -57,7 +57,7 @@ class ContractC5Test extends TestCase
             $this->fail('Expected contract refusal');
         } catch (ContractNotAllowedException $e) {
             $this->assertSame('contract_id 1 cannot be used for this ticket.', $e->getMessage());
-            $this->assertSame('contract_id 1 cannot be used for this ticket. Select a client and an active contract belonging to it, or omit contract_id for automatic selection (which may leave the contract unset).', $e->toolRefusal()['error']);
+            $this->assertSame('contract_id 1 cannot be used for this ticket. Use an active contract of this ticket\'s client (list_client_contracts lists them), or omit contract_id for automatic selection (which may leave the contract unset).', $e->toolRefusal()['error']);
         }
         $this->assertNull(app(TicketService::class)->contractForNewTicket(null, null)->contract);
     }
