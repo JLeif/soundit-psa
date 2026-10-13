@@ -144,11 +144,18 @@ class TimeEntryContractMoveService
      */
     public function changeTicketContract(Ticket $ticket, ?int $contractId, array $moves, ?string $reason, User $by): array
     {
-        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)->first();
+        if ($moves === [] && $contractId === $ticket->contract_id) {
+            return ['moved' => 0, 'hours' => 0.0, 'errors' => []];
+        }
+
+        $to = $contractId === null ? null : Contract::withTrashed()->whereKey($contractId)->where('client_id', $ticket->client_id)->first();
         if ($contractId !== null && ! $to) {
             throw new \InvalidArgumentException("Contract {$contractId} is not a contract of this ticket's client.");
         }
-        if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {
+        if ($moves === [] && $to && ($to->trashed() || $to->status !== ContractStatus::Active)) {
+            throw new \InvalidArgumentException("Contract {$contractId} is not an ACTIVE contract of this ticket's client.");
+        }
+        if ($moves !== [] && (! $to || $to->trashed() || $to->status !== ContractStatus::Active)) {
             throw new \InvalidArgumentException('Entries can only be moved to an active contract.');
         }
         if ($moves !== [] && trim((string) $reason) === '') {
@@ -177,6 +184,11 @@ class TimeEntryContractMoveService
             $entry = $this->entry($ticket, $move['type'] ?? '', (int) ($move['id'] ?? 0));
             if (! $entry) {
                 $errors[] = 'Entry '.($move['type'] ?? '?').' #'.(int) ($move['id'] ?? 0).' is not a time entry on this ticket.';
+
+                continue;
+            }
+            if ($this->hasPendingMove($move['type'], (int) $entry->id)) {
+                $errors[] = 'A staged contract move on this entry is awaiting approval.';
 
                 continue;
             }
@@ -241,6 +253,10 @@ class TimeEntryContractMoveService
         $ticket = $entry?->ticket;
         if (! $entry || ! $ticket) {
             return ['error' => "No {$type} {$id} on a ticket."];
+        }
+        $refusal = $this->entryRefusal($entry, $type);
+        if ($refusal !== null) {
+            return ['error' => $refusal];
         }
         $refusal = $this->moveRefusal($ticket, $entry, $type, $contractId);
         if ($refusal !== null) {
@@ -421,6 +437,27 @@ class TimeEntryContractMoveService
         return $effect.' Nothing has moved yet.';
     }
 
+    /** Refusals about the entry itself, not the contract; agentMove returns them without an error_code. */
+    private function entryRefusal(TicketNote|PhoneCall $entry, string $type): ?string
+    {
+        if ($this->hasPendingMove($type, (int) $entry->id)) {
+            return 'A staged contract move on this entry is awaiting approval.';
+        }
+        if ($entry instanceof TicketNote) {
+            if ($entry->note_type === \App\Enums\NoteType::System) {
+                return 'System notes cannot be moved.';
+            }
+            if ($entry->pricedMinutes() <= 0) {
+                return 'This note has no positive priced minutes.';
+            }
+            if (! $entry->is_billable) {
+                return 'This note is not billable.';
+            }
+        }
+
+        return null;
+    }
+
     private function moveRefusal(Ticket $ticket, TicketNote|PhoneCall $entry, string $type, int $contractId): ?string
     {
         $active = Contract::whereKey($contractId)->where('client_id', $ticket->client_id)
@@ -453,6 +490,12 @@ class TimeEntryContractMoveService
         $id = $ledger ?? $entry->contract_id;
 
         return $id === null ? null : (int) $id;
+    }
+
+    private function hasPendingMove(string $type, int $id): bool
+    {
+        return TimeEntryMoveProposal::where('entry_type', $type)->where('entry_id', $id)
+            ->where('state', 'pending')->exists();
     }
 
     private function hasPendingCallAction(int $callId): bool

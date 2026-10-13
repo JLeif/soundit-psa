@@ -5,9 +5,12 @@
     an unledgered entry: a draw from the new contract only when that is hours-prepay). Expects $ticket and $contractEntries.
 --}}
 @php
-    $ccContracts = ($ticket->client?->contracts ?? collect())->keyBy('id');
-    $ccPrepay = $ccContracts->filter(fn ($c) => $c->has_prepay && ! $c->prepay_as_amount)
-        ->map(fn ($c) => ['name' => $c->name, 'balance' => (float) $c->prepay_balance]);
+    // An entry's old contract gets its credit back whatever that contract's status, so the map keeps
+    // inactive contracts; 'active' limits the new-contract draw and debit preview to Active contracts (#4984).
+    $ccPrepay = ($ticket->client?->contracts ?? collect())->keyBy('id')
+        ->filter(fn ($c) => $c->has_prepay && ! $c->prepay_as_amount)
+        ->map(fn ($c) => ['name' => $c->name, 'balance' => (float) $c->prepay_balance,
+            'active' => $c->status === \App\Enums\ContractStatus::Active]);
 @endphp
 <div class="modal fade" id="contractChangeModal" tabindex="-1" aria-labelledby="contractChangeTitle"
      data-entries="{{ $contractEntries->count() }}" data-prepay='@json($ccPrepay)'>
