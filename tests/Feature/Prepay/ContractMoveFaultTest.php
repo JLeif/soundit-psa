@@ -230,7 +230,7 @@ class ContractMoveFaultTest extends TestCase
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
     }
 
-    public function test_modal_alert_fault_flashes_committed_draw_hours(): void
+    public function test_modal_alert_fault_flashes_move_count_and_fault_error(): void
     {
         $this->ticket->forceFill(['contract_id' => $this->to->id])->saveQuietly();
         $note = $this->note();
@@ -244,7 +244,7 @@ class ContractMoveFaultTest extends TestCase
         $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
     }
 
-    public function test_modal_omits_hours_when_fault_leaves_ledger_unread(): void
+    public function test_modal_unread_ledger_fault_flashes_move_count_and_error(): void
     {
         $note = $this->note();
         $service = \Mockery::mock(PrepayService::class)->makePartial();

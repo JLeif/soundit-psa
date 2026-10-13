@@ -780,10 +780,13 @@ class PrepayService
      * so it acts on $to only and never touches the old pair.
      *
      * Refused (InvalidArgumentException, nothing written) when $to is not an active
-     * contract of the ticket's client, when the entry is already on $to, when its
-     * ledger row is on another client's contract (ruling Q5), or when a staged action
-     * on the entry is awaiting approval. An entry with no ledger row moves its stamp
-     * only; the ordinary debit path then runs after commit, as on any entry edit.
+     * contract of the ticket's client, when the entry is already on $to, when its ledger
+     * row's source contract is missing or belongs to another client (ruling Q5, #4988),
+     * or when a staged action on the entry is awaiting approval.
+     * An entry with no ledger row moves its stamp only; the ordinary debit path then
+     * runs after commit, as on any entry edit. A stamp on another client's contract is
+     * treated as no source contract: nothing is written on that contract, and the note
+     * says 'another client's contract' (#5008).
      *
      * Lock order: entry -> prepay_transaction -> contracts in ascending id. $guard, when
      * given, runs inside the transaction once the entry and its ledger row are locked and
@@ -848,7 +851,9 @@ class PrepayService
                 throw new \InvalidArgumentException("That {$type} is already on {$target->name}.");
             }
             $from = $fromId === null ? null : $contracts->get($fromId);
+            $foreignStampId = null;
             if (! $row && $from && (int) $from->client_id !== (int) $ticket->client_id) {
+                $foreignStampId = $fromId;
                 $from = null;
                 $fromId = null;
             }
@@ -856,7 +861,7 @@ class PrepayService
             $hours = 0.0;
             if ($row) {
                 if (! $from || (int) $from->client_id !== (int) $target->client_id) {
-                    // Ruling Q5: time stays on the old client's contracts.
+                    // Ruling Q5 (#4988): time stays on the old client's contracts; a missing source is refused too.
                     throw new \InvalidArgumentException("That {$type}'s ledger source contract is missing or belongs to another client; nothing moved.");
                 }
                 if ($row->hours === null) {
@@ -928,7 +933,7 @@ class PrepayService
 
             $what = $isNote ? "note #{$locked->id}" : "phone call #{$locked->id}";
             $report['body'] = fn (float $h, string $drew = '', ?string $destination = null) => 'Moved '.$what.' time ('.number_format($h, 2).' h) from '
-                .($from?->name ?? 'no contract').' to '.($destination ?? $target->name).$drew.': '.$reason;
+                .($foreignStampId !== null ? "another client's contract" : ($from?->name ?? 'no contract')).' to '.($destination ?? $target->name).$drew.': '.$reason;
             $report['hours'] = $hours > 0 ? $hours : ($isNote ? $locked->pricedMinutes() / 60 : ($locked->effectiveDurationSeconds() ?? 0) / 3600);
             $effect = $row ? '; credited '.number_format($hours, 2).'h back to '.$from->name
                 .($this->hoursPrepayOrNull($target)
@@ -947,6 +952,7 @@ class PrepayService
 
             Log::info('[Prepay] Time entry contract moved', [
                 $key => $locked->id,
+                'foreign_stamp_contract_id' => $foreignStampId,
                 'from_contract_id' => $fromId,
                 'to_contract_id' => $target->id,
                 'hours' => $hours,

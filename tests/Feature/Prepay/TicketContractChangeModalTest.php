@@ -155,7 +155,7 @@ class TicketContractChangeModalTest extends TestCase
 
         $this->assertEquals(-0.5, (float) PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
         $this->assertEquals(-0.2, (float) PrepayTransaction::where('phone_call_id', $call->id)->sole()->hours);
-        $this->assertEquals(9.3, (float) $this->b->fresh()->prepay_balance, 'the reported 0.70 h is what B lost');
+        $this->assertEquals(9.3, (float) $this->b->fresh()->prepay_balance, 'B lost both draws, 0.50 h + 0.20 h');
 
         $system = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->where('body', 'like', 'Moved %')->orderBy('id')->pluck('body')->all();
         $this->assertSame([

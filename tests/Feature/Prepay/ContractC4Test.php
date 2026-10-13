@@ -74,5 +74,45 @@ class ContractC4Test extends TestCase
         $this->assertSame($before, ContractActivity::where('contract_id', $foreign->id)->get()->toArray());
         $this->assertNull($in->changes['from_contract_id']);
         $this->assertNull($result['from_contract_id']);
+        foreach (TicketNote::where('note_type', \App\Enums\NoteType::System)->pluck('body') as $body) {
+            $this->assertStringNotContainsString('Synthetic X contract', $body);
+        }
+        $this->assertSame(
+            "Moved note #{$note->id} time (0.75 h) from another client's contract to Synthetic Y contract: Synthetic private reason",
+            TicketNote::where('ticket_id', $ticket->id)->where('note_type', \App\Enums\NoteType::System)->sole()->body,
+        );
+    }
+
+    public function test_foreign_stamp_follow_on_draw_note_body(): void
+    {
+        Http::fake(['*' => Http::response([], 200)]);
+        Http::preventStrayRequests();
+        $x = Client::create(['name' => 'Synthetic X']);
+        $y = Client::create(['name' => 'Synthetic Y']);
+        $foreign = Contract::create(['client_id' => $x->id, 'name' => 'Synthetic X contract', 'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01']);
+        $target = Contract::create([
+            'client_id' => $y->id, 'name' => 'Synthetic Y contract', 'type' => 'managed',
+            'status' => 'active', 'start_date' => '2026-01-01', 'prepay_total' => 10,
+            'prepay_balance' => 10, 'prepay_used' => 0, 'prepay_as_amount' => false,
+        ]);
+        $user = User::factory()->create();
+        $ticket = Ticket::factory()->create(['client_id' => $y->id, 'contract_id' => $target->id]);
+        $note = TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'author_id' => $user->id, 'body' => 'Synthetic time',
+            'time_minutes' => 45, 'is_billable' => true, 'contract_id' => $foreign->id,
+        ]));
+        $this->assertFalse(\App\Models\PrepayTransaction::where('ticket_note_id', $note->id)->exists());
+
+        $result = app(PrepayService::class)->moveEntryContract($note, $target, 'Synthetic private reason', $user);
+
+        $row = \App\Models\PrepayTransaction::where('ticket_note_id', $note->id)->sole();
+        $this->assertSame($target->id, $row->contract_id);
+        $this->assertSame(-0.75, (float) $row->hours);
+        $this->assertSame(0.75, $result['drawn_hours']);
+        $this->assertSame(9.25, (float) $target->fresh()->prepay_balance);
+        $this->assertSame(
+            "Moved note #{$note->id} time (0.75 h) from another client's contract to Synthetic Y contract; it had no prepay ledger row, so 0.75h was drawn from Synthetic Y contract: Synthetic private reason",
+            TicketNote::where('ticket_id', $ticket->id)->where('note_type', \App\Enums\NoteType::System)->sole()->body,
+        );
     }
 }
