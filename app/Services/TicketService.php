@@ -129,7 +129,8 @@ class TicketService
      * applies, and SLA deadlines from that contract when none are set yet. A ticket
      * that already has a contract, or no client, is left as it is.
      * First assignment intentionally lets TicketObserver::updated() schedule the client's
-     * held-debit release, as any contract change on an existing ticket does; entries still unresolved stay held.
+     * held-debit release, as setting a ticket's contract does unless it is saved under
+     * TicketObserver::withoutHeldRelease(); entries still unresolved stay held.
      */
     public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
     {
