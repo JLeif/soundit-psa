@@ -69,8 +69,7 @@ class TicketStoreRequest extends FormRequest
             'due_at' => ['nullable', 'date'],
             // Card I3EvQKUV PR 3: an ACTIVE contract of the chosen client. The id must be a positive int or digit
             // string (not true or 1.0), the same test TicketService::contractForNewTicket applies.
-            // Blank = let the
-            // server apply the client default / only active contract (TicketService).
+            // Blank = let the server apply the client default / only active contract (TicketService).
             'contract_id' => [
                 'nullable',
                 function (string $attribute, $value, $fail): void {

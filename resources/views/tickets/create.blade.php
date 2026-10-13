@@ -194,7 +194,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const contractSelect = document.getElementById('contract_id');
     const contractHint = document.getElementById('contractHint');
     const contractHintDefault = contractHint.textContent;
-    // One hint per picker state (review r1 context:8, contract-s1:4). No hint says where new time goes.
+    // Hint text per picker state (review r1 context:8, contract-s1:4); the several-active-and-no-default hint is set inline in loadContracts().
     const contractHints = {
         chosen: "Select a contract for this ticket.",
         none: 'This client has no active contracts, so the ticket is created without one.',

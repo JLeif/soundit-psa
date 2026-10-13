@@ -11,7 +11,8 @@ use Illuminate\Support\Collection;
  * The deleted-ticket block in StaffPsaActionToolExecutor::existingTicketContractBlock is built by
  * hand, not by this class, and reports the stored contract under rule ticket whatever its status.
  * For a live existing ticket, callers add ticket_contract_id when the stored id differs; the
- * deleted-ticket block always adds it. Instances are built only from a ContractResolver answer;
+ * deleted-ticket block always adds it. Instances are built from a ContractResolution:
+ * a ContractResolver answer, or ContractResolution::none() where there is no client or no ticket;
  * this class decides nothing.
  */
 final class TicketContractOutcome
