@@ -296,7 +296,8 @@ class TimeEntryContractMoveService
         $proposal = TimeEntryMoveProposal::firstOrCreate(
             ['content_hash' => $hash, 'state' => 'pending', 'drafted_by' => $actor],
             ['entry_type' => $type, 'entry_id' => $id, 'ticket_id' => $ticket->id, 'from_contract_id' => $from,
-                'to_contract_id' => $contractId, 'reason' => trim($reason)],
+                'to_contract_id' => $contractId, 'reason' => trim($reason),
+                'activity_watermark' => \App\Models\ContractActivity::max('id') ?? 0],
         );
 
         $draw = $this->stagedDrawHours($entry, $type, $contractId);
@@ -401,7 +402,10 @@ class TimeEntryContractMoveService
     {
         return \App\Models\ContractActivity::where('action', 'entry_moved_in')
             ->where('changes->entry_type', $p->entry_type)->where('changes->entry_id', (int) $p->entry_id)
-            ->where('created_at', '>=', $p->created_at)->exists();
+            ->when($p->activity_watermark !== null,
+                fn ($query) => $query->where('id', '>', $p->activity_watermark),
+                fn ($query) => $query->where('created_at', '>=', $p->created_at))
+            ->exists();
     }
 
     /**
