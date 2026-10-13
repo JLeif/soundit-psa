@@ -154,7 +154,7 @@
                     <label for="due_at" class="form-label">Due Date</label>
                     <input type="datetime-local" name="due_at" id="due_at"
                            class="form-control" value="{{ old('due_at') }}">
-                    <small class="form-text text-muted">Optional due date override</small>
+                    <small class="form-text text-muted" id="dueAtHint">{{ old('due_at') ? 'Optional due date override' : 'Auto-set from priority SLA' }}</small>
                 </div>
 
                 {{-- ITIL taxonomy SOP category (so-0ftg) — the node that carries the
@@ -192,9 +192,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const contractSelect = document.getElementById('contract_id');
     const contractHint = document.getElementById('contractHint');
     const contractHintDefault = contractHint.textContent;
-    const clearedContractNotice = 'The previously submitted contract was cleared. Review the contract selection before submitting. ';
-    const replacedContractNotice = c => "The previously submitted contract is not one of this client's active contracts, so the client's "
-        + (c.is_default ? 'default' : 'only active') + ' contract is selected instead. Review the contract selection before submitting. ';
     // Hint text per picker state (review r1 context:8, contract-s1:4); the several-active-and-no-default hint is set inline in loadContracts().
     const contractHints = {
         chosen: "Select a contract for this ticket.",
@@ -202,10 +199,11 @@ document.addEventListener('DOMContentLoaded', function() {
         failed: "Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.",
     };
 
-    function contractOption(value, text) {
+    function contractOption(value, text, resolutionSlaHours = {}) {
         const opt = document.createElement('option');
         opt.value = value;
         opt.textContent = text;
+        opt.dataset.resolutionSlaHours = JSON.stringify(resolutionSlaHours);
         return opt;
     }
 
@@ -222,6 +220,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Card I3EvQKUV PR 3: fill the Contract picker from the client's active contracts.
     function loadContracts(clientId, preferId) {
         contractSelect.innerHTML = '';
+        updateDueDate();
         contractHint.textContent = contractHintDefault;
         contractHint.classList.remove('text-warning-emphasis');
         if (!clientId) {
@@ -241,7 +240,7 @@ document.addEventListener('DOMContentLoaded', function() {
             contractSelect.innerHTML = '';
             if (contracts.length === 0) {
                 contractSelect.appendChild(contractOption('', 'None: no active contracts'));
-                contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.none;
+                contractHint.textContent = (preferId ? 'The contract you submitted is not an active contract of this client. ' : '') + contractHints.none;
                 contractSelect.disabled = true;
                 return;
             }
@@ -254,11 +253,14 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 contractHint.textContent = contractHints.chosen;
             }
-            contracts.forEach(c => contractSelect.appendChild(contractOption(String(c.id), contractLabel(c))));
+            contracts.forEach(c => contractSelect.appendChild(contractOption(String(c.id), contractLabel(c), c.resolution_sla_hours)));
             const preferred = preferId && contracts.some(c => String(c.id) === String(preferId)) ? String(preferId) : null;
             contractSelect.value = preferred || (fallback ? String(fallback.id) : '');
             if (preferId && !preferred) {
-                contractHint.textContent = (fallback ? replacedContractNotice(fallback) : clearedContractNotice) + contractHint.textContent;
+                const notice = fallback
+                    ? 'The contract you submitted is not an active contract of this client, so this client\'s ' + (fallback.is_default ? 'default' : 'only active') + ' contract is selected instead. '
+                    : 'The contract you submitted is not an active contract of this client; pick one. ';
+                contractHint.textContent = notice + contractHint.textContent;
             }
             contractSelect.disabled = false;
         })
@@ -270,9 +272,9 @@ document.addEventListener('DOMContentLoaded', function() {
             // the only active contract when the ticket is created.
             contractSelect.innerHTML = '';
             contractSelect.appendChild(contractOption('', 'Contracts could not be loaded'));
-            contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.failed;
+            contractHint.textContent = (preferId ? 'The contract you submitted could not be restored. ' : '') + contractHints.failed;
             contractSelect.disabled = true;
-        });
+        }).finally(updateDueDate);
     }
 
     // Client change → load contacts, assets and contracts
@@ -344,6 +346,43 @@ document.addEventListener('DOMContentLoaded', function() {
             subcategorySelect.disabled = true;
         }
     });
+
+    const prioritySelect = document.getElementById('priority');
+    const dueAtInput = document.getElementById('due_at');
+    const dueAtHint = document.getElementById('dueAtHint');
+    let dueAtDirty = !!dueAtInput.value;
+
+    // Browser-local priority fill is retained; app/browser timezone parity is deferred.
+    function updateDueDate() {
+        if (dueAtDirty) {
+            dueAtHint.textContent = 'Optional due date override';
+            return;
+        }
+        const selectedContract = contractSelect.disabled ? null : contractSelect.selectedOptions[0];
+        const terms = selectedContract ? JSON.parse(selectedContract.dataset.resolutionSlaHours || '{}') : {};
+        const h = terms[prioritySelect.value];
+        if (h !== null && h !== undefined) {
+            dueAtInput.value = '';
+            dueAtHint.textContent = 'Leave blank and this contract\'s ' + h + 'h resolution SLA sets the due date.';
+            return;
+        }
+        const selected = prioritySelect.options[prioritySelect.selectedIndex];
+        const slaHours = parseInt(selected.dataset.slaHours || 24);
+        const due = new Date();
+        due.setHours(due.getHours() + slaHours);
+        const pad = n => String(n).padStart(2, '0');
+        dueAtInput.value = due.getFullYear() + '-' + pad(due.getMonth() + 1) + '-' +
+                           pad(due.getDate()) + 'T' + pad(due.getHours()) + ':' + pad(due.getMinutes());
+        dueAtHint.textContent = 'Auto-set from priority SLA';
+    }
+
+    dueAtInput.addEventListener('input', function() {
+        dueAtDirty = true;
+        updateDueDate();
+    });
+    prioritySelect.addEventListener('change', updateDueDate);
+    contractSelect.addEventListener('change', updateDueDate);
+    updateDueDate();
 
     // Reload contracts for the submitted client.
     if (clientSelect.value) {
