@@ -97,7 +97,7 @@ if (dueAtDirty) {
         }
 JS, $html);
         $this->assertStringContainsString(<<<'JS'
-const hours = (typeof h === 'number' || typeof h === 'string') && /^\d+$/.test(String(h)) ? Number(h) : 0;
+const hours = typeof h === 'number' || (typeof h === 'string' && /^[ \t\n\r\v\f]*[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?[ \t\n\r\v\f]*$/.test(h)) ? Number(h) : 0;
         if (Number.isSafeInteger(hours) && hours > 0) {
             dueAtInput.value = '';
             dueAtHint.textContent = 'Leave blank and this contract\'s ' + hours + 'h resolution SLA sets the due date.';
@@ -134,7 +134,7 @@ JS, $html);
         $this->travelTo(now()->startOfMinute());
         $client = Client::create(['name' => 'Synthetic C7 string SLA client']);
         $data = ['client_id' => $client->id, 'subject' => 'Synthetic C7 string SLA', 'priority' => 'p3', 'type' => 'incident', 'due_at' => ''];
-        foreach ([['8', 8], ['0', null]] as $i => [$stored, $hours]) {
+        foreach ([['8', 8], ['8.0', 8], ['+8', 8], ['0', null]] as $i => [$stored, $hours]) {
             $contract = Contract::create([
                 'client_id' => $client->id, 'name' => 'Synthetic C7 string '.$i, 'type' => 'managed',
                 'status' => 'active', 'start_date' => '2026-01-01',
@@ -149,7 +149,10 @@ JS, $html);
             }
         }
         $html = $this->get(route('tickets.create'))->assertOk()->getContent();
-        $this->assertStringContainsString("const hours = (typeof h === 'number' || typeof h === 'string') && /^\\d+$/.test(String(h)) ? Number(h) : 0;", $html);
+        $this->assertStringContainsString(<<<'JS'
+const hours = typeof h === 'number' || (typeof h === 'string' && /^[ \t\n\r\v\f]*[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?[ \t\n\r\v\f]*$/.test(h)) ? Number(h) : 0;
+JS, $html);
+        $this->assertStringNotContainsString('/^\d+$/.test(String(h))', $html);
         $this->assertStringContainsString('if (Number.isSafeInteger(hours) && hours > 0) {', $html);
     }
 }
