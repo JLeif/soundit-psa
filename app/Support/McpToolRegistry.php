@@ -656,7 +656,7 @@ class McpToolRegistry
      * The one-line contract_id description every ticket-creating agent tool carries
      * (card I3EvQKUV PR 3, spec §7). The portal create_ticket has no contract_id (Q8).
      */
-    public const CREATE_CONTRACT_ID_DESCRIPTION = 'Optional. Must be an active contract of this ticket\'s client; omit it and the server uses the client\'s default contract, else its only active contract, else none — the response says which. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied, and the response\'s contract block is authoritative.';
+    public const CREATE_CONTRACT_ID_DESCRIPTION = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract, except that a replay whose earlier ticket has since been deleted returns contract: null and contract_rule: none with no ticket_contract_id.';
 
     /**
      * The contract_id property of a ticket-creating tool schema.

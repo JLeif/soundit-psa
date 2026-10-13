@@ -235,20 +235,24 @@ class StaffPsaActionToolExecutor
             return $this->idempotentCreateTicketResult($existing, $clientId);
         }
 
-        $ticket = DB::transaction(function () use ($payload, $actorLabel, $contentHash, $reason): Ticket {
-            $actorId = TechnicianConfig::requiredAiActorUserId();
-            $ticket = $this->ticketCreator->createFromPayload($payload, $actorId);
-            $this->auditDirectExecution(
-                'create_ticket',
-                $ticket,
-                $actorLabel,
-                $contentHash,
-                'Direct MCP ticket created: '.$reason,
-                $actorId,
-            );
+        try {
+            $ticket = DB::transaction(function () use ($payload, $actorLabel, $contentHash, $reason): Ticket {
+                $actorId = TechnicianConfig::requiredAiActorUserId();
+                $ticket = $this->ticketCreator->createFromPayload($payload, $actorId);
+                $this->auditDirectExecution(
+                    'create_ticket',
+                    $ticket,
+                    $actorLabel,
+                    $contentHash,
+                    'Direct MCP ticket created: '.$reason,
+                    $actorId,
+                );
 
-            return $ticket;
-        });
+                return $ticket;
+            });
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return $e->toolRefusal();
+        }
 
         return [
             'success' => true,
@@ -2268,6 +2272,7 @@ class StaffPsaActionToolExecutor
             'email_id' => $email->id,
             'ticket_id' => $ticket->id,
             'ticket_display_id' => $ticket->display_id,
+            'linked_existing' => ! $ticket->wasRecentlyCreated,
             'message' => 'Ticket created or linked from email.',
         ] + $this->createdContractBlock($ticket);
     }
@@ -2451,21 +2456,25 @@ class StaffPsaActionToolExecutor
             return $e->toolRefusal();
         }
 
-        $ticket = DB::transaction(function () use ($call, $actorLabel, $reason, $contractId): Ticket {
-            $ticket = $this->phoneCallService->createTicketFromCall($call, $contractId);
-            $this->auditEntityExecution(
-                'create_ticket_from_call',
-                'phone_call',
-                (int) $call->id,
-                $ticket->client_id,
-                $actorLabel,
-                $this->mutationContentHash('create_ticket_from_call', (int) $call->id, ['ticket_id' => $ticket->id], $reason),
-                'Phone call #'.$call->id.' created ticket #'.$ticket->id.': '.$reason,
-                TechnicianConfig::requiredAiActorUserId(),
-            );
+        try {
+            $ticket = DB::transaction(function () use ($call, $actorLabel, $reason, $contractId): Ticket {
+                $ticket = $this->phoneCallService->createTicketFromCall($call, $contractId);
+                $this->auditEntityExecution(
+                    'create_ticket_from_call',
+                    'phone_call',
+                    (int) $call->id,
+                    $ticket->client_id,
+                    $actorLabel,
+                    $this->mutationContentHash('create_ticket_from_call', (int) $call->id, ['ticket_id' => $ticket->id], $reason),
+                    'Phone call #'.$call->id.' created ticket #'.$ticket->id.': '.$reason,
+                    TechnicianConfig::requiredAiActorUserId(),
+                );
 
-            return $ticket;
-        });
+                return $ticket;
+            });
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return $e->toolRefusal();
+        }
 
         return [
             'success' => true,
