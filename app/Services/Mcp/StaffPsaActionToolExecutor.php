@@ -3657,7 +3657,7 @@ class StaffPsaActionToolExecutor
             'ticket_id' => $ticket?->id ?? $log->ticket_id,
             'ticket_display_id' => $ticket?->display_id,
             'display_id' => $ticket?->display_id,
-            'url' => $ticket ? route('tickets.show', $ticket) : null,
+            'url' => $ticket !== null && ! $ticket->trashed() ? route('tickets.show', $ticket) : null,
             'message' => 'Already created identical create_ticket recently; no new ticket was created.',
         ] + $this->existingTicketContractBlock($ticket);
     }

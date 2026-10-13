@@ -271,6 +271,8 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertSame($contract->id, $r['contract']['id'] ?? null);
         $this->assertSame('ticket', $r['contract_rule']);
         $this->assertTrue($r['ticket_deleted']);
+        $this->assertArrayHasKey('url', $r);
+        $this->assertNull($r['url']);
         $this->assertSame($contract->id, $r['ticket_contract_id']);
         $this->assertSame(1, Ticket::withTrashed()->count());
 
