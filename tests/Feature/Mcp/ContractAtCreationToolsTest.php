@@ -32,7 +32,7 @@ class ContractAtCreationToolsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract.';
+    private const LINE = 'Optional. Must be an active contract of this ticket\'s client. For a new ticket, omit it to use the client\'s active default contract, else its only active contract; with no active contracts the ticket gets none, and with several and no active default the outcome is ambiguous. An ambiguous outcome returns contract: null plus candidate_contracts. When the call returns an existing ticket (an idempotent replay or a linked email), contract_id is not applied: contract and contract_rule report where new time resolves, and ticket_contract_id reports the stored contract when it differs from the resolved contract, except that a replay whose earlier ticket has since been deleted returns contract: null and contract_rule: none with no ticket_contract_id.';
 
     private Client $client;
 
@@ -250,6 +250,26 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertSame(['id' => $passed->id, 'name' => 'Synthetic Passed', 'rule' => 'picked'], $r['contract']);
         $this->assertSame($passed->id, Ticket::sole()->contract_id);
         $this->assertSame(Ticket::sole()->id, $email->fresh()->ticket_id);
+    }
+
+    public function test_create_ticket_replay_of_a_deleted_ticket_reports_no_contract(): void
+    {
+        $contract = $this->contract('Synthetic Replay');
+        $first = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $contract->id]));
+        $this->assertTrue($first['success'] ?? false, json_encode($first));
+        $ticket = Ticket::sole();
+        $this->assertSame($contract->id, $ticket->contract_id);
+        $ticket->delete();
+
+        $r = $this->callTool(['create_ticket'], 'create_ticket', $this->createArgs(['contract_id' => $contract->id]));
+
+        $this->assertTrue($r['idempotent'] ?? false, json_encode($r));
+        $this->assertSame($ticket->id, $r['ticket_id']);
+        $this->assertArrayHasKey('contract', $r);
+        $this->assertNull($r['contract']);
+        $this->assertSame('none', $r['contract_rule']);
+        $this->assertArrayNotHasKey('ticket_contract_id', $r);
+        $this->assertSame(1, Ticket::withTrashed()->count());
     }
 
     // ── C2: an inactive contract of the same client ─────────────────────────
