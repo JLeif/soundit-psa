@@ -44,7 +44,9 @@
                                 @php($key = $entry['type'].':'.$entry['id'])
                                 <tr class="js-cc-row {{ $entry['locked'] ? 'text-muted' : '' }}" data-contract="{{ $entry['contract_id'] }}"
                                     data-hours="{{ $entry['ledger_hours'] }}" data-locked="{{ $entry['locked'] ? '1' : '0' }}"
-                                    data-ledger="{{ $entry['ledger'] ? '1' : '0' }}" data-draw-hours="{{ $entry['draw_hours'] }}">
+                                    data-ledger="{{ $entry['ledger'] ? '1' : '0' }}" data-draw-hours="{{ $entry['draw_hours'] }}"
+                                    data-source-prepay="{{ $entry['contract_prepay'] ? '1' : '0' }}"
+                                    data-source-name="{{ $entry['contract_name'] }}" data-source-balance="{{ $entry['contract_balance'] }}">
                                     <td>
                                         <input type="checkbox" class="form-check-input js-cc-move" name="move[]" value="{{ $key }}"
                                                id="ccMove{{ str_replace(':', '', $key) }}" @disabled($entry['locked'])
