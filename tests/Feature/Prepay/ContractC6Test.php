@@ -60,7 +60,7 @@ class ContractC6Test extends TestCase
             $response = $this->actingAs($user)->patch(route('clients.default-contract.update', $contract->client_id),
                 ['default_contract_id' => $contract->id]);
             $response->assertRedirect(route('clients.show', $contract->client_id))
-                ->assertSessionHas('error', 'Held-debit release failed. Check the ledger before retrying.');
+                ->assertSessionHas('error', 'Default contract saved, but releasing held debits failed; some may already be debited. Check the ledger before retrying.');
             $this->assertSame($contract->id, $contract->client->fresh()->default_contract_id);
             $this->assertStringNotContainsString('Synthetic private failure detail', json_encode(session()->all()));
         }

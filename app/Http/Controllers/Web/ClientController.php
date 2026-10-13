@@ -673,8 +673,8 @@ class ClientController extends Controller
 
         // Choosing a default releases the debits held as "Needs contract"; re-submitting
         // the same default retries any still held.
-        // A release failure must not turn a committed default into a 500 (#4920): it is
-        // caught and logged exactly as the Contract and Ticket release paths do.
+        // A release failure must not turn a committed default into a 500 (#4920): it is caught,
+        // logged without the exception message (#4991) and reported; the default above stays saved.
         $released = 0;
         if ($newId !== null) {
             try {
@@ -687,7 +687,7 @@ class ClientController extends Controller
                 ]);
 
                 return redirect()->route('clients.show', $client)
-                    ->with('error', 'Held-debit release failed. Check the ledger before retrying.');
+                    ->with('error', 'Default contract saved, but releasing held debits failed; some may already be debited. Check the ledger before retrying.');
             }
         }
         if ($oldId === $newId && $released === 0) {
