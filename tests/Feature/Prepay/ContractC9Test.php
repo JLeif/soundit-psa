@@ -70,7 +70,8 @@ class ContractC9Test extends TestCase
         $dispatcher = DB::connection()->getEventDispatcher();
         DB::connection()->setEventDispatcher(clone $dispatcher);
         DB::listen(function ($query) use ($note, $target, &$winner, &$injected) {
-            if (! $injected && str_starts_with($query->sql, 'select * from "time_entry_move_proposals"') && str_contains($query->sql, '"content_hash"')) {
+            $sql = str_replace(['"', '`'], '', $query->sql);
+            if (! $injected && str_starts_with($sql, 'select * from time_entry_move_proposals') && str_contains($sql, 'content_hash')) {
                 $injected = true;
                 $winner = DB::table('time_entry_move_proposals')->insertGetId([
                     'entry_type' => 'note', 'entry_id' => $note->id, 'ticket_id' => $note->ticket_id,
@@ -83,6 +84,7 @@ class ContractC9Test extends TestCase
         });
         try {
             $proposal = $this->stage($note, $target);
+            $this->assertTrue($injected);
             $this->assertSame($winner, $proposal->id);
             $this->assertSame(1, TimeEntryMoveProposal::count());
         } finally {
