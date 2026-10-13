@@ -47,7 +47,7 @@ class MoveEntryContractTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Http::fake();
+        Http::fake(['*' => Http::response([], 200)]);
         Http::preventStrayRequests();
         $this->client = Client::create(['name' => 'Synthetic Client M']);
         $this->a = $this->contract('Synthetic Block A');
@@ -222,8 +222,8 @@ class MoveEntryContractTest extends TestCase
         $this->assertSame($this->a->id, $n2->fresh()->contract_id, 'an unticked entry stays');
     }
 
-    /** (c) for forfeiture: the moved pair does not take part in the FIFO expiry replay. */
-    public function test_c_expiry_replay_ignores_the_moved_pair(): void
+    /** Rule (b): consumption of a lot expired at the move stays consumed. */
+    public function test_c_expiry_replay_preserves_expired_consumption(): void
     {
         $note = $this->note(60);
         $this->move($note, $this->b);
@@ -234,8 +234,81 @@ class MoveEntryContractTest extends TestCase
         // The work was logged a year ago (inside the lot's life) and moved today, as in real use.
         PrepayTransaction::whereNotNull('moved_ticket_note_id')->where('hours', '<', 0)->update(['date' => now()->subMonths(12)]);
         $expirations = app(PrepayExpirationService::class)->computeExpirations($this->a->fresh(), now());
-        $this->assertSame([[$lot->id, 2.0]], array_map(fn ($e) => [$e['lot_id'], $e['hours']], $expirations),
-            'the moved debit drew nothing from the lot');
+        $this->assertSame([[$lot->id, 1.0]], array_map(fn ($e) => [$e['lot_id'], $e['hours']], $expirations));
+    }
+
+    private function expiredMoveFixture(bool $mixed = false): array
+    {
+        $this->travelTo(\Carbon\Carbon::parse('2026-06-15 12:00:00'));
+        $this->a->prepayTransactions()->delete();
+        $expired = PrepayTransaction::create([
+            'contract_id' => $this->a->id, 'source' => PrepayTransactionSource::ManualCredit,
+            'date' => '2026-01-01', 'hours' => 2, 'expiry_date' => '2026-05-01',
+        ]);
+        $live = $mixed ? PrepayTransaction::create([
+            'contract_id' => $this->a->id, 'source' => PrepayTransactionSource::ManualCredit,
+            'date' => '2026-02-01', 'hours' => 3, 'expiry_date' => '2026-07-01',
+        ]) : null;
+        $note = $this->note($mixed ? 180 : 60, ['noted_at' => '2026-03-01']);
+        $expiry = app(PrepayExpirationService::class);
+        $before = $expiry->expireContract($this->a->fresh());
+        $this->assertSame($mixed ? 0.0 : 1.0, $before['forfeited_hours']);
+        $this->move($note, $this->b);
+
+        return [$expired, $live];
+    }
+
+    public function test_no_second_forfeiture_after_move_off_expired_lot(): void
+    {
+        $this->expiredMoveFixture();
+        $result = app(PrepayExpirationService::class)->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $result['forfeited_hours']);
+        $this->assertSame([0, 0, 0], [$result['created'], $result['updated'], $result['deleted']]);
+        $this->assertSame([2.0, 0.0, 1.0, 1.0], $this->columns($this->a));
+    }
+
+    public function test_move_spanning_expired_and_live_lots_frees_only_live_consumption(): void
+    {
+        [$expired, $live] = $this->expiredMoveFixture(true);
+        $expiry = app(PrepayExpirationService::class);
+        $this->assertSame([], $expiry->computeExpirations($this->a->fresh(), now()));
+        $later = $expiry->computeExpirations($this->a->fresh(), now()->addMonth());
+        $this->assertSame([[$live->id, 3.0]], array_map(fn ($e) => [$e['lot_id'], $e['hours']], $later));
+    }
+
+    public function test_expired_move_reconciliation_is_idempotent(): void
+    {
+        $this->expiredMoveFixture();
+        $expiry = app(PrepayExpirationService::class);
+        $first = $expiry->expireContract($this->a->fresh());
+        $ledger = $this->ledger();
+        $columns = $this->columns($this->a);
+        $second = $expiry->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $second['forfeited_hours']);
+        $this->assertSame($first, $second);
+        $this->assertSame($ledger, $this->ledger());
+        $this->assertSame($columns, $this->columns($this->a));
+    }
+
+    public function test_round_trip_move_does_not_reduce_the_forfeiture(): void
+    {
+        $this->expiredMoveFixture();
+        $note = TicketNote::findOrFail(PrepayTransaction::whereNotNull('moved_ticket_note_id')->value('moved_ticket_note_id'));
+        $expiry = app(PrepayExpirationService::class);
+
+        $this->travelTo(\Carbon\Carbon::parse('2026-06-20 12:00:00'));
+        $this->move($note->fresh(), $this->a, 'Moved back');
+        $back = $expiry->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $back['forfeited_hours']);
+        $this->assertSame([0, 0, 0], [$back['created'], $back['updated'], $back['deleted']]);
+        $this->assertSame([2.0, 1.0, 1.0, 0.0], $this->columns($this->a));
+
+        $this->travelTo(\Carbon\Carbon::parse('2026-06-25 12:00:00'));
+        $this->move($note->fresh(), $this->b, 'Moved out again');
+        $again = $expiry->expireContract($this->a->fresh());
+        $this->assertSame(1.0, $again['forfeited_hours']);
+        $this->assertSame([0, 0, 0], [$again['created'], $again['updated'], $again['deleted']]);
+        $this->assertSame([2.0, 0.0, 1.0, 1.0], $this->columns($this->a));
     }
 
     /** (d): later edit, unbill, rebill, re-debit and delete act on the new contract only. */

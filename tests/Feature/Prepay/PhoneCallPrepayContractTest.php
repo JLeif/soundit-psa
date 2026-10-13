@@ -68,7 +68,7 @@ class PhoneCallPrepayContractTest extends TestCase
         $this->assertEquals(-$hours, $txn->fresh()->hours);
     }
 
-    public function test_missing_original_contract_updates_ledger_without_moving_balances(): void
+    public function test_trashed_original_contract_columns_follow_the_ledger(): void
     {
         [$call, $a, $b, $txn] = $this->fixture();
         $a->delete();
@@ -81,11 +81,11 @@ class PhoneCallPrepayContractTest extends TestCase
         $this->assertEquals(0, $b->fresh()->prepay_used);
         $this->assertEquals(10, $b->fresh()->prepay_balance);
         $original = Contract::withTrashed()->findOrFail($a->id);
-        $this->assertEquals(1, $original->prepay_used);
-        $this->assertEquals(9, $original->prepay_balance);
+        $this->assertEquals(1.5, $original->prepay_used);
+        $this->assertEquals(8.5, $original->prepay_balance);
         $this->assertEquals(-1.5, $txn->fresh()->hours);
         $this->assertSame($a->id, $txn->fresh()->contract_id);
-        $this->assertContains(['warning', '[Prepay] Phone call difference skipped', [
+        $this->assertNotContains(['warning', '[Prepay] Phone call difference skipped', [
             'phone_call_id' => $call->id,
             'contract_id' => $a->id,
             'hours_difference' => 0.5,

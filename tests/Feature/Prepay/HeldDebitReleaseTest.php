@@ -41,7 +41,7 @@ class HeldDebitReleaseTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Http::fake();
+        Http::fake(['*' => Http::response([], 200)]);
         Http::preventStrayRequests();
         $this->ticket = Ticket::factory()->create();
         $this->client = $this->ticket->client;
@@ -151,6 +151,35 @@ class HeldDebitReleaseTest extends TestCase
 
         $this->assertReleasedTo($this->a, $note, $call, $transition);
         $this->assertEquals(10, $this->b->fresh() ? $this->b->fresh()->prepay_balance : Contract::withTrashed()->find($this->b->id)->prepay_balance);
+    }
+
+    public function test_first_contract_assignment_at_verification_releases_client_held_debits(): void
+    {
+        [$note, $call] = $this->heldPair();
+        $other = Ticket::factory()->create(['client_id' => $this->client->id]);
+        $otherNote = $this->note(30, ['ticket_id' => $other->id]);
+        $this->assertNotNull($otherNote->fresh()->contract_held_at);
+        // Resolve the ambiguity without firing a separate release trigger.
+        $this->b->updateQuietly(['status' => 'expired']);
+        $this->assertSame(0, PrepayTransaction::count());
+
+        $service = app(\App\Services\TicketService::class);
+        $service->assignContractAtVerification($this->ticket->fresh());
+
+        $this->assertSame($this->a->id, $this->ticket->fresh()->contract_id);
+        foreach ([$note, $otherNote] as $entry) {
+            $this->assertSame($this->a->id, PrepayTransaction::where('ticket_note_id', $entry->id)->sole()->contract_id);
+            $this->assertNull($entry->fresh()->contract_held_at);
+        }
+        $this->assertSame($this->a->id, PrepayTransaction::where('phone_call_id', $call->id)->sole()->contract_id);
+        $this->assertNull($call->fresh()->contract_held_at);
+        $this->assertEquals(7.5, $this->a->fresh()->prepay_balance);
+        $this->assertNull($service->assignContractAtVerification($this->ticket->fresh()));
+        $this->assertSame(3, PrepayTransaction::count());
+        $this->assertSame(1, \App\Models\ContractActivity::where('action', 'ticket_contract_assigned_at_verification')->count());
+        $audit = \App\Models\ContractActivity::where('action', 'ticket_contract_assigned_at_verification')->sole();
+        $this->assertSame($this->a->id, $audit->contract_id);
+        $this->assertSame(['ticket_id' => $this->ticket->id, 'client_id' => $this->client->id], $audit->changes);
     }
 
     public function test_ticket_contract_set_releases_that_ticket_and_leaves_other_still_ambiguous_tickets_held(): void
