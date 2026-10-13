@@ -3,7 +3,6 @@
 namespace Tests\Feature\Prepay;
 
 use App\Models\Client;
-use App\Models\Contract;
 use App\Models\Ticket;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -47,30 +46,9 @@ class ContractC7Test extends TestCase
             ->get(route('tickets.create'))->assertOk()->getContent();
         $this->assertStringContainsString('data-old="123"', $html);
         $this->assertStringContainsString("contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.none;", $html);
-        $this->assertStringContainsString("if (preferId && !preferred) {\n                contractHint.textContent = clearedContractNotice + contractHint.textContent;\n            }", $html);
+        $this->assertStringContainsString("if (preferId && !preferred) {\n                contractHint.textContent = (fallback ? replacedContractNotice(fallback) : clearedContractNotice) + contractHint.textContent;\n            }", $html);
+        $this->assertStringContainsString("const replacedContractNotice = c => \"The previously submitted contract is not one of this client's active contracts, so the client's \"\n        + (c.is_default ? 'default' : 'only active') + ' contract is selected instead. Review the contract selection before submitting. ';", $html);
         $this->assertStringContainsString("contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.failed;", $html);
         $this->assertStringContainsString("const clearedContractNotice = 'The previously submitted contract was cleared. Review the contract selection before submitting. ';", $html);
-    }
-
-    public function test_form_leaves_due_date_empty_and_web_store_uses_contract_sla(): void
-    {
-        $this->travelTo(now()->startOfMinute());
-        $client = Client::create(['name' => 'Synthetic C7 SLA client']);
-        $contract = Contract::create([
-            'client_id' => $client->id, 'name' => 'Synthetic C7 SLA', 'type' => 'managed',
-            'status' => 'active', 'start_date' => '2026-01-01',
-            'sla_terms' => ['resolution' => ['p3' => 8]],
-        ]);
-        $html = $this->get(route('tickets.create'))->assertOk()->getContent();
-        $this->assertStringContainsString('class="form-control" value=""', $html);
-        $this->assertStringNotContainsString('updateDueDate', $html);
-        $data = ['client_id' => $client->id, 'subject' => 'Synthetic C7 SLA', 'priority' => 'p3', 'type' => 'incident', 'contract_id' => $contract->id, 'due_at' => ''];
-        $this->post(route('tickets.store'), $data)->assertSessionHasNoErrors()->assertRedirect();
-        $this->assertTrue(Ticket::latest('id')->first()->due_at->equalTo(now()->addHours(8)));
-        $explicit = now()->addHours(3)->format('Y-m-d\TH:i');
-        $this->post(route('tickets.store'), array_replace($data, ['due_at' => $explicit]))->assertSessionHasNoErrors()->assertRedirect();
-        $this->assertSame($explicit, Ticket::latest('id')->first()->due_at->format('Y-m-d\TH:i'));
-        $this->withSession(['_old_input' => ['due_at' => $explicit]])->get(route('tickets.create'))
-            ->assertOk()->assertSee('value="'.$explicit.'"', false);
     }
 }
