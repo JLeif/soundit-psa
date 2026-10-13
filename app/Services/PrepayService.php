@@ -793,9 +793,9 @@ class PrepayService
      * drawn_hours is the draw recorded on the entry's ledger row after that follow-on debit (0 for
      * a ledgered move, or when no draw is found): the row the debit returned, or, after a caught
      * debit fault, the row read back from the ledger; null when that read-back also failed.
-     * After an unledgered move, the system note and ContractActivity rows report the entry's re-read stamp (a held or unstamped entry as on no contract, to_contract_id null) and any found draw in place of 0.
+     * After an unledgered move, the system note and ContractActivity rows report the entry's re-read stamp (a held or unstamped entry as on no contract, to_contract_id null) and any found draw (in the note in place of the entry's priced hours, in the activity rows in place of 0).
      *
-     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: ?int, hours: float, ledger: bool, drawn_hours: ?float}
+     * @return array{entry_type: string, entry_id: int, from_contract_id: ?int, to_contract_id: ?int, hours: float, ledger: bool, drawn_hours: ?float, status?: 'executed_with_fault', message?: string}
      */
     public function moveEntryContract(TicketNote|PhoneCall $entry, Contract $to, string $reason, User $by, ?\Closure $guard = null): array
     {
@@ -1334,7 +1334,7 @@ class PrepayService
             }
 
             $hours = abs((float) $txn->hours);
-            $contract = $txn->contract;
+            $contract = $txn->contract()->withTrashed()->lockForUpdate()->first();
 
             $txn->delete();
 
