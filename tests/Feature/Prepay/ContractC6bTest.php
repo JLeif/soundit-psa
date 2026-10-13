@@ -101,6 +101,26 @@ class ContractC6bTest extends TestCase
         }
     }
 
+    public function test_client_less_ticket_gets_no_q5_lock_and_server_refuses_earlier(): void
+    {
+        [$ticket, $note, , $target, $by] = $this->fixture();
+        Ticket::whereKey($ticket->id)->update(['client_id' => null]);
+        $ticket->refresh();
+        $row = app(TimeEntryContractMoveService::class)->entries($ticket, $target->id)->first();
+        $this->assertTrue($row['ledger']);
+        $this->assertNull($row['locked']);
+        $html = view('tickets._contract-change-modal', ['ticket' => $ticket, 'contractEntries' => collect([$row])])->render();
+        $this->assertStringNotContainsString(self::LOCK, $html);
+        $before = PrepayTransaction::count();
+        try {
+            app(PrepayService::class)->moveEntryContract($note, $target, 'Synthetic correction', $by);
+            $this->fail('A note on a client-less ticket was moved.');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame("That note is not on a client's ticket.", $e->getMessage());
+        }
+        $this->assertSame($before, PrepayTransaction::count());
+    }
+
     public static function balanceCases(): array
     {
         $cases = [];

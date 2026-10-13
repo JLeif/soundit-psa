@@ -52,14 +52,15 @@ class TimeEntryContractMoveService
             $row = $noteRows->get($note->id);
             $rows->push($this->row('note', $note->id, mb_substr(trim(strip_tags((string) $note->body)), 0, 60), $note->noted_at ?? $note->created_at,
                 $note->author?->name, round($note->pricedMinutes() / 60, 2), $row, $note->contract_id, false, isset($pendingMoves['note:'.$note->id]), $toContractId,
-                $this->drawHoursIfMoved($note, $row), (int) $ticket->client_id));
+                $this->drawHoursIfMoved($note, $row), $ticket->client_id === null ? null : (int) $ticket->client_id));
         }
         foreach ($calls as $call) {
             $row = $callRows->get($call->id);
             $label = 'Phone call: '.($call->direction?->value ?? 'call');
             $rows->push($this->row('call', $call->id, $label, $call->started_at ?? $call->created_at,
                 $call->answeredBy?->name, round(($call->effectiveDurationSeconds() ?? 0) / 3600, 2), $row, $call->contract_id,
-                isset($pendingCalls[$call->id]), isset($pendingMoves['call:'.$call->id]), $toContractId, $this->drawHoursIfMoved($call, $row), (int) $ticket->client_id));
+                isset($pendingCalls[$call->id]), isset($pendingMoves['call:'.$call->id]), $toContractId, $this->drawHoursIfMoved($call, $row),
+                $ticket->client_id === null ? null : (int) $ticket->client_id));
         }
 
         $contracts = Contract::withTrashed()->whereIn('id', $rows->pluck('contract_id')->filter()->unique())->get()->keyBy('id');
@@ -75,13 +76,13 @@ class TimeEntryContractMoveService
     }
 
     private function row(string $type, int $id, string $label, $date, ?string $by, float $hours, ?PrepayTransaction $ledger,
-        $stamp, bool $pendingCallAction, bool $pendingMove, ?int $toContractId, float $drawHours, int $clientId): array
+        $stamp, bool $pendingCallAction, bool $pendingMove, ?int $toContractId, float $drawHours, ?int $clientId): array
     {
         $contractId = $ledger ? (int) $ledger->contract_id : ($stamp === null ? null : (int) $stamp);
         $locked = match (true) {
             $pendingCallAction => 'Locked: a staged billable action is awaiting approval',
             $pendingMove => 'Locked: a staged contract move is awaiting approval',
-            $ledger !== null && ! $this->prepay->ledgerSourceMatchesClient(Contract::withTrashed()->find($contractId), $clientId) => 'Locked: ledger source contract is missing or belongs to another client',
+            $ledger !== null && $clientId !== null && ! $this->prepay->ledgerSourceMatchesClient(Contract::withTrashed()->find($contractId), $clientId) => 'Locked: ledger source contract is missing or belongs to another client',
             $toContractId !== null && $contractId === $toContractId => 'Already on the new contract',
             default => null,
         };
