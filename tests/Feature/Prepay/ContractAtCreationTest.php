@@ -257,14 +257,17 @@ class ContractAtCreationTest extends TestCase
         $other = Client::create(['name' => 'Synthetic Other']);
         $foreign = $this->contract('Synthetic Foreign', [], $other);
         $this->contract('Synthetic Own');
+        Ticket::factory()->create(['client_id' => $this->client->id]);
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
 
         $this->actingAs($this->staff())->from(route('tickets.create'))
             ->post(route('tickets.store'), $this->data(['contract_id' => $foreign->id]))
             ->assertRedirect(route('tickets.create'))
             ->assertSessionHasErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
 
-        $this->assertSame(0, Ticket::withTrashed()->count());
-        $this->assertSame(0, \App\Models\TechnicianActionLog::count());
+        $this->assertSame(1, Ticket::withTrashed()->count());
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        $this->assertDatabaseCount('ticket_notes', 0);
     }
 
     public function test_web_form_refuses_an_inactive_contract_and_accepts_an_active_one(): void
