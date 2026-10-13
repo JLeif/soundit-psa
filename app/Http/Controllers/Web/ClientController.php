@@ -683,8 +683,11 @@ class ClientController extends Controller
                 Log::warning('[Prepay] Held debits release failed', [
                     'client_id' => $client->id,
                     'default_contract_id' => $newId,
-                    'error' => $e->getMessage(),
+                    'exception_class' => $e::class,
                 ]);
+
+                return redirect()->route('clients.show', $client)
+                    ->with('error', 'Held-debit release failed. Check the ledger before retrying.');
             }
         }
         if ($oldId === $newId && $released === 0) {

@@ -350,7 +350,7 @@ class TimeEntryContractMoveService
             }
             // A staged action on the call is refused before the guard runs and is transient: the
             // move stays pending, to be approved once that action is approved or denied.
-            if ($p->entry_type === 'call' && $this->hasPendingCallAction((int) $p->entry_id)) {
+            if ($p->entry_type === 'call' && $e->getMessage() === 'A staged action on this call is awaiting approval; approve or deny it first.') {
                 return ['error' => $e->getMessage().' This move stays pending.'];
             }
 

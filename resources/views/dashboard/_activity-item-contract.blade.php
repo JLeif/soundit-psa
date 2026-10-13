@@ -17,7 +17,7 @@
             @endif
         </div>
         @if($activity->changes)
-            <div class="text-muted small text-clamp-2">{{ Str::limit(json_encode($activity->changes), 120) }}</div>
+            <div class="text-muted small text-break">{{ json_encode($activity->changes) }}</div>
         @endif
     </div>
     <div class="activity-time" title="{{ $item->timestamp->toAppTz()->format('M j, Y g:i A') }}">
