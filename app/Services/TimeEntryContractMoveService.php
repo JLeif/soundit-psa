@@ -148,14 +148,14 @@ class TimeEntryContractMoveService
             return ['moved' => 0, 'hours' => 0.0, 'errors' => []];
         }
 
-        $to = $contractId === null ? null : Contract::whereKey($contractId)->where('client_id', $ticket->client_id)->first();
+        $to = $contractId === null ? null : Contract::withTrashed()->whereKey($contractId)->where('client_id', $ticket->client_id)->first();
         if ($contractId !== null && ! $to) {
             throw new \InvalidArgumentException("Contract {$contractId} is not a contract of this ticket's client.");
         }
-        if ($moves === [] && $to && $to->status !== ContractStatus::Active) {
+        if ($moves === [] && $to && ($to->trashed() || $to->status !== ContractStatus::Active)) {
             throw new \InvalidArgumentException("Contract {$contractId} is not an ACTIVE contract of this ticket's client.");
         }
-        if ($moves !== [] && (! $to || $to->status !== ContractStatus::Active)) {
+        if ($moves !== [] && (! $to || $to->trashed() || $to->status !== ContractStatus::Active)) {
             throw new \InvalidArgumentException('Entries can only be moved to an active contract.');
         }
         if ($moves !== [] && trim((string) $reason) === '') {

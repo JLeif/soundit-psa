@@ -146,6 +146,34 @@ class ContractMoveC3aRefusalTest extends TestCase
         $this->unchanged();
     }
 
+    public function test_same_client_trashed_active_without_moves_is_refused(): void
+    {
+        $this->b->delete();
+        $this->assertTrue($this->b->trashed());
+        $this->assertSame(\App\Enums\ContractStatus::Active, $this->b->status);
+        try {
+            app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->b->id, [], null, $this->user);
+            $this->fail('Expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame("Contract {$this->b->id} is not an ACTIVE contract of this ticket's client.", $e->getMessage());
+        }
+        $this->assertSame($this->a->id, $this->ticket->fresh()->contract_id);
+    }
+
+    public function test_same_client_trashed_active_with_moves_is_refused(): void
+    {
+        $this->b->delete();
+        $this->assertTrue($this->b->trashed());
+        $this->assertSame(\App\Enums\ContractStatus::Active, $this->b->status);
+        try {
+            app(TimeEntryContractMoveService::class)->changeTicketContract($this->ticket, $this->b->id, [['type' => 'note', 'id' => $this->note->id]], 'Synthetic', $this->user);
+            $this->fail('Expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertSame('Entries can only be moved to an active contract.', $e->getMessage());
+        }
+        $this->assertSame($this->a->id, $this->ticket->fresh()->contract_id);
+    }
+
     public function test_active_and_null_change_only_are_accepted(): void
     {
         foreach ([$this->b->id, null] as $id) {
