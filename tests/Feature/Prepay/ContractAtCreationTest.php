@@ -378,9 +378,9 @@ class ContractAtCreationTest extends TestCase
         $this->assertStringNotContainsString('goes to this contract', $html);
         $this->assertStringContainsString('chosen: "Select a contract for this ticket."', $html);
         $this->assertStringContainsString("none: 'This client has no active contracts, so the ticket is created without one.'", $html);
-        $this->assertStringContainsString('contractHint.textContent = contractHints.none;', $html);
+        $this->assertStringContainsString("contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.none;", $html);
         $this->assertStringContainsString("failed: \"Contracts could not be loaded. Leave it blank and the server uses the client's default or only active contract; with several and no default, the ticket gets none.\"", $html);
-        $this->assertStringContainsString('contractHint.textContent = contractHints.failed;', $html);
+        $this->assertStringContainsString("contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.failed;", $html);
         $this->assertStringContainsString('active contracts. Pick one now; time logged on this ticket without a contract is held as “Needs contract” until one is chosen.', $html);
         $this->assertStringNotContainsString('each time entry will ask', $html);
         $this->assertStringNotContainsString('choose when time is logged', $html);

@@ -97,7 +97,7 @@
                     <label for="contract_id" class="form-label">Contract</label>
                     <select name="contract_id" id="contract_id"
                             class="form-select @error('contract_id') is-invalid @enderror"
-                            data-old="{{ old('contract_id') }}"
+                            data-old="{{ is_scalar(old('contract_id')) ? old('contract_id') : '' }}"
                             aria-describedby="contractHint" disabled>
                         <option value="">Choose a client first</option>
                     </select>
@@ -154,7 +154,7 @@
                     <label for="due_at" class="form-label">Due Date</label>
                     <input type="datetime-local" name="due_at" id="due_at"
                            class="form-control" value="{{ old('due_at') }}">
-                    <small class="form-text text-muted">Auto-set from priority SLA</small>
+                    <small class="form-text text-muted">Optional due date override</small>
                 </div>
 
                 {{-- ITIL taxonomy SOP category (so-0ftg) — the node that carries the
@@ -187,13 +187,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const assetSelect = document.getElementById('asset_id');
     const categorySelect = document.getElementById('category');
     const subcategorySelect = document.getElementById('subcategory');
-    const prioritySelect = document.getElementById('priority');
-    const dueAtInput = document.getElementById('due_at');
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
     const contractSelect = document.getElementById('contract_id');
     const contractHint = document.getElementById('contractHint');
     const contractHintDefault = contractHint.textContent;
+    const clearedContractNotice = 'The previously submitted contract was cleared. Review the contract selection before submitting. ';
     // Hint text per picker state (review r1 context:8, contract-s1:4); the several-active-and-no-default hint is set inline in loadContracts().
     const contractHints = {
         chosen: "Select a contract for this ticket.",
@@ -240,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
             contractSelect.innerHTML = '';
             if (contracts.length === 0) {
                 contractSelect.appendChild(contractOption('', 'None: no active contracts'));
-                contractHint.textContent = contractHints.none;
+                contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.none;
                 contractSelect.disabled = true;
                 return;
             }
@@ -256,14 +255,20 @@ document.addEventListener('DOMContentLoaded', function() {
             contracts.forEach(c => contractSelect.appendChild(contractOption(String(c.id), contractLabel(c))));
             const preferred = preferId && contracts.some(c => String(c.id) === String(preferId)) ? String(preferId) : null;
             contractSelect.value = preferred || (fallback ? String(fallback.id) : '');
+            if (preferId && !preferred) {
+                contractHint.textContent = clearedContractNotice + contractHint.textContent;
+            }
             contractSelect.disabled = false;
         })
         .catch(function() {
+            if (clientSelect.value !== String(clientId)) {
+                return;
+            }
             // Leave it blank and disabled: the server then applies the client default or
             // the only active contract when the ticket is created.
             contractSelect.innerHTML = '';
             contractSelect.appendChild(contractOption('', 'Contracts could not be loaded'));
-            contractHint.textContent = contractHints.failed;
+            contractHint.textContent = (preferId ? clearedContractNotice : '') + contractHints.failed;
             contractSelect.disabled = true;
         });
     }
@@ -338,29 +343,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // Priority change → auto-set due date.
-    // NOTE: new Date() uses the browser's local timezone, not the app timezone. For a
-    // single-location MSP where browser tz == app tz this is correct. Full fix deferred.
-    function updateDueDate() {
-        const selected = prioritySelect.options[prioritySelect.selectedIndex];
-        const slaHours = parseInt(selected.dataset.slaHours || 24);
-        const due = new Date();
-        due.setHours(due.getHours() + slaHours);
-        // Format as datetime-local value
-        const pad = n => String(n).padStart(2, '0');
-        dueAtInput.value = due.getFullYear() + '-' + pad(due.getMonth() + 1) + '-' +
-                           pad(due.getDate()) + 'T' + pad(due.getHours()) + ':' + pad(due.getMinutes());
-    }
-
-    prioritySelect.addEventListener('change', updateDueDate);
-
-    // Set initial due date on page load
-    if (!dueAtInput.value) {
-        updateDueDate();
-    }
-
-    // A form re-shown after a validation error keeps its client: reload its contracts
-    // and keep the contract that was submitted.
+    // Reload contracts for the submitted client.
     if (clientSelect.value) {
         loadContracts(clientSelect.value, contractSelect.dataset.old || null);
     }
