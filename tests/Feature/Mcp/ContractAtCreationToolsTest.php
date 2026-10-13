@@ -643,12 +643,15 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertSame(2, Ticket::count());
     }
 
-    // ── C6: the description line on every ticket-creating agent schema ──────
+    // ── C6: the description line on ticket-creating tools found by the sweep ─
 
     /**
-     * Exercise each published tool with a synthetic ticket-creation payload, in
-     * an isolated transaction. Select by observed Ticket inserts, not tool name.
-     * This probes this payload, not every possible branch of every executor.
+     * Probe staff general, client-scoped, PSA-action and intake definitions
+     * (including internal staged variants), and assistant definitions, not portal tools.
+     * Select by observed Ticket inserts, not tool name, using synthetic payloads.
+     * Each probe's rows are rolled back on the default connection. Jobs are faked,
+     * so tickets created inside queued jobs would not be observed.
+     * This probes these payloads, not every possible branch of every executor.
      *
      * @return array<string, array<string, mixed>>
      */
@@ -709,7 +712,7 @@ class ContractAtCreationToolsTest extends TestCase
         return $creating;
     }
 
-    public function test_c6_every_ticket_creating_agent_schema_carries_the_contract_line(): void
+    public function test_c6_ticket_creating_tools_found_by_the_sweep_carry_the_contract_line(): void
     {
         $schemas = $this->creatingSchemas();
         $this->assertEqualsCanonicalizing(
