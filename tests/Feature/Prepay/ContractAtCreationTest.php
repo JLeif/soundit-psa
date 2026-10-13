@@ -261,14 +261,23 @@ class ContractAtCreationTest extends TestCase
         $category = TicketCategory::create(['name' => 'Synthetic Category', 'is_active' => true]);
         Ticket::factory()->create(['client_id' => $this->client->id]);
         $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        // TicketService refuses a foreign contract too, and the controller returns the same error.
+        // Here it resolves by the client rules instead, so only the request rule can refuse.
+        $service = app(TicketService::class);
+        $mock = \Mockery::mock(TicketService::class)->makePartial();
+        $mock->shouldReceive('contractForNewTicket')->andReturnUsing(fn (mixed $clientId) => $service->contractForNewTicket($clientId, null));
+        $this->app->instance(TicketService::class, $mock);
 
-        $this->actingAs($this->staff())->from(route('tickets.create'))
-            ->post(route('tickets.store'), $this->data(['contract_id' => $foreign->id, 'category_id' => $category->id]))
-            ->assertRedirect(route('tickets.create'))
-            ->assertSessionHasErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
+        $response = $this->actingAs($this->staff())->from(route('tickets.create'))
+            ->post(route('tickets.store'), $this->data(['contract_id' => $foreign->id, 'category_id' => $category->id]));
 
-        $this->assertSame(1, Ticket::withTrashed()->count());
+        $this->assertSame(
+            ['tickets' => 1, 'ticket_category_change_logs' => 0],
+            ['tickets' => Ticket::withTrashed()->count(), 'ticket_category_change_logs' => \Illuminate\Support\Facades\DB::table('ticket_category_change_logs')->count()],
+        );
         $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        $response->assertRedirect(route('tickets.create'))
+            ->assertSessionHasErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
     }
 
     public function test_web_form_refuses_an_inactive_contract_and_accepts_an_active_one(): void
