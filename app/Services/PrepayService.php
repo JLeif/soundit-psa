@@ -860,7 +860,7 @@ class PrepayService
 
             $hours = 0.0;
             if ($row) {
-                if (! $from || (int) $from->client_id !== (int) $target->client_id) {
+                if (! $this->ledgerSourceMatchesClient($from, (int) $target->client_id)) {
                     // Ruling Q5 (#4988): time stays on the old client's contracts; a missing source is refused too.
                     throw new \InvalidArgumentException("That {$type}'s ledger source contract is missing or belongs to another client; nothing moved.");
                 }
@@ -1077,13 +1077,23 @@ class PrepayService
         return null;
     }
 
-    private function hoursPrepayOrNull(?Contract $contract): ?Contract
+    public function ledgerSourceMatchesClient(?Contract $source, int $clientId): bool
+    {
+        return $source !== null && (int) $source->client_id === $clientId;
+    }
+
+    public function isHoursPrepay(?Contract $contract): bool
     {
         if (! $contract || ! $contract->has_prepay || $contract->prepay_as_amount) {
-            return null;
+            return false;
         }
 
-        return $contract;
+        return true;
+    }
+
+    private function hoursPrepayOrNull(?Contract $contract): ?Contract
+    {
+        return $this->isHoursPrepay($contract) ? $contract : null;
     }
 
     /**

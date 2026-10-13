@@ -38,11 +38,14 @@ document.addEventListener('DOMContentLoaded', function () {
         moveBtn.disabled = ticked.length === 0;
         reason.required = ticked.length > 0;
         const deltas = {};
+        const sources = {};
         rows.forEach((r) => {
             const effect = r.querySelector('.js-cc-effect');
             const from = r.dataset.contract;
             const hours = parseFloat(r.dataset.hours || '0');
             const ledgered = r.dataset.ledger === '1';
+            const sourcePrepay = r.dataset.sourcePrepay === '1';
+            sources[from] = {name: r.dataset.sourceName, balance: parseFloat(r.dataset.sourceBalance || '0')};
             const draw = parseFloat(r.dataset.drawHours || '0');
             if (r.dataset.locked === '1') {
                 return;
@@ -63,11 +66,11 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
                 return;
             }
-            if (hours > 0 && prepay[from]) {
-                effect.append(el('span', 'text-success fw-semibold', '+' + fmt(hours) + ' h'), ' back to ' + prepay[from].name);
+            if (hours > 0 && sourcePrepay) {
+                effect.append(el('span', 'text-success fw-semibold', '+' + fmt(hours) + ' h'), ' back to ' + sources[from].name);
                 deltas[from] = (deltas[from] || 0) + hours;
             }
-            if (target && (hours > 0 || !prepay[from])) {
+            if (target && hours > 0) {
                 if (effect.childNodes.length) effect.append(' · ');
                 effect.append(el('span', 'text-danger fw-semibold', '−' + fmt(hours) + ' h'), ' from ' + target.name);
                 deltas[toId] = (deltas[toId] || 0) - hours;
@@ -78,7 +81,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         totals.textContent = '';
         Object.keys(deltas).forEach((id) => {
-            const c = prepay[id];
+            const c = prepay[id] || sources[id];
             const after = c.balance + deltas[id];
             const col = el('div', 'col-md-6');
             const box = el('div', 'border rounded p-2 small');
