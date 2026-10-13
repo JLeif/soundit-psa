@@ -848,6 +848,10 @@ class PrepayService
                 throw new \InvalidArgumentException("That {$type} is already on {$target->name}.");
             }
             $from = $fromId === null ? null : $contracts->get($fromId);
+            if (! $row && $from && (int) $from->client_id !== (int) $ticket->client_id) {
+                $from = null;
+                $fromId = null;
+            }
 
             $hours = 0.0;
             if ($row) {
