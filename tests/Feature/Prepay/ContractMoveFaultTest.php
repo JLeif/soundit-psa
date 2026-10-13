@@ -225,12 +225,12 @@ class ContractMoveFaultTest extends TestCase
         $this->injectFault($note);
         $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
             'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
-        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.00 h).')
+        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.')
             ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved, but a follow-on step failed and no prepay debit was recorded for it; check the ledger before acting.');
         $this->assertSame($this->to->id, $note->fresh()->contract_id);
     }
 
-    public function test_modal_alert_fault_flashes_committed_draw_hours(): void
+    public function test_modal_alert_fault_flashes_move_count_and_fault_error(): void
     {
         $this->ticket->forceFill(['contract_id' => $this->to->id])->saveQuietly();
         $note = $this->note();
@@ -239,12 +239,12 @@ class ContractMoveFaultTest extends TestCase
         $this->app->instance(\App\Services\PrepayAlertService::class, $alerts);
         $this->actingAs($this->user)->patch(route('tickets.contract.update', $this->ticket), [
             'contract_id' => $this->to->id, 'move' => ['note:'.$note->id], 'move_reason' => 'Synthetic move',
-        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry (0.50 h).')
+        ])->assertRedirect()->assertSessionHas('success', 'Ticket contract updated. Moved 1 time entry.')
             ->assertSessionHas('error', 'Entry note #'.$note->id.': Time entry moved and its prepay debit was recorded, but a step after the debit failed; check the ledger before acting.');
         $this->assertEquals(-0.5, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->hours);
     }
 
-    public function test_modal_omits_hours_when_fault_leaves_ledger_unread(): void
+    public function test_modal_unread_ledger_fault_flashes_move_count_and_error(): void
     {
         $note = $this->note();
         $service = \Mockery::mock(PrepayService::class)->makePartial();

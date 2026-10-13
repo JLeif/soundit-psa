@@ -167,7 +167,7 @@ class MoveEntryContractTest extends TestCase
         $this->assertSame(['note', $note->id, $this->ticket->id, 'Part of the office move', $this->a->id, $this->b->id],
             [$act->changes['entry_type'], $act->changes['entry_id'], $act->changes['ticket_id'], $act->changes['reason'], $act->changes['from_contract_id'], $act->changes['to_contract_id']]);
         $system = TicketNote::where('ticket_id', $this->ticket->id)->where('note_type', 'system')->sole();
-        $this->assertStringContainsString('from Synthetic Block A to Synthetic Block B: Part of the office move', $system->body);
+        $this->assertSame("Moved note #{$note->id} time (0.75 h) from Synthetic Block A to Synthetic Block B; credited 0.75h back to Synthetic Block A and debited 0.75h from Synthetic Block B: Part of the office move", $system->body);
         $this->assertStringContainsString('0.75 h', $system->body);
         $this->assertTrue((bool) $system->is_private);
         $this->assertRecalcMatches($this->a, $this->b);
@@ -444,7 +444,7 @@ class MoveEntryContractTest extends TestCase
             $this->move($note->fresh(), $foreign);
             $this->fail('cross-client move must be refused');
         } catch (\InvalidArgumentException $e) {
-            $this->assertStringContainsString("another client's contract; it stays there", $e->getMessage());
+            $this->assertSame("That note's ledger source contract is missing or belongs to another client; nothing moved.", $e->getMessage());
         }
         $this->assertSame($ledger, $this->ledger());
     }
