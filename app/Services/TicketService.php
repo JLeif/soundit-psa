@@ -128,6 +128,8 @@ class TicketService
      * PR 3, spec §7). At verification it takes the same client rules createTicket()
      * applies, and SLA deadlines from that contract when none are set yet. A ticket
      * that already has a contract, or no client, is left as it is.
+     * First assignment intentionally lets TicketObserver schedule the client's
+     * held-debit release, as creation does; entries still unresolved stay held.
      */
     public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
     {
@@ -152,6 +154,13 @@ class TicketService
             }
         }
         $ticket->save();
+        \App\Models\ContractActivity::create([
+            'contract_id' => $contract->id,
+            'user_id' => auth()->id(),
+            'action' => 'ticket_contract_assigned_at_verification',
+            'changes' => ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id],
+            'created_at' => now(),
+        ]);
 
         return $outcome;
     }

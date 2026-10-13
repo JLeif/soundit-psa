@@ -153,12 +153,10 @@ class PrepayExpirationService
             return [];
         }
 
-        // A moved entry's detached debit and its EntryMovedOut credit cancel out and
-        // never take part in FIFO (card I3EvQKUV PR 2): the replay is the one the
-        // contract would have had if the time had never been logged on it.
+        // Rule (b): a moved debit keeps its consumption of lots already expired
+        // at the move date. Its consumption of lots still live then is freed.
+        // The move credit is not a new lot in the expiration replay.
         $txns = $contract->prepayTransactions()
-            ->whereNull('moved_ticket_note_id')
-            ->whereNull('moved_phone_call_id')
             ->orderByRaw('COALESCE(date, created_at) asc')
             ->orderBy('id')
             ->get();
@@ -169,7 +167,7 @@ class PrepayExpirationService
         $lots = [];
         foreach ($txns as $t) {
             $hours = (float) $t->hours;
-            if ($hours <= 0) {
+            if ($hours <= 0 || $t->source === PrepayTransactionSource::EntryMovedOut) {
                 continue;
             }
             $lots[] = [
@@ -194,7 +192,19 @@ class PrepayExpirationService
             if ($hours < 0 && $t->source !== PrepayTransactionSource::Expiration) {
                 $date = $t->date ?? $t->created_at;
                 if ($date->lte($asOf)) {
-                    $events[] = ['date' => $date, 'rank' => 1, 'kind' => 'debit', 'amount' => abs($hours)];
+                    $move = null;
+                    if ($t->moved_ticket_note_id !== null || $t->moved_phone_call_id !== null) {
+                        // Each move appends its credit after the detached debit. The
+                        // next matching credit also handles repeated moves back here.
+                        $move = $txns->first(fn ($credit) => $credit->id > $t->id
+                            && $credit->source === PrepayTransactionSource::EntryMovedOut
+                            && $credit->moved_ticket_note_id === $t->moved_ticket_note_id
+                            && $credit->moved_phone_call_id === $t->moved_phone_call_id);
+                    }
+                    $events[] = [
+                        'date' => $date, 'rank' => 1, 'kind' => 'debit', 'amount' => abs($hours),
+                        'moved_at' => $move ? ($move->date ?? $move->created_at) : null,
+                    ];
                 }
             }
         }
@@ -223,7 +233,10 @@ class PrepayExpirationService
                         continue;
                     }
                     $draw = min($lot['remaining'], $amount);
-                    $lots[$i]['remaining'] -= $draw;
+                    if ($event['moved_at'] === null || $event['moved_at']->gt($asOf)
+                        || ($lot['expiry'] !== null && $lot['expiry']->lte($event['moved_at']))) {
+                        $lots[$i]['remaining'] -= $draw;
+                    }
                     $amount -= $draw;
                 }
 
