@@ -91,7 +91,7 @@ class PrepayFoldedTicketsTest extends TestCase
         $this->assertTrue($logs->hasWarningThatContains('[Prepay] Held debits release failed'));
         $record = collect($logs->getRecords())->first(fn ($r) => $r->message === '[Prepay] Held debits release failed');
         $this->assertSame($this->client->id, $record->context['client_id']);
-        $this->assertSame('synthetic lock wait timeout', $record->context['error']);
+        $this->assertSame(\RuntimeException::class, $record->context['exception_class']);
     }
 
     /**
