@@ -252,6 +252,8 @@ class TimeEntryContractMoveService
             return ['error' => 'entry_type (note|call), positive integer entry_id and contract_id, and a reason (1-800 characters) are required.'];
         }
 
+        // Read before the entry, so a move written after the entry read sorts above the watermark (movedSince()).
+        $watermark = \App\Models\ContractActivity::max('id') ?? 0;
         $entry = $type === 'note' ? TicketNote::find($id) : PhoneCall::find($id);
         $ticket = $entry?->ticket;
         if (! $entry || ! $ticket) {
@@ -297,7 +299,7 @@ class TimeEntryContractMoveService
             ['content_hash' => $hash, 'state' => 'pending', 'drafted_by' => $actor],
             ['entry_type' => $type, 'entry_id' => $id, 'ticket_id' => $ticket->id, 'from_contract_id' => $from,
                 'to_contract_id' => $contractId, 'reason' => trim($reason),
-                'activity_watermark' => \App\Models\ContractActivity::max('id') ?? 0],
+                'activity_watermark' => $watermark],
         );
 
         $draw = $this->stagedDrawHours($entry, $type, $contractId);

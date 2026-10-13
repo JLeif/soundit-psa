@@ -116,6 +116,33 @@ class ContractC9Test extends TestCase
         $this->assertSame($proposal->from_contract_id, $note->fresh()->contract_id);
     }
 
+    public function test_round_trip_move_during_staging_stales_proposal(): void
+    {
+        [$note, $target, $by] = $this->fixture();
+        $source = Contract::findOrFail($note->contract_id);
+        $injected = false;
+        $dispatcher = DB::connection()->getEventDispatcher();
+        DB::connection()->setEventDispatcher(clone $dispatcher);
+        DB::listen(function ($query) use ($note, $target, $source, &$injected) {
+            $sql = str_replace(['"', '`'], '', $query->sql);
+            if (! $injected && str_starts_with($sql, 'select * from ticket_notes')) {
+                $injected = true;
+                $this->activity($note, $target);
+                $this->activity($note, $source);
+            }
+        });
+        try {
+            $proposal = $this->stage($note, $target);
+        } finally {
+            DB::connection()->setEventDispatcher($dispatcher);
+        }
+        $this->assertTrue($injected);
+        $result = app(TimeEntryContractMoveService::class)->approve($proposal, $by);
+        $this->assertArrayHasKey('error', $result);
+        $this->assertSame('stale', $proposal->fresh()->state);
+        $this->assertSame($source->id, $note->fresh()->contract_id);
+    }
+
     public function test_non_pending_duplicates_are_allowed(): void
     {
         [$note, $target] = $this->fixture();
