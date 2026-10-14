@@ -123,6 +123,17 @@ class ContractAtCreationToolsTest extends TestCase
     {
         $this->assertSame(0, Ticket::withTrashed()->count(), 'no ticket row');
         $this->assertSame(0, TechnicianActionLog::count(), 'no audit row');
+        $this->assertDatabaseCount('ticket_notes', 0);
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        $this->assertDatabaseCount('contract_activities', 0);
+        Bus::assertNotDispatched(\App\Jobs\SendTicketNotification::class);
+        foreach (Email::all() as $email) {
+            $this->assertNull($email->ticket_id);
+        }
+        foreach (PhoneCall::all() as $call) {
+            $this->assertNull($call->ticket_id);
+            $this->assertNull($call->contract_id);
+        }
     }
 
     // ── C1: another client's contract is refused on every creating surface ───
@@ -590,21 +601,64 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertStringNotContainsString('contract', json_encode($tool));
     }
 
-    // ── C6: the description line on every ticket-creating agent schema ──────
+    public function test_portal_mcp_ignores_a_smuggled_contract_id(): void
+    {
+        $default = $this->contract('Synthetic Default');
+        $smuggled = $this->contract('Synthetic Smuggled');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $default->id]);
+        $person = \App\Models\Person::create([
+            'client_id' => $this->client->id, 'person_type' => \App\Enums\PersonType::User,
+            'first_name' => 'Synthetic', 'last_name' => 'Portal', 'email' => 'portal@example.test',
+        ]);
+        $executor = new \App\Services\Mcp\PortalMcpToolExecutor($person);
+
+        foreach ([[], ['contract_id' => $smuggled->id]] as $extra) {
+            $result = $executor->execute('create_ticket', $extra + [
+                'subject' => 'Synthetic portal request', 'body' => 'Synthetic portal body',
+            ]);
+            $this->assertTrue($result['success'] ?? false, json_encode($result));
+            $this->assertSame($default->id, Ticket::findOrFail($result['ticket_id'])->contract_id);
+        }
+        $this->assertSame(2, Ticket::count());
+    }
+
+    public function test_portal_web_ignores_a_smuggled_contract_id(): void
+    {
+        Setting::setValue('portal_enabled', '1');
+        $default = $this->contract('Synthetic Default');
+        $smuggled = $this->contract('Synthetic Smuggled');
+        Client::whereKey($this->client->id)->update(['default_contract_id' => $default->id]);
+        $person = \App\Models\Person::create([
+            'client_id' => $this->client->id, 'is_active' => true, 'portal_enabled' => true,
+            'person_type' => \App\Enums\PersonType::User,
+            'first_name' => 'Synthetic', 'last_name' => 'Portal', 'email' => 'portal@example.test',
+        ]);
+
+        foreach ([[], ['contract_id' => $smuggled->id]] as $extra) {
+            $this->actingAs($person, 'portal')->post(route('portal.tickets.store'), $extra + [
+                'subject' => 'Synthetic portal request', 'description' => 'Synthetic portal body',
+            ])->assertSessionHasNoErrors()->assertRedirect();
+            $this->assertSame($default->id, Ticket::latest('id')->firstOrFail()->contract_id);
+        }
+        $this->assertSame(2, Ticket::count());
+    }
+
+    // ── C6: the description line on ticket-creating tools found by the sweep ─
 
     /**
-     * Every agent-facing tool that creates a ticket: names matching create_ticket
-     * (create_ticket, create_ticket_from_*) and their staged twins, across the staff
-     * MCP registry and the assistant definitions. A tool added later under such a name
-     * without the line fails here. create_ticket_category creates a taxonomy node.
+     * Probe staff general, client-scoped, PSA-action and intake definitions
+     * (including internal staged variants), and assistant definitions, not portal tools.
+     * Select by observed Ticket inserts, not tool name, using synthetic payloads.
+     * Each probe's rows are rolled back on the default connection. Jobs are faked,
+     * so tickets created inside queued jobs would not be observed.
+     * This probes these payloads, not every possible branch of every executor.
      *
      * @return array<string, array<string, mixed>>
      */
     private function creatingSchemas(): array
     {
         $tools = [];
-        // The full schemas the staff MCP publishes (McpToolRegistry::groups() keeps only
-        // names and descriptions), plus every staged twin.
+        // Use the live schema assembly, not the grant catalog's descriptions.
         $staff = array_merge(
             \App\Support\McpToolSurface::liveGeneralToolDefinitions(),
             \App\Support\McpToolSurface::liveClientScopedToolDefinitions(),
@@ -618,10 +672,47 @@ class ContractAtCreationToolsTest extends TestCase
             $tools['assistant:'.$tool['name']] = $tool;
         }
 
-        return array_filter($tools, fn (array $t, string $k) => preg_match('/(^|_)create_ticket(_from_[a-z]+)?$/', $t['name']) === 1, ARRAY_FILTER_USE_BOTH);
+        $creating = [];
+        $actor = User::factory()->create(['name' => 'Synthetic Sweep']);
+        foreach ($tools as $key => $tool) {
+            \Illuminate\Support\Facades\DB::beginTransaction();
+            try {
+                $email = $this->email();
+                $call = $this->phoneCall();
+                $schema = $tool['input_schema'];
+                $values = $this->createArgs([
+                    'email_id' => $email->id, 'phone_call_id' => $call->id,
+                ]);
+                $input = array_intersect_key($values, (array) $schema['properties']);
+                foreach ($schema['required'] ?? [] as $field) {
+                    $property = $schema['properties'][$field];
+                    $input[$field] = $values[$field] ?? ($property['enum'][0] ?? match ($property['type'] ?? 'string') {
+                        'integer', 'number' => 1,
+                        'boolean' => false,
+                        'array' => [],
+                        'object' => new \stdClass,
+                        default => 'Synthetic sweep',
+                    });
+                }
+                $before = Ticket::withTrashed()->count();
+                if (str_starts_with($key, 'staff:')) {
+                    $this->callTool([$tool['name']], $tool['name'], $input + ['client_id' => $this->client->id]);
+                } else {
+                    (new AssistantToolExecutor(clientId: $this->client->id, userId: $actor->id))
+                        ->execute($tool['name'], $input);
+                }
+                if (Ticket::withTrashed()->count() > $before) {
+                    $creating[$key] = $tool;
+                }
+            } finally {
+                \Illuminate\Support\Facades\DB::rollBack();
+            }
+        }
+
+        return $creating;
     }
 
-    public function test_c6_every_ticket_creating_agent_schema_carries_the_contract_line(): void
+    public function test_c6_ticket_creating_tools_found_by_the_sweep_carry_the_contract_line(): void
     {
         $schemas = $this->creatingSchemas();
         $this->assertEqualsCanonicalizing(

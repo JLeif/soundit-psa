@@ -10,6 +10,7 @@ use App\Models\Contract;
 use App\Models\PhoneCall;
 use App\Models\Setting;
 use App\Models\Ticket;
+use App\Models\TicketCategory;
 use App\Models\User;
 use App\Services\ContactIntake\StaffWorkflow;
 use App\Services\ContactIntake\SubmissionLedger;
@@ -257,14 +258,26 @@ class ContractAtCreationTest extends TestCase
         $other = Client::create(['name' => 'Synthetic Other']);
         $foreign = $this->contract('Synthetic Foreign', [], $other);
         $this->contract('Synthetic Own');
+        $category = TicketCategory::create(['name' => 'Synthetic Category', 'is_active' => true]);
+        Ticket::factory()->create(['client_id' => $this->client->id]);
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        // TicketService refuses a foreign contract too, and the controller returns the same error.
+        // Here it resolves by the client rules instead, so only the request rule can refuse.
+        $service = app(TicketService::class);
+        $mock = \Mockery::mock(TicketService::class)->makePartial();
+        $mock->shouldReceive('contractForNewTicket')->andReturnUsing(fn (mixed $clientId) => $service->contractForNewTicket($clientId, null));
+        $this->app->instance(TicketService::class, $mock);
 
-        $this->actingAs($this->staff())->from(route('tickets.create'))
-            ->post(route('tickets.store'), $this->data(['contract_id' => $foreign->id]))
-            ->assertRedirect(route('tickets.create'))
+        $response = $this->actingAs($this->staff())->from(route('tickets.create'))
+            ->post(route('tickets.store'), $this->data(['contract_id' => $foreign->id, 'category_id' => $category->id]));
+
+        $this->assertSame(
+            ['tickets' => 1, 'ticket_category_change_logs' => 0],
+            ['tickets' => Ticket::withTrashed()->count(), 'ticket_category_change_logs' => \Illuminate\Support\Facades\DB::table('ticket_category_change_logs')->count()],
+        );
+        $this->assertDatabaseCount('ticket_category_change_logs', 0);
+        $response->assertRedirect(route('tickets.create'))
             ->assertSessionHasErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
-
-        $this->assertSame(0, Ticket::withTrashed()->count());
-        $this->assertSame(0, \App\Models\TechnicianActionLog::count());
     }
 
     public function test_web_form_refuses_an_inactive_contract_and_accepts_an_active_one(): void
