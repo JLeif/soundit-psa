@@ -110,7 +110,7 @@ class ApplicableSopDeliveryTest extends TestCase
         $result = $this->detail($ticket);
 
         $this->assertSame(
-            ['no_category: set category_id via update_ticket (list_ticket_categories for leaves)'],
+            ['no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, set category_id via update_ticket (list_ticket_categories for leaves)'],
             $result['warnings'] ?? null,
         );
     }
@@ -132,7 +132,7 @@ class ApplicableSopDeliveryTest extends TestCase
 
         $this->assertArrayNotHasKey('error', $result);
         $this->assertSame(
-            ['no_category: set category_id via update_ticket (list_ticket_categories for leaves)'],
+            ['no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, set category_id via update_ticket (list_ticket_categories for leaves)'],
             $result['warnings'] ?? null,
         );
     }

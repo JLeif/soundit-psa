@@ -671,8 +671,13 @@ class AssistantToolExecutor
         return $out;
     }
 
-    /** Top-level get_ticket_detail warning for a ticket with no taxonomy category (nQGaatw6). */
-    public const NO_CATEGORY_WARNING = 'no_category: set category_id via update_ticket (list_ticket_categories for leaves)';
+    /**
+     * Top-level get_ticket_detail warning for a ticket with no taxonomy category (nQGaatw6).
+     * The remedy is conditional because this read is also served where update_ticket and
+     * list_ticket_categories are not offered: the in-app assistant (AssistantToolDefinitions),
+     * the Teams read-only surface, and MCP staff tokens without the grant.
+     */
+    public const NO_CATEGORY_WARNING = 'no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, set category_id via update_ticket (list_ticket_categories for leaves)';
 
     /**
      * The applicable_sop block (so-0ftg Part 3, psa-id3rt): the ticket's
