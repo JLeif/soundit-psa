@@ -248,6 +248,32 @@ class ContractC10Test extends TestCase
         $this->assertSame(0, PrepayTransaction::count());
     }
 
+    public function test_r3_editing_a_held_pick_keeps_it_through_verification(): void
+    {
+        [$ticket, $default] = $this->linkedCall();
+        $picked = $default->replicate();
+        $picked->name = 'Synthetic picked';
+        $picked->saveQuietly();
+        $user = User::factory()->admin()->create();
+        $this->actingAs($user)->post(route('tickets.notes.store', $ticket), [
+            'body' => 'Synthetic picked time', 'note_type' => 'note', 'time' => '1h', 'is_billable' => '1', 'contract_id' => $picked->id,
+        ])->assertSessionHasNoErrors();
+        $note = $ticket->notes()->where('body', 'Synthetic picked time')->sole();
+        $this->assertSame($picked->id, $note->contract_id);
+
+        $this->actingAs($user)->put(route('tickets.notes.update', [$ticket, $note]), [
+            'body' => 'Synthetic picked time edited', 'note_type' => 'note', 'time' => '1h', 'is_billable' => '1', 'contract_id' => $picked->id,
+        ])->assertSessionHasNoErrors();
+        $this->assertSame($picked->id, $note->fresh()->contract_id);
+        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertSame(0, PrepayTransaction::where('ticket_note_id', $note->id)->count());
+
+        $this->verify($ticket);
+        $this->assertSame($picked->id, PrepayTransaction::where('ticket_note_id', $note->id)->sole()->contract_id);
+        $this->assertSame([$picked->id, null], [$note->fresh()->contract_id, $note->fresh()->contract_held_at]);
+        $this->assertEquals(9, $picked->fresh()->prepay_balance);
+    }
+
     public function test_r3_double_release_skips_ledgered_entries(): void
     {
         [$ticket, $contract, $call] = $this->linkedCall();

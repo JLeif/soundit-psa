@@ -225,8 +225,9 @@ class TicketNoteController extends Controller
                 $contractId = $keptStamp;
             } else {
                 // An unchanged stamp that no longer validates (expired, deleted, ticket moved)
-                // resolves afresh, as the debit path does, rather than refusing the field.
-                if ($submitted !== null && $submitted === $currentStamp && ! $this->contractResolver->forEntry($ticket, $submitted)->isResolved()) {
+                // resolves afresh, as the debit path does, rather than refusing the field. A valid
+                // stamp on a ticket waiting for verification is kept (card VLyhWACq, C10).
+                if ($submitted !== null && $submitted === $currentStamp && $this->contractResolver->forEntry($ticket, $submitted)->status === ContractResolution::INVALID_PICK) {
                     $contractId = null;
                 }
                 if ($refusal = $this->contractRefusal($ticket, $contractId)) {
