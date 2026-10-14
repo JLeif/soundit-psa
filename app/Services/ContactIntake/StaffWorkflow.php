@@ -69,6 +69,23 @@ final class StaffWorkflow
                         // Card I3EvQKUV PR 3: a contact-intake ticket gets its contract (and that
                         // contract's SLA) only now that staff verified it.
                         $outcome = app(\App\Services\TicketService::class)->assignContractAtVerification($ticket);
+                        if ($ticket->client_id !== null) {
+                            $clientId = (int) $ticket->client_id;
+                            DB::afterCommit(function () use ($clientId, $ticket) {
+                                app(\App\Services\PrepayService::class)->releaseHeldDebits($clientId);
+                                $ticket = $ticket->fresh();
+                                if ($ticket && app(\App\Services\ContractResolver::class)->forEntry($ticket)->status === \App\Services\ContractResolution::NONE) {
+                                    $ticket->notes()->whereNotNull('contract_held_at')
+                                        ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('prepay_transactions')
+                                            ->whereColumn('prepay_transactions.ticket_note_id', 'ticket_notes.id'))
+                                        ->update(['contract_held_at' => null]);
+                                    $ticket->phoneCalls()->whereNotNull('contract_held_at')
+                                        ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('prepay_transactions')
+                                            ->whereColumn('prepay_transactions.phone_call_id', 'phone_calls.id'))
+                                        ->update(['contract_held_at' => null]);
+                                }
+                            });
+                        }
                         $body = match ($outcome?->rule) {
                             'client_default' => "Contract {$outcome->contract->name} assigned at verification: it is the client's default contract.",
                             'only_active' => "Contract {$outcome->contract->name} assigned at verification: it is the client's only active contract.",

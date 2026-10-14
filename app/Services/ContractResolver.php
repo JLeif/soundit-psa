@@ -24,6 +24,8 @@ use App\Models\Ticket;
  *  5. several active contracts and no default: AMBIGUOUS (the caller asks a
  *     person, or holds the debit under "Needs contract": Q7); zero: NONE.
  *
+ * Unverified contact intake: a picked contract is still checked and AMBIGUOUS is still returned, but an answer that would resolve is NONE until staff verify (card VLyhWACq, C10).
+ *
  * There is no draw order: nothing here picks between several contracts.
  * "Active" is ContractStatus::Active and not soft-deleted, the one definition
  * Contract::scopeActive() already uses.
@@ -40,32 +42,28 @@ class ContractResolver
 
     public function forEntry(Ticket $ticket, ?int $pickedContractId = null): ContractResolution
     {
-        if ($ticket->isUnverifiedContactIntake()) {
-            return ContractResolution::none();
-        }
-
         $clientId = $ticket->client_id === null ? null : (int) $ticket->client_id;
 
         if ($pickedContractId !== null) {
             $picked = $this->activeContractOf($clientId, $pickedContractId);
 
-            return $picked
+            $resolution = $picked
                 ? ContractResolution::resolved($picked, self::RULE_PICKED)
                 : ContractResolution::invalidPick();
+        } else {
+            $ticketContract = $ticket->contract_id === null
+                ? null
+                : $this->activeContractOf($clientId, (int) $ticket->contract_id);
+            $resolution = $ticketContract
+                ? ContractResolution::resolved($ticketContract, self::RULE_TICKET)
+                : ($clientId === null ? ContractResolution::none() : $this->forClient($clientId));
         }
 
-        if ($ticket->contract_id !== null) {
-            $ticketContract = $this->activeContractOf($clientId, (int) $ticket->contract_id);
-            if ($ticketContract) {
-                return ContractResolution::resolved($ticketContract, self::RULE_TICKET);
-            }
-        }
-
-        if ($clientId === null) {
+        if ($ticket->isUnverifiedContactIntake() && $resolution->isResolved()) {
             return ContractResolution::none();
         }
 
-        return $this->forClient($clientId);
+        return $resolution;
     }
 
     /**

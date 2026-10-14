@@ -182,6 +182,98 @@ class ContractC10Test extends TestCase
         $this->assertSame(0, $this->verificationNotes($ticket)->count());
     }
 
+    public function test_r3_already_assigned_verification_releases_both_entries(): void
+    {
+        [$ticket, $contract, $call] = $this->linkedCall();
+        $ticket->updateQuietly(['contract_id' => $contract->id]);
+        $note = TicketNote::forceCreate(['ticket_id' => $ticket->id, 'body' => 'Synthetic held time', 'is_billable' => true, 'time_minutes' => 60, 'noted_at' => now()]);
+        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertNotNull($call->fresh()->contract_held_at);
+        $this->assertSame(0, PrepayTransaction::count());
+        $this->verify($ticket);
+        foreach (['ticket_note_id' => $note, 'phone_call_id' => $call] as $key => $entry) {
+            $this->assertSame(1, PrepayTransaction::where($key, $entry->id)->count());
+            $this->assertSame($contract->id, PrepayTransaction::where($key, $entry->id)->sole()->contract_id);
+            $this->assertNull($entry->fresh()->contract_held_at);
+        }
+    }
+
+    public function test_r3_none_verification_clears_without_later_debit(): void
+    {
+        [$ticket, $contract, $call] = $this->linkedCall();
+        $note = TicketNote::forceCreate(['ticket_id' => $ticket->id, 'body' => 'Synthetic held time', 'is_billable' => true, 'time_minutes' => 60, 'noted_at' => now()]);
+        $contract->updateQuietly(['status' => 'expired']);
+        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertNotNull($call->fresh()->contract_held_at);
+        $this->verify($ticket);
+        $this->assertNull($note->fresh()->contract_held_at);
+        $this->assertNull($call->fresh()->contract_held_at);
+        $contract->updateQuietly(['status' => 'active']);
+        app(\App\Services\PrepayService::class)->releaseHeldDebits($ticket->client_id);
+        $this->assertSame(0, PrepayTransaction::count());
+    }
+
+    public function test_r3_unverified_note_form_preserves_refusals(): void
+    {
+        [$ticket, $contract] = $this->linkedCall();
+        $user = User::factory()->admin()->create();
+        $foreign = $contract->replicate();
+        $foreign->client_id = \App\Models\Client::factory()->create()->id;
+        $foreign->saveQuietly();
+        $expired = $contract->replicate();
+        $expired->status = 'expired';
+        $expired->saveQuietly();
+        foreach ([$foreign, $expired] as $pick) {
+            $this->actingAs($user)->post(route('tickets.notes.store', $ticket), [
+                'body' => 'Synthetic refused time', 'note_type' => 'note', 'time' => '1h', 'is_billable' => '1', 'contract_id' => $pick->id,
+            ])->assertSessionHasErrors(['contract_id' => "Choose one of this client's active contracts."]);
+        }
+        $ticket->client->forceFill(['default_contract_id' => null])->saveQuietly();
+        $other = $contract->replicate();
+        $other->saveQuietly();
+        $this->actingAs($user)->post(route('tickets.notes.store', $ticket), [
+            'body' => 'Synthetic ambiguous time', 'note_type' => 'note', 'time' => '1h', 'is_billable' => '1',
+        ])->assertSessionHasErrors(['contract_id' => 'This client has several active contracts and no default. Choose the contract this time belongs to.']);
+        $this->assertSame(0, PrepayTransaction::count());
+    }
+
+    public function test_r3_valid_pick_is_held_without_debit(): void
+    {
+        [$ticket, $contract] = $this->linkedCall();
+        $this->actingAs(User::factory()->admin()->create())->post(route('tickets.notes.store', $ticket), [
+            'body' => 'Synthetic valid picked time', 'note_type' => 'note', 'time' => '1h', 'is_billable' => '1', 'contract_id' => $contract->id,
+        ])->assertSessionHasNoErrors();
+        $note = $ticket->notes()->where('body', 'Synthetic valid picked time')->sole();
+        $this->assertNotNull($note->contract_held_at);
+        $this->assertSame(0, PrepayTransaction::count());
+    }
+
+    public function test_r3_double_release_skips_ledgered_entries(): void
+    {
+        [$ticket, $contract, $call] = $this->linkedCall();
+        $note = TicketNote::forceCreate(['ticket_id' => $ticket->id, 'body' => 'Synthetic held time', 'is_billable' => true, 'time_minutes' => 60, 'noted_at' => now()]);
+        $ticket->forceFill(['contact_intake_verified_at' => now()])->saveQuietly();
+        $service = app(\App\Services\PrepayService::class);
+        $this->assertSame(2, $service->releaseHeldDebits($ticket->client_id));
+        $this->assertSame(0, $service->releaseHeldDebits($ticket->client_id));
+        foreach (['ticket_note_id' => $note, 'phone_call_id' => $call] as $key => $entry) {
+            $this->assertSame(1, PrepayTransaction::where($key, $entry->id)->count());
+            $entry->forceFill(['contract_held_at' => now()])->saveQuietly();
+        }
+        $guard = \Mockery::mock(\App\Services\PrepayService::class)->makePartial();
+        $attempts = 0;
+        $skip = function () use (&$attempts) {
+            $attempts++;
+
+            return null;
+        };
+        $guard->shouldReceive('debitFromTicketNote')->andReturnUsing($skip);
+        $guard->shouldReceive('debitFromPhoneCall')->andReturnUsing($skip);
+        $this->assertSame(0, $guard->releaseHeldDebits($ticket->client_id));
+        $this->assertSame(0, $attempts);
+        $this->assertSame(2, PrepayTransaction::count());
+    }
+
     private function verificationNotes(Ticket $ticket)
     {
         return $ticket->notes()->where('note_type', \App\Enums\NoteType::System)->where('body', 'like', '%at verification:%');
