@@ -677,7 +677,7 @@ class AssistantToolExecutor
      * list_ticket_categories are not offered: the in-app assistant (AssistantToolDefinitions),
      * the Teams read-only surface, and MCP staff tokens without the grant.
      */
-    public const NO_CATEGORY_WARNING = 'no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, set category_id via update_ticket (list_ticket_categories for leaves)';
+    public const NO_CATEGORY_WARNING = 'no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, call list_ticket_categories without include_inactive and set category_id via update_ticket to one of the active node ids it returns';
 
     /**
      * The applicable_sop block (so-0ftg Part 3, psa-id3rt): the ticket's
