@@ -16,6 +16,23 @@ class TransferLockOrderTest extends TestCase
 
     public function test_reverse_transfer_selects_contracts_ascending_before_writes(): void
     {
+        if (DB::getDriverName() !== 'sqlite') {
+            $this->markTestSkipped('SQLite lock annotation assertion.');
+        }
+        $this->assertTransferLockOrder(true);
+    }
+
+    public function test_reverse_transfer_native_mariadb(): void
+    {
+        if (DB::getDriverName() !== 'mariadb') {
+            $this->markTestSkipped('Requires the MariaDB 10.11 lane for #5009 native locks.');
+        }
+        $this->assertSame('mariadb', DB::getDriverName());
+        $this->assertTransferLockOrder(false);
+    }
+
+    private function assertTransferLockOrder(bool $annotateSqlite): void
+    {
         Http::fake();
         Http::preventStrayRequests();
         $client = Client::create(['name' => 'Synthetic transfer client']);
@@ -24,11 +41,6 @@ class TransferLockOrderTest extends TestCase
             'prepay_balance' => 10, 'prepay_used' => 0, 'prepay_as_amount' => false];
         $low = Contract::create($attributes);
         $high = Contract::create($attributes);
-        $driver = DB::getDriverName();
-        $this->assertContains($driver, ['sqlite', 'mariadb']);
-        if (getenv('DB_CONNECTION') === 'mariadb') {
-            $this->assertSame('mariadb', $driver);
-        }
         $originalGrammar = DB::connection()->getQueryGrammar();
         $grammar = new class(DB::connection()) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
         {
@@ -43,7 +55,7 @@ class TransferLockOrderTest extends TestCase
                 return parent::compileSelect($query);
             }
         };
-        if ($driver === 'sqlite') {
+        if ($annotateSqlite) {
             DB::connection()->setQueryGrammar($grammar);
         }
         $queries = [];
@@ -53,7 +65,7 @@ class TransferLockOrderTest extends TestCase
 
         app(PrepayService::class)->transfer($high, $low, 2, 'Synthetic transfer');
 
-        if ($driver === 'sqlite') {
+        if ($annotateSqlite) {
             $this->assertSame(true, $grammar->contractLocks[0] ?? null);
         } else {
             $this->assertStringEndsWith('for update', $queries[0][0]);

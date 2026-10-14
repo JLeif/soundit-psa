@@ -515,27 +515,37 @@ class MoveEntryContractTest extends TestCase
     /** M4: entry -> ledger row -> contracts ascending by id, in both move directions. */
     public function test_m4_lock_order_entry_then_row_then_contracts_ascending(): void
     {
+        if (DB::getDriverName() !== 'sqlite') {
+            $this->markTestSkipped('SQLite lock annotation assertion.');
+        }
+        DB::connection()->setQueryGrammar(new class(DB::connection()) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
+        {
+            protected function compileLock(\Illuminate\Database\Query\Builder $query, $value)
+            {
+                return $value ? '/* requested update lock */' : '';
+            }
+        });
+        $this->assertMoveLockOrder('/* requested update lock */');
+    }
+
+    public function test_m4_lock_order_native_mariadb(): void
+    {
+        if (DB::getDriverName() !== 'mariadb') {
+            $this->markTestSkipped('Requires the MariaDB 10.11 lane for #5009 native locks.');
+        }
+        $this->assertSame('mariadb', DB::getDriverName());
+        $this->assertStringContainsString('10.11.', DB::selectOne('select version() as version')->version);
+        $this->assertMoveLockOrder('for update');
+    }
+
+    private function assertMoveLockOrder(string $lockSuffix): void
+    {
         $note = $this->note(45);
         $this->ticket->update(['contract_id' => $this->b->id]);
         $oppositeNote = $this->note(30);
-        $driver = DB::getDriverName();
-        $this->assertContains($driver, ['sqlite', 'mariadb']);
-        if (getenv('DB_CONNECTION') === 'mariadb') {
-            $this->assertSame('mariadb', $driver);
-            $this->assertStringContainsString('10.11.', DB::selectOne('select version() as version')->version);
-        }
-        if ($driver === 'sqlite') {
-            DB::connection()->setQueryGrammar(new class(DB::connection()) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
-            {
-                protected function compileLock(\Illuminate\Database\Query\Builder $query, $value)
-                {
-                    return $value ? '/* requested update lock */' : '';
-                }
-            });
-        }
         $locks = [];
-        DB::listen(function ($q) use (&$locks) {
-            if (str_contains($q->sql, '/* requested update lock */') || str_ends_with($q->sql, 'for update')) {
+        DB::listen(function ($q) use (&$locks, $lockSuffix) {
+            if (str_ends_with($q->sql, $lockSuffix)) {
                 $locks[] = [$q->sql, $q->bindings];
             }
         });
