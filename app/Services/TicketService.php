@@ -153,6 +153,7 @@ class TicketService
         }
 
         $ticket->contract_id = $contract->id;
+        // legacy rows without opened_at: SLA from now()
         $slaStart = $ticket->opened_at ?? now();
         $priority = $ticket->priority instanceof TicketPriority ? $ticket->priority : TicketPriority::tryFrom((string) $ticket->priority);
         if ($priority !== null) {
