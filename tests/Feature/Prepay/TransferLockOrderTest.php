@@ -25,9 +25,8 @@ class TransferLockOrderTest extends TestCase
     public function test_reverse_transfer_native_mariadb(): void
     {
         if (DB::getDriverName() !== 'mariadb') {
-            $this->markTestSkipped('Requires the MariaDB 10.11 lane for #5009 native locks.');
+            $this->markTestSkipped('Native FOR UPDATE order assertion; runs only on a mariadb connection (#5009).');
         }
-        $this->assertSame('mariadb', DB::getDriverName());
         $this->assertTransferLockOrder(false);
     }
 

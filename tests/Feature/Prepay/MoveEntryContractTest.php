@@ -531,10 +531,8 @@ class MoveEntryContractTest extends TestCase
     public function test_m4_lock_order_native_mariadb(): void
     {
         if (DB::getDriverName() !== 'mariadb') {
-            $this->markTestSkipped('Requires the MariaDB 10.11 lane for #5009 native locks.');
+            $this->markTestSkipped('Native FOR UPDATE order assertion; runs only on a mariadb connection (#5009).');
         }
-        $this->assertSame('mariadb', DB::getDriverName());
-        $this->assertStringContainsString('10.11.', DB::selectOne('select version() as version')->version);
         $this->assertMoveLockOrder('for update');
     }
 
@@ -561,6 +559,17 @@ class MoveEntryContractTest extends TestCase
             $this->assertSame([$this->a->id, $this->b->id], array_map('intval', $locks[2][1]), 'both contracts in one ascending locking read');
             $this->assertSame($target->id, $entry->fresh()->contract_id);
         }
+        $this->assertSame($this->b->id, $note->fresh()->contract_id);
+        $locks = [];
+        $this->move($note->fresh(), $this->a);
+        $this->assertGreaterThanOrEqual(3, count($locks));
+        $sql = array_map(fn ($lock) => str_replace('`', '"', $lock[0]), $locks);
+        $this->assertStringStartsWith('select * from "ticket_notes"', $sql[0]);
+        $this->assertStringStartsWith('select * from "prepay_transactions"', $sql[1]);
+        $this->assertStringStartsWith('select * from "contracts"', $sql[2]);
+        $this->assertStringContainsString('order by "id" asc', $sql[2]);
+        $this->assertSame([$this->a->id, $this->b->id], array_map('intval', $locks[2][1]), 'both contracts in one ascending locking read');
+        $this->assertSame($this->a->id, $note->fresh()->contract_id);
         $this->assertRecalcMatches($this->a, $this->b);
     }
 }
