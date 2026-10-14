@@ -181,7 +181,7 @@
                                     @endif
                                     {{-- A held call's prepay debit waits for the client's contract to be settled (card I3EvQKUV r2) --}}
                                     @if($item->contract_held_at && $item->is_billable && $item->effectiveDurationSeconds())
-                                        <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Set a default contract or this ticket's contract.">
+                                        <span class="badge bg-warning text-dark small" title="{{ "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification)." }}">
                                             <i class="bi bi-exclamation-circle me-1"></i>Needs contract
                                         </span>
                                     @endif
@@ -387,7 +387,7 @@
                                         @endif
                                         {{-- A held note can keep a stamp that no longer validates; it is not billed to it --}}
                                         @if($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
-                                            <span class="badge bg-warning text-dark small" title="Not debited: the client had several active contracts and no default. Edit the note to choose its contract.">
+                                            <span class="badge bg-warning text-dark small" title="{{ "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification). Verify the ticket, or edit the note to choose its contract." }}">
                                                 <i class="bi bi-exclamation-circle me-1"></i>Needs contract
                                             </span>
                                         @elseif($note->contract_id && $note->contract_id !== $ticket->contract_id)

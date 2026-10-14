@@ -40,6 +40,10 @@ class ContractResolver
 
     public function forEntry(Ticket $ticket, ?int $pickedContractId = null): ContractResolution
     {
+        if ($ticket->isUnverifiedContactIntake()) {
+            return ContractResolution::none();
+        }
+
         $clientId = $ticket->client_id === null ? null : (int) $ticket->client_id;
 
         if ($pickedContractId !== null) {

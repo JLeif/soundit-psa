@@ -134,32 +134,44 @@ class TicketService
      */
     public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
     {
-        if ($ticket->contract_id !== null || $ticket->client_id === null) {
-            return null;
+        $alreadyAssigned = $ticket->contract_id !== null;
+        if ($alreadyAssigned) {
+            if ($ticket->due_at !== null || $ticket->response_due_at !== null) {
+                return null;
+            }
+            $outcome = null;
+            $contract = $ticket->contract;
+        } else {
+            if ($ticket->client_id === null) {
+                return null;
+            }
+            $outcome = $this->contractForNewTicket($ticket->client_id, null);
+            $contract = $outcome->contract;
         }
-
-        $outcome = $this->contractForNewTicket($ticket->client_id, null);
-        $contract = $outcome->contract;
         if ($contract === null) {
             return $outcome;
         }
 
         $ticket->contract_id = $contract->id;
+        $slaStart = $ticket->opened_at ?? now();
         $priority = $ticket->priority instanceof TicketPriority ? $ticket->priority : TicketPriority::tryFrom((string) $ticket->priority);
         if ($priority !== null) {
             if ($ticket->due_at === null && ($hours = $contract->slaResolutionHours($priority))) {
-                $ticket->due_at = now()->addHours($hours);
+                $ticket->due_at = $slaStart->copy()->addHours($hours);
             }
             if ($ticket->response_due_at === null && ($hours = $contract->slaResponseHours($priority))) {
-                $ticket->response_due_at = now()->addHours($hours);
+                $ticket->response_due_at = $slaStart->copy()->addHours($hours);
             }
         }
         $ticket->save();
+        if ($alreadyAssigned) {
+            return null;
+        }
         \App\Models\ContractActivity::create([
             'contract_id' => $contract->id,
             'user_id' => auth()->id(),
             'action' => 'ticket_contract_assigned_at_verification',
-            'changes' => ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id],
+            'changes' => ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id, 'rule' => $outcome->rule],
             'created_at' => now(),
         ]);
 
