@@ -137,6 +137,21 @@ class ApplicableSopDeliveryTest extends TestCase
         );
     }
 
+    public function test_unscoped_read_of_an_unlinked_uncategorized_ticket_warns_without_the_update_ticket_remedy(): void
+    {
+        // client_id IS NULL: update_ticket refuses an unlinked ticket, so the
+        // remedy clause must not be offered here.
+        $ticket = Ticket::factory()->create(['client_id' => null, 'category_id' => null]);
+
+        $result = (new AssistantToolExecutor)->execute('get_ticket_detail', ['ticket_id' => $ticket->id]);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame(
+            ['no_category: no taxonomy category is assigned to this ticket'],
+            $result['warnings'] ?? null,
+        );
+    }
+
     public function test_retired_category_still_serves_its_sop_for_tickets_pointing_at_it(): void
     {
         // Retiring a node stops NEW assignment (a UI concern) — it must not

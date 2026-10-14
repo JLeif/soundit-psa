@@ -664,8 +664,11 @@ class AssistantToolExecutor
         // nQGaatw6 (Charlie 2026-10-13): the no_category gap inside
         // applicable_sop is easy to miss, so an uncategorized ticket also
         // carries it as a top-level warning. Present only when it applies.
+        // An unlinked ticket (client_id IS NULL, reachable only on the unscoped
+        // read) gets the bare marker: update_ticket refuses it until it is
+        // linked to a client, so the remedy clause would be false there.
         if ($ticket->category_id === null) {
-            $out['warnings'] = [self::NO_CATEGORY_WARNING];
+            $out['warnings'] = [$ticket->client_id === null ? self::NO_CATEGORY_WARNING_UNLINKED : self::NO_CATEGORY_WARNING];
         }
 
         return $out;
@@ -675,9 +678,17 @@ class AssistantToolExecutor
      * Top-level get_ticket_detail warning for a ticket with no taxonomy category (nQGaatw6).
      * The remedy is conditional because this read is also served where update_ticket and
      * list_ticket_categories are not offered: the in-app assistant (AssistantToolDefinitions),
-     * the Teams read-only surface, and MCP staff tokens without the grant.
+     * the Teams read-only surface, and MCP staff tokens without the grant. Served only for a
+     * ticket linked to a client; an unlinked one gets NO_CATEGORY_WARNING_UNLINKED.
      */
     public const NO_CATEGORY_WARNING = 'no_category: no taxonomy category is assigned to this ticket; if update_ticket and list_ticket_categories are available to you, call list_ticket_categories without include_inactive and set category_id via update_ticket to one of the active node ids it returns';
+
+    /**
+     * The same warning for a ticket with no client (client_id IS NULL). The remedy clause is
+     * dropped: update_ticket is not in UnlinkedTicketScope::admits(), so McpStaffController
+     * refuses it on an unlinked ticket whatever grants the token holds.
+     */
+    public const NO_CATEGORY_WARNING_UNLINKED = 'no_category: no taxonomy category is assigned to this ticket';
 
     /**
      * The applicable_sop block (so-0ftg Part 3, psa-id3rt): the ticket's
