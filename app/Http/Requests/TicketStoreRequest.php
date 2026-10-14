@@ -2,11 +2,10 @@
 
 namespace App\Http\Requests;
 
-use App\Enums\ContractStatus;
 use App\Enums\TicketPriority;
 use App\Enums\TicketType;
-use App\Models\Contract;
 use App\Models\TicketCategory;
+use App\Services\ContractResolver;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -70,27 +69,29 @@ class TicketStoreRequest extends FormRequest
             // Card I3EvQKUV PR 3: an ACTIVE contract of the chosen client. The id must be a positive int or digit
             // string (not true or 1.0), the same test TicketService::contractForNewTicket applies.
             // Blank = let the server apply the client default / only active contract (TicketService).
-            'contract_id' => [
-                'nullable',
-                function (string $attribute, $value, $fail): void {
-                    if ($value === null || $value === '') {
-                        return;
-                    }
+            'contract_id' => self::contractRules($this->input('client_id')),
+        ];
+    }
 
-                    $clientId = $this->input('client_id');
-                    $isActiveOfClient = (is_int($value) || (is_string($value) && ctype_digit($value))) && (int) $value > 0
-                        && is_scalar($clientId) && ctype_digit((string) $clientId)
-                        && Contract::query()
-                            ->whereKey((int) $value)
-                            ->where('client_id', (int) $clientId)
-                            ->where('status', ContractStatus::Active)
-                            ->exists();
+    public static function contractRules(mixed $clientId): array
+    {
+        return [
+            'nullable',
+            function (string $attribute, $value, $fail) use ($clientId): void {
+                if ($value === null || $value === '') {
+                    return;
+                }
 
-                    if (! $isActiveOfClient) {
-                        $fail('The selected contract is not an active contract of this client.');
-                    }
-                },
-            ],
+                $isActiveOfClient = (is_int($value) || (is_string($value) && ctype_digit($value))) && (int) $value > 0
+                    && is_scalar($clientId) && ctype_digit((string) $clientId)
+                    && app(ContractResolver::class)->activeForClient((int) $clientId)
+                        ->whereKey((int) $value)
+                        ->exists();
+
+                if (! $isActiveOfClient) {
+                    $fail('The selected contract is not an active contract of this client.');
+                }
+            },
         ];
     }
 

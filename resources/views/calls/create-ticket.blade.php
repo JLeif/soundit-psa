@@ -121,6 +121,8 @@
                     </select>
                 </div>
 
+                @include('tickets.partials.intake-contract-picker')
+
                 {{-- Asset (AJAX) --}}
                 <div class="col-md-3" id="assetGroup">
                     <label for="asset_id" class="form-label">Asset</label>
@@ -201,6 +203,7 @@ document.addEventListener('DOMContentLoaded', function() {
         clientSearchInput.addEventListener('input', function() {
             clearTimeout(searchTimer);
             clientIdHidden.value = '';  // clear selection when typing
+            clientIdHidden.dispatchEvent(new Event('change'));
             const q = this.value.trim();
             if (q.length < 2) {
                 clientResultsDiv.style.display = 'none';
@@ -225,6 +228,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         btn.textContent = c.name + (c.stage === 'prospect' ? ' (prospect)' : '');
                         btn.addEventListener('click', function() {
                             clientIdHidden.value = c.id;
+                            clientIdHidden.dispatchEvent(new Event('change'));
                             clientSearchInput.value = c.name + (c.stage === 'prospect' ? ' (prospect)' : '');
                             clientResultsDiv.style.display = 'none';
                             clientResultsDiv.innerHTML = '';

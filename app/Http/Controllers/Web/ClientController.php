@@ -563,9 +563,7 @@ class ClientController extends Controller
         $defaultId = $resolution->isResolved() && $resolution->rule === \App\Services\ContractResolver::RULE_CLIENT_DEFAULT
             ? $resolution->contract->id : null;
 
-        $contracts = \App\Models\Contract::query()
-            ->where('client_id', $client->id)
-            ->where('status', \App\Enums\ContractStatus::Active)
+        $contracts = app(\App\Services\ContractResolver::class)->activeForClient($client->id)
             ->orderBy('name')
             ->get(['id', 'name', 'type', 'prepay_balance', 'prepay_as_amount', 'sla_terms']);
 

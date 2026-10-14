@@ -6,6 +6,7 @@ use App\Enums\ContractStatus;
 use App\Models\Client;
 use App\Models\Contract;
 use App\Models\Ticket;
+use Illuminate\Database\Eloquent\Builder;
 
 /**
  * THE producer of "which contract does new time on this ticket belong to".
@@ -79,10 +80,7 @@ class ContractResolver
             }
         }
 
-        $active = Contract::query()
-            ->where('client_id', $clientId)
-            ->where('status', ContractStatus::Active)
-            ->get();
+        $active = $this->activeForClient($clientId)->get();
 
         if ($active->count() === 1) {
             return ContractResolution::resolved($active->first(), self::RULE_ONLY_ACTIVE);
@@ -102,16 +100,19 @@ class ContractResolver
         return $this->activeContractOf($clientId, $contractId) !== null;
     }
 
+    public function activeForClient(int $clientId): Builder
+    {
+        return Contract::query()
+            ->where('client_id', $clientId)
+            ->where('status', ContractStatus::Active);
+    }
+
     private function activeContractOf(?int $clientId, int $contractId): ?Contract
     {
         if ($clientId === null) {
             return null;
         }
 
-        return Contract::query()
-            ->whereKey($contractId)
-            ->where('client_id', $clientId)
-            ->where('status', ContractStatus::Active)
-            ->first();
+        return $this->activeForClient($clientId)->whereKey($contractId)->first();
     }
 }
