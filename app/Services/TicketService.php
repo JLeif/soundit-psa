@@ -127,7 +127,7 @@ class TicketService
      * A contact-intake ticket gets no contract until staff verify it (card I3EvQKUV
      * PR 3, spec §7). At verification it takes the same client rules createTicket()
      * applies, and SLA deadlines from that contract when none are set yet.
-     * A ticket with no client is left as it is. A ticket that already has a contract keeps it, and gets that contract's SLA deadlines only while both are unset (#5036). Verification itself schedules the client's held-debit release (StaffWorkflow), whether or not a contract is assigned here; entries that still do not resolve stay held.
+     * A ticket with no client is left as it is. A ticket that already has a contract keeps it, and gets that contract's SLA deadlines only while both are unset (#5036). Verification itself schedules the client's held-debit release (StaffWorkflow), whether or not a contract is assigned here; entries that resolve to no contract are no longer held, and entries still ambiguous stay held.
      */
     public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
     {
