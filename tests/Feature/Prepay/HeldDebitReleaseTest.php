@@ -307,7 +307,7 @@ class HeldDebitReleaseTest extends TestCase
             $this->assertSame(['client_id' => $this->client->id, 'held_notes' => 1, 'held_calls' => 1, 'debited' => 0, 'still_held' => 2], $run->context);
         }
         // A still-ambiguous entry is skipped, not re-run through the hold path.
-        $this->assertSame([], array_values(array_filter($logs->getRecords(), fn ($r) => str_contains($r->message, 'debit held: needs contract'))));
+        $this->assertSame([], array_values(array_filter($logs->getRecords(), fn ($r) => str_contains($r->message, 'debit held:'))));
     }
 
     // ── Idempotency: a repeated release never debits twice ──

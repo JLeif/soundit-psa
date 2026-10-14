@@ -179,7 +179,7 @@
                                             @endif
                                         </span>
                                     @endif
-                                    {{-- A held call's prepay debit waits for the client's contract to be settled (card I3EvQKUV r2) --}}
+                                    {{-- A call's prepay debit can be held for contract ambiguity or pending ticket verification (card I3EvQKUV r2) --}}
                                     @if($item->contract_held_at && $item->is_billable && $item->effectiveDurationSeconds())
                                         <span class="badge bg-warning text-dark small" title="{{ "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification)." }}">
                                             <i class="bi bi-exclamation-circle me-1"></i>Needs contract
