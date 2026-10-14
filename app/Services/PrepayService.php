@@ -503,6 +503,7 @@ class PrepayService
             // The entry's stamp is the debit target (card I3EvQKUV §3). A new debit with no
             // stamp (logged before stamping, or while no contract resolved) resolves once
             // through ContractResolver and is stamped; ambiguity or pending verification holds the debit.
+            // With neither, and no active contract, this pass neither debits it nor marks it held.
             if (! $existing) {
                 $contract = $this->stampedOrResolvedNoteContract($note, $ticket);
                 if (! $contract) {
@@ -617,8 +618,11 @@ class PrepayService
      * (an active contract of the ticket's client, on a ticket not awaiting contact-intake
      * verification), else one ContractResolver answer, which is stamped on the note when
      * it resolves. A stamp that does not resolve (expired, deleted, ticket moved, or the
-     * ticket is awaiting verification) is re-resolved, never debited and never silently
-     * dropped (r1 diff:4). Returns null when there is no ticket, the
+     * ticket is awaiting verification) is re-resolved and is not debited on this pass (r1 diff:4);
+     * releaseHeldDebits() retries a held entry after contract choice or verification.
+     * When that re-resolution is NONE on a ticket not awaiting verification (no client, or the client
+     * has no active contract), this method debits nothing, sets no hold marker and logs nothing;
+     * a marker set by an earlier pass stays. Returns null when there is no ticket, the
      * resolution is unresolved, or the target is not an hours prepay contract.
      * Unresolved entries are held and marked for
      * releaseHeldDebits() when the client needs a contract chosen or the ticket
@@ -639,13 +643,11 @@ class PrepayService
         if (! $resolution->isResolved()) {
             if ($resolution->isAmbiguous() || $ticket->isUnverifiedContactIntake()) {
                 $this->markNoteHeld($note);
-                Log::info($resolution->isAmbiguous()
-                    ? '[Prepay] Ticket note debit held: needs contract'
-                    : '[Prepay] Ticket note debit held: awaiting verification', [
-                        'ticket_note_id' => $note->id,
-                        'ticket_id' => $ticket->id,
-                        'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
-                    ]);
+                Log::info('[Prepay] Ticket note debit held: '.$this->heldReason($note, $ticket), [
+                    'ticket_note_id' => $note->id,
+                    'ticket_id' => $ticket->id,
+                    'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
+                ]);
             }
 
             return null;
@@ -654,6 +656,18 @@ class PrepayService
         $this->stampNote($note, $resolution->contract->id);
 
         return $this->hoursPrepayOrNull($resolution->contract);
+    }
+
+    public function heldReason(TicketNote|PhoneCall $entry, Ticket $ticket): string
+    {
+        $resolver = app(ContractResolver::class);
+
+        return $ticket->isUnverifiedContactIntake()
+            && (! $resolver->forEntry($ticket)->isAmbiguous()
+                || ($entry->contract_id !== null
+                    && $resolver->isActiveContractOf($ticket->client_id, (int) $entry->contract_id)))
+            ? 'awaiting verification'
+            : 'needs contract';
     }
 
     private function stampNote(TicketNote $note, int $contractId): void
@@ -1222,13 +1236,11 @@ class PrepayService
                 if ($resolution->isAmbiguous() || (! $resolution->isResolved() && $ticket->isUnverifiedContactIntake())) {
                     // releaseHeldDebits() re-runs this marker after contract choice or verification.
                     PhoneCall::whereKey($call->id)->whereNull('contract_held_at')->update(['contract_held_at' => now()]);
-                    Log::info($resolution->isAmbiguous()
-                        ? '[Prepay] Phone call debit held: needs contract'
-                        : '[Prepay] Phone call debit held: awaiting verification', [
-                            'phone_call_id' => $call->id,
-                            'ticket_id' => $ticket->id,
-                            'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
-                        ]);
+                    Log::info('[Prepay] Phone call debit held: '.$this->heldReason($call, $ticket), [
+                        'phone_call_id' => $call->id,
+                        'ticket_id' => $ticket->id,
+                        'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
+                    ]);
                 }
             }
             if ($existing && $call->contract_held_at !== null) {
