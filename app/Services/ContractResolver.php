@@ -104,6 +104,11 @@ class ContractResolver
         return Contract::query()->forClient($clientId)->active();
     }
 
+    public function isActiveContractOf(?int $clientId, int $contractId): bool
+    {
+        return $this->activeContractOf($clientId, $contractId) !== null;
+    }
+
     private function activeContractOf(?int $clientId, int $contractId): ?Contract
     {
         if ($clientId === null) {
