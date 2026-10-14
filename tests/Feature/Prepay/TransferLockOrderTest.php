@@ -17,7 +17,7 @@ class TransferLockOrderTest extends TestCase
     public function test_reverse_transfer_selects_contracts_ascending_before_writes(): void
     {
         if (DB::getDriverName() !== 'sqlite') {
-            $this->markTestSkipped('SQLite lock annotation assertion.');
+            $this->markTestSkipped('SQLite grammar lock-flag assertion.');
         }
         $this->assertTransferLockOrder(true);
     }
