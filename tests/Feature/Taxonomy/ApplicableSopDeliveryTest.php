@@ -103,6 +103,40 @@ class ApplicableSopDeliveryTest extends TestCase
         $this->assertNull($result['applicable_sop']['category_path']);
     }
 
+    public function test_uncategorized_ticket_carries_a_top_level_no_category_warning(): void
+    {
+        $ticket = Ticket::factory()->create(['category_id' => null]);
+
+        $result = $this->detail($ticket);
+
+        $this->assertSame(
+            ['no_category: set category_id via update_ticket (list_ticket_categories for leaves)'],
+            $result['warnings'] ?? null,
+        );
+    }
+
+    public function test_categorized_ticket_carries_no_warnings_key(): void
+    {
+        $ticket = Ticket::factory()->create(['category_id' => $this->leaf()->id]);
+
+        $result = $this->detail($ticket);
+
+        $this->assertArrayNotHasKey('warnings', $result);
+    }
+
+    public function test_unscoped_staff_read_of_an_uncategorized_ticket_also_warns(): void
+    {
+        $ticket = Ticket::factory()->create(['category_id' => null]);
+
+        $result = (new AssistantToolExecutor)->execute('get_ticket_detail', ['ticket_id' => $ticket->id]);
+
+        $this->assertArrayNotHasKey('error', $result);
+        $this->assertSame(
+            ['no_category: set category_id via update_ticket (list_ticket_categories for leaves)'],
+            $result['warnings'] ?? null,
+        );
+    }
+
     public function test_retired_category_still_serves_its_sop_for_tickets_pointing_at_it(): void
     {
         // Retiring a node stops NEW assignment (a UI concern) — it must not

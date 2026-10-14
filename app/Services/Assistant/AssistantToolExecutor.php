@@ -661,8 +661,18 @@ class AssistantToolExecutor
             $out['client_scoped_detail'] = 'withheld — the client and contact names, the linked devices, the related-record stubs, and the linked_ids block are returned only on a client-scoped read of this ticket; use find_assets for device data on this surface';
         }
 
+        // nQGaatw6 (Charlie 2026-10-13): the no_category gap inside
+        // applicable_sop is easy to miss, so an uncategorized ticket also
+        // carries it as a top-level warning. Present only when it applies.
+        if ($ticket->category_id === null) {
+            $out['warnings'] = [self::NO_CATEGORY_WARNING];
+        }
+
         return $out;
     }
+
+    /** Top-level get_ticket_detail warning for a ticket with no taxonomy category (nQGaatw6). */
+    public const NO_CATEGORY_WARNING = 'no_category: set category_id via update_ticket (list_ticket_categories for leaves)';
 
     /**
      * The applicable_sop block (so-0ftg Part 3, psa-id3rt): the ticket's
