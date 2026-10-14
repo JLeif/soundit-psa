@@ -112,6 +112,8 @@
                     </select>
                 </div>
 
+                @include('tickets.partials.intake-contract-picker')
+
                 {{-- Asset (AJAX) --}}
                 <div class="col-md-3" id="assetGroup">
                     <label for="asset_id" class="form-label">Asset</label>

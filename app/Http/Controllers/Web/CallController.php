@@ -301,27 +301,35 @@ class CallController extends Controller
             'due_at' => ['nullable', 'date'],
         ]);
 
+        $validated += $request->validate([
+            'contract_id' => \App\Http\Requests\TicketStoreRequest::contractRules($request->input('client_id')),
+        ]);
+
         $validated['source'] = TicketSource::Phone->value;
 
-        $ticket = DB::transaction(function () use ($validated, $call) {
-            // Re-fetch with lock to prevent double-submit race condition
-            $call = PhoneCall::lockForUpdate()->findOrFail($call->id);
+        try {
+            $ticket = DB::transaction(function () use ($validated, $call) {
+                // Re-fetch with lock to prevent double-submit race condition
+                $call = PhoneCall::lockForUpdate()->findOrFail($call->id);
 
-            if ($call->ticket_id !== null) {
-                return null; // Already linked — handled after transaction
-            }
+                if ($call->ticket_id !== null) {
+                    return null; // Already linked — handled after transaction
+                }
 
-            $ticket = $this->ticketService->createTicket($validated, auth()->id());
+                $ticket = $this->ticketService->createTicket($validated, auth()->id());
 
-            $call->update(['ticket_id' => $ticket->id]);
-            app(PrepayService::class)->stampPhoneCallContract($call);
+                $call->update(['ticket_id' => $ticket->id]);
+                app(PrepayService::class)->stampPhoneCallContract($call);
 
-            if ($call->needsFollowUp()) {
-                $this->phoneCallService->markFollowedUp($call, auth()->id());
-            }
+                if ($call->needsFollowUp()) {
+                    $this->phoneCallService->markFollowedUp($call, auth()->id());
+                }
 
-            return $ticket;
-        });
+                return $ticket;
+            });
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return back()->withInput()->withErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
+        }
 
         if ($ticket === null) {
             $call->refresh();

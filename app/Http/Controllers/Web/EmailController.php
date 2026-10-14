@@ -286,30 +286,38 @@ class EmailController extends Controller
             'due_at' => ['nullable', 'date'],
         ]);
 
+        $validated += $request->validate([
+            'contract_id' => \App\Http\Requests\TicketStoreRequest::contractRules($request->input('client_id')),
+        ]);
+
         $validated['source'] = TicketSource::Email->value;
 
-        $ticket = DB::transaction(function () use ($validated, $email) {
-            $ticket = $this->ticketService->createTicket($validated, auth()->id());
+        try {
+            $ticket = DB::transaction(function () use ($validated, $email) {
+                $ticket = $this->ticketService->createTicket($validated, auth()->id());
 
-            // Create initial note from email body, linked to the email
-            $bodyText = $email->body_text ?? strip_tags($email->body_html ?? $email->body_preview ?? '');
-            if (trim($bodyText)) {
-                $this->ticketService->addNote(
-                    $ticket,
-                    $bodyText,
-                    NoteType::Reply,
-                    false, // is_private = false → triggers responded_at
-                    auth()->id(),
-                    null, // timeMinutes
-                    $email->id, // emailId
-                );
-            }
+                // Create initial note from email body, linked to the email
+                $bodyText = $email->body_text ?? strip_tags($email->body_html ?? $email->body_preview ?? '');
+                if (trim($bodyText)) {
+                    $this->ticketService->addNote(
+                        $ticket,
+                        $bodyText,
+                        NoteType::Reply,
+                        false, // is_private = false → triggers responded_at
+                        auth()->id(),
+                        null, // timeMinutes
+                        $email->id, // emailId
+                    );
+                }
 
-            // Link email to ticket
-            $email->update(['ticket_id' => $ticket->id]);
+                // Link email to ticket
+                $email->update(['ticket_id' => $ticket->id]);
 
-            return $ticket;
-        });
+                return $ticket;
+            });
+        } catch (\App\Services\ContractNotAllowedException $e) {
+            return back()->withInput()->withErrors(['contract_id' => 'The selected contract is not an active contract of this client.']);
+        }
 
         return redirect()->route('tickets.show', $ticket)
             ->with('success', "Ticket {$ticket->display_id} created from email.");
