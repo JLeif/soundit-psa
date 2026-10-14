@@ -40,6 +40,7 @@
 
                             $lastTopUp = $contract->prepayTransactions
                                 ->where($isAmount ? 'amount' : 'hours', '>', 0)
+                                ->filter(fn ($row) => $row->source !== \App\Enums\PrepayTransactionSource::EntryMovedOut)
                                 ->sortByDesc('date')
                                 ->first();
                         @endphp

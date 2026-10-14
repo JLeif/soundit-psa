@@ -512,14 +512,11 @@ class MoveEntryContractTest extends TestCase
         $this->assertRecalcMatches($this->a);
     }
 
-    /** M4 (lock order, SQLite annotation): entry -> ledger row -> contracts ascending by id. */
+    /** M4: entry -> ledger row -> contracts ascending by id, in both move directions. */
     public function test_m4_lock_order_entry_then_row_then_contracts_ascending(): void
     {
-        $note = $this->note(45);
-        // Move B -> A direction too, so ascending order is not just "from first".
-        $this->move($note, $this->b);
         if (DB::getDriverName() !== 'sqlite') {
-            $this->markTestSkipped('Annotates SQLite lock requests; the real-lock M4 run is the MariaDB harness (pr2/m4-concurrency.php).');
+            $this->markTestSkipped('SQLite lock annotation assertion.');
         }
         DB::connection()->setQueryGrammar(new class(DB::connection()) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
         {
@@ -528,18 +525,51 @@ class MoveEntryContractTest extends TestCase
                 return $value ? '/* requested update lock */' : '';
             }
         });
+        $this->assertMoveLockOrder('/* requested update lock */');
+    }
+
+    public function test_m4_lock_order_native_mariadb(): void
+    {
+        if (DB::getDriverName() !== 'mariadb') {
+            $this->markTestSkipped('Native FOR UPDATE order assertion; runs only on a mariadb connection (#5009).');
+        }
+        $this->assertMoveLockOrder('for update');
+    }
+
+    private function assertMoveLockOrder(string $lockSuffix): void
+    {
+        $note = $this->note(45);
+        $this->ticket->update(['contract_id' => $this->b->id]);
+        $oppositeNote = $this->note(30);
         $locks = [];
-        DB::listen(function ($q) use (&$locks) {
-            if (str_contains($q->sql, '/* requested update lock */')) {
+        DB::listen(function ($q) use (&$locks, $lockSuffix) {
+            if (str_ends_with($q->sql, $lockSuffix)) {
                 $locks[] = [$q->sql, $q->bindings];
             }
         });
-        $this->move($note->fresh(), $this->a, 'Back');
+        foreach ([[$note, $this->b], [$oppositeNote, $this->a]] as [$entry, $target]) {
+            $locks = [];
+            $this->move($entry->fresh(), $target);
+            $this->assertGreaterThanOrEqual(3, count($locks));
+            $sql = array_map(fn ($lock) => str_replace('`', '"', $lock[0]), $locks);
+            $this->assertStringStartsWith('select * from "ticket_notes"', $sql[0]);
+            $this->assertStringStartsWith('select * from "prepay_transactions"', $sql[1]);
+            $this->assertStringStartsWith('select * from "contracts"', $sql[2]);
+            $this->assertStringContainsString('order by "id" asc', $sql[2]);
+            $this->assertSame([$this->a->id, $this->b->id], array_map('intval', $locks[2][1]), 'both contracts in one ascending locking read');
+            $this->assertSame($target->id, $entry->fresh()->contract_id);
+        }
+        $this->assertSame($this->b->id, $note->fresh()->contract_id);
+        $locks = [];
+        $this->move($note->fresh(), $this->a);
         $this->assertGreaterThanOrEqual(3, count($locks));
-        $this->assertStringStartsWith('select * from "ticket_notes"', $locks[0][0]);
-        $this->assertStringStartsWith('select * from "prepay_transactions"', $locks[1][0]);
-        $this->assertStringStartsWith('select * from "contracts"', $locks[2][0]);
-        $this->assertStringContainsString('order by "id" asc', $locks[2][0]);
+        $sql = array_map(fn ($lock) => str_replace('`', '"', $lock[0]), $locks);
+        $this->assertStringStartsWith('select * from "ticket_notes"', $sql[0]);
+        $this->assertStringStartsWith('select * from "prepay_transactions"', $sql[1]);
+        $this->assertStringStartsWith('select * from "contracts"', $sql[2]);
+        $this->assertStringContainsString('order by "id" asc', $sql[2]);
         $this->assertSame([$this->a->id, $this->b->id], array_map('intval', $locks[2][1]), 'both contracts in one ascending locking read');
+        $this->assertSame($this->a->id, $note->fresh()->contract_id);
+        $this->assertRecalcMatches($this->a, $this->b);
     }
 }
