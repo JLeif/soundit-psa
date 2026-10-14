@@ -25,7 +25,7 @@ class ContractC16ViewTest extends TestCase
         $ticket = Ticket::factory()->create(['contact_intake_origin' => true, 'contact_intake_verified_at' => null]);
         $ticket->client->forceFill(['default_contract_id' => null])->saveQuietly();
         for ($i = 0; $i < 2; $i++) {
-            Contract::create([
+            $contract = Contract::create([
                 'client_id' => $ticket->client_id, 'name' => 'Synthetic C16 view '.$i,
                 'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
                 'prepay_as_amount' => false, 'prepay_total' => 10,
@@ -35,7 +35,7 @@ class ContractC16ViewTest extends TestCase
         $note = TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
             'ticket_id' => $ticket->id, 'author_id' => $user->id, 'note_type' => 'note',
             'body' => 'Synthetic held time', 'is_private' => true, 'is_billable' => true,
-            'time_minutes' => 60, 'noted_at' => now(), 'contract_held_at' => now(),
+            'time_minutes' => 60, 'noted_at' => now(), 'contract_held_at' => now(), 'contract_id' => $contract->id,
         ]));
         $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
             'ticket_id' => $ticket->id, 'call_uuid' => 'synthetic-c16-view',
@@ -52,23 +52,44 @@ class ContractC16ViewTest extends TestCase
             'receipt' => 'synthetic-c16-view', 'payload' => [], 'state' => 'processed',
             'ticket_id' => $ticket->id, 'ticket_note_id' => $formNote->id,
         ]);
-        $this->assertHeldBadges($ticket, $user, 'Awaiting verification');
+        $this->assertHeldBadges($ticket, $user, ['Needs contract', 'Awaiting verification']);
+
+        $single = Ticket::factory()->create(['contact_intake_origin' => true, 'contact_intake_verified_at' => null]);
+        $single->client->forceFill(['default_contract_id' => null])->saveQuietly();
+        Contract::create([
+            'client_id' => $single->client_id, 'name' => 'Synthetic single C16',
+            'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+            'prepay_as_amount' => false, 'prepay_total' => 10,
+            'prepay_used' => 0, 'prepay_balance' => 10,
+        ]);
+        $singleNote = TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $single->id, 'author_id' => $user->id, 'note_type' => 'note',
+            'body' => 'Synthetic single held time', 'is_private' => true, 'is_billable' => true,
+            'time_minutes' => 60, 'noted_at' => now(), 'contract_held_at' => now(),
+        ]));
+        $this->assertNull($singleNote->contract_id);
+        $this->assertSame(1, Contract::where('client_id', $single->client_id)->active()->count());
+        $this->assertHeldBadges($single, $user, ['Awaiting verification']);
         app(StaffWorkflow::class)->act($row->id, $user, 'verify', 'Synthetic verification');
         $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
-        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertNull($note->fresh()->contract_held_at);
         $this->assertNotNull($call->fresh()->contract_held_at);
-        $this->assertHeldBadges($ticket->fresh(), $user, 'Needs contract');
+        $this->assertHeldBadges($ticket->fresh(), $user, ['Needs contract']);
     }
 
-    private function assertHeldBadges(Ticket $ticket, User $user, string $expected): void
+    private function assertHeldBadges(Ticket $ticket, User $user, array $expected): void
     {
         $html = $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()->getContent();
         $dom = new \DOMDocument;
         @$dom->loadHTML($html);
         $badges = (new \DOMXPath($dom))->query('//span[contains(@class, "badge") and starts-with(@title, "Not debited yet:")]');
-        $this->assertCount(2, $badges);
+        $this->assertCount(count($expected), $badges);
+        $actual = [];
         foreach ($badges as $badge) {
-            $this->assertSame($expected, trim($badge->textContent));
+            $actual[] = trim($badge->textContent);
         }
+        sort($actual);
+        sort($expected);
+        $this->assertSame($expected, $actual);
     }
 }
