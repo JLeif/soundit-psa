@@ -242,8 +242,8 @@ class ContractAtCreationTest extends TestCase
         $ticket->refresh();
         $this->assertFalse($ticket->isUnverifiedContactIntake());
         $this->assertSame($default->id, $ticket->contract_id);
-        $this->assertTrue($ticket->due_at->equalTo(now()->addHours(8)));
-        $this->assertTrue($ticket->response_due_at->equalTo(now()->addHours(2)));
+        $this->assertTrue($ticket->due_at->equalTo(\Carbon\Carbon::parse('2026-09-24T12:00:00Z')->addHours(8)));
+        $this->assertTrue($ticket->response_due_at->equalTo(\Carbon\Carbon::parse('2026-09-24T12:00:00Z')->addHours(2)));
     }
 
     // ── Web form (C1 web, U1) ───────────────────────────────────────────────

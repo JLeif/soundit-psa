@@ -179,7 +179,7 @@ class HeldDebitReleaseTest extends TestCase
         $this->assertSame(1, \App\Models\ContractActivity::where('action', 'ticket_contract_assigned_at_verification')->count());
         $audit = \App\Models\ContractActivity::where('action', 'ticket_contract_assigned_at_verification')->sole();
         $this->assertSame($this->a->id, $audit->contract_id);
-        $this->assertSame(['ticket_id' => $this->ticket->id, 'client_id' => $this->client->id], $audit->changes);
+        $this->assertSame(['ticket_id' => $this->ticket->id, 'client_id' => $this->client->id, 'rule' => 'only_active'], $audit->changes);
     }
 
     public function test_ticket_contract_set_releases_that_ticket_and_leaves_other_still_ambiguous_tickets_held(): void
@@ -405,7 +405,7 @@ class HeldDebitReleaseTest extends TestCase
         $this->assertNotNull($call->fresh()->contract_held_at);
         $this->assertSame(0, PrepayTransaction::count());
         $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk()
-            ->assertDontSee("Set a default contract or this ticket's contract.", false);
+            ->assertDontSee("Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification).");
     }
 
     // ── Visibility: held calls show "Needs contract"; held notes show it ahead of a stale stamp ──
@@ -415,13 +415,13 @@ class HeldDebitReleaseTest extends TestCase
         $user = User::factory()->create();
         $call = $this->phoneCall(['ticket_id' => $this->ticket->id]);
         app(PrepayService::class)->debitFromPhoneCall($call);
-        $badge = "Set a default contract or this ticket's contract.";
+        $badge = "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification).";
 
-        $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk()->assertSee($badge, false);
+        $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk()->assertSee($badge);
 
         $this->ticket->update(['contract_id' => $this->a->id]);
         $this->assertNull($call->fresh()->contract_held_at);
-        $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk()->assertDontSee($badge, false);
+        $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk()->assertDontSee($badge);
     }
 
     public function test_held_note_badge_says_needs_contract_ahead_of_a_stale_stamp(): void
@@ -442,7 +442,7 @@ class HeldDebitReleaseTest extends TestCase
         $this->assertNotNull($note->fresh()->contract_held_at);
 
         $page = $this->actingAs($user)->get(route('tickets.show', $this->ticket))->assertOk();
-        $page->assertSee('Not debited: the client had several active contracts and no default. Edit the note to choose its contract.');
+        $page->assertSee("Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification). Verify the ticket, or edit the note to choose its contract.");
         $page->assertDontSee('Billed to Synthetic A');
     }
 

@@ -618,8 +618,9 @@ class PrepayService
      * is stamped on the note when it resolves. A stamp that no longer validates
      * (expired, deleted, ticket moved) is re-resolved, never debited and never
      * silently dropped (r1 diff:4). Returns null when the target is not an
-     * hours prepay contract or the client needs a contract chosen (held, and
-     * marked so releaseHeldDebits() can re-run it).
+     * hours prepay contract. Unresolved entries are held and marked for
+     * releaseHeldDebits() when the client needs a contract chosen or the ticket
+     * is waiting for verification.
      */
     private function stampedOrResolvedNoteContract(TicketNote $note, ?Ticket $ticket): ?Contract
     {
@@ -634,7 +635,7 @@ class PrepayService
         }
 
         if (! $resolution->isResolved()) {
-            if ($resolution->isAmbiguous()) {
+            if ($resolution->isAmbiguous() || $ticket->isUnverifiedContactIntake()) {
                 $this->markNoteHeld($note);
                 Log::info('[Prepay] Ticket note debit held: needs contract', [
                     'ticket_note_id' => $note->id,
@@ -1206,11 +1207,12 @@ class PrepayService
             $existing = PrepayTransaction::where('phone_call_id', $call->id)->lockForUpdate()->first();
 
             // Every unledgered call re-resolves here, so a stamp that no longer validates is
-            // never debited (r1 diff:4); ledgered time stays where it was debited.
+            // never debited (r1 diff:4); unresolved intake time waits for verification.
+            // Ledgered time stays where it was debited.
             if (! $existing && ! $this->stampPhoneCallContract($call)) {
                 $resolution = app(ContractResolver::class)->forEntry($ticket);
-                if ($resolution->isAmbiguous()) {
-                    // The marker releaseHeldDebits() re-runs when the ambiguity ends (r1 diff:1, r2).
+                if ($resolution->isAmbiguous() || (! $resolution->isResolved() && $ticket->isUnverifiedContactIntake())) {
+                    // releaseHeldDebits() re-runs this marker after contract choice or verification.
                     PhoneCall::whereKey($call->id)->whereNull('contract_held_at')->update(['contract_held_at' => now()]);
                     Log::info('[Prepay] Phone call debit held: needs contract', [
                         'phone_call_id' => $call->id,

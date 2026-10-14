@@ -126,40 +126,50 @@ class TicketService
     /**
      * A contact-intake ticket gets no contract until staff verify it (card I3EvQKUV
      * PR 3, spec §7). At verification it takes the same client rules createTicket()
-     * applies, and SLA deadlines from that contract when none are set yet. A ticket
-     * that already has a contract, or no client, is left as it is.
-     * First assignment intentionally lets TicketObserver::updated() schedule the client's
-     * held-debit release, as setting a ticket's contract does unless it is saved under
-     * TicketObserver::withoutHeldRelease(); entries still unresolved stay held.
+     * applies, and SLA deadlines from that contract when none are set yet.
+     * A ticket with no client is left as it is. A ticket that already has a contract keeps it, and gets that contract's SLA deadlines only while both are unset (#5036). Verification itself schedules the client's held-debit release (StaffWorkflow), whether or not a contract is assigned here; entries that resolve to no contract are no longer held, and entries still ambiguous stay held.
      */
     public function assignContractAtVerification(Ticket $ticket): ?TicketContractOutcome
     {
-        if ($ticket->contract_id !== null || $ticket->client_id === null) {
-            return null;
+        $alreadyAssigned = $ticket->contract_id !== null;
+        if ($alreadyAssigned) {
+            if ($ticket->due_at !== null || $ticket->response_due_at !== null) {
+                return null;
+            }
+            $outcome = null;
+            $contract = $ticket->contract;
+        } else {
+            if ($ticket->client_id === null) {
+                return null;
+            }
+            $outcome = $this->contractForNewTicket($ticket->client_id, null);
+            $contract = $outcome->contract;
         }
-
-        $outcome = $this->contractForNewTicket($ticket->client_id, null);
-        $contract = $outcome->contract;
         if ($contract === null) {
             return $outcome;
         }
 
         $ticket->contract_id = $contract->id;
+        // legacy rows without opened_at: SLA from now()
+        $slaStart = $ticket->opened_at ?? now();
         $priority = $ticket->priority instanceof TicketPriority ? $ticket->priority : TicketPriority::tryFrom((string) $ticket->priority);
         if ($priority !== null) {
             if ($ticket->due_at === null && ($hours = $contract->slaResolutionHours($priority))) {
-                $ticket->due_at = now()->addHours($hours);
+                $ticket->due_at = $slaStart->copy()->addHours($hours);
             }
             if ($ticket->response_due_at === null && ($hours = $contract->slaResponseHours($priority))) {
-                $ticket->response_due_at = now()->addHours($hours);
+                $ticket->response_due_at = $slaStart->copy()->addHours($hours);
             }
         }
         $ticket->save();
+        if ($alreadyAssigned) {
+            return null;
+        }
         \App\Models\ContractActivity::create([
             'contract_id' => $contract->id,
             'user_id' => auth()->id(),
             'action' => 'ticket_contract_assigned_at_verification',
-            'changes' => ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id],
+            'changes' => ['ticket_id' => $ticket->id, 'client_id' => $ticket->client_id, 'rule' => $outcome->rule],
             'created_at' => now(),
         ]);
 

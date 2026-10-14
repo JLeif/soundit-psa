@@ -491,7 +491,7 @@ class ContractDefaultsTest extends TestCase
         $this->assertSame(0, PrepayTransaction::count());
         $this->actingAs($user)->get(route('tickets.show', $this->ticket))
             ->assertOk()
-            ->assertSee('Not debited: the client had several active contracts and no default.')
+            ->assertSee("Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification).")
             ->assertDontSee('Billed to Synthetic A');
     }
 
