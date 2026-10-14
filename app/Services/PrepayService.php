@@ -501,8 +501,8 @@ class PrepayService
             }
 
             // The entry's stamp is the debit target (card I3EvQKUV §3). A new debit with no
-            // stamp (logged before stamping, or under an ambiguous client) resolves once
-            // through ContractResolver and is stamped; ambiguity holds the debit.
+            // stamp (logged before stamping, or while no contract resolved) resolves once
+            // through ContractResolver and is stamped; ambiguity or pending verification holds the debit.
             if (! $existing) {
                 $contract = $this->stampedOrResolvedNoteContract($note, $ticket);
                 if (! $contract) {
@@ -613,11 +613,12 @@ class PrepayService
     }
 
     /**
-     * A ticket note's debit target: its stamp while it is still an active
-     * contract of the ticket's client, else one ContractResolver answer, which
-     * is stamped on the note when it resolves. A stamp that no longer validates
-     * (expired, deleted, ticket moved) is re-resolved, never debited and never
-     * silently dropped (r1 diff:4). Returns null when there is no ticket, the
+     * A ticket note's debit target: its stamp when ContractResolver still resolves it
+     * (an active contract of the ticket's client, on a ticket not awaiting contact-intake
+     * verification), else one ContractResolver answer, which is stamped on the note when
+     * it resolves. A stamp that does not resolve (expired, deleted, ticket moved, or the
+     * ticket is awaiting verification) is re-resolved, never debited and never silently
+     * dropped (r1 diff:4). Returns null when there is no ticket, the
      * resolution is unresolved, or the target is not an hours prepay contract.
      * Unresolved entries are held and marked for
      * releaseHeldDebits() when the client needs a contract chosen or the ticket
@@ -1104,12 +1105,13 @@ class PrepayService
     /**
      * The contract a phone call's time belongs to, WITHOUT writing anything:
      * its existing ledger row's contract (even soft-deleted: debited time stays
-     * where it was debited), else its stamp (phone_calls.contract_id) while it is
-     * still an active contract of the ticket's client (r1 diff:4), else the
+     * where it was debited), else its stamp (phone_calls.contract_id) when ContractResolver
+     * still resolves it (an active contract of the ticket's client, on a ticket not
+     * awaiting contact-intake verification) (r1 diff:4), else the
      * ContractResolver answer for its ticket. Without a ledger row, returns
      * null when there is no ticket or no resolved contract, including contract
-     * ambiguity and unverified contact intake. Those latter two reasons hold
-     * the debit pending contract choice or verification, respectively.
+     * ambiguity and unverified contact intake. For those two reasons debitFromPhoneCall
+     * can hold the debit pending contract choice or verification, respectively.
      */
     public function contractForPhoneCall(PhoneCall $call): ?Contract
     {
@@ -1157,7 +1159,8 @@ class PrepayService
 
     /**
      * Stamp a call with the contract its time belongs to (at link time).
-     * Leaves NULL when the client needs a contract chosen.
+     * Leaves the stamp unchanged when contractForPhoneCall returns null, for example
+     * when the client needs a contract chosen or the ticket is waiting for verification.
      */
     public function stampPhoneCallContract(PhoneCall $call): ?Contract
     {
