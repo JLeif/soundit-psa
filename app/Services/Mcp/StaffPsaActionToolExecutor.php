@@ -24,6 +24,7 @@ use App\Services\Agent\CloseAutoEligibility;
 use App\Services\AssetService;
 use App\Services\Assistant\AssistantTicketCreator;
 use App\Services\ClientService;
+use App\Services\ContractResolver;
 use App\Services\Email\EmailRecipientResolver;
 use App\Services\Email\RecipientContext;
 use App\Services\Email\RecipientValidationException;
@@ -343,8 +344,7 @@ class StaffPsaActionToolExecutor
         // contract_id changes the ticket only (card I3EvQKUV PR 2): an ACTIVE contract of
         // this ticket's client, or null. Earlier time stays where it was logged.
         if (array_key_exists('contract_id', $validated ?? []) && $validated['contract_id'] !== null) {
-            $contractOk = \App\Models\Contract::whereKey((int) $validated['contract_id'])->where('client_id', $ticket->client_id)
-                ->where('status', \App\Enums\ContractStatus::Active)->exists();
+            $contractOk = app(ContractResolver::class)->activeForClient($ticket->client_id)->whereKey((int) $validated['contract_id'])->exists();
             if (! $contractOk) {
                 return [
                     'error' => "contract_id must be an ACTIVE contract of this ticket's client; contract {$validated['contract_id']} is not. Call list_client_contracts for valid ids.",
