@@ -24,6 +24,12 @@ class TransferLockOrderTest extends TestCase
             'prepay_balance' => 10, 'prepay_used' => 0, 'prepay_as_amount' => false];
         $low = Contract::create($attributes);
         $high = Contract::create($attributes);
+        $driver = DB::getDriverName();
+        $this->assertContains($driver, ['sqlite', 'mariadb']);
+        if (getenv('DB_CONNECTION') === 'mariadb') {
+            $this->assertSame('mariadb', $driver);
+        }
+        $originalGrammar = DB::connection()->getQueryGrammar();
         $grammar = new class(DB::connection()) extends \Illuminate\Database\Query\Grammars\SQLiteGrammar
         {
             public array $contractLocks = [];
@@ -37,7 +43,9 @@ class TransferLockOrderTest extends TestCase
                 return parent::compileSelect($query);
             }
         };
-        DB::connection()->setQueryGrammar($grammar);
+        if ($driver === 'sqlite') {
+            DB::connection()->setQueryGrammar($grammar);
+        }
         $queries = [];
         DB::listen(function ($query) use (&$queries) {
             $queries[] = [$query->sql, $query->bindings];
@@ -45,10 +53,16 @@ class TransferLockOrderTest extends TestCase
 
         app(PrepayService::class)->transfer($high, $low, 2, 'Synthetic transfer');
 
-        $this->assertSame(true, $grammar->contractLocks[0] ?? null);
-        $this->assertStringContainsString('select * from "contracts"', $queries[0][0]);
-        $this->assertStringContainsString('order by "id" asc', $queries[0][0]);
-        $this->assertStringContainsString('"id" in (?, ?)', $queries[0][0]);
+        if ($driver === 'sqlite') {
+            $this->assertSame(true, $grammar->contractLocks[0] ?? null);
+        } else {
+            $this->assertStringEndsWith('for update', $queries[0][0]);
+        }
+        DB::connection()->setQueryGrammar($originalGrammar);
+        $sql = str_replace('`', '"', $queries[0][0]);
+        $this->assertStringContainsString('select * from "contracts"', $sql);
+        $this->assertStringContainsString('order by "id" asc', $sql);
+        $this->assertStringContainsString('"id" in (?, ?)', $sql);
         $this->assertEqualsCanonicalizing([$low->id, $high->id], $queries[0][1]);
         $this->assertEquals(8, $high->fresh()->prepay_balance);
         $this->assertEquals(12, $low->fresh()->prepay_balance);

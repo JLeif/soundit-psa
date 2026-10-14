@@ -13,6 +13,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mariadb-lock-order:
+    name: MariaDB 10.11 lock order
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DB_CONNECTION: mariadb
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_DATABASE: prepay_test
+      DB_USERNAME: prepay_test
+      DB_PASSWORD: throwaway-ci-only
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_DATABASE: prepay_test
+          MARIADB_USER: prepay_test
+          MARIADB_PASSWORD: throwaway-ci-only
+          MARIADB_ROOT_PASSWORD: throwaway-ci-root-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo_mysql, bcmath, intl, gd, zip
+          coverage: none
+          tools: composer:v2
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+      - name: Run lock-order tests in both move directions
+        run: >-
+          php -d memory_limit=1024M vendor/bin/phpunit --fail-on-warning
+          --filter 'test_m4_lock_order_entry_then_row_then_contracts_ascending|test_reverse_transfer_selects_contracts_ascending_before_writes'
+
   verify:
     name: Tests & style gate
     runs-on: ubuntu-latest
