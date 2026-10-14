@@ -572,6 +572,17 @@ class ContractAtCreationToolsTest extends TestCase
         $this->assertNull($ticket->fresh()->contract_id);
     }
 
+    public function test_c13_update_ticket_refuses_an_inactive_contract_of_the_same_client(): void
+    {
+        $expired = $this->contract('Synthetic Expired', ['status' => 'expired']);
+        $ticket = Ticket::factory()->create(['client_id' => $this->client->id, 'contract_id' => null]);
+
+        $r = $this->callTool(['update_ticket'], 'update_ticket', ['ticket_id' => $ticket->id, 'contract_id' => $expired->id]);
+
+        $this->assertSame('contract_not_allowed', $r['error_code'] ?? null);
+        $this->assertNull($ticket->fresh()->contract_id);
+    }
+
     // ── list_client_contracts: is_default per row ──────────────────────────
 
     public function test_list_client_contracts_flags_the_live_default_only(): void

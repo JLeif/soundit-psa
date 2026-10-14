@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Enums\ContractStatus;
 use App\Models\Client;
 use App\Models\Contract;
 use App\Models\Ticket;
@@ -102,9 +101,7 @@ class ContractResolver
 
     public function activeForClient(int $clientId): Builder
     {
-        return Contract::query()
-            ->where('client_id', $clientId)
-            ->where('status', ContractStatus::Active);
+        return Contract::query()->forClient($clientId)->active();
     }
 
     private function activeContractOf(?int $clientId, int $contractId): ?Contract
