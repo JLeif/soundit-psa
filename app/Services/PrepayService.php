@@ -684,8 +684,8 @@ class PrepayService
     }
 
     /**
-     * Re-run debits held for contract ambiguity or pending verification for a
-     * client (r1 diff:1, r2). Triggers include a default chosen
+     * Re-run debits held for contract ambiguity (r1 diff:1, r2) or pending
+     * verification (card VLyhWACq C10) for a client. Triggers include a default chosen
      * (ClientController); a contract created or restored active, changing status,
      * moved to another client, or soft- or force-deleted (Contract::booted); a
      * ticket given its own contract or moved to another client (TicketObserver);

@@ -52,9 +52,9 @@ class TicketNoteObserver
      * Stamp the contract this note's time belongs to when time is logged
      * (card I3EvQKUV §3), so a later change to the ticket's contract does not
      * move it. A note that already has a ledger row keeps that row's contract;
-     * otherwise ContractResolver answers. Ambiguity or unverified contact
-     * intake leaves an unstamped note's contract NULL; the debit path can hold
-     * it pending contract choice or verification.
+     * otherwise ContractResolver answers, and ambiguity or unverified contact
+     * intake leaves the note's contract NULL; the debit path can hold it pending
+     * contract choice or verification.
      */
     private function stampContract(TicketNote $note): void
     {
