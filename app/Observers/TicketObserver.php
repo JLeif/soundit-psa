@@ -218,7 +218,7 @@ class TicketObserver
         // settle it, can stop needing one chosen: re-run the held debits
         // for its (new) client once the change is committed (card I3EvQKUV r2).
         // The release is client-wide; entries on other tickets that still resolve
-        // AMBIGUOUS stay held.
+        // AMBIGUOUS or NONE (including a ticket awaiting verification) stay held.
         $contractSet = $ticket->wasChanged('contract_id') && $ticket->contract_id !== null && ! self::$suppressHeldRelease;
         if (($contractSet || $ticket->wasChanged('client_id')) && $ticket->client_id !== null) {
             $clientId = (int) $ticket->client_id;

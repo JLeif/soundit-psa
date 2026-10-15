@@ -670,8 +670,9 @@ class ClientController extends Controller
             });
         }
 
-        // Choosing a default releases the client's held debits; re-submitting
-        // the same default retries any still held.
+        // Choosing a default re-runs the client's held debits: entries that now resolve are debited,
+        // and entries that still do not resolve (such as a ticket awaiting verification) stay held.
+        // Re-submitting the same default retries any still held.
         // A release failure must not turn a committed default into a 500 (#4920): it is caught,
         // logged without the exception message (#4991) and reported; the default above stays saved.
         $released = 0;

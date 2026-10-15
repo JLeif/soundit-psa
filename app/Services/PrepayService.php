@@ -618,9 +618,10 @@ class PrepayService
      * (an active contract of the ticket's client, on a ticket not awaiting contact-intake
      * verification), else one ContractResolver answer, which is stamped on the note when
      * it resolves. A stamp that does not resolve (expired, deleted, ticket moved, or the
-     * ticket is awaiting verification) is never debited (r1 diff:4): the note is re-resolved
-     * on this pass and debited to that answer only when it resolves. releaseHeldDebits()
-     * retries a held entry after a contract choice, or after verification of a ticket that has a client.
+     * ticket is awaiting verification) is never debited while the note is unledgered (r1 diff:4):
+     * the note is re-resolved on this pass and debited to that answer only when it resolves;
+     * ledgered time stays where it was debited. releaseHeldDebits() retries a held entry on
+     * its triggers (see its docblock), including verification of a ticket that has a client.
      * When that re-resolution is NONE on a ticket not awaiting verification (no client, or the client
      * has no active contract), this method debits nothing, sets no hold marker and logs nothing;
      * a marker set by an earlier pass stays. Returns null when there is no ticket, the
@@ -1079,9 +1080,10 @@ class PrepayService
      * it is no longer an active contract of the ticket's client (expired, cancelled,
      * soft-deleted or moved since it was resolved), so an inactive contract is never
      * drawn down. The caller then re-resolves once after its transaction: the stale
-     * stamp fails ContractResolver's active check, so the entry goes to the ticket or
-     * client default, or is held when that is ambiguous or the ticket is awaiting verification
-     * (heldReason() gives the badge and log text).
+     * stamp fails ContractResolver's active check, so the entry takes the re-resolved answer
+     * when it resolves, is held when that is ambiguous or the ticket is awaiting verification
+     * (heldReason() gives the badge and log text), and otherwise (NONE on a verified ticket)
+     * is not debited.
      */
     private function lockedActiveContract(Contract $contract, int $clientId, string $entryKey, int $entryId): ?Contract
     {
@@ -1237,7 +1239,8 @@ class PrepayService
             if (! $existing && ! $this->stampPhoneCallContract($call)) {
                 $resolution = app(ContractResolver::class)->forEntry($ticket);
                 if ($resolution->isAmbiguous() || (! $resolution->isResolved() && $ticket->isUnverifiedContactIntake())) {
-                    // releaseHeldDebits() re-runs this marker after a contract choice, or after verification of a ticket that has a client.
+                    // releaseHeldDebits() re-runs this marker on its triggers (see its docblock),
+                    // including verification of a ticket that has a client.
                     PhoneCall::whereKey($call->id)->whereNull('contract_held_at')->update(['contract_held_at' => now()]);
                     Log::info('[Prepay] Phone call debit held: '.$this->heldReason($call, $ticket), [
                         'phone_call_id' => $call->id,
