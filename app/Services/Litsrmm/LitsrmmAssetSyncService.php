@@ -347,7 +347,7 @@ class LitsrmmAssetSyncService
     /**
      * Sync every mapped, operational client, or only $only (the client page's
      * Sync button). A single-client run writes nothing outside that client:
-     * the estate-wide sweeps (links and seats of clients no longer mapped)
+     * the estate-wide sweeps (links of clients that are unmapped or not active, and seats of unmapped clients)
      * belong to a full run only.
      *
      * $acceptShortRead: refusal codes (refusalCode()) an admin passed with
@@ -542,8 +542,8 @@ class LitsrmmAssetSyncService
     }
 
     /**
-     * Full runs only: links on assets, and seats, of clients that are no
-     * longer mapped (or no longer operational, for links).
+     * Full runs only: the links of clients that are unmapped or not active,
+     * and the LITSRMM seats of unmapped clients.
      */
     private function sweepUnmapped(array $mappedClientIds, SyncResult $result): void
     {
@@ -1348,7 +1348,7 @@ class LitsrmmAssetSyncService
             $data['last_seen_at'] = Carbon::instance($device->lastSeen);
         }
 
-        // Never write a placeholder or overwrite a real serial; replace a stored placeholder.
+        // Never write a placeholder or overwrite a real serial; replace a stored value that is not a serial identity.
         $serial = $device->matchableSerial();
         if ($serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
             $data['serial_number'] = $serial;
@@ -1402,7 +1402,7 @@ class LitsrmmAssetSyncService
         return $windows ? 'Windows Workstation' : null;
     }
 
-    /** Links on live assets whose client is no longer mapped or no longer operational. */
+    /** Links on every asset that is not soft-deleted whose client is unmapped or not active, inactive and retired-stamped assets included. */
     private function clearUnmappedClients(array $mappedClientIds, SyncResult $result): void
     {
         $result->deactivated += Asset::whereNotNull('litsrmm_device_id')

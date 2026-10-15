@@ -29,7 +29,7 @@ use Illuminate\Database\Eloquent\Model;
  *
  * Lists below were taken from the migrated schema at 60cf6ca6 (which agrees
  * with the models' fillable/casts), not from the card's prose list.
- * assets.litsrmm_device_id was added after it, by migration 2026_09_30_120000 (#4485); LinkedIdsContractTest holds every list to the schema the suite migrates.
+ * assets.litsrmm_device_id (migration 2026_09_30_120000, #4485) and clients.default_contract_id (migration 2026_10_03_000001) were added after it; LinkedIdsContractTest holds every list to the schema the suite migrates.
  */
 final class LinkedIds
 {

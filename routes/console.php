@@ -30,13 +30,15 @@ Schedule::command('level:sync-devices')
 // LITSRMM device sync — every 4 hours: creates and updates assets from the RMM
 // for mapped, active clients, and keeps their LITSRMM server/workstation seats.
 // OFF BY DEFAULT: runs only once an admin switches on "Sync every 4 hours" in
-// Settings (litsrmm_sync_schedule_enabled), after a supervised manual run. Also
+// Settings (litsrmm_sync_schedule_enabled); switch it on only after a supervised
+// manual run has been reviewed (nothing in code checks for one). Also
 // skipped while the integration is switched off or unconfigured. It runs even
 // when no client is mapped (#5347): a full run ends with a sweep, even one that
 // fails by refusing a client; a run that ends early on an error (such as a failed
 // first device list read, which changes nothing) does not sweep. The sweep clears
 // the LITSRMM links of assets of clients that are unmapped or not active, and
-// suspends the LITSRMM seats of unmapped clients only: seats of a client that is
+// suspends the LITSRMM seats of unmapped clients only, leaving soft-deleted assets
+// and the seats of soft-deleted clients as they are: seats of a client that is
 // still mapped but not active stay as they are (#5346).
 // A failed run (non-zero exit) writes one fixed log line (#5360). Its output
 // is not appended to a file, because the skip lines it prints carry

@@ -26,7 +26,8 @@ namespace App\Support;
  * Ported deliberately from the RMM's own server/src/rmm/serial.ts, then
  * extended here beyond the ported list (#5353) with the sequential fillers
  * '123456', '1234567' and '12345678' and the firmware default 'system product
- * name'. So this side refuses at least every value the vendor's list refuses.
+ * name'. So, as of the port, this side refuses at least every value the vendor's
+ * list refused; nothing here checks the vendor's list for later additions.
  * The duplication is a known drift risk; the cost of disagreeing is a wrongly
  * merged asset, so it is the lesser evil.
  */

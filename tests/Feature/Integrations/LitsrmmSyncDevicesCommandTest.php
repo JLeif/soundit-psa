@@ -108,6 +108,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->artisan('litsrmm:sync-devices')
             ->expectsOutputToContain('No active clients are mapped to LITSRMM')
             ->expectsOutputToContain('Sweeping: clearing the LITSRMM links of clients that are unmapped or not active, and suspending the LITSRMM seats of unmapped clients.')
+            ->expectsOutputToContain('Map them at: Settings > Integrations > LITSRMM')
             ->assertSuccessful();
     }
 
