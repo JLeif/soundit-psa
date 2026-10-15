@@ -81,7 +81,14 @@ class ContractC14Test extends TestCase
         $this->assertSame(0, PrepayTransaction::count());
         $logs = new TestHandler;
         Log::getLogger()->pushHandler($logs);
-        app(\App\Services\PrepayService::class)->moveEntryContract($call, $contracts[0], 'Synthetic move', $user);
+        \App\Models\Setting::setValue('triage_system_user_id', (string) $user->id);
+        $this->assertFalse(\App\Support\TechnicianConfig::killSwitchEngaged());
+        $result = app(\App\Services\TimeEntryContractMoveService::class)->agentMove([
+            'entry_type' => 'call', 'entry_id' => $call->id,
+            'contract_id' => $contracts[0]->id, 'reason' => 'Synthetic move',
+        ], 'synthetic-c17-actor', false);
+        $this->assertTrue($result['success'] ?? false, json_encode($result));
+        $this->assertFalse($result['staged']);
         $this->assertSame($contracts[0]->id, $call->fresh()->contract_id);
         $this->assertNotNull($call->fresh()->contract_held_at);
         $this->assertSame(0, PrepayTransaction::count());
@@ -249,11 +256,29 @@ class ContractC14Test extends TestCase
         }
         $this->assertSame([], array_values(array_filter($logs->getRecords(), fn ($r) => str_contains($r->message, 'debit held: needs contract'))));
 
-        $ticket->forceFill(['contact_intake_verified_at' => now()])->saveQuietly();
+        $user = \App\Models\User::factory()->admin()->create(['is_active' => true]);
+        $formNote = TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'body' => 'Synthetic C17 form', 'note_type' => 'note',
+            'contact_intake_origin' => true, 'contact_intake_verified_at' => null, 'noted_at' => now(),
+        ]);
+        $row = \App\Models\ContactSubmission::forceCreate([
+            'integration_id' => 'website', 'submission_id' => 'synthetic-c17-verify',
+            'payload_hash' => hash('sha256', 'synthetic-c17-verify'), 'identity_hash' => hash('sha256', 'synthetic-c17-verify'),
+            'receipt' => 'synthetic-c17-verify', 'payload' => [], 'state' => 'processed',
+            'ticket_id' => $ticket->id, 'ticket_note_id' => $formNote->id,
+        ]);
+        app(\App\Services\ContactIntake\StaffWorkflow::class)->act($row->id, $user, 'verify', 'Synthetic verification');
         $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
         $this->assertSame($contract->id, $resolver->forEntry($ticket->fresh())->contract?->id);
         $service = app(\App\Services\PrepayService::class);
         $this->assertSame($contract->id, $service->contractForPhoneCall($call->fresh())?->id);
         $this->assertTrue($service->isHoursPrepay($contract->fresh()));
+        $freshNote = TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'body' => 'Synthetic C17 verified time',
+            'is_billable' => true, 'time_minutes' => 60, 'noted_at' => now(),
+        ]);
+        $debit = PrepayTransaction::where('ticket_note_id', $freshNote->id)->sole();
+        $this->assertSame($contract->id, $debit->contract_id);
+        $this->assertEquals(-1, $debit->hours);
     }
 }

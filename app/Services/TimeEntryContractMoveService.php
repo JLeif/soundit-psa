@@ -140,7 +140,7 @@ class TimeEntryContractMoveService
     /**
      * Change the ticket's contract and, when entries are ticked, move each through
      * moveEntryContract (one transaction per entry, after the ticket change commits).
-     * The ticket change alone moves no money, and releases no held "Needs contract" entry.
+     * The ticket change alone moves no money, and releases no held entry.
      *
      * @param  list<array{type: string, id: int}>  $moves
      * @return array{moved: int, hours: ?float, errors: list<string>}

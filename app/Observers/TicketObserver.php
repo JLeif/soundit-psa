@@ -198,7 +198,7 @@ class TicketObserver
     /**
      * Run a ticket save whose contract change moves no time (the modal's "Change contract
      * only" and MCP update_ticket, which both say so): it does not release the client's
-     * held "Needs contract" entries (card I3EvQKUV PR 2). updated() runs synchronously
+     * held entries (card I3EvQKUV PR 2). updated() runs synchronously
      * inside the save, so the flag covers exactly that save.
      */
     public static function withoutHeldRelease(callable $fn): mixed
@@ -215,7 +215,7 @@ class TicketObserver
     public function updated(Ticket $ticket): void
     {
         // A ticket given its own contract, or moved to another client whose contracts may
-        // settle it, can stop needing one chosen: re-run the debits held as "Needs contract"
+        // settle it, can stop needing one chosen: re-run the held debits
         // for its (new) client once the change is committed (card I3EvQKUV r2).
         // The release is client-wide; entries on other tickets that still resolve
         // AMBIGUOUS stay held.

@@ -670,7 +670,7 @@ class ClientController extends Controller
             });
         }
 
-        // Choosing a default releases the debits held as "Needs contract"; re-submitting
+        // Choosing a default releases the client's held debits; re-submitting
         // the same default retries any still held.
         // A release failure must not turn a committed default into a 500 (#4920): it is caught,
         // logged without the exception message (#4991) and reported; the default above stays saved.
