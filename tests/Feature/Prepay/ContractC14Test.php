@@ -225,6 +225,12 @@ class ContractC14Test extends TestCase
             'prepay_used' => 0, 'prepay_balance' => 10,
         ]);
         $ticket->forceFill(['contract_id' => $contract->id])->saveQuietly();
+        Contract::create([
+            'client_id' => $ticket->client_id, 'name' => 'Synthetic C19 second',
+            'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+            'prepay_as_amount' => false, 'prepay_total' => 10,
+            'prepay_used' => 0, 'prepay_balance' => 10,
+        ]);
         $this->assertTrue($ticket->isUnverifiedContactIntake());
         $this->assertTrue(app(\App\Services\PrepayService::class)->isHoursPrepay($contract));
         $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
@@ -245,8 +251,16 @@ class ContractC14Test extends TestCase
             'receipt' => 'synthetic-c17-verify', 'payload' => [], 'state' => 'processed',
             'ticket_id' => $ticket->id, 'ticket_note_id' => $formNote->id,
         ]);
+        $contractWrites = 0;
+        Ticket::updated(function (Ticket $t) use (&$contractWrites, $ticket) {
+            if ($t->id === $ticket->id && $t->wasChanged('contract_id')) {
+                $contractWrites++;
+            }
+        });
         app(\App\Services\ContactIntake\StaffWorkflow::class)->act($row->id, $user, 'verify', 'Synthetic verification');
         $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
+        $this->assertSame($contract->id, $ticket->fresh()->contract_id);
+        $this->assertSame(0, $contractWrites);
         $debit = PrepayTransaction::where('phone_call_id', $call->id)->sole();
         $this->assertSame($contract->id, $debit->contract_id);
         $this->assertNull($call->fresh()->contract_held_at);
@@ -312,6 +326,16 @@ class ContractC14Test extends TestCase
         $unsaved = (new PhoneCall)->forceFill(['ticket_id' => $ticket->id]);
         $this->assertFalse($unsaved->exists);
         $this->assertSame($contract->id, $service->contractForPhoneCall($unsaved)?->id);
+        $otherTicket = Ticket::factory()->create();
+        $otherContract = Contract::create([
+            'client_id' => $otherTicket->client_id, 'name' => 'Synthetic C19 other client',
+            'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+            'prepay_as_amount' => false, 'prepay_total' => 10,
+            'prepay_used' => 0, 'prepay_balance' => 10,
+        ]);
+        $unsaved = (new PhoneCall)->forceFill(['ticket_id' => $otherTicket->id]);
+        $this->assertFalse($unsaved->exists);
+        $this->assertSame($otherContract->id, $service->contractForPhoneCall($unsaved)?->id);
         $callDebit = PrepayTransaction::where('phone_call_id', $call->id)->sole();
         $this->assertSame($contract->id, $callDebit->contract_id);
         $this->assertNull($call->fresh()->contract_held_at);

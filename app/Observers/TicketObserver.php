@@ -196,9 +196,10 @@ class TicketObserver
     private static bool $suppressHeldRelease = false;
 
     /**
-     * Run a ticket save whose contract change moves no time (the modal's "Change contract
-     * only" and MCP update_ticket, which both say so): it does not release the client's
-     * held entries (card I3EvQKUV PR 2). updated() runs synchronously
+     * Run a ticket save whose contract_id change does not release the client's held
+     * entries (card I3EvQKUV PR 2): changeTicketContract, behind both buttons of the
+     * ticket's contract-change modal, and MCP update_ticket. A client_id change in the
+     * same save still releases them (updated() below). updated() runs synchronously
      * inside the save, so the flag covers exactly that save.
      */
     public static function withoutHeldRelease(callable $fn): mixed
