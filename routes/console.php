@@ -33,12 +33,11 @@ Schedule::command('level:sync-devices')
 // Settings (litsrmm_sync_schedule_enabled), after a supervised manual run. Also
 // skipped while the integration is switched off or unconfigured. It runs even
 // when no client is mapped (#5347): a full run ends with a sweep, even one that
-// fails by refusing a client; only a failed device list read (which changes
-// nothing) or an error that rolls a client back stops it before the sweep.
-// The sweep clears the
-// LITSRMM links of assets of clients that are unmapped or no longer active, and
+// fails by refusing a client; a run that ends early on an error (such as a failed
+// first device list read, which changes nothing) does not sweep. The sweep clears
+// the LITSRMM links of assets of clients that are unmapped or not active, and
 // suspends the LITSRMM seats of unmapped clients only: seats of a client that is
-// still mapped but no longer active stay as they are (#5346).
+// still mapped but not active stay as they are (#5346).
 // A failed run (non-zero exit) writes one fixed log line (#5360). Its output
 // is not appended to a file, because the skip lines it prints carry
 // hostnames. The sync writes its own log lines, by PSA client id only.
