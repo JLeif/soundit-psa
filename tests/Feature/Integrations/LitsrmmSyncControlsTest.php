@@ -379,6 +379,42 @@ class LitsrmmSyncControlsTest extends TestCase
             ->assertForbidden();
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('l4ScheduleStates')]
+    public function test_l4_schedule_flash_is_true_for_each_state(bool $configured, bool $enabled, bool $scheduled): void
+    {
+        Http::preventStrayRequests();
+        Setting::setValue('litsrmm_enabled', $enabled ? '1' : '0');
+        if (! $configured) {
+            Setting::setValue('litsrmm_base_url', '');
+        }
+        $expected = $scheduled
+            ? ($configured && $enabled
+                ? 'LITSRMM scheduled device sync is on and runs every 4 hours while the integration is configured and enabled.'
+                : 'LITSRMM scheduled device sync is on. It will run every 4 hours once the integration is configured and enabled.')
+            : 'LITSRMM scheduled device sync is off.';
+
+        $this->actingAs(User::factory()->admin()->create())
+            ->post(route('settings.integrations.litsrmm.schedule'), ['enabled' => $scheduled ? '1' : '0'])
+            ->assertRedirect(route('settings.integrations'))
+            ->assertSessionHas('success', $expected);
+        $this->assertSame($scheduled ? '1' : '0', Setting::getValue('litsrmm_sync_schedule_enabled'));
+        $this->assertSame($scheduled && $configured && $enabled, $this->event()->filtersPass($this->app));
+    }
+
+    public static function l4ScheduleStates(): array
+    {
+        $states = [];
+        foreach ([false, true] as $configured) {
+            foreach ([false, true] as $enabled) {
+                foreach ([false, true] as $scheduled) {
+                    $states['configured='.(int) $configured.' enabled='.(int) $enabled.' scheduled='.(int) $scheduled] = [$configured, $enabled, $scheduled];
+                }
+            }
+        }
+
+        return $states;
+    }
+
     public function test_an_admin_switches_the_schedule_on_and_off(): void
     {
         $admin = User::factory()->admin()->create();

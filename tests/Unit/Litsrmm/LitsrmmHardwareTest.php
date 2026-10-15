@@ -172,6 +172,46 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertSame(['hardware', 'disks'], $hw->malformed, 'named, so the sync can log the drift');
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('driftShapes')]
+    public function test_l4_unreadable_shape_drops_the_whole_category(string $category, array $payload, array $fields): void
+    {
+        $inventory = self::inventory();
+        $inventory[$category]['payload'] = $payload;
+        $hw = LitsrmmHardware::fromInventory($inventory);
+
+        $this->assertSame([$category], $hw->malformed);
+        $stored = array_fill_keys($fields, 'old value');
+        $merged = array_merge($stored, $hw->columns());
+        foreach ($fields as $field) {
+            $this->assertSame('old value', $merged[$field]);
+        }
+    }
+
+    public static function driftShapes(): array
+    {
+        return [
+            'disks object' => ['disks', ['drive' => 'C:', 'totalBytes' => 480000000000], ['disk_summary']],
+            'network object' => ['network', ['ipv4' => ['192.0.2.10'], 'up' => true], ['ip_address']],
+            'ram string' => ['hardware', ['ramBytes' => '15000000000', 'cpu' => 'Example CPU'], ['ram_gb', 'cpu']],
+            'cpu int' => ['hardware', ['ramBytes' => 15000000000, 'cpu' => 42], ['ram_gb', 'cpu']],
+            'boot unreadable' => ['system', ['bootTimeUtc' => 'last Tuesday', 'pendingReboot' => true], ['last_boot_at', 'needs_reboot']],
+        ];
+    }
+
+    public function test_l4_missing_and_null_known_keys_are_not_drift(): void
+    {
+        foreach ([[], ['cpu' => null, 'ramBytes' => null]] as $hardware) {
+            foreach ([[], ['bootTimeUtc' => null]] as $system) {
+                $hw = LitsrmmHardware::fromInventory([
+                    'hardware' => ['payload' => $hardware],
+                    'system' => ['payload' => $system],
+                ]);
+                $this->assertSame([], $hw->malformed);
+                $this->assertSame([], $hw->columns());
+            }
+        }
+    }
+
     public function test_an_absent_category_is_not_malformed(): void
     {
         $inventory = self::inventory();
@@ -180,7 +220,7 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertSame([], LitsrmmHardware::fromInventory($inventory)->malformed);
     }
 
-    public function test_an_unparseable_boot_time_is_dropped(): void
+    public function test_an_unparseable_boot_time_marks_the_system_category_malformed(): void
     {
         $inventory = self::inventory();
         $inventory['system']['payload']['bootTimeUtc'] = 'last Tuesday';
@@ -188,6 +228,7 @@ class LitsrmmHardwareTest extends TestCase
         $hw = LitsrmmHardware::fromInventory($inventory);
 
         $this->assertNull($hw->lastBootAt);
-        $this->assertTrue($hw->needsReboot, 'the rest of the category still counts');
+        $this->assertNull($hw->needsReboot, 'a malformed system category writes none of its fields');
+        $this->assertSame(['system'], $hw->malformed);
     }
 }
