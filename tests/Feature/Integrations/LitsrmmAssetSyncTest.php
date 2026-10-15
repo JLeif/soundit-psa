@@ -182,10 +182,10 @@ class LitsrmmAssetSyncTest extends TestCase
     private static function inventory(): array
     {
         return [
-            'hardware' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['cpu' => 'Example CPU', 'ramBytes' => 17179869184]],
-            'disks' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [['drive' => 'C:', 'totalBytes' => 536870912000, 'freeBytes' => 107374182400]]],
+            'hardware' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]],
+            'disks' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]],
             'network' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [['name' => 'Ethernet', 'mac' => '00:00:5E:00:53:01', 'ipv4' => ['192.0.2.10'], 'up' => true]]],
-            'system' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['bootTimeUtc' => '2026-09-30T03:00:00Z', 'pendingReboot' => true]],
+            'system' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]],
         ];
     }
 
@@ -222,10 +222,10 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertTrue($asset->is_active);
         $this->assertSame('2026-09-30 10:00:00', $asset->last_seen_at->utc()->format('Y-m-d H:i:s'));
         $this->assertSame('Example CPU', $asset->cpu);
-        $this->assertSame('16.00', $asset->ram_gb);
-        $this->assertSame('C: 500 GB (20% free)', $asset->disk_summary);
+        $this->assertSame('13.97', $asset->ram_gb);
+        $this->assertSame('C: 447 GB (21% free)', $asset->disk_summary);
         $this->assertSame('192.0.2.10', $asset->ip_address);
-        $this->assertSame('2026-09-30 03:00:00', $asset->last_boot_at->utc()->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-09-30 03:04:05', $asset->last_boot_at->utc()->format('Y-m-d H:i:s'));
         $this->assertTrue($asset->needs_reboot);
     }
 
@@ -502,7 +502,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $asset->refresh();
         $this->assertSame('Known CPU', $asset->cpu);
-        $this->assertSame('C: 500 GB (20% free)', $asset->disk_summary);
+        $this->assertSame('C: 447 GB (21% free)', $asset->disk_summary);
     }
 
     public function test_a_failed_detail_read_still_writes_the_list_facts_and_keeps_the_hardware(): void

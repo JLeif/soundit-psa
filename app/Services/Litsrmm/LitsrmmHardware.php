@@ -108,7 +108,7 @@ final class LitsrmmHardware
     }
 
     /**
-     * "C: 465 GB (18% free), D: 932 GB (50% free)". The same format and the
+     * "C: 447 GB (21% free), D: 932 GB (50% free)". The same format and the
      * same rounding as LevelSyncService::resolveDiskSummary() (free percent is
      * taken from the ROUNDED gigabytes), so an asset moved from Level to
      * LITSRMM does not change its disk line for no reason.
