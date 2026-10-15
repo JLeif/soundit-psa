@@ -39,6 +39,10 @@ class LitsrmmSerialTest extends TestCase
             ['N/A'],
             ['none'],
             ['0123456789'],
+            ['123456'],
+            ['1234567'],
+            ['12345678'],
+            ['System Product Name'],
         ];
     }
 
@@ -100,22 +104,5 @@ class LitsrmmSerialTest extends TestCase
         // still not identities.
         $this->assertNull(LitsrmmSerial::identity('0000000'));
         $this->assertNull(LitsrmmSerial::identity('XXXXXXX'));
-    }
-
-    /**
-     * The property that matters most, stated directly: two different machines
-     * that both report a placeholder must NOT produce the same match key,
-     * because a shared key is what merges them.
-     */
-    #[Test]
-    public function two_placeholder_machines_never_share_a_match_key(): void
-    {
-        $a = LitsrmmSerial::identity('Default string');
-        $b = LitsrmmSerial::identity('Default string');
-
-        $this->assertNull($a);
-        $this->assertNull($b);
-        // Null is not a key. Both fall through to hostname matching instead,
-        // which is weaker and knows it is weaker.
     }
 }

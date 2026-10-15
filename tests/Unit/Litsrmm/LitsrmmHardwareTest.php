@@ -104,6 +104,41 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertSame('192.0.2.10', LitsrmmHardware::fromInventory($inventory)->ipAddress);
     }
 
+    public function test_an_up_loopback_adapter_does_not_win_over_ethernet(): void
+    {
+        $inventory = self::inventory();
+        $inventory['network']['payload'] = [
+            ['name' => 'Loopback', 'ipv4' => ['127.0.0.1'], 'up' => true],
+            ['name' => 'Ethernet', 'ipv4' => ['192.0.2.10'], 'up' => true],
+        ];
+
+        $this->assertSame('192.0.2.10', LitsrmmHardware::fromInventory($inventory)->ipAddress);
+    }
+
+    public function test_a_calendar_invalid_boot_time_is_dropped(): void
+    {
+        $inventory = self::inventory();
+        $inventory['system']['payload']['bootTimeUtc'] = '2026-09-31T03:00:00Z';
+
+        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+    }
+
+    public function test_a_valid_leap_day_boot_time_is_kept(): void
+    {
+        $inventory = self::inventory();
+        $inventory['system']['payload']['bootTimeUtc'] = '2028-02-29T00:00:00Z';
+
+        $this->assertSame('2028-02-29T00:00:00+00:00', LitsrmmHardware::fromInventory($inventory)->lastBootAt?->format(DATE_ATOM));
+    }
+
+    public function test_a_24_hour_boot_time_is_dropped(): void
+    {
+        $inventory = self::inventory();
+        $inventory['system']['payload']['bootTimeUtc'] = '2026-09-30T24:00:00Z';
+
+        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+    }
+
     public function test_every_fixed_volume_is_listed(): void
     {
         $inventory = self::inventory();
