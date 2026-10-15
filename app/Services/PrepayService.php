@@ -705,7 +705,10 @@ class PrepayService
      * verification (card VLyhWACq C10) for a client. Triggers include a default chosen
      * (ClientController); a contract created or restored active, changing status,
      * moved to another client, or soft- or force-deleted (Contract::booted); a
-     * ticket given its own contract or moved to another client (TicketObserver);
+     * ticket given its own contract (TicketObserver), except a save inside
+     * TicketObserver::withoutHeldRelease (the modal's "Change contract only" and
+     * MCP update_ticket); a ticket moved to another client (TicketObserver, even
+     * inside withoutHeldRelease);
      * a client merge (ClientService::mergeClients); contact-intake ticket
      * verification (ContactIntake\StaffWorkflow::act).
      * Only entries the hold path marked and that have no ledger row are touched,

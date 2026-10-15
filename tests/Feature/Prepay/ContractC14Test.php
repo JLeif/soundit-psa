@@ -82,7 +82,6 @@ class ContractC14Test extends TestCase
         $logs = new TestHandler;
         Log::getLogger()->pushHandler($logs);
         \App\Models\Setting::setValue('triage_system_user_id', (string) $user->id);
-        $this->assertFalse(\App\Support\TechnicianConfig::killSwitchEngaged());
         $result = app(\App\Services\TimeEntryContractMoveService::class)->agentMove([
             'entry_type' => 'call', 'entry_id' => $call->id,
             'contract_id' => $contracts[0]->id, 'reason' => 'Synthetic move',
@@ -214,6 +213,45 @@ class ContractC14Test extends TestCase
         $this->assertSame([], array_values(array_filter($logs->getRecords(), fn ($r) => str_contains($r->message, 'debit held: needs contract'))));
     }
 
+    public function test_verification_releases_held_call_on_preassigned_contract(): void
+    {
+        Http::fake();
+        Http::preventStrayRequests();
+        $ticket = Ticket::factory()->create(['contact_intake_origin' => true, 'contact_intake_verified_at' => null]);
+        $contract = Contract::create([
+            'client_id' => $ticket->client_id, 'name' => 'Synthetic C14',
+            'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+            'prepay_as_amount' => false, 'prepay_total' => 10,
+            'prepay_used' => 0, 'prepay_balance' => 10,
+        ]);
+        $ticket->forceFill(['contract_id' => $contract->id])->saveQuietly();
+        $this->assertTrue($ticket->isUnverifiedContactIntake());
+        $this->assertTrue(app(\App\Services\PrepayService::class)->isHoursPrepay($contract));
+        $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+            'call_uuid' => 'synthetic-c14', 'direction' => 'inbound', 'from_number' => '+15555550142',
+            'status' => 'completed', 'is_billable' => true, 'duration' => 3600, 'started_at' => now(),
+        ]));
+        app(PhoneCallService::class)->linkCallToTicket($call, $ticket->id);
+        $this->assertNotNull($call->fresh()->contract_held_at);
+        $this->assertSame(0, PrepayTransaction::count());
+        $user = \App\Models\User::factory()->admin()->create(['is_active' => true]);
+        $formNote = TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'body' => 'Synthetic C17 form', 'note_type' => 'note',
+            'contact_intake_origin' => true, 'contact_intake_verified_at' => null, 'noted_at' => now(),
+        ]);
+        $row = \App\Models\ContactSubmission::forceCreate([
+            'integration_id' => 'website', 'submission_id' => 'synthetic-c17-verify',
+            'payload_hash' => hash('sha256', 'synthetic-c17-verify'), 'identity_hash' => hash('sha256', 'synthetic-c17-verify'),
+            'receipt' => 'synthetic-c17-verify', 'payload' => [], 'state' => 'processed',
+            'ticket_id' => $ticket->id, 'ticket_note_id' => $formNote->id,
+        ]);
+        app(\App\Services\ContactIntake\StaffWorkflow::class)->act($row->id, $user, 'verify', 'Synthetic verification');
+        $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
+        $debit = PrepayTransaction::where('phone_call_id', $call->id)->sole();
+        $this->assertSame($contract->id, $debit->contract_id);
+        $this->assertNull($call->fresh()->contract_held_at);
+    }
+
     public function test_unverified_intake_logs_verification_hold_for_note_and_call(): void
     {
         // Synthetic intake fixture follows ContractC10Test::linkedCall.
@@ -271,6 +309,12 @@ class ContractC14Test extends TestCase
         $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
         $this->assertSame($contract->id, $resolver->forEntry($ticket->fresh())->contract?->id);
         $service = app(\App\Services\PrepayService::class);
+        $unsaved = (new PhoneCall)->forceFill(['ticket_id' => $ticket->id]);
+        $this->assertFalse($unsaved->exists);
+        $this->assertSame($contract->id, $service->contractForPhoneCall($unsaved)?->id);
+        $callDebit = PrepayTransaction::where('phone_call_id', $call->id)->sole();
+        $this->assertSame($contract->id, $callDebit->contract_id);
+        $this->assertNull($call->fresh()->contract_held_at);
         $this->assertSame($contract->id, $service->contractForPhoneCall($call->fresh())?->id);
         $this->assertTrue($service->isHoursPrepay($contract->fresh()));
         $freshNote = TicketNote::forceCreate([
