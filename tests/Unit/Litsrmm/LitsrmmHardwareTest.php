@@ -107,10 +107,10 @@ class LitsrmmHardwareTest extends TestCase
     public function test_every_fixed_volume_is_listed(): void
     {
         $inventory = self::inventory();
-        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000204886016, 'freeBytes' => 500102443008];
+        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000000000000, 'freeBytes' => 500000000000];
 
-        // D: 931.5 -> 932 GB, free 465.8 -> 466 GB, 466/932 = 50%.
-        $this->assertSame('C: 447 GB (21% free), D: 932 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
+        // D: 931.32 -> 931 GB, free 465.66 -> 466 GB, 466/931 = 50.05 -> 50%.
+        $this->assertSame('C: 447 GB (21% free), D: 931 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
     }
 
     public function test_a_malformed_payload_is_ignored_not_fatal(): void
