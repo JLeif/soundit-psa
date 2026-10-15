@@ -151,9 +151,9 @@ final class LitsrmmHardware
 
     /**
      * The first IPv4 on an adapter that is up, then on any adapter.
-     * Never a reserved address (loopback 127/8, 0/8, 240/4) or a 169.254/16
-     * link-local one: link-local is what Windows assigns when DHCP failed,
-     * and none of them says where the machine is.
+     * Never a loopback (127/8), 0/8, 240/4 or 169.254/16 link-local address:
+     * link-local is what Windows assigns when DHCP failed, and none of them
+     * says where the machine is.
      */
     private static function ipAddress(?array $adapters): ?string
     {
@@ -190,7 +190,7 @@ final class LitsrmmHardware
     private static function instant(mixed $value): ?DateTimeImmutable
     {
         if (! is_string($value)
-            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/', $value, $m) !== 1) {
+            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/D', $value, $m) !== 1) {
             return null;
         }
 

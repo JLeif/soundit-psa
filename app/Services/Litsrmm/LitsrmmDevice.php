@@ -130,8 +130,9 @@ final class LitsrmmDevice
      * reports none, a blank string, a firmware placeholder ("System Serial
      * Number", "Default string", "To be filled by O.E.M." and their family),
      * or a value too short or too repetitive to be one. The rule is
-     * App\Support\LitsrmmSerial, which is the list the vendor's own RMM
-     * refuses, so both sides of the integration withhold the same values.
+     * App\Support\LitsrmmSerial, which holds the list the vendor's own RMM
+     * refuses plus the entries #5353 added, so this side withholds at least
+     * what the vendor does.
      * A placeholder is still REAL data and stays in $serial.
      *
      * Even a non-placeholder serial is NOT a key: the vendor says serial

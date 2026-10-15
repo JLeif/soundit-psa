@@ -287,6 +287,24 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertNull(Asset::sole()->asset_type);
     }
 
+    public function test_wind_river_linux_server_is_not_typed_as_windows(): void
+    {
+        $this->device('1', ['osName' => 'Wind River Linux Server']);
+
+        $this->service()->sync();
+
+        $this->assertNull(Asset::sole()->asset_type);
+    }
+
+    public function test_microsoft_windows_workstation_is_typed_as_a_workstation(): void
+    {
+        $this->device('1', ['osName' => 'Microsoft Windows 11 Pro']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Workstation', Asset::sole()->asset_type);
+    }
+
     public function test_microsoft_windows_server_is_typed_as_a_server(): void
     {
         $this->device('1', ['osName' => 'Microsoft Windows Server 2019 Standard']);

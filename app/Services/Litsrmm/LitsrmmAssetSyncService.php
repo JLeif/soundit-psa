@@ -1392,7 +1392,7 @@ class LitsrmmAssetSyncService
         }
 
         $os = mb_strtolower($osName);
-        $windows = str_starts_with($os, 'win') || str_contains($os, 'windows');
+        $windows = preg_match('/^win\b/', $os) === 1 || str_contains($os, 'windows');
 
         if ($windows && str_contains($os, 'server')) {
             return 'Windows Server';

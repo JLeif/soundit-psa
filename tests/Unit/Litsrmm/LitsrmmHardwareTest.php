@@ -123,6 +123,14 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
     }
 
+    public function test_a_boot_time_with_a_trailing_newline_is_dropped(): void
+    {
+        $inventory = self::inventory();
+        $inventory['system']['payload']['bootTimeUtc'] = '2026-09-30T03:04:05Z'."\n";
+
+        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+    }
+
     public function test_a_valid_leap_day_boot_time_is_kept(): void
     {
         $inventory = self::inventory();
