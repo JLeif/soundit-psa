@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LITSRMM settings — schedule states</title>
+<link rel="stylesheet" href="../_tokens.css">
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--psa-colors-canvas); color: var(--psa-colors-ink); font-family: var(--psa-typography-body-font-family); font-size: var(--psa-typography-body-font-size); line-height: var(--psa-typography-body-line-height); }
+main { padding: var(--psa-spacing-lg); display: grid; grid-template-columns: 1fr 1fr; gap: var(--psa-spacing-lg); }
+.card { background: var(--psa-colors-surface); border: 1px solid var(--psa-colors-border); border-radius: var(--psa-rounded-md); overflow: hidden; }
+.card-header { background: var(--psa-colors-navy); color: var(--psa-colors-surface); font-family: var(--psa-typography-title-font-family); font-size: var(--psa-typography-title-font-size); font-weight: var(--psa-typography-title-font-weight); padding: var(--psa-spacing-md); display: flex; justify-content: space-between; gap: var(--psa-spacing-sm); }
+.card-body { padding: var(--psa-spacing-md); }
+.muted { color: var(--psa-colors-muted-ink); }
+.badge { border-radius: var(--psa-rounded-pill); padding: var(--psa-spacing-xs) var(--psa-spacing-sm); }
+.active { background: var(--psa-colors-success); color: var(--psa-colors-surface); }
+.disabled { background: var(--psa-colors-warning); color: var(--psa-colors-navy-deep); }
+label { display: block; margin-top: var(--psa-spacing-md); font-weight: var(--psa-typography-label-font-weight); color: var(--psa-colors-navy); }
+input[type=url], input[type=password] { width: 100%; padding: var(--psa-spacing-sm); background: var(--psa-colors-surface); color: var(--psa-colors-ink); border: 1px solid var(--psa-colors-field-border); border-radius: var(--psa-rounded-sm); }
+input[type=checkbox] { accent-color: var(--psa-colors-navy); }
+button { margin-top: var(--psa-spacing-md); padding: var(--psa-spacing-sm) var(--psa-spacing-md); border: 1px solid var(--psa-colors-navy); border-radius: var(--psa-rounded-sm); background: var(--psa-colors-surface); color: var(--psa-colors-navy); font: inherit; }
+button.primary { background: var(--psa-colors-navy); color: var(--psa-colors-surface); }
+button:hover, button:active { background: var(--psa-colors-navy-light); color: var(--psa-colors-surface); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--psa-colors-navy-light); outline-offset: 2px; }
+button:disabled { color: var(--psa-colors-muted-ink); border-color: var(--psa-colors-field-border); }
+.section { border-top: 1px solid var(--psa-colors-border); margin-top: var(--psa-spacing-md); padding-top: var(--psa-spacing-sm); }
+p { margin: var(--psa-spacing-sm) 0; }
+</style>
+</head>
+<body>
+<main>
+<article class="card">
+<header class="card-header"><span>LITSRMM (Leif IT Solutions RMM)</span><span class="badge active">Active</span></header>
+<div class="card-body">
+<p class="muted">Map clients to their LITSRMM counterparts. LITSRMM is self-hosted, so both the base URL of your instance and an API key are required — there is no default host.</p>
+<label for="url-on">Base URL</label><input id="url-on" type="url" value="https://rmm.example.test">
+<p class="muted">The root of your LITSRMM instance, without a trailing path.</p>
+<label for="key-on">API Key</label><input id="key-on" type="password" placeholder="Leave blank to keep current">
+<p class="muted">Sent as a bearer token. Stored encrypted and never shown again.</p>
+<button class="primary" type="button">Save LITSRMM Settings</button><br><button type="button">Test Connection</button>
+<div class="section"><button type="button">Sync all devices</button><p class="muted">Creates and updates assets, and LITSRMM seats, for every mapped client.</p>
+<label><input type="checkbox" checked> Sync every 4 hours</label><p class="muted">Off by default. Switch on after a supervised manual run has been reviewed.</p></div>
+<div class="section"><label><input type="checkbox" checked> Integration enabled</label><p class="muted">Turning this off stops all LITSRMM requests, including client lookups on the client page. Credentials are kept so it can be turned back on.</p></div>
+</div></article>
+<article class="card">
+<header class="card-header"><span>LITSRMM (Leif IT Solutions RMM)</span><span class="badge disabled">Configured (disabled)</span></header>
+<div class="card-body">
+<p class="muted">Map clients to their LITSRMM counterparts. LITSRMM is self-hosted, so both the base URL of your instance and an API key are required — there is no default host.</p>
+<label for="url-off">Base URL</label><input id="url-off" type="url" value="https://rmm.example.test">
+<p class="muted">The root of your LITSRMM instance, without a trailing path.</p>
+<label for="key-off">API Key</label><input id="key-off" type="password" placeholder="Leave blank to keep current">
+<p class="muted">Sent as a bearer token. Stored encrypted and never shown again.</p>
+<button class="primary" type="button">Save LITSRMM Settings</button><br><button type="button">Test Connection</button>
+<p class="section muted">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
+<div class="section"><label><input type="checkbox"> Integration enabled</label><p class="muted">Turning this off stops all LITSRMM requests, including client lookups on the client page. Credentials are kept so it can be turned back on.</p></div>
+</div></article>
+</main>
+</body>
+</html>
