@@ -149,6 +149,66 @@ class ContractC16ViewTest extends TestCase
         $this->assertHeldBadges($ticket, $user, ['#editNoteModal'.$note->id => 'Needs contract']);
     }
 
+    public function test_stamped_call_on_ambiguous_unverified_intake_badge_awaits_verification(): void
+    {
+        Http::fake();
+        Http::preventStrayRequests();
+        $user = User::factory()->admin()->create(['is_active' => true]);
+        $ticket = Ticket::factory()->create(['contact_intake_origin' => true, 'contact_intake_verified_at' => null]);
+        $contract = $this->ambiguousContracts($ticket);
+        $this->assertTrue($ticket->isUnverifiedContactIntake());
+        $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+            'ticket_id' => $ticket->id, 'call_uuid' => 'synthetic-c18-t8',
+            'direction' => 'inbound', 'from_number' => '+15555550142', 'status' => 'completed',
+            'is_billable' => true, 'duration' => 3600, 'started_at' => now(), 'contract_id' => $contract->id,
+        ]));
+        app(\App\Services\PrepayService::class)->debitFromPhoneCall($call);
+        $this->assertNotNull($call->fresh()->contract_held_at);
+        $this->assertSame(0, \App\Models\PrepayTransaction::count());
+        $this->assertHeldBadges($ticket, $user, ['#editCallModal'.$call->id => 'Awaiting verification']);
+    }
+
+    public function test_ambiguous_non_intake_note_badge_matches_needs_contract_hold_log(): void
+    {
+        Http::fake();
+        Http::preventStrayRequests();
+        $user = User::factory()->admin()->create(['is_active' => true]);
+        $ticket = Ticket::factory()->create(['contact_intake_origin' => false, 'contact_intake_verified_at' => null]);
+        $this->ambiguousContracts($ticket);
+        $this->assertFalse($ticket->isUnverifiedContactIntake());
+        $note = TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'author_id' => $user->id, 'note_type' => 'note',
+            'body' => 'Synthetic C18 nc', 'is_private' => true, 'is_billable' => true,
+            'time_minutes' => 60, 'noted_at' => now(),
+        ]));
+        $logs = new \Monolog\Handler\TestHandler;
+        \Illuminate\Support\Facades\Log::getLogger()->pushHandler($logs);
+        app(\App\Services\PrepayService::class)->debitFromTicketNote($note);
+        $this->assertNotNull($note->fresh()->contract_held_at);
+        $this->assertSame(0, \App\Models\PrepayTransaction::count());
+        $records = array_values(array_filter($logs->getRecords(), fn ($r) => $r->message === '[Prepay] Ticket note debit held: needs contract' && ($r->context['ticket_note_id'] ?? null) === $note->id));
+        $this->assertCount(1, $records);
+        $this->assertSame(\Monolog\Level::Info, $records[0]->level);
+        $this->assertHeldBadges($ticket, $user, ['#editNoteModal'.$note->id => 'Needs contract']);
+    }
+
+    private function ambiguousContracts(Ticket $ticket): Contract
+    {
+        $ticket->client->forceFill(['default_contract_id' => null])->saveQuietly();
+        for ($i = 0; $i < 2; $i++) {
+            $contract = Contract::create([
+                'client_id' => $ticket->client_id, 'name' => 'Synthetic C18 '.$i,
+                'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+                'prepay_as_amount' => false, 'prepay_total' => 10,
+                'prepay_used' => 0, 'prepay_balance' => 10,
+            ]);
+        }
+        $this->assertSame(2, Contract::where('client_id', $ticket->client_id)->active()->count());
+        $this->assertTrue(app(\App\Services\ContractResolver::class)->forEntry($ticket)->isAmbiguous());
+
+        return $contract;
+    }
+
     private function assertHeldBadges(Ticket $ticket, User $user, array $expected): void
     {
         $html = $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()->getContent();
