@@ -1381,7 +1381,10 @@ class LitsrmmAssetSyncService
         ]));
     }
 
-    /** "Windows Workstation" / "Windows Server", the form LevelSyncService writes. */
+    /**
+     * "Windows Workstation" / "Windows Server" for a Windows OS only (the form
+     * LevelSyncService writes); NULL for any other OS rather than a wrong guess.
+     */
     private static function assetType(?string $osName): ?string
     {
         if ($osName === null) {
@@ -1389,12 +1392,14 @@ class LitsrmmAssetSyncService
         }
 
         $os = mb_strtolower($osName);
+        // 'win 10 pro', 'win10 pro' and 'winserver 2022' are Windows; 'wind river' is not.
+        $windows = preg_match('/^win(?:\b|\d|server)/', $os) === 1 || str_contains($os, 'windows');
 
-        if (str_contains($os, 'server')) {
+        if ($windows && str_contains($os, 'server')) {
             return 'Windows Server';
         }
 
-        return str_starts_with($os, 'win') ? 'Windows Workstation' : null;
+        return $windows ? 'Windows Workstation' : null;
     }
 
     /** Links on live assets whose client is no longer mapped or no longer operational. */

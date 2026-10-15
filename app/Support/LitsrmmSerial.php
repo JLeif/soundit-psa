@@ -23,9 +23,11 @@ namespace App\Support;
  * device carrying one must be treated exactly as if the field were empty and
  * fall through to hostname matching — never match on junk.
  *
- * Ported deliberately from the RMM's own server/src/rmm/serial.ts so both
- * sides of the integration refuse the same values. The duplication is a known
- * drift risk; the list is stable and the cost of disagreeing is a wrongly
+ * Ported deliberately from the RMM's own server/src/rmm/serial.ts, then
+ * extended here beyond the ported list (#5353) with the sequential fillers
+ * '123456', '1234567' and '12345678' and the firmware default 'system product
+ * name'. So this side refuses at least every value the vendor's list refuses.
+ * The duplication is a known drift risk; the cost of disagreeing is a wrongly
  * merged asset, so it is the lesser evil.
  */
 class LitsrmmSerial
@@ -37,13 +39,13 @@ class LitsrmmSerial
     private const PLACEHOLDERS = [
         'default string', 'default',
         'to be filled by o.e.m.', 'to be filled by oem', 'filled by oem',
-        'system serial number', 'base board serial number',
+        'system serial number', 'base board serial number', 'system product name',
         'chassis serial number', 'module part number',
         'serial number', 'serial',
         'not applicable', 'not specified', 'not available',
         'unknown', 'invalid', 'none', 'null', 'nil', 'empty',
         'n/a', 'na', 'oem', 'x',
-        '0123456789', '123456789', '1234567890',
+        '0123456789', '123456', '1234567', '12345678', '123456789', '1234567890',
     ];
 
     /**

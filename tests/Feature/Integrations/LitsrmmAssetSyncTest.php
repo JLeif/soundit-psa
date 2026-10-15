@@ -278,6 +278,80 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('Windows Server', Asset::sole()->asset_type);
     }
 
+    public function test_ubuntu_server_is_not_typed_as_windows(): void
+    {
+        $this->device('1', ['osName' => 'Ubuntu Server 22.04']);
+
+        $this->service()->sync();
+
+        $this->assertNull(Asset::sole()->asset_type);
+    }
+
+    public function test_wind_river_linux_server_is_not_typed_as_windows(): void
+    {
+        $this->device('1', ['osName' => 'Wind River Linux Server']);
+
+        $this->service()->sync();
+
+        $this->assertNull(Asset::sole()->asset_type);
+    }
+
+    public function test_microsoft_windows_workstation_is_typed_as_a_workstation(): void
+    {
+        $this->device('1', ['osName' => 'Microsoft Windows 11 Pro']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Workstation', Asset::sole()->asset_type);
+    }
+
+    public function test_microsoft_windows_server_is_typed_as_a_server(): void
+    {
+        $this->device('1', ['osName' => 'Microsoft Windows Server 2019 Standard']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Server', Asset::sole()->asset_type);
+    }
+
+    public function test_a_compact_win_workstation_os_is_typed_as_a_workstation(): void
+    {
+        $this->device('1', ['osName' => 'Win10 Pro']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Workstation', Asset::sole()->asset_type);
+    }
+
+    public function test_a_compact_win_server_os_is_typed_as_a_server(): void
+    {
+        $this->device('1', ['osName' => 'Win2019 Server']);
+        $this->device('2', ['osName' => 'WinServer 2022']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Server', Asset::where('hostname', 'WORKSTATION-1')->sole()->asset_type);
+        $this->assertSame('Windows Server', Asset::where('hostname', 'WORKSTATION-2')->sole()->asset_type);
+    }
+
+    public function test_two_placeholder_serial_devices_in_one_client_create_two_assets(): void
+    {
+        $alpha = $this->device('1', ['hostname' => 'WS-ALPHA', 'serial' => 'Default string']);
+        $bravo = $this->device('2', ['hostname' => 'WS-BRAVO', 'serial' => 'Default string']);
+        $this->assertSame(0, Asset::count());
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(0, $result->errors);
+        $this->assertSame(2, $result->created);
+        $this->assertSame(2, Asset::count());
+        foreach ([$alpha, $bravo] as $row) {
+            $asset = Asset::where('hostname', $row['hostname'])->sole();
+            $this->assertSame($this->client->id, $asset->client_id);
+            $this->assertSame($row['id'], $asset->litsrmm_device_id);
+        }
+    }
+
     public function test_an_agentless_device_is_created_without_a_detail_read(): void
     {
         // Most of the vendor's devices have no agent: nothing was ever
