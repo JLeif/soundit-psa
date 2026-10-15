@@ -196,6 +196,66 @@ class LitsrmmAssetSyncTest extends TestCase
             ->count();
     }
 
+    public function test_l4_duplicate_device_link_keeps_lowest_id_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $this->details[$row['id']] = self::inventory();
+        $higher = Asset::factory()->create(['id' => 9002, 'client_id' => $this->client->id, 'hostname' => 'EXAMPLE-HIGH', 'serial_number' => null, 'litsrmm_device_id' => $row['id']]);
+        $lower = Asset::factory()->create(['id' => 9001, 'client_id' => $this->client->id, 'hostname' => 'EXAMPLE-LOW', 'serial_number' => null, 'litsrmm_device_id' => $row['id']]);
+
+        $this->service()->sync();
+
+        $this->assertSame($row['id'], $lower->fresh()->litsrmm_device_id);
+        $this->assertNull($higher->fresh()->litsrmm_device_id);
+        $this->assertSame('Example CPU', $lower->fresh()->cpu);
+    }
+
+    public function test_l4_real_serial_replaces_stored_placeholder(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'To Be Filled By O.E.M.', 'litsrmm_device_id' => $row['id']]);
+
+        $this->service()->sync();
+
+        $this->assertSame('SN1REAL0', $asset->fresh()->serial_number);
+    }
+
+    public function test_l4_real_stored_serial_is_preserved_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'EXAMPLE-OLD-SERIAL', 'litsrmm_device_id' => $row['id']]);
+
+        $this->service()->sync();
+
+        $this->assertSame('EXAMPLE-OLD-SERIAL', $asset->fresh()->serial_number);
+    }
+
+    #[DataProvider('l4DriftShapes')]
+    public function test_l4_drift_preserves_stored_sibling_and_records_error(string $category, array $payload, string $field, mixed $old): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $inventory = self::inventory();
+        $inventory[$category]['payload'] = $payload;
+        $this->details[$row['id']] = $inventory;
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], $field => $old]);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame($old, $asset->fresh()->{$field});
+        $this->assertSame(1, $result->errors);
+    }
+
+    public static function l4DriftShapes(): array
+    {
+        return [
+            'disks object' => ['disks', ['drive' => 'C:', 'totalBytes' => 480000000000], 'disk_summary', 'C: 100 GB'],
+            'network object' => ['network', ['ipv4' => ['192.0.2.10'], 'up' => true], 'ip_address', '192.0.2.20'],
+            'ram string' => ['hardware', ['ramBytes' => '15000000000', 'cpu' => 'Example CPU'], 'cpu', 'Old CPU'],
+            'cpu int' => ['hardware', ['ramBytes' => 15000000000, 'cpu' => 42], 'ram_gb', '8.00'],
+            'boot unreadable' => ['system', ['bootTimeUtc' => 'last Tuesday', 'pendingReboot' => true], 'needs_reboot', false],
+        ];
+    }
+
     // ---- creating ----
 
     public function test_a_device_of_a_mapped_client_becomes_an_asset_with_its_hardware(): void

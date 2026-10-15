@@ -1348,9 +1348,9 @@ class LitsrmmAssetSyncService
             $data['last_seen_at'] = Carbon::instance($device->lastSeen);
         }
 
-        // Never a placeholder, and never over a serial the asset already has.
+        // Never write a placeholder or overwrite a real serial; replace a stored placeholder.
         $serial = $device->matchableSerial();
-        if ($serial !== null && ($asset === null || blank($asset->serial_number))) {
+        if ($serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
             $data['serial_number'] = $serial;
         }
 

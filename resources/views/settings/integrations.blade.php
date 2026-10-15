@@ -918,6 +918,10 @@
                 </div>
                 @endif
 
+                @if($litsrmmScheduleEnabled && (! $litsrmmConfigured || ! $litsrmmEnabled))
+                    <p class="text-muted small border-top pt-3 mt-3">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
+                @endif
+
                 @if($litsrmmConfigured)
                 <div class="border-top pt-3 mt-3">
                     <form method="POST" action="{{ route('settings.integrations.toggle') }}">

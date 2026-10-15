@@ -20,9 +20,10 @@ use DateTimeZone;
  * actually knows, so a sync never overwrites a value the asset already holds
  * with a null that means "nobody asked".
  *
- * A malformed category is skipped rather than thrown: one bad payload must not
- * cost the asset the other three. It is NAMED in $malformed, so the sync can
- * log it as drift; an absent category is not malformed.
+ * A malformed category writes none of its fields: non-list disks/network or
+ * unreadable non-null ramBytes, cpu or bootTimeUtc also invalidate the whole
+ * category. Other categories remain readable. $malformed names each category
+ * once for drift reporting; missing or null known keys are not drift.
  */
 final class LitsrmmHardware
 {
@@ -35,7 +36,7 @@ final class LitsrmmHardware
         public readonly ?string $ipAddress,
         public readonly ?DateTimeImmutable $lastBootAt,
         public readonly ?bool $needsReboot,
-        /** @var list<string> categories present but not the documented shape */
+        /** @var list<string> skipped categories, ordered hardware, disks, network, system */
         public readonly array $malformed = [],
     ) {}
 
@@ -46,12 +47,23 @@ final class LitsrmmHardware
         $network = self::payload($inventory, 'network');
         $system = self::payload($inventory, 'system');
 
+        $invalid = [
+            'hardware' => (isset($hardware['ramBytes']) && ! is_int($hardware['ramBytes']) && ! is_float($hardware['ramBytes']))
+                || (isset($hardware['cpu']) && ! is_string($hardware['cpu'])),
+            'disks' => $disks !== null && ! array_is_list($disks),
+            'network' => $network !== null && ! array_is_list($network),
+            'system' => isset($system['bootTimeUtc']) && self::instant($system['bootTimeUtc']) === null,
+        ];
         $malformed = [];
-        foreach (['hardware', 'disks', 'network', 'system'] as $category) {
-            if (array_key_exists($category, $inventory) && self::payload($inventory, $category) === null) {
+        foreach ($invalid as $category => $unreadable) {
+            if ($unreadable || (array_key_exists($category, $inventory) && self::payload($inventory, $category) === null)) {
                 $malformed[] = $category;
             }
         }
+        $hardware = in_array('hardware', $malformed, true) ? null : $hardware;
+        $disks = in_array('disks', $malformed, true) ? null : $disks;
+        $network = in_array('network', $malformed, true) ? null : $network;
+        $system = in_array('system', $malformed, true) ? null : $system;
 
         return new self(
             cpu: self::nonEmptyString($hardware['cpu'] ?? null),

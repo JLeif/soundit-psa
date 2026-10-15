@@ -2502,8 +2502,13 @@ class IntegrationsController extends Controller
         $on = $request->boolean('enabled');
         Setting::setValue('litsrmm_sync_schedule_enabled', $on ? '1' : '0');
 
-        return redirect()->route('settings.integrations')
-            ->with('success', $on ? 'LITSRMM device sync will run every 4 hours.' : 'LITSRMM device sync will run only when started by hand.');
+        $message = ! $on
+            ? 'LITSRMM scheduled device sync is off.'
+            : (\App\Support\LitsrmmConfig::isEnabled() && \App\Support\LitsrmmConfig::isConfigured()
+                ? 'LITSRMM scheduled device sync is on and runs every 4 hours while the integration is configured and enabled.'
+                : 'LITSRMM scheduled device sync is on. It will run every 4 hours once the integration is configured and enabled.');
+
+        return redirect()->route('settings.integrations')->with('success', $message);
     }
 
     public function syncControlDDevices()

@@ -73,6 +73,35 @@ class LitsrmmSettingsPanelTest extends TestCase
 
     // ---- the panel renders and can be configured at all ----
 
+    #[DataProvider('l4CardStates')]
+    public function test_l4_card_explains_pending_schedule(bool $configured, bool $enabled, bool $scheduled): void
+    {
+        \Illuminate\Support\Facades\Http::preventStrayRequests();
+        if ($configured) {
+            $this->configure();
+        }
+        Setting::setValue('litsrmm_enabled', $enabled ? '1' : '0');
+        Setting::setValue('litsrmm_sync_schedule_enabled', $scheduled ? '1' : '0');
+        $response = $this->actingAs($this->admin())->get(route('settings.integrations'))->assertOk();
+        $text = 'Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.';
+
+        if ($scheduled && (! $configured || ! $enabled)) {
+            $response->assertSee($text);
+        } else {
+            $response->assertDontSee($text);
+        }
+        if ($configured && $enabled) {
+            $response->assertSee(route('settings.integrations.litsrmm.sync-devices'));
+        } else {
+            $response->assertDontSee(route('settings.integrations.litsrmm.sync-devices'));
+        }
+    }
+
+    public static function l4CardStates(): array
+    {
+        return LitsrmmSyncControlsTest::l4ScheduleStates();
+    }
+
     public function test_the_integrations_page_renders_a_litsrmm_card(): void
     {
         $response = $this->actingAs($this->admin())->get('/settings/integrations');
