@@ -97,7 +97,7 @@ class LitsrmmSyncDevices extends Command
         $mapped = Client::whereNotNull('litsrmm_client_id')->operational()->count();
 
         if ($mapped === 0) {
-            $this->warn('No clients are mapped to LITSRMM.');
+            $this->warn('No active clients are mapped to LITSRMM.');
             $this->info('Map them at: Settings > Integrations > LITSRMM');
 
             return self::SUCCESS;

@@ -31,8 +31,7 @@ Schedule::command('level:sync-devices')
 // assets from the RMM, and keeps the LITSRMM server/workstation seats. OFF BY
 // DEFAULT: runs only once an admin switches on "Sync every 4 hours" in Settings
 // (litsrmm_sync_schedule_enabled), after a supervised manual run. Also skipped
-// while the integration is switched off or unconfigured, and while no client
-// is mapped (a run then would only sweep, and there is nothing to sweep).
+// while the integration is switched off or unconfigured, and while no active client is mapped to LITSRMM. Such a run sweeps nothing: links and seats can remain on clients unmapped or made inactive since (#5347). A sync started from Settings > Integrations > LITSRMM does sweep them.
 // A failed run (non-zero exit) writes one fixed log line (#5360). Its output
 // is not appended to a file, because the skip lines it prints carry
 // hostnames. The sync writes its own log lines, by PSA client id only.

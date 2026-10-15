@@ -213,7 +213,7 @@ class LitsrmmDeviceParserTest extends TestCase
     public static function brokenRows(): array
     {
         return [
-            'null id (34/34 non-null)' => [['id' => null], 'no usable id'],
+            'null id (never null in the relayed sample)' => [['id' => null], 'no usable id'],
             'empty hostname' => [['hostname' => ''], 'no usable hostname'],
             'numeric clientId' => [['clientId' => 7], 'no usable clientId'],
             'unknown availability' => [['availabilityState' => 'unknown'], 'availabilityState outside'],

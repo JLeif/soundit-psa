@@ -67,7 +67,7 @@ class LitsrmmDeviceDetailTest extends TestCase
 
         return array_merge($capture['devices'][0], [
             'inventory' => [
-                'hardware' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => ['cpu' => 'Example CPU', 'ramBytes' => 17179869184]],
+                'hardware' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['cpu' => 'Example CPU', 'ramBytes' => 17179869184]],
             ],
         ], $overrides);
     }
