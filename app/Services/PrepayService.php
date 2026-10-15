@@ -1082,8 +1082,8 @@ class PrepayService
      * drawn down. The caller then re-resolves once after its transaction: the stale
      * stamp fails ContractResolver's active check, so the entry takes the re-resolved answer
      * when it resolves, is held when that is ambiguous or the ticket is awaiting verification
-     * (heldReason() gives the badge and log text), and otherwise (NONE on a verified ticket)
-     * is not debited.
+     * (heldReason() gives the badge and log text), and otherwise (NONE on a ticket not awaiting
+     * verification) is not debited.
      */
     private function lockedActiveContract(Contract $contract, int $clientId, string $entryKey, int $entryId): ?Contract
     {
