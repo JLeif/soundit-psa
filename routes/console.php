@@ -27,11 +27,16 @@ Schedule::command('level:sync-devices')
     ->withoutOverlapping()
     ->runInBackground();
 
-// LITSRMM device sync — every 4 hours for mapped clients: creates and updates
-// assets from the RMM, and keeps the LITSRMM server/workstation seats. OFF BY
-// DEFAULT: runs only once an admin switches on "Sync every 4 hours" in Settings
-// (litsrmm_sync_schedule_enabled), after a supervised manual run. Also skipped
-// while the integration is switched off or unconfigured, and while no active client is mapped to LITSRMM. Such a run sweeps nothing: links and seats can remain on clients unmapped or no longer active since (#5347). A sync started from Settings > Integrations > LITSRMM clears the links of both, but the seats of unmapped clients only: seats of a client that is still mapped but no longer active stay as they are.
+// LITSRMM device sync — every 4 hours: creates and updates assets from the RMM
+// for mapped, active clients, and keeps their LITSRMM server/workstation seats.
+// OFF BY DEFAULT: runs only once an admin switches on "Sync every 4 hours" in
+// Settings (litsrmm_sync_schedule_enabled), after a supervised manual run. Also
+// skipped while the integration is switched off or unconfigured. It runs even
+// when no client is mapped (#5347): a full run ends with a sweep, unless it
+// fails first (a failed device list read changes nothing). The sweep clears the
+// LITSRMM links of assets of clients that are unmapped or no longer active, and
+// suspends the LITSRMM seats of unmapped clients only: seats of a client that is
+// still mapped but no longer active stay as they are (#5346).
 // A failed run (non-zero exit) writes one fixed log line (#5360). Its output
 // is not appended to a file, because the skip lines it prints carry
 // hostnames. The sync writes its own log lines, by PSA client id only.
@@ -40,8 +45,7 @@ Schedule::command('litsrmm:sync-devices')
     ->withoutOverlapping()
     ->runInBackground()
     ->when(fn () => \App\Support\LitsrmmConfig::isScheduleEnabled()
-        && \App\Support\LitsrmmConfig::isAvailable()
-        && \App\Models\Client::whereNotNull('litsrmm_client_id')->exists())
+        && \App\Support\LitsrmmConfig::isAvailable())
     ->onFailure(fn () => \Illuminate\Support\Facades\Log::error('[LitsrmmSyncDevices] scheduled run failed'));
 
 // Mesh license sync — daily

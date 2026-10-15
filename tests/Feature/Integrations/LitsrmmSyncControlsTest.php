@@ -103,10 +103,10 @@ class LitsrmmSyncControlsTest extends TestCase
         $this->assertFalse($this->event()->filtersPass($this->app), 'mapped and configured, but the schedule was never switched on');
     }
 
-    public function test_the_schedule_runs_only_when_switched_on_configured_and_mapped(): void
+    public function test_the_schedule_runs_only_when_switched_on_and_configured(): void
     {
         Setting::setValue('litsrmm_sync_schedule_enabled', '1');
-        $this->assertFalse($this->event()->filtersPass($this->app), 'no client mapped: nothing to do');
+        $this->assertTrue($this->event()->filtersPass($this->app), 'no client mapped: it still runs, to sweep');
 
         $this->mapped();
         $this->assertTrue($this->event()->filtersPass($this->app));

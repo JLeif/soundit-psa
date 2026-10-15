@@ -98,12 +98,10 @@ class LitsrmmSyncDevices extends Command
 
         if ($mapped === 0) {
             $this->warn('No active clients are mapped to LITSRMM.');
-            $this->info('Map them at: Settings > Integrations > LITSRMM');
-
-            return self::SUCCESS;
+            $this->info('Sweeping links and seats left on clients that are unmapped.');
+        } else {
+            $this->info("Syncing LITSRMM devices for {$mapped} mapped client(s)...");
         }
-
-        $this->info("Syncing LITSRMM devices for {$mapped} mapped client(s)...");
 
         return $this->report($sync->sync(null, $accept));
     }
