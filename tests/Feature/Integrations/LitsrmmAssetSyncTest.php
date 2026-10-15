@@ -314,6 +314,26 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('Windows Server', Asset::sole()->asset_type);
     }
 
+    public function test_a_compact_win_workstation_os_is_typed_as_a_workstation(): void
+    {
+        $this->device('1', ['osName' => 'Win10 Pro']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Workstation', Asset::sole()->asset_type);
+    }
+
+    public function test_a_compact_win_server_os_is_typed_as_a_server(): void
+    {
+        $this->device('1', ['osName' => 'Win2019 Server']);
+        $this->device('2', ['osName' => 'WinServer 2022']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Server', Asset::where('hostname', 'WORKSTATION-1')->sole()->asset_type);
+        $this->assertSame('Windows Server', Asset::where('hostname', 'WORKSTATION-2')->sole()->asset_type);
+    }
+
     public function test_two_placeholder_serial_devices_in_one_client_create_two_assets(): void
     {
         $alpha = $this->device('1', ['hostname' => 'WS-ALPHA', 'serial' => 'Default string']);

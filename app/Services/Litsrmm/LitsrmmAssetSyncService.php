@@ -1392,7 +1392,8 @@ class LitsrmmAssetSyncService
         }
 
         $os = mb_strtolower($osName);
-        $windows = preg_match('/^win\b/', $os) === 1 || str_contains($os, 'windows');
+        // 'win 10 pro', 'win10 pro' and 'winserver 2022' are Windows; 'wind river' is not.
+        $windows = preg_match('/^win(?:\b|\d|server)/', $os) === 1 || str_contains($os, 'windows');
 
         if ($windows && str_contains($os, 'server')) {
             return 'Windows Server';
