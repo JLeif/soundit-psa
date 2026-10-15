@@ -365,7 +365,7 @@ class StaffPsaActionToolExecutor
         ];
 
         $updated = DB::transaction(function () use ($ticket, $validated, $actorLabel, $reason, $before): Ticket {
-            // "No time moved" (below) holds for held "Needs contract" entries too.
+            // "No time moved" (below) holds for held entries too.
             $updated = \App\Observers\TicketObserver::withoutHeldRelease(fn () => $this->ticketService->updateTicket($ticket, $validated));
             $after = [
                 'subject' => $updated->subject,

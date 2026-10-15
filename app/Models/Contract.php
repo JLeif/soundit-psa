@@ -129,9 +129,10 @@ class Contract extends Model
     }
 
     /**
-     * Re-run this client's debits held as "Needs contract" once the change is
-     * committed (card I3EvQKUV r2). Entries that still resolve AMBIGUOUS stay
-     * held; a failure never takes the contract write down with it.
+     * Re-run this client's held debits once the change is
+     * committed (card I3EvQKUV r2). Entries that still resolve AMBIGUOUS or NONE
+     * (including a ticket awaiting verification) stay held; a failure never takes
+     * the contract write down with it.
      */
     private function releaseClientHeldDebits(int|string|null $clientId = null): void
     {

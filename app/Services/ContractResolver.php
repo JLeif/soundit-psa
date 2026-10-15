@@ -22,7 +22,7 @@ use Illuminate\Database\Eloquent\Builder;
  *                   column is never trusted on its own);
  *  4. only_active   the client has exactly one active contract;
  *  5. several active contracts and no default: AMBIGUOUS (the caller asks a
- *     person, or holds the debit under "Needs contract": Q7); zero: NONE.
+ *     person, or holds the debit: Q7); zero: NONE.
  *
  * Unverified contact intake: a picked contract is still checked and AMBIGUOUS is still returned, but an answer that would resolve is NONE until staff verify (card VLyhWACq, C10).
  *
