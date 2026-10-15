@@ -99,15 +99,33 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertFailed();
     }
 
-    public function test_no_mapped_client_is_said_plainly_and_nothing_runs(): void
+    public function test_no_mapped_client_is_said_plainly_and_the_sweep_runs(): void
     {
         $service = Mockery::mock(LitsrmmAssetSyncService::class);
-        $service->shouldNotReceive('sync');
+        $service->shouldReceive('sync')->once()->with(null, [])->andReturn(new SyncResult);
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
 
         $this->artisan('litsrmm:sync-devices')
             ->expectsOutputToContain('No active clients are mapped to LITSRMM')
+            ->expectsOutputToContain('Sweeping: clearing the LITSRMM links of clients that are unmapped or not active, and suspending the LITSRMM seats of unmapped clients.')
             ->assertSuccessful();
+    }
+
+    public function test_no_operational_mapped_client_still_sweeps_asset_links(): void
+    {
+        $client = $this->mapClient();
+        $asset = Asset::factory()->create([
+            'client_id' => $client->id,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000001',
+        ]);
+        $client->stage = ClientStage::Prospect;
+        $client->save();
+        $this->realSync([]);
+
+        $this->artisan('litsrmm:sync-devices')->assertSuccessful();
+
+        $this->assertNull($asset->fresh()->litsrmm_device_id);
+        $this->assertSame(0, $this->listReads);
     }
 
     public function test_a_switched_off_integration_refuses_and_says_why(): void

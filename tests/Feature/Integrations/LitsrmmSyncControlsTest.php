@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Litsrmm\LitsrmmAssetSyncService;
 use App\Services\Litsrmm\LitsrmmClient;
 use App\Services\SyncResult;
+use App\Support\LitsrmmConfig;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Response;
@@ -103,16 +104,23 @@ class LitsrmmSyncControlsTest extends TestCase
         $this->assertFalse($this->event()->filtersPass($this->app), 'mapped and configured, but the schedule was never switched on');
     }
 
-    public function test_the_schedule_runs_only_when_switched_on_configured_and_mapped(): void
+    public function test_the_schedule_runs_only_when_switched_on_and_configured(): void
     {
         Setting::setValue('litsrmm_sync_schedule_enabled', '1');
-        $this->assertFalse($this->event()->filtersPass($this->app), 'no client mapped: nothing to do');
+        $this->assertTrue($this->event()->filtersPass($this->app), 'no client mapped: it still runs, to sweep');
 
         $this->mapped();
         $this->assertTrue($this->event()->filtersPass($this->app));
 
         Setting::setValue('litsrmm_enabled', '0');
         $this->assertFalse($this->event()->filtersPass($this->app), 'switched off means off');
+
+        Setting::setValue('litsrmm_enabled', '1');
+        Setting::setValue('litsrmm_base_url', '');
+        $this->assertSame('', LitsrmmConfig::get('base_url'));
+        $this->assertFalse(LitsrmmConfig::isConfigured());
+        $this->assertTrue(LitsrmmConfig::isEnabled());
+        $this->assertFalse($this->event()->filtersPass($this->app), 'unconfigured means off');
     }
 
     /** #5360: a failed scheduled run leaves a fixed log line; a clean one does not. */
