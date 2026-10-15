@@ -32,8 +32,10 @@ Schedule::command('level:sync-devices')
 // OFF BY DEFAULT: runs only once an admin switches on "Sync every 4 hours" in
 // Settings (litsrmm_sync_schedule_enabled), after a supervised manual run. Also
 // skipped while the integration is switched off or unconfigured. It runs even
-// when no client is mapped (#5347): a full run ends with a sweep, unless it
-// fails first (a failed device list read changes nothing). The sweep clears the
+// when no client is mapped (#5347): a full run ends with a sweep, even one that
+// fails by refusing a client; only a failed device list read (which changes
+// nothing) or an error that rolls a client back stops it before the sweep.
+// The sweep clears the
 // LITSRMM links of assets of clients that are unmapped or no longer active, and
 // suspends the LITSRMM seats of unmapped clients only: seats of a client that is
 // still mapped but no longer active stay as they are (#5346).
