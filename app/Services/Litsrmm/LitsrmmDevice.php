@@ -17,13 +17,13 @@ use DateTimeZone;
  * customer ids replaced by the vendor, relayed on card 6ab46339 on 24 Sep 2026.
  * It is committed as tests/Fixtures/litsrmm/devices-capture-2026-09-24.json and
  * the parser's tests read that file. The same relay gives the vendor's null
- * counts over their 34 devices, which is why nullability is split this way:
+ * counts over the relayed sample, which is why nullability is split this way:
  *
- *  - never null in 34/34: id, clientId, clientName, hostname,
+ *  - never null in the relayed sample: id, clientId, clientName, hostname,
  *    enrollmentState, availabilityState. Absent or empty => the row is refused.
- *  - serial is null on 1 of 34.
+ *  - serial is null on one row.
  *  - osName, osVersion, osBuild, agentVersion, lastUser, firstSeen, lastSeen
- *    are non-null on 3 of 34 only (the machines running the vendor's agent).
+ *    are non-null only on the rows running the vendor's agent.
  *    Null there is NORMAL, not a fault: nothing is logged and the row is kept.
  *
  * Unknown extra fields are ignored rather than refused, so the vendor can add
@@ -117,7 +117,7 @@ final class LitsrmmDevice
             enrollmentState: $row['enrollmentState'],
             availabilityState: $row['availabilityState'],
             // PROPOSED SHAPE. The vendor has no production data for retiredAt
-            // yet (non-null on 0 of 34) and calls its shape proposed. Parsing
+            // yet (non-null on none in the relayed sample) and calls its shape proposed. Parsing
             // it in the firstSeen/lastSeen form is OUR assumption, not a
             // measured fact. Re-check against the first real retired device
             // before anything acts on this value.
@@ -152,8 +152,7 @@ final class LitsrmmDevice
      * Whether the vendor reports this device retired: BOTH states read
      * `retired`, which is how the vendor says retired devices are listed.
      *
-     * This only EXPOSES the state. Nothing in this class or its client acts on
-     * it; retiring our asset rows is a later PR under its own ruling.
+     * This class only exposes the state. LitsrmmAssetSyncService acts on it: an active asset linked to a retired device is made inactive and stamped litsrmm_retired_at, unless another RMM still links it (#5368), and a retired device counts toward no seat.
      */
     public function isRetired(): bool
     {

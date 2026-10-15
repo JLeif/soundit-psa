@@ -50,7 +50,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         return Client::factory()->create([
             'stage' => ClientStage::Active,
             'is_active' => true,
-            'litsrmm_client_id' => '2f12dedb-b4cf-48cf-86bb-9f63b5b8f7af',
+            'litsrmm_client_id' => '00000000-0000-4000-8000-0000000000a1',
         ]);
     }
 
@@ -106,7 +106,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
 
         $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('No clients are mapped to LITSRMM')
+            ->expectsOutputToContain('No active clients are mapped to LITSRMM')
             ->assertSuccessful();
     }
 
@@ -237,7 +237,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
     private static function row(int $n): array
     {
         return [
-            'id' => sprintf('8f14e45f-ceea-467a-9f38-%012d', $n), 'clientId' => '2f12dedb-b4cf-48cf-86bb-9f63b5b8f7af',
+            'id' => sprintf('8f14e45f-ceea-467a-9f38-%012d', $n), 'clientId' => '00000000-0000-4000-8000-0000000000a1',
             'clientName' => 'Leif IT Solutions', 'hostname' => "WORKSTATION-{$n}", 'serial' => "SN{$n}REAL0",
             'osName' => 'Win 11 Pro', 'osVersion' => 'Microsoft Windows NT 10.0.26200.0', 'osBuild' => '26200',
             'agentVersion' => '1.14.0+92a5b34', 'lastUser' => 'exampleuser', 'firstSeen' => '2026-09-22T03:47:40Z',

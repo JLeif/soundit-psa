@@ -15,12 +15,9 @@ namespace App\Support;
  * defect is the opposite case: exactly one asset and exactly one incoming
  * device both carrying "Default string" join AS CERTAIN, silently merging two
  * different machines into one asset. That case gets MORE likely as the
- * candidate pool shrinks, so a 34-device estate sits squarely in its range.
+ * candidate pool shrinks, so a small estate sits squarely in its range.
  *
- * THIS IS NOT HYPOTHETICAL HERE. Real machines report
- * "Default string" and "System Serial Number". They do not
- * collide only because those two placeholders happen to differ — a third
- * machine reporting "Default string" would merge into the first one's asset.
+ * THIS IS NOT HYPOTHETICAL. Common boards report "Default string" or "System Serial Number". Two machines carrying different placeholders avoid a collision only because the strings differ — a further machine reporting "Default string" would merge into the first one's asset.
  *
  * THE RULE: a placeholder is not a weak serial, it is the ABSENCE of one. A
  * device carrying one must be treated exactly as if the field were empty and

@@ -43,7 +43,7 @@ class LitsrmmAssetSyncTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const VENDOR_CLIENT = '2f12dedb-b4cf-48cf-86bb-9f63b5b8f7af';
+    private const VENDOR_CLIENT = '00000000-0000-4000-8000-0000000000a1';
 
     private const OTHER_VENDOR_CLIENT = 'c0a80101-0000-4000-8000-000000000009';
 
@@ -182,10 +182,10 @@ class LitsrmmAssetSyncTest extends TestCase
     private static function inventory(): array
     {
         return [
-            'hardware' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => ['cpu' => 'AMD Ryzen 7 5700G with Radeon Graphics', 'ramBytes' => 16424173568]],
-            'disks' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => [['drive' => 'C:', 'totalBytes' => 499496030208, 'freeBytes' => 89943642112]]],
-            'network' => ['collectedAt' => '2026-09-30T09:58:35.842Z', 'payload' => [['name' => 'Ethernet', 'mac' => '00:00:5E:00:53:01', 'ipv4' => ['192.0.2.10'], 'up' => true]]],
-            'system' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => ['bootTimeUtc' => '2026-09-30T03:33:21Z', 'pendingReboot' => true]],
+            'hardware' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]],
+            'disks' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]],
+            'network' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [['name' => 'Ethernet', 'mac' => '00:00:5E:00:53:01', 'ipv4' => ['192.0.2.10'], 'up' => true]]],
+            'system' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]],
         ];
     }
 
@@ -221,11 +221,11 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertTrue($asset->rmm_online);
         $this->assertTrue($asset->is_active);
         $this->assertSame('2026-09-30 10:00:00', $asset->last_seen_at->utc()->format('Y-m-d H:i:s'));
-        $this->assertSame('AMD Ryzen 7 5700G with Radeon Graphics', $asset->cpu);
-        $this->assertSame('15.30', $asset->ram_gb);
-        $this->assertSame('C: 465 GB (18% free)', $asset->disk_summary);
+        $this->assertSame('Example CPU', $asset->cpu);
+        $this->assertSame('13.97', $asset->ram_gb);
+        $this->assertSame('C: 447 GB (21% free)', $asset->disk_summary);
         $this->assertSame('192.0.2.10', $asset->ip_address);
-        $this->assertSame('2026-09-30 03:33:21', $asset->last_boot_at->utc()->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-09-30 03:04:05', $asset->last_boot_at->utc()->format('Y-m-d H:i:s'));
         $this->assertTrue($asset->needs_reboot);
     }
 
@@ -242,9 +242,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_a_merge_carries_the_link_to_the_survivor_and_the_next_sync_follows_it(): void
     {
-        // Seen in testing: a linked asset (#136) was merged INTO the
-        // older #132. AssetService's identity list did not know litsrmm_device_id,
-        // so the link stayed on the retired tombstone and #132 was left unlinked.
+        // Seen in testing: a linked asset was merged INTO an older one. AssetService's identity list did not know litsrmm_device_id, so the link stayed on the retired tombstone and the survivor was left unlinked.
         $row = $this->device('1');
         $this->service()->sync();
         $linked = Asset::where('litsrmm_device_id', $row['id'])->sole();
@@ -299,9 +297,8 @@ class LitsrmmAssetSyncTest extends TestCase
         // The vendor's agent reports "(none)" when the machine sits at the
         // sign-in or lock screen: a fact about NOW, not a user. The asset's
         // last_user means the last person who used it (Level's
-        // last_logged_in_user), so "(none)" must not overwrite that. Seen on
-        // a rehearsal against real data: two machines both read
-        // "(none)" while nobody was signed in.
+        // last_logged_in_user), so "(none)" must not overwrite that.
+        // Two machines can both read "(none)" while nobody is signed in.
         $row = $this->device('1', ['lastUser' => '(none)']);
         $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'last_user' => 'user1']);
         $this->device('2', ['lastUser' => '(none)']);
@@ -505,7 +502,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $asset->refresh();
         $this->assertSame('Known CPU', $asset->cpu);
-        $this->assertSame('C: 465 GB (18% free)', $asset->disk_summary);
+        $this->assertSame('C: 447 GB (21% free)', $asset->disk_summary);
     }
 
     public function test_a_failed_detail_read_still_writes_the_list_facts_and_keeps_the_hardware(): void
@@ -621,7 +618,6 @@ class LitsrmmAssetSyncTest extends TestCase
 
     // ---- licenses: one seat per device running the vendor's agent ----
 
-    /** @return array{server: ?License, workstation: ?License} */
     // ---- Review of #4485 (Sound IT, 2026-10-01) ----
 
     /** Item 2: an asset whose link names a device this read does not list live is free to match. */
@@ -820,6 +816,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertNull($asset->litsrmm_retired_at);
     }
 
+    /** @return array{server: ?License, workstation: ?License} */
     private function licenses(Client $client): array
     {
         $of = fn (string $sku) => License::where('client_id', $client->id)
@@ -2192,7 +2189,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $asset->refresh();
         $this->assertSame('C: 100 GB', $asset->disk_summary, 'the malformed category is not refreshed');
-        $this->assertSame('AMD Ryzen 7 5700G with Radeon Graphics', $asset->cpu, 'the well-formed ones are');
+        $this->assertSame('Example CPU', $asset->cpu, 'the well-formed ones are');
     }
 
     public function test_a_real_serial_links_a_person_made_inactive_asset_and_leaves_it_inactive(): void

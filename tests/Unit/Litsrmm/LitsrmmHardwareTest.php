@@ -9,9 +9,7 @@ use PHPUnit\Framework\TestCase;
  * The `inventory` block of LITSRMM `GET /v1/devices/{id}`, turned into the
  * asset columns a Level-fed asset already carries.
  *
- * The payload below has the shape of a real inventory as the vendor stores
- * it; identifying values are synthetic (documentation-range MAC and IP, a
- * random GUID). Expected values were worked out by hand from it, not read back
+ * The payload below follows the shape of the vendor's inventory. Its identifying values are synthetic: documentation-range MACs, documentation-range or link-local IPs, round byte counts, an all-zero-prefixed GUID, and placeholder CPU, manufacturer and board names. The adapter descriptions and 'System Product Name' are generic driver and firmware defaults that identify no machine. Expected values were worked out by hand from it, not read back
  * from the code.
  */
 class LitsrmmHardwareTest extends TestCase
@@ -19,23 +17,23 @@ class LitsrmmHardwareTest extends TestCase
     private static function inventory(): array
     {
         return [
-            'hardware' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => [
-                'cpu' => 'AMD Ryzen 7 5700G with Radeon Graphics',
-                'ramBytes' => 16424173568,
-                'manufacturer' => 'ASUS',
+            'hardware' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [
+                'cpu' => 'Example CPU',
+                'ramBytes' => 15000000000,
+                'manufacturer' => 'Example Manufacturer',
                 'model' => 'System Product Name',
-                'board' => 'PRIME B450M-A II',
-                'machineGuid' => '4d63f009-b54b-4522-bdc1-b8e80c766ce5',
+                'board' => 'Example Board',
+                'machineGuid' => '00000000-0000-4000-8000-0000000000b1',
             ]],
-            'disks' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => [
-                ['drive' => 'C:', 'label' => null, 'fileSystem' => 'NTFS', 'totalBytes' => 499496030208, 'freeBytes' => 89943642112],
+            'disks' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [
+                ['drive' => 'C:', 'label' => null, 'fileSystem' => 'NTFS', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000],
             ]],
-            'network' => ['collectedAt' => '2026-09-30T09:58:35.842Z', 'payload' => [
+            'network' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [
                 ['name' => 'Ethernet', 'description' => 'Realtek PCIe GbE Family Controller', 'mac' => '00:00:5E:00:53:01', 'ipv4' => ['192.0.2.10'], 'up' => true],
                 ['name' => 'Bluetooth Network Connection', 'description' => 'Bluetooth Device (Personal Area Network)', 'mac' => '00:00:5E:00:53:02', 'ipv4' => ['169.254.0.20'], 'up' => false],
             ]],
-            'system' => ['collectedAt' => '2026-09-30T09:58:35.835Z', 'payload' => [
-                'bootTimeUtc' => '2026-09-30T03:33:21Z',
+            'system' => ['collectedAt' => '2026-09-30T10:00:00.000Z', 'payload' => [
+                'bootTimeUtc' => '2026-09-30T03:04:05Z',
                 'pendingReboot' => true,
                 'pendingRebootReasons' => ['pendingFileRename'],
             ]],
@@ -46,13 +44,13 @@ class LitsrmmHardwareTest extends TestCase
     {
         $hw = LitsrmmHardware::fromInventory(self::inventory());
 
-        $this->assertSame('AMD Ryzen 7 5700G with Radeon Graphics', $hw->cpu);
-        // 16424173568 / 1024^3 = 15.296...
-        $this->assertSame(15.30, $hw->ramGb);
-        // 465 GB total, 84 GB free, 84/465 = 18% - the same rounding LevelSyncService uses.
-        $this->assertSame('C: 465 GB (18% free)', $hw->diskSummary);
+        $this->assertSame('Example CPU', $hw->cpu);
+        // 15000000000 / 1024^3 = 13.969... -> 13.97
+        $this->assertSame(13.97, $hw->ramGb);
+        // 447.03 -> 447 GB total, 93.13 -> 93 GB free, 93/447 = 20.8 -> 21% - the same rounding LevelSyncService uses.
+        $this->assertSame('C: 447 GB (21% free)', $hw->diskSummary);
         $this->assertSame('192.0.2.10', $hw->ipAddress);
-        $this->assertSame('2026-09-30T03:33:21+00:00', $hw->lastBootAt?->format(DATE_ATOM));
+        $this->assertSame('2026-09-30T03:04:05+00:00', $hw->lastBootAt?->format(DATE_ATOM));
         $this->assertTrue($hw->needsReboot);
     }
 
@@ -89,7 +87,7 @@ class LitsrmmHardwareTest extends TestCase
         // 169.254/16 is Windows' "DHCP failed" address; it identifies nothing.
         $inventory = self::inventory();
         $inventory['network']['payload'] = [
-            ['name' => 'Wi-Fi', 'mac' => 'AA:BB:CC:DD:EE:FF', 'ipv4' => ['169.254.1.2'], 'up' => true],
+            ['name' => 'Wi-Fi', 'mac' => '00:00:5E:00:53:FF', 'ipv4' => ['169.254.1.2'], 'up' => true],
         ];
 
         $this->assertNull(LitsrmmHardware::fromInventory($inventory)->ipAddress);
@@ -99,8 +97,8 @@ class LitsrmmHardwareTest extends TestCase
     {
         $inventory = self::inventory();
         $inventory['network']['payload'] = [
-            ['name' => 'Old VPN', 'mac' => 'AA:BB:CC:DD:EE:01', 'ipv4' => ['10.8.0.2'], 'up' => false],
-            ['name' => 'Ethernet', 'mac' => 'AA:BB:CC:DD:EE:02', 'ipv4' => ['192.0.2.10'], 'up' => true],
+            ['name' => 'Old VPN', 'mac' => '00:00:5E:00:53:11', 'ipv4' => ['198.51.100.2'], 'up' => false],
+            ['name' => 'Ethernet', 'mac' => '00:00:5E:00:53:12', 'ipv4' => ['192.0.2.10'], 'up' => true],
         ];
 
         $this->assertSame('192.0.2.10', LitsrmmHardware::fromInventory($inventory)->ipAddress);
@@ -109,10 +107,10 @@ class LitsrmmHardwareTest extends TestCase
     public function test_every_fixed_volume_is_listed(): void
     {
         $inventory = self::inventory();
-        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000204886016, 'freeBytes' => 500102443008];
+        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000000000000, 'freeBytes' => 500000000000];
 
-        // D: 931.5 -> 932 GB, free 465.8 -> 466 GB, 466/932 = 50%.
-        $this->assertSame('C: 465 GB (18% free), D: 932 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
+        // D: 931.32 -> 931 GB, free 465.66 -> 466 GB, 466/931 = 50.05 -> 50%.
+        $this->assertSame('C: 447 GB (21% free), D: 931 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
     }
 
     public function test_a_malformed_payload_is_ignored_not_fatal(): void

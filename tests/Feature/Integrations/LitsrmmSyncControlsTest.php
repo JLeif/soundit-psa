@@ -40,7 +40,7 @@ class LitsrmmSyncControlsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const VENDOR_CLIENT = '2f12dedb-b4cf-48cf-86bb-9f63b5b8f7af';
+    private const VENDOR_CLIENT = '00000000-0000-4000-8000-0000000000a1';
 
     protected function setUp(): void
     {
@@ -433,7 +433,7 @@ class LitsrmmSyncControlsTest extends TestCase
 
     public function test_a_litsrmm_asset_names_its_rmm_and_when_it_last_synced(): void
     {
-        // Seen in testing: #131, #132 and #135 read "-" under RMM and "Never"
+        // Seen in testing: LITSRMM assets read "-" under RMM and "Never"
         // under Last Synced, because both rows only knew Ninja, Level,
         // ScreenConnect and Tactical.
         $asset = Asset::factory()->create([

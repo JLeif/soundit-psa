@@ -19,10 +19,7 @@ use PHPUnit\Framework\TestCase;
 class LitsrmmSerialTest extends TestCase
 {
     /**
-     * THE TWO SEEN ON REAL MACHINES. One board reports
-     * "Default string" and another "System Serial Number". They do
-     * not collide only because those two placeholders happen to differ — a
-     * third machine reporting "Default string" would merge into the first.
+     * THE TWO COMMON PLACEHOLDERS. One board family reports "Default string" and another "System Serial Number". Two machines carrying them avoid a collision only because the strings differ — a third machine reporting "Default string" would merge into the first.
      */
     #[Test]
     public function it_refuses_the_placeholders_this_estate_actually_reports(): void
