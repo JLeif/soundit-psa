@@ -21,12 +21,13 @@ use DateTimeZone;
  * with a null that means "nobody asked".
  *
  * A malformed category writes none of its fields. A category is malformed
- * when it is present and not null but its payload is not a JSON object
- * (hardware, system) or list (disks, network), or when a key this class
- * reads is present, not null and of another type: ramBytes, totalBytes and
- * freeBytes numbers; cpu and drive strings; pendingReboot and up booleans;
- * bootTimeUtc a time instant() can read; each disk and adapter an object;
- * ipv4 a list of strings. An IPv4 string that is not usable (link-local,
+ * when it is present and not null but it or its payload is not an array, its
+ * payload is a non-empty list (hardware, system) or not a list (disks,
+ * network), or a key this class reads is present, not null and of another
+ * type: ramBytes, totalBytes and freeBytes numbers; cpu and drive strings;
+ * pendingReboot and up booleans; bootTimeUtc a time instant() can read; each
+ * disk and adapter an array; ipv4 a list of strings.
+ * An IPv4 string that is not usable (link-local,
  * reserved, not an address) is skipped, not drift. A null category, a
  * missing, null or empty payload, and missing or null keys are absent, not
  * drift. Other categories remain readable. $malformed names each category
