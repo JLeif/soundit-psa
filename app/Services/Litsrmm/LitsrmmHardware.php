@@ -20,10 +20,18 @@ use DateTimeZone;
  * actually knows, so a sync never overwrites a value the asset already holds
  * with a null that means "nobody asked".
  *
- * A malformed category writes none of its fields: non-list disks/network or
- * unreadable non-null ramBytes, cpu or bootTimeUtc also invalidate the whole
- * category. Other categories remain readable. $malformed names each category
- * once for drift reporting; missing or null known keys are not drift.
+ * A malformed category writes none of its fields. A category is malformed
+ * when it is present and not null but it or its payload is not an array, its
+ * payload is a non-empty list (hardware, system) or not a list (disks,
+ * network), or a key this class reads is present, not null and of another
+ * type: ramBytes, totalBytes and freeBytes numbers; cpu and drive strings;
+ * pendingReboot and up booleans; bootTimeUtc a time instant() can read; each
+ * disk and adapter an array; ipv4 a list of strings.
+ * An IPv4 string that is not usable (link-local,
+ * reserved, not an address) is skipped, not drift. A null category, a
+ * missing, null or empty payload, and missing or null keys are absent, not
+ * drift. Other categories remain readable. $malformed names each category
+ * once for drift reporting.
  */
 final class LitsrmmHardware
 {
@@ -49,14 +57,25 @@ final class LitsrmmHardware
 
         $invalid = [
             'hardware' => (isset($hardware['ramBytes']) && ! is_int($hardware['ramBytes']) && ! is_float($hardware['ramBytes']))
-                || (isset($hardware['cpu']) && ! is_string($hardware['cpu'])),
-            'disks' => $disks !== null && ! array_is_list($disks),
-            'network' => $network !== null && ! array_is_list($network),
-            'system' => isset($system['bootTimeUtc']) && self::instant($system['bootTimeUtc']) === null,
+                || (isset($hardware['cpu']) && ! is_string($hardware['cpu']))
+                || ($hardware !== null && $hardware !== [] && array_is_list($hardware)),
+            'disks' => $disks !== null && (! array_is_list($disks) || array_filter($disks, static fn ($disk) => ! is_array($disk)
+                || (isset($disk['totalBytes']) && ! is_int($disk['totalBytes']) && ! is_float($disk['totalBytes']))
+                || (isset($disk['freeBytes']) && ! is_int($disk['freeBytes']) && ! is_float($disk['freeBytes']))
+                || (isset($disk['drive']) && ! is_string($disk['drive']))) !== []),
+            'network' => $network !== null && (! array_is_list($network) || array_filter($network, static fn ($adapter) => ! is_array($adapter)
+                || (isset($adapter['ipv4']) && (! is_array($adapter['ipv4']) || ! array_is_list($adapter['ipv4'])
+                    || array_filter($adapter['ipv4'], static fn ($ip) => ! is_string($ip)) !== []))
+                || (isset($adapter['up']) && ! is_bool($adapter['up']))) !== []),
+            'system' => (isset($system['bootTimeUtc']) && self::instant($system['bootTimeUtc']) === null)
+                || (isset($system['pendingReboot']) && ! is_bool($system['pendingReboot']))
+                || ($system !== null && $system !== [] && array_is_list($system)),
         ];
         $malformed = [];
         foreach ($invalid as $category => $unreadable) {
-            if ($unreadable || (array_key_exists($category, $inventory) && self::payload($inventory, $category) === null)) {
+            $entry = $inventory[$category] ?? null;
+            $present = $entry !== null && (! is_array($entry) || ($entry['payload'] ?? null) !== null);
+            if ($unreadable || ($present && self::payload($inventory, $category) === null)) {
                 $malformed[] = $category;
             }
         }
@@ -198,7 +217,7 @@ final class LitsrmmHardware
         return $candidates[0]['ip'] ?? null;
     }
 
-    /** ISO 8601 UTC ending in Z; anything else is dropped rather than guessed at. */
+    /** ISO 8601 UTC ending in Z, a real calendar date and time; anything else, a leap second (:60) included, is dropped rather than guessed at. */
     private static function instant(mixed $value): ?DateTimeImmutable
     {
         if (! is_string($value)

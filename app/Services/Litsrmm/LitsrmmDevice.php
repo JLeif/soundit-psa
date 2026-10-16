@@ -178,9 +178,9 @@ final class LitsrmmDevice
      * notes set no limit on how many fraction digits appear, so any number is
      * accepted. Digits past the sixth are dropped (truncated, not rounded),
      * because microseconds are the finest precision DateTimeImmutable holds.
-     * Anything else,
-     * including an offset form or a calendar-invalid date that PHP would
-     * silently roll over, is refused.
+     * Anything else, including an offset form, a trailing newline, or a
+     * calendar-invalid date or leap second (:60) that PHP would silently roll
+     * over, is refused.
      */
     private static function timestamp(array $row, string $key): ?DateTimeImmutable
     {
@@ -191,7 +191,7 @@ final class LitsrmmDevice
         }
 
         if (! is_string($value)
-            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/', $value, $m) !== 1) {
+            || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/D', $value, $m) !== 1) {
             throw new LitsrmmClientException("LITSRMM device row has an unparseable {$key}");
         }
 

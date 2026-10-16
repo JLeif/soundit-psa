@@ -1391,7 +1391,8 @@ class LitsrmmAssetSyncService
     }
 
     /**
-     * "Windows Workstation" / "Windows Server" for a Windows OS only (the form
+     * "Windows Server" for a Windows Server OS, Microsoft Hyper-V Server
+     * included; "Windows Workstation" for any other Windows OS (the forms
      * LevelSyncService writes); NULL for any other OS rather than a wrong guess.
      */
     private static function assetType(?string $osName): ?string
@@ -1404,7 +1405,7 @@ class LitsrmmAssetSyncService
         // 'win 10 pro', 'win10 pro' and 'winserver 2022' are Windows; 'wind river' is not.
         $windows = preg_match('/^win(?:\b|\d|server)/', $os) === 1 || str_contains($os, 'windows');
 
-        if ($windows && str_contains($os, 'server')) {
+        if (($windows && str_contains($os, 'server')) || str_contains($os, 'hyper-v server')) {
             return 'Windows Server';
         }
 
