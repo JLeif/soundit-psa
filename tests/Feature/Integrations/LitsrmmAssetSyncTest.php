@@ -210,6 +210,41 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('Example CPU', $lower->fresh()->cpu);
     }
 
+    public function test_b5_another_live_asset_keeps_the_linked_assets_placeholder(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
+        $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => null]);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame($row['id'], $a->fresh()->litsrmm_device_id);
+        $this->assertSame($row['hostname'], $a->fresh()->hostname);
+        $this->assertSame('SN1REAL0', $b->fresh()->serial_number);
+        $this->assertNull($b->fresh()->litsrmm_device_id);
+        $this->assertSame(1, $result->updated);
+        $this->assertSame(0, $result->created);
+        $this->assertSame(0, $result->skipped);
+        $this->assertSame(0, $result->errors);
+        $this->assertSame('Default string', $a->fresh()->serial_number);
+    }
+
+    public function test_b6_a_soft_deleted_asset_does_not_block_serial_replacement_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
+        $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => null]);
+        $b->delete();
+
+        $this->service()->sync();
+
+        $this->assertSame($row['id'], $a->fresh()->litsrmm_device_id);
+        $this->assertSame('SN1REAL0', $a->fresh()->serial_number);
+        $this->assertTrue($b->fresh()->trashed());
+        $this->assertSame('SN1REAL0', $b->fresh()->serial_number);
+        $this->assertNull($b->fresh()->litsrmm_device_id);
+    }
+
     public function test_l4_real_serial_replaces_stored_placeholder(): void
     {
         $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
@@ -327,6 +362,47 @@ class LitsrmmAssetSyncTest extends TestCase
         $b = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '8f14e45f-ceea-467a-9f38-000000000002']);
 
         $this->assertArrayHasKey('litsrmm_device_id', app(AssetService::class)->assetMergeIdentityConflicts($a, $b));
+    }
+
+    public function test_b1_a_linked_windows_server_becomes_a_windows_workstation(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'osName' => 'Microsoft Windows 11 Pro']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'asset_type' => 'Windows Server']);
+
+        $this->service()->sync();
+
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+        $this->assertSame('Windows Workstation', $asset->fresh()->asset_type);
+    }
+
+    public function test_b2_a_stored_firewall_type_is_kept_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'osName' => 'Microsoft Windows 11 Pro']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'asset_type' => 'Firewall']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Firewall', $asset->fresh()->asset_type);
+    }
+
+    public function test_b3_a_null_os_keeps_windows_server_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'osName' => null]);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'asset_type' => 'Windows Server']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Server', $asset->fresh()->asset_type);
+    }
+
+    public function test_b4_an_ubuntu_os_keeps_windows_workstation_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'osName' => 'Ubuntu Server 22.04']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'asset_type' => 'Windows Workstation']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Workstation', $asset->fresh()->asset_type);
     }
 
     public function test_a_server_os_is_typed_as_a_server(): void
