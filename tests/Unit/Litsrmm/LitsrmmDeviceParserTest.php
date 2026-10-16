@@ -139,6 +139,8 @@ class LitsrmmDeviceParserTest extends TestCase
     public static function malformedTimestamps(): array
     {
         return [
+            'trailing newline' => ["2026-09-30T10:00:00Z\n"],
+            'leap second' => ['2016-12-31T23:59:60Z'],
             'offset instead of Z' => ['2026-09-24T01:00:50+00:00'],
             'no zone' => ['2026-09-24T01:00:50'],
             'date only' => ['2026-09-24'],

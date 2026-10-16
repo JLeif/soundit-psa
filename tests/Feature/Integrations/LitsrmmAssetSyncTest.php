@@ -338,6 +338,15 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame('Windows Server', Asset::sole()->asset_type);
     }
 
+    public function test_microsoft_hyper_v_server_is_typed_as_a_server(): void
+    {
+        $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'osName' => 'Microsoft Hyper-V Server 2019']);
+
+        $this->service()->sync();
+
+        $this->assertSame('Windows Server', Asset::sole()->asset_type);
+    }
+
     public function test_ubuntu_server_is_not_typed_as_windows(): void
     {
         $this->device('1', ['osName' => 'Ubuntu Server 22.04']);

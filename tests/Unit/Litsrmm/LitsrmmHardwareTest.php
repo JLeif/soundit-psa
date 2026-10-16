@@ -252,9 +252,55 @@ class LitsrmmHardwareTest extends TestCase
         }
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('absentEntries')]
+    public function test_h3_null_and_missing_payloads_are_absent(array $inventory): void
+    {
+        $hw = LitsrmmHardware::fromInventory($inventory);
+
+        $this->assertSame([], $hw->malformed);
+        $this->assertSame([], $hw->columns());
+    }
+
+    public static function absentEntries(): array
+    {
+        return [
+            'null disks' => [['disks' => null]],
+            'null system payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'payload' => null]]],
+            'missing payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z']]],
+            'empty hardware object' => [['hardware' => ['payload' => []]]],
+        ];
+    }
+
+    public function test_h3_non_array_entries_and_payloads_stay_malformed(): void
+    {
+        $this->assertSame(['disks'], LitsrmmHardware::fromInventory(['disks' => 'x'])->malformed);
+        $this->assertSame(['system'], LitsrmmHardware::fromInventory(['system' => ['payload' => 'x']])->malformed);
+    }
+
+    public function test_h3_filtered_ipv4_strings_are_not_drift(): void
+    {
+        $hw = LitsrmmHardware::fromInventory([
+            'network' => ['payload' => [['ipv4' => ['169.254.1.1', 'not-an-ip']]]],
+        ]);
+
+        $this->assertSame([], $hw->malformed);
+        $this->assertNull($hw->ipAddress);
+    }
+
     public static function driftShapes(): array
     {
         return [
+            'hardware list' => ['hardware', [['cpu' => 'Example CPU', 'ramBytes' => 15000000000]], ['cpu', 'ram_gb']],
+            'system list' => ['system', [['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]], ['last_boot_at', 'needs_reboot']],
+            'disk total string' => ['disks', [['totalBytes' => '480000000000']], ['disk_summary']],
+            'disk string' => ['disks', ['C:'], ['disk_summary']],
+            'disk free string' => ['disks', [['totalBytes' => 480000000000, 'freeBytes' => '1']], ['disk_summary']],
+            'disk drive int' => ['disks', [['totalBytes' => 480000000000, 'drive' => 3]], ['disk_summary']],
+            'reboot string' => ['system', ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => 'yes'], ['last_boot_at', 'needs_reboot']],
+            'ipv4 string' => ['network', [['ipv4' => '192.0.2.10']], ['ip_address']],
+            'ipv4 element int' => ['network', [['ipv4' => [42]]], ['ip_address']],
+            'up string' => ['network', [['ipv4' => ['192.0.2.10'], 'up' => 'true']], ['ip_address']],
+            'boot leap second' => ['system', ['bootTimeUtc' => '2016-12-31T23:59:60Z', 'pendingReboot' => true], ['last_boot_at', 'needs_reboot']],
             'disks object' => ['disks', ['drive' => 'C:', 'totalBytes' => 480000000000], ['disk_summary']],
             'network object' => ['network', ['ipv4' => ['192.0.2.10'], 'up' => true], ['ip_address']],
             'ram string' => ['hardware', ['ramBytes' => '15000000000', 'cpu' => 'Example CPU'], ['ram_gb', 'cpu']],
