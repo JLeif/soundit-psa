@@ -148,6 +148,7 @@
 
                 @include('tickets._timeline-navigation')
                 {{-- Unified activity timeline, newest first; adjacent tool entries fold into one row --}}
+                @php $heldResolution = $ticket->isUnverifiedContactIntake() ? app(\App\Services\ContractResolver::class)->forEntry($ticket) : null; @endphp
                 @forelse($timelineRows as $item)
                     @if($item instanceof App\Support\TimelineToolRun)
                         @include('tickets._timeline-tool-group', ['run' => $item])
@@ -182,7 +183,7 @@
                                     {{-- A call's prepay debit can be held for contract ambiguity (card I3EvQKUV r2) or pending ticket verification (card VLyhWACq C10) --}}
                                     @if($item->contract_held_at && $item->is_billable && $item->effectiveDurationSeconds())
                                         <span class="badge bg-warning text-dark small" title="{{ "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification)." }}">
-                                            <i class="bi bi-exclamation-circle me-1"></i>{{ ucfirst(app(\App\Services\PrepayService::class)->heldReason($item, $ticket)) }}
+                                            <i class="bi bi-exclamation-circle me-1"></i>{{ ucfirst(app(\App\Services\PrepayService::class)->heldReason($item, $ticket, $heldResolution)) }}
                                         </span>
                                     @endif
                                     <span class="text-muted small ms-auto" title="{{ $item->started_at?->copy()->setTimezone($timelineTz)->format('Y-m-d H:i T') }}">
@@ -388,7 +389,7 @@
                                         {{-- A held note can keep a stamp that no longer validates; it is not billed to it --}}
                                         @if($note->contract_held_at && $note->is_billable && $note->time_minutes > 0)
                                             <span class="badge bg-warning text-dark small" title="{{ "Not debited yet: this ticket's contract is not settled (the client has several active contracts and no default, or the ticket is waiting for verification). Verify the ticket, or edit the note to choose its contract." }}">
-                                                <i class="bi bi-exclamation-circle me-1"></i>{{ ucfirst(app(\App\Services\PrepayService::class)->heldReason($note, $ticket)) }}
+                                                <i class="bi bi-exclamation-circle me-1"></i>{{ ucfirst(app(\App\Services\PrepayService::class)->heldReason($note, $ticket, $heldResolution)) }}
                                             </span>
                                         @elseif($note->contract_id && $note->contract_id !== $ticket->contract_id)
                                             <span class="badge bg-info text-dark small" title="Billed to {{ $note->contract?->name }}">

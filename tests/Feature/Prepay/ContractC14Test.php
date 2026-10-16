@@ -10,6 +10,7 @@ use App\Models\TicketNote;
 use App\Services\ContractResolver;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Monolog\Handler\TestHandler;
@@ -19,6 +20,75 @@ use Tests\TestCase;
 class ContractC14Test extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_h4_1_held_note_contract_queries_do_not_grow_per_badge(): void
+    {
+        [$ticket, $user] = $this->h4HeldFixture();
+        $queries = 0;
+        $counting = false;
+        DB::listen(function ($query) use (&$queries, &$counting) {
+            if ($counting && preg_match('/^select .* from [`"]contracts[`"]/i', $query->sql)) {
+                $queries++;
+            }
+        });
+        $this->actingAs($user);
+        $counting = true;
+        $this->get(route('tickets.show', $ticket))->assertOk();
+        $counting = false;
+        $one = $queries;
+        $this->assertGreaterThan(0, $one);
+        $this->h4HeldNote($ticket, $user);
+        $this->h4HeldNote($ticket, $user);
+        $this->assertSame(3, $ticket->notes()->whereNotNull('contract_held_at')->count());
+        $queries = 0;
+        $counting = true;
+        $this->get(route('tickets.show', $ticket))->assertOk();
+        $counting = false;
+        $this->assertSame($one, $queries, 'H4-1: three held notes must select contracts no more than one held note');
+    }
+
+    public function test_h4_2_held_badge_text_pins_ambiguous_and_single_contract(): void
+    {
+        [$ticket, $user, $second] = $this->h4HeldFixture();
+        $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()
+            ->assertSee('Needs contract')->assertDontSee('Awaiting verification');
+        $second->delete();
+        $this->assertSame(1, Contract::where('client_id', $ticket->client_id)->active()->count());
+        $this->get(route('tickets.show', $ticket))->assertOk()
+            ->assertSee('Awaiting verification')->assertDontSee('Needs contract');
+    }
+
+    private function h4HeldFixture(): array
+    {
+        Http::fake();
+        Http::preventStrayRequests();
+        $user = \App\Models\User::factory()->admin()->create(['is_active' => true]);
+        $ticket = Ticket::factory()->create(['contact_intake_origin' => true, 'contact_intake_verified_at' => null, 'contract_id' => null]);
+        $ticket->client->forceFill(['default_contract_id' => null])->saveQuietly();
+        for ($i = 0; $i < 2; $i++) {
+            $contract = Contract::create([
+                'client_id' => $ticket->client_id, 'name' => 'Synthetic H4 '.$i,
+                'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
+                'prepay_as_amount' => false, 'prepay_total' => 10,
+                'prepay_used' => 0, 'prepay_balance' => 10,
+            ]);
+            $this->assertTrue(app(\App\Services\PrepayService::class)->isHoursPrepay($contract));
+        }
+        $this->assertTrue($ticket->isUnverifiedContactIntake());
+        $this->assertTrue(app(ContractResolver::class)->forEntry($ticket)->isAmbiguous());
+        $this->h4HeldNote($ticket, $user);
+
+        return [$ticket, $user, $contract];
+    }
+
+    private function h4HeldNote(Ticket $ticket, \App\Models\User $user): TicketNote
+    {
+        return TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'author_id' => $user->id, 'note_type' => 'note',
+            'body' => 'Synthetic H4 held time', 'is_private' => true, 'is_billable' => true,
+            'time_minutes' => 60, 'noted_at' => now(), 'contract_held_at' => now(), 'contract_id' => null,
+        ]));
+    }
 
     public function test_inactive_stamp_on_unverified_ambiguous_ticket_needs_contract(): void
     {
@@ -225,12 +295,14 @@ class ContractC14Test extends TestCase
             'prepay_used' => 0, 'prepay_balance' => 10,
         ]);
         $ticket->forceFill(['contract_id' => $contract->id])->saveQuietly();
-        Contract::create([
+        $second = Contract::create([
             'client_id' => $ticket->client_id, 'name' => 'Synthetic C19 second',
             'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
             'prepay_as_amount' => false, 'prepay_total' => 10,
             'prepay_used' => 0, 'prepay_balance' => 10,
         ]);
+        $this->assertTrue(app(\App\Services\PrepayService::class)->isHoursPrepay($second));
+        $this->assertTrue(app(ContractResolver::class)->forClient((int) $ticket->client_id)->isAmbiguous(), 'the second contract makes the ticket tier distinguishable');
         $this->assertTrue($ticket->isUnverifiedContactIntake());
         $this->assertTrue(app(\App\Services\PrepayService::class)->isHoursPrepay($contract));
         $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
@@ -252,8 +324,9 @@ class ContractC14Test extends TestCase
             'ticket_id' => $ticket->id, 'ticket_note_id' => $formNote->id,
         ]);
         $contractWrites = 0;
-        Ticket::updated(function (Ticket $t) use (&$contractWrites, $ticket) {
-            if ($t->id === $ticket->id && $t->wasChanged('contract_id')) {
+        DB::listen(function ($query) use (&$contractWrites, $ticket) {
+            if (preg_match('/^update [`"]tickets[`"] set .*[`"]contract_id[`"]/i', $query->sql)
+                && in_array($ticket->id, $query->bindings)) {
                 $contractWrites++;
             }
         });
@@ -261,6 +334,7 @@ class ContractC14Test extends TestCase
         $this->assertFalse($ticket->fresh()->isUnverifiedContactIntake());
         $this->assertSame($contract->id, $ticket->fresh()->contract_id);
         $this->assertSame(0, $contractWrites);
+        $this->assertTrue(PrepayTransaction::where('phone_call_id', $call->id)->exists(), 'the preassigned contract debits the released call');
         $debit = PrepayTransaction::where('phone_call_id', $call->id)->sole();
         $this->assertSame($contract->id, $debit->contract_id);
         $this->assertNull($call->fresh()->contract_held_at);
@@ -327,12 +401,14 @@ class ContractC14Test extends TestCase
         $this->assertFalse($unsaved->exists);
         $this->assertSame($contract->id, $service->contractForPhoneCall($unsaved)?->id);
         $otherTicket = Ticket::factory()->create();
+        $this->assertNotSame($ticket->client_id, $otherTicket->client_id);
         $otherContract = Contract::create([
             'client_id' => $otherTicket->client_id, 'name' => 'Synthetic C19 other client',
             'type' => 'managed', 'status' => 'active', 'start_date' => '2026-01-01',
             'prepay_as_amount' => false, 'prepay_total' => 10,
             'prepay_used' => 0, 'prepay_balance' => 10,
         ]);
+        $this->assertTrue(PrepayTransaction::where('contract_id', $contract->id)->whereNull('phone_call_id')->exists(), 'the released note row the M7074 kill relies on');
         $unsaved = (new PhoneCall)->forceFill(['ticket_id' => $otherTicket->id]);
         $this->assertFalse($unsaved->exists);
         $this->assertSame($otherContract->id, $service->contractForPhoneCall($unsaved)?->id);

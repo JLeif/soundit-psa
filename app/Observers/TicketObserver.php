@@ -199,7 +199,9 @@ class TicketObserver
      * Run a ticket save whose contract_id change does not release the client's held
      * entries (card I3EvQKUV PR 2): changeTicketContract, behind both buttons of the
      * ticket's contract-change modal, and MCP update_ticket. A client_id change in the
-     * same save still releases them (updated() below). updated() runs synchronously
+     * same save still re-runs the held entries of the client the ticket moves to
+     * (updated() below); a move to no client re-runs nothing, and the previous
+     * client's entries are not re-run. updated() runs synchronously
      * inside the save, so the flag covers exactly that save.
      */
     public static function withoutHeldRelease(callable $fn): mixed

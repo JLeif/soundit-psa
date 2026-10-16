@@ -645,7 +645,7 @@ class PrepayService
         if (! $resolution->isResolved()) {
             if ($resolution->isAmbiguous() || $ticket->isUnverifiedContactIntake()) {
                 $this->markNoteHeld($note);
-                Log::info('[Prepay] Ticket note debit held: '.$this->heldReason($note, $ticket), [
+                Log::info('[Prepay] Ticket note debit held: '.$this->heldReason($note, $ticket, $resolution), [
                     'ticket_note_id' => $note->id,
                     'ticket_id' => $ticket->id,
                     'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
@@ -660,12 +660,17 @@ class PrepayService
         return $this->hoursPrepayOrNull($resolution->contract);
     }
 
-    public function heldReason(TicketNote|PhoneCall $entry, Ticket $ticket): string
+    /**
+     * The held badge and log reason: 'awaiting verification' or 'needs contract'.
+     * $resolution, when given, must be forEntry($ticket) for this ticket; callers
+     * that already hold it pass it so the ticket is not resolved again per entry.
+     */
+    public function heldReason(TicketNote|PhoneCall $entry, Ticket $ticket, ?ContractResolution $resolution = null): string
     {
         $resolver = app(ContractResolver::class);
 
         return $ticket->isUnverifiedContactIntake()
-            && (! $resolver->forEntry($ticket)->isAmbiguous()
+            && (! ($resolution ?? $resolver->forEntry($ticket))->isAmbiguous()
                 || ($entry->contract_id !== null
                     && $resolver->isActiveContractOf($ticket->client_id, (int) $entry->contract_id)))
             ? 'awaiting verification'
@@ -1245,7 +1250,7 @@ class PrepayService
                     // releaseHeldDebits() re-runs this marker on its triggers (see its docblock),
                     // including verification of a ticket that has a client.
                     PhoneCall::whereKey($call->id)->whereNull('contract_held_at')->update(['contract_held_at' => now()]);
-                    Log::info('[Prepay] Phone call debit held: '.$this->heldReason($call, $ticket), [
+                    Log::info('[Prepay] Phone call debit held: '.$this->heldReason($call, $ticket, $resolution), [
                         'phone_call_id' => $call->id,
                         'ticket_id' => $ticket->id,
                         'candidate_contract_ids' => $resolution->candidates->pluck('id')->all(),
