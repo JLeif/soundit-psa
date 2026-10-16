@@ -380,12 +380,18 @@ class LitsrmmSyncControlsTest extends TestCase
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('l4ScheduleStates')]
-    public function test_l4_schedule_flash_is_true_for_each_state(bool $configured, bool $enabled, bool $scheduled): void
+    public function test_l4_schedule_flash_is_true_for_each_state(bool $configured, bool $enabled, bool $scheduled, string $unconfiguredBy): void
     {
         Http::preventStrayRequests();
         Setting::setValue('litsrmm_enabled', $enabled ? '1' : '0');
         if (! $configured) {
-            Setting::setValue('litsrmm_base_url', '');
+            if ($unconfiguredBy === 'url') {
+                Setting::setValue('litsrmm_base_url', '');
+            } else {
+                Setting::where('key', 'litsrmm_api_key')->delete();
+                config(['services.litsrmm.api_key' => null]);
+            }
+            $this->assertFalse(LitsrmmConfig::isConfigured());
         }
         $expected = $scheduled
             ? ($configured && $enabled
@@ -407,7 +413,14 @@ class LitsrmmSyncControlsTest extends TestCase
         foreach ([false, true] as $configured) {
             foreach ([false, true] as $enabled) {
                 foreach ([false, true] as $scheduled) {
-                    $states['configured='.(int) $configured.' enabled='.(int) $enabled.' scheduled='.(int) $scheduled] = [$configured, $enabled, $scheduled];
+                    if ($configured) {
+                        $states['configured=1 enabled='.(int) $enabled.' scheduled='.(int) $scheduled] = [$configured, $enabled, $scheduled, 'none'];
+
+                        continue;
+                    }
+                    foreach (['url', 'key'] as $unconfiguredBy) {
+                        $states['configured='.(int) $configured.' enabled='.(int) $enabled.' scheduled='.(int) $scheduled.' unconfigured-by='.$unconfiguredBy] = [$configured, $enabled, $scheduled, $unconfiguredBy];
+                    }
                 }
             }
         }

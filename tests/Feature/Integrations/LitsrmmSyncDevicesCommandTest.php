@@ -69,6 +69,8 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->syncReturns($result);
 
         $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
+            ->doesntExpectOutputToContain('Sweeping:')
             ->expectsOutputToContain('3 created')
             ->assertSuccessful();
     }
@@ -99,13 +101,14 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertFailed();
     }
 
-    public function test_no_mapped_client_is_said_plainly_and_the_sweep_runs(): void
+    public function test_no_mapped_client_is_said_plainly_and_sync_is_called_for_the_sweep(): void
     {
         $service = Mockery::mock(LitsrmmAssetSyncService::class);
         $service->shouldReceive('sync')->once()->with(null, [])->andReturn(new SyncResult);
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
 
         $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
             ->expectsOutputToContain('No active clients are mapped to LITSRMM')
             ->expectsOutputToContain('Sweeping: clearing the LITSRMM links of clients that are unmapped or not active, and suspending the LITSRMM seats of unmapped clients.')
             ->assertSuccessful();
@@ -120,12 +123,25 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         ]);
         $client->stage = ClientStage::Prospect;
         $client->save();
+        $unmapped = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true, 'litsrmm_client_id' => null]);
+        $type = LicenseType::firstOrCreate(
+            ['vendor' => LitsrmmAssetSyncService::LICENSE_VENDOR, 'vendor_sku_id' => 'rmm_workstation'],
+            ['name' => 'LITSRMM — Workstation', 'is_active' => true],
+        );
+        $seat = License::create(['license_type_id' => $type->id, 'client_id' => $unmapped->id, 'quantity' => 3, 'status' => 'active']);
+        $prospectSeat = License::create(['license_type_id' => $type->id, 'client_id' => $client->id, 'quantity' => 2, 'status' => 'active']);
         $this->realSync([]);
 
-        $this->artisan('litsrmm:sync-devices')->assertSuccessful();
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
+            ->assertSuccessful();
 
         $this->assertNull($asset->fresh()->litsrmm_device_id);
         $this->assertSame(0, $this->listReads);
+        $this->assertSame(0, (int) $seat->fresh()->quantity);
+        $this->assertSame('suspended', $seat->fresh()->status);
+        $this->assertSame(2, (int) $prospectSeat->fresh()->quantity);
+        $this->assertSame('active', $prospectSeat->fresh()->status);
     }
 
     public function test_a_switched_off_integration_refuses_and_says_why(): void
@@ -171,6 +187,16 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->expectsOutputToContain('a short-read refusal is passed only if it matches exactly: 12:b:1:5:4:5:1:0:d0123456789, 34:d:2:0:0:1:0:2:dabcdef0123')
             ->doesntExpectOutputToContain('Accepting a short read')
             ->assertSuccessful();
+    }
+
+    public function test_an_accept_with_no_active_mapped_client_is_reported_unused(): void
+    {
+        $this->realSync([]);
+
+        $this->artisan('litsrmm:sync-devices', ['--accept-short-read' => ['12:b:1:5:4:5:1:0:d0123456789']])
+            ->expectsOutputToContain('For each of PSA client ID(s) 12, an --accept-short-read code given for it passed nothing')
+            ->assertSuccessful();
+        $this->assertSame(0, $this->listReads);
     }
 
     public function test_accept_short_read_reaches_a_single_client_run_too(): void
@@ -258,7 +284,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             'id' => sprintf('8f14e45f-ceea-467a-9f38-%012d', $n), 'clientId' => '00000000-0000-4000-8000-0000000000a1',
             'clientName' => 'Leif IT Solutions', 'hostname' => "WORKSTATION-{$n}", 'serial' => "SN{$n}REAL0",
             'osName' => 'Win 11 Pro', 'osVersion' => 'Microsoft Windows NT 10.0.26200.0', 'osBuild' => '26200',
-            'agentVersion' => '1.14.0+92a5b34', 'lastUser' => 'exampleuser', 'firstSeen' => '2026-09-22T03:47:40Z',
+            'agentVersion' => '1.0.0+0000000', 'lastUser' => 'exampleuser', 'firstSeen' => '2026-09-22T00:00:00Z',
             'lastSeen' => '2026-09-30T10:00:00.123Z', 'enrollmentState' => 'enrolled', 'availabilityState' => 'online', 'retiredAt' => null,
         ];
     }

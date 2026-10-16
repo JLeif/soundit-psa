@@ -165,9 +165,9 @@ class LitsrmmAssetSyncTest extends TestCase
             'osName' => 'Win 11 Pro',
             'osVersion' => 'Microsoft Windows NT 10.0.26200.0',
             'osBuild' => '26200',
-            'agentVersion' => '1.14.0+92a5b34',
+            'agentVersion' => '1.0.0+0000000',
             'lastUser' => 'exampleuser',
-            'firstSeen' => '2026-09-22T03:47:40Z',
+            'firstSeen' => '2026-09-22T00:00:00Z',
             'lastSeen' => '2026-09-30T10:00:00.123Z',
             'enrollmentState' => 'enrolled',
             'availabilityState' => 'online',
@@ -409,6 +409,7 @@ class LitsrmmAssetSyncTest extends TestCase
             $asset = Asset::where('hostname', $row['hostname'])->sole();
             $this->assertSame($this->client->id, $asset->client_id);
             $this->assertSame($row['id'], $asset->litsrmm_device_id);
+            $this->assertNull($asset->serial_number, 'a placeholder serial is never written');
         }
     }
 

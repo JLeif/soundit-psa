@@ -147,6 +147,12 @@ class LitsrmmDeviceParserTest extends TestCase
         ];
     }
 
+    public function test_a_one_digit_fraction_is_read_as_tenths(): void
+    {
+        $device = LitsrmmDevice::fromArray(self::row(0, ['lastSeen' => '2026-09-24T01:00:50.5Z']));
+        $this->assertSame('2026-09-24T01:00:50.500000Z', $device->lastSeen?->format('Y-m-d\TH:i:s.u\Z'));
+    }
+
     #[DataProvider('longFractions')]
     public function test_a_fraction_longer_than_microseconds_is_truncated_not_refused(string $value, string $expected): void
     {

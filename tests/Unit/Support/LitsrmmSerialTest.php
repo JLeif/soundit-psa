@@ -22,7 +22,7 @@ class LitsrmmSerialTest extends TestCase
      * THE TWO COMMON PLACEHOLDERS. One board family reports "Default string" and another "System Serial Number". Two machines carrying them avoid a collision only because the strings differ — a third machine reporting "Default string" would merge into the first.
      */
     #[Test]
-    public function it_refuses_the_placeholders_this_estate_actually_reports(): void
+    public function it_refuses_the_two_common_placeholders(): void
     {
         $this->assertNull(LitsrmmSerial::identity('Default string'));
         $this->assertNull(LitsrmmSerial::identity('System Serial Number'));
