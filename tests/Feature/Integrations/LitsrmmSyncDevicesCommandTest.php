@@ -66,6 +66,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->mapClient();
         $result = new SyncResult;
         $result->created = 3;
+        $result->details['full_run_clients'] = 1;
         $this->syncReturns($result);
 
         $this->artisan('litsrmm:sync-devices')
@@ -105,7 +106,9 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
     public function test_no_mapped_client_is_said_plainly_and_sync_is_called_for_the_sweep(): void
     {
         $service = Mockery::mock(LitsrmmAssetSyncService::class);
-        $service->shouldReceive('sync')->once()->with(null, [])->andReturn(new SyncResult);
+        $result = new SyncResult;
+        $result->details['full_run_clients'] = 0;
+        $service->shouldReceive('sync')->once()->with(null, [])->andReturn($result);
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
 
         $this->artisan('litsrmm:sync-devices')
@@ -145,6 +148,62 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->assertSame('suspended', $seat->fresh()->status);
         $this->assertSame(2, (int) $prospectSeat->fresh()->quantity);
         $this->assertSame('active', $prospectSeat->fresh()->status);
+    }
+
+    public function test_zero_mapped_sweeps_no_client_and_soft_deleted_client_links(): void
+    {
+        $client = $this->mapClient();
+        $asset = Asset::factory()->create([
+            'client_id' => $client->id,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000011',
+        ]);
+        $client->delete();
+        $noClient = Asset::factory()->create([
+            'client_id' => null,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000012',
+        ]);
+        $this->realSync([]);
+
+        $this->artisan('litsrmm:sync-devices')->assertSuccessful();
+
+        $this->assertNull($noClient->fresh()->litsrmm_device_id);
+        $this->assertNull($asset->fresh()->litsrmm_device_id);
+    }
+
+    public function test_one_mapped_client_sweeps_no_client_link_and_keeps_its_own_link(): void
+    {
+        $client = $this->mapClient();
+        $row = self::row(1);
+        $row['id'] = '00000000-0000-4000-8000-000000000021';
+        $asset = Asset::factory()->create([
+            'client_id' => $client->id,
+            'litsrmm_device_id' => $row['id'],
+        ]);
+        $noClient = Asset::factory()->create([
+            'client_id' => null,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000022',
+        ]);
+        $this->realSync([$row]);
+
+        $this->artisan('litsrmm:sync-devices')->assertSuccessful();
+
+        $this->assertNull($noClient->fresh()->litsrmm_device_id);
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+    }
+
+    public function test_command_lines_use_the_runs_zero_count_not_the_current_mapping(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['full_run_clients'] = 0;
+        $this->syncReturns($result);
+
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('No active clients are mapped to LITSRMM.')
+            ->expectsOutputToContain('Map a client on its page, under Integrations > Leif IT Solutions RMM. A mapped client is synced only once it is converted from a prospect and marked Active.')
+            ->expectsOutputToContain('Sweeping: clearing the LITSRMM link on every asset that is not deleted, and suspending the LITSRMM seats of unmapped clients that are not deleted.')
+            ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
+            ->assertSuccessful();
     }
 
     public function test_a_switched_off_integration_refuses_and_says_why(): void

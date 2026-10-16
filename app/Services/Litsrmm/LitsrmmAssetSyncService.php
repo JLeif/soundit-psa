@@ -409,6 +409,10 @@ class LitsrmmAssetSyncService
             ->orderBy('id')
             ->get();
 
+        if ($only === null) {
+            $result->details['full_run_clients'] = $clients->count();
+        }
+
         if ($only !== null && $clients->isEmpty()) {
             $result->recordError("client {$only->id} is not mapped to LITSRMM, or is not an active client; nothing was read.");
 
@@ -544,15 +548,16 @@ class LitsrmmAssetSyncService
      * Full runs only. Clears the LITSRMM link on every asset that is not
      * soft-deleted and whose client is not a mapped, active client; a
      * soft-deleted client is never one, whatever its mapping. An asset with no
-     * client keeps its link while any client is mapped and active, and loses it
-     * when none is. Then suspends the LITSRMM seats of unmapped clients that are
-     * not soft-deleted; the seats of a soft-deleted client, and of a client still
-     * mapped but not active, are left as they are (#5346).
+     * client loses its link too. Then suspends the LITSRMM seats of unmapped
+     * clients that are not soft-deleted; the seats of a soft-deleted client, and
+     * of a client still mapped but not active, are left as they are (#5346).
      */
     private function sweepUnmapped(array $mappedClientIds, SyncResult $result): void
     {
-        $this->clearUnmappedClients($mappedClientIds, $result);
-        $result->deactivated += License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
+        DB::transaction(function () use ($mappedClientIds, $result) {
+            $this->clearUnmappedClients($mappedClientIds, $result);
+            $result->deactivated += License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
+        });
     }
 
     /**
@@ -1406,11 +1411,11 @@ class LitsrmmAssetSyncService
         return $windows ? 'Windows Workstation' : null;
     }
 
-    /** Clears the link on every asset that is not soft-deleted whose client_id is not in $mappedClientIds, inactive and retired-stamped assets included. With $mappedClientIds empty that is every linked asset, those with no client included; otherwise an asset with no client keeps its link (NOT IN never matches null). */
+    /** Clears the link on every asset that is not soft-deleted whose client_id is null or not in $mappedClientIds, inactive and retired-stamped assets included. With $mappedClientIds empty that is every linked asset. */
     private function clearUnmappedClients(array $mappedClientIds, SyncResult $result): void
     {
         $result->deactivated += Asset::whereNotNull('litsrmm_device_id')
-            ->when($mappedClientIds !== [], fn ($q) => $q->whereNotIn('client_id', $mappedClientIds))
+            ->when($mappedClientIds !== [], fn ($q) => $q->where(fn ($w) => $w->whereNull('client_id')->orWhereNotIn('client_id', $mappedClientIds)))
             ->update(self::clearedColumns());
     }
 

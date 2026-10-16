@@ -95,17 +95,18 @@ class LitsrmmSyncDevices extends Command
             return $this->report($sync->sync($client, $accept));
         }
 
-        $mapped = Client::whereNotNull('litsrmm_client_id')->operational()->count();
+        $result = $sync->sync(null, $accept);
+        $mapped = $result->details['full_run_clients'] ?? null;
 
         if ($mapped === 0) {
             $this->warn('No active clients are mapped to LITSRMM.');
             $this->info('Map a client on its page, under Integrations > Leif IT Solutions RMM. A mapped client is synced only once it is converted from a prospect and marked Active.');
             $this->info('Sweeping: clearing the LITSRMM link on every asset that is not deleted, and suspending the LITSRMM seats of unmapped clients that are not deleted.');
-        } else {
+        } elseif ($mapped > 0) {
             $this->info("Syncing LITSRMM devices for {$mapped} mapped client(s)...");
         }
 
-        return $this->report($sync->sync(null, $accept));
+        return $this->report($result);
     }
 
     private function report(\App\Services\SyncResult $result): int
