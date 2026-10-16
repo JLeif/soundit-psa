@@ -1357,7 +1357,7 @@ class LitsrmmAssetSyncService
             $data['last_seen_at'] = Carbon::instance($device->lastSeen);
         }
 
-        // Never write a placeholder or overwrite a real serial; replace a stored value that is not a serial identity, unless another asset of this client already carries that serial.
+        // Never write a placeholder or overwrite a real serial; replace a stored value that is not a serial identity, unless another asset of this client that is not soft-deleted already carries a serial with the same identity.
         $serial = $device->matchableSerial();
         if ($serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
             $duplicate = $asset !== null && Asset::where('client_id', $client->id)
