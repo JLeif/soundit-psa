@@ -5,6 +5,7 @@ namespace Tests\Feature\Assistant;
 use App\Models\Asset;
 use App\Models\Client;
 use App\Models\Ticket;
+use App\Services\Assistant\AssistantToolDefinitions;
 use App\Services\Assistant\AssistantToolExecutor;
 use App\Services\Assistant\LinkedIds;
 use Illuminate\Database\Schema\Blueprint;
@@ -31,6 +32,26 @@ class LinkedIdsContractTest extends TestCase
         'assets' => LinkedIds::ASSET_COLUMNS,
         'tickets' => LinkedIds::TICKET_COLUMNS,
     ];
+
+    public function test_get_asset_description_names_every_linked_id(): void
+    {
+        $tools = array_column(AssistantToolDefinitions::getTools(true), null, 'name');
+        $this->assertArrayHasKey('get_asset', $tools);
+        $this->assertNotEmpty(LinkedIds::ASSET_COLUMNS);
+        foreach (LinkedIds::ASSET_COLUMNS as $column) {
+            $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $tools['get_asset']['description'], $column);
+        }
+    }
+
+    public function test_get_client_description_names_every_linked_id(): void
+    {
+        $tools = array_column(AssistantToolDefinitions::getTools(true), null, 'name');
+        $this->assertArrayHasKey('get_client', $tools);
+        $this->assertNotEmpty(LinkedIds::CLIENT_COLUMNS);
+        foreach (LinkedIds::CLIENT_COLUMNS as $column) {
+            $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $tools['get_client']['description'], $column);
+        }
+    }
 
     /** The columns the contract governs, derived from the live schema. */
     private static function governedColumns(string $table): array

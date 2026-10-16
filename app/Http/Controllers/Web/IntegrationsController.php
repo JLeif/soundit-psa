@@ -416,6 +416,7 @@ class IntegrationsController extends Controller
         $litsrmmBaseUrl = (string) (LitsrmmConfig::get('base_url') ?? '');
         $litsrmmConfigured = LitsrmmConfig::isConfigured();
         $litsrmmEnabled = LitsrmmConfig::isEnabled();
+        $litsrmmAvailable = LitsrmmConfig::isAvailable();
         $litsrmmScheduleEnabled = LitsrmmConfig::isScheduleEnabled();
         $litsrmmConnectedAt = $fmtTs(Setting::getValue('litsrmm_connected_at'));
         $meshEnabled = MeshConfig::isEnabled();
@@ -612,7 +613,7 @@ class IntegrationsController extends Controller
             'benjipaysPayOnline',
             'ninjaClientId', 'ninjaConnected', 'ninjaConnectedAt', 'ninjaEnabled',
             'levelHasApiKey', 'levelConnected', 'levelConnectedAt', 'levelWebhookSecret', 'levelHasInstallAccountToken', 'levelEnabled',
-            'litsrmmHasApiKey', 'litsrmmBaseUrl', 'litsrmmConfigured', 'litsrmmEnabled', 'litsrmmScheduleEnabled', 'litsrmmConnectedAt',
+            'litsrmmHasApiKey', 'litsrmmBaseUrl', 'litsrmmConfigured', 'litsrmmEnabled', 'litsrmmAvailable', 'litsrmmScheduleEnabled', 'litsrmmConnectedAt',
             'meshHasApiKey', 'meshKeyUnusable', 'meshBaseUrl', 'meshConnected', 'meshEnabled',
             'huntressConfigured', 'huntressConnected', 'huntressEnabled',
             'huntressWebhookSecretStored', 'huntressWebhookAccountId', 'huntressWebhooksEnabled',
@@ -2504,7 +2505,7 @@ class IntegrationsController extends Controller
 
         $message = ! $on
             ? 'LITSRMM scheduled device sync is off.'
-            : (\App\Support\LitsrmmConfig::isEnabled() && \App\Support\LitsrmmConfig::isConfigured()
+            : (\App\Support\LitsrmmConfig::isAvailable()
                 ? 'LITSRMM scheduled device sync is on and runs every 4 hours while the integration is configured and enabled.'
                 : 'LITSRMM scheduled device sync is on. It will run every 4 hours once the integration is configured and enabled.');
 
