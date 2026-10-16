@@ -212,7 +212,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_b5_another_live_asset_keeps_the_linked_assets_placeholder(): void
     {
-        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0']);
         $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
         $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => null]);
 
@@ -231,7 +231,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_b6_a_soft_deleted_asset_does_not_block_serial_replacement_pin(): void
     {
-        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0']);
         $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
         $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => null]);
         $b->delete();
@@ -243,6 +243,48 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertTrue($b->fresh()->trashed());
         $this->assertSame('SN1REAL0', $b->fresh()->serial_number);
         $this->assertNull($b->fresh()->litsrmm_device_id);
+    }
+
+    public function test_b7_a_linked_null_type_asset_is_typed_from_the_os_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'osName' => 'Microsoft Windows 11 Pro']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => $row['id'], 'asset_type' => null]);
+
+        $this->service()->sync();
+
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+        $this->assertSame('Windows Workstation', $asset->fresh()->asset_type);
+    }
+
+    public function test_b8_another_clients_asset_does_not_block_serial_replacement_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
+        $other = Client::factory()->create();
+        $this->assertNull($other->fresh()->litsrmm_client_id);
+        $c = Asset::factory()->create(['client_id' => $other->id, 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => null]);
+
+        $this->service()->sync();
+
+        $this->assertSame('SN1REAL0', $a->fresh()->serial_number);
+        $this->assertSame('SN1REAL0', $c->fresh()->serial_number);
+        $this->assertSame($other->id, $c->fresh()->client_id);
+        $this->assertNull($c->fresh()->litsrmm_device_id);
+    }
+
+    public function test_b9_a_sibling_serial_equal_only_by_identity_blocks_replacement_pin(): void
+    {
+        $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
+        $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'sn1real0', 'litsrmm_device_id' => null]);
+        $this->assertSame('sn1real0', $b->fresh()->serial_number);
+
+        $this->service()->sync();
+
+        $this->assertSame('Default string', $a->fresh()->serial_number);
+        $this->assertSame('sn1real0', $b->fresh()->serial_number);
+        $this->assertNull($b->fresh()->litsrmm_device_id);
+        $this->assertSame($row['id'], $a->fresh()->litsrmm_device_id);
     }
 
     public function test_l4_real_serial_replaces_stored_placeholder(): void
