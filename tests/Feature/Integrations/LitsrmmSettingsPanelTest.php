@@ -108,6 +108,33 @@ class LitsrmmSettingsPanelTest extends TestCase
         }
     }
 
+    public function test_schedule_on_is_switchable_when_not_configured(): void
+    {
+        \Illuminate\Support\Facades\Http::preventStrayRequests();
+        Setting::setValue('litsrmm_base_url', '');
+        Setting::setValue('litsrmm_sync_schedule_enabled', '1');
+        $this->assertFalse(LitsrmmConfig::isConfigured());
+
+        $response = $this->actingAs($this->admin())->get(route('settings.integrations'))->assertOk();
+        $response->assertSee('action="'.route('settings.integrations.litsrmm.schedule').'"', false);
+        $document = new \DOMDocument;
+        @$document->loadHTML($response->getContent());
+        $xpath = new \DOMXPath($document);
+        $this->assertSame(1, $xpath->query('//form[@action="'.route('settings.integrations.litsrmm.schedule').'"]//input[@id="litsrmm_sync_schedule" and @checked]')->length);
+        $response->assertSee('Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.');
+    }
+
+    public function test_schedule_off_has_no_form_when_not_configured(): void
+    {
+        \Illuminate\Support\Facades\Http::preventStrayRequests();
+        Setting::setValue('litsrmm_base_url', '');
+        Setting::setValue('litsrmm_sync_schedule_enabled', '0');
+        $this->assertFalse(LitsrmmConfig::isConfigured());
+
+        $this->actingAs($this->admin())->get(route('settings.integrations'))->assertOk()
+            ->assertDontSee(route('settings.integrations.litsrmm.schedule'));
+    }
+
     public static function l4CardStates(): array
     {
         return LitsrmmSyncControlsTest::l4ScheduleStates();

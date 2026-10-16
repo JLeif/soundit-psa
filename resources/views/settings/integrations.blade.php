@@ -897,8 +897,9 @@
                 </div>
                 <div id="test-result-litsrmm" class="mt-3" style="display: none;"></div>
 
-                @if($litsrmmConfigured && $litsrmmEnabled)
+                @if($litsrmmAvailable || $litsrmmScheduleEnabled)
                 <div class="border-top pt-3 mt-3">
+                    @if($litsrmmAvailable)
                     <form method="POST" action="{{ route('settings.integrations.litsrmm.sync-devices') }}">
                         @csrf
                         <button type="submit" class="btn btn-outline-primary">
@@ -906,6 +907,8 @@
                         </button>
                         <div class="form-text">Creates and updates assets, and LITSRMM seats, for every mapped client.</div>
                     </form>
+                    @endif
+
                     <form method="POST" action="{{ route('settings.integrations.litsrmm.schedule') }}" class="mt-3">
                         @csrf
                         <div class="form-check form-switch">
@@ -913,13 +916,12 @@
                                    {{ $litsrmmScheduleEnabled ? 'checked' : '' }} onchange="this.form.submit()">
                             <label class="form-check-label" for="litsrmm_sync_schedule">Sync every 4 hours</label>
                         </div>
+                        @if($litsrmmScheduleEnabled && ! $litsrmmAvailable)
+                            <p class="text-muted small">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
+                        @endif
                         <div class="form-text">Off by default. Switch on after a supervised manual run has been reviewed.</div>
                     </form>
                 </div>
-                @endif
-
-                @if($litsrmmScheduleEnabled && (! $litsrmmConfigured || ! $litsrmmEnabled))
-                    <p class="text-muted small border-top pt-3 mt-3">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
                 @endif
 
                 @if($litsrmmConfigured)

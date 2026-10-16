@@ -51,7 +51,9 @@ p { margin: var(--psa-spacing-sm) 0; }
 <label for="key-off">API Key</label><input id="key-off" type="password" placeholder="Leave blank to keep current">
 <p class="muted">Sent as a bearer token. Stored encrypted and never shown again.</p>
 <button class="primary" type="button">Save LITSRMM Settings</button><br><button type="button">Test Connection</button>
-<p class="section muted">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
+<div class="section"><label><input type="checkbox" checked> Sync every 4 hours</label>
+<p class="muted">Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.</p>
+<p class="muted">Off by default. Switch on after a supervised manual run has been reviewed.</p></div>
 <div class="section"><label><input type="checkbox"> Integration enabled</label><p class="muted">Turning this off stops all LITSRMM requests, including client lookups on the client page. Credentials are kept so it can be turned back on.</p></div>
 </div></article>
 </main>
