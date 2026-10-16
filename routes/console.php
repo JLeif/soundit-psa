@@ -37,8 +37,8 @@ Schedule::command('level:sync-devices')
 // fails by refusing a client; a run that ends early on an error (such as a failed
 // first device list read, which changes nothing) does not sweep. The sweep clears
 // the LITSRMM link on every asset that is not soft-deleted whose client is not a
-// mapped, active client (a soft-deleted client never is one; an asset with no
-// client keeps its link unless no client is mapped and active), and suspends the
+// mapped, active client (a soft-deleted client never is one, and an asset with no
+// client has none), and suspends the
 // LITSRMM seats of unmapped clients that are not soft-deleted. The seats of a
 // soft-deleted client, and of a client still mapped but not active, stay as
 // they are (#5346).
