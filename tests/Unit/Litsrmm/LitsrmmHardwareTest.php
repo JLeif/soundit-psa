@@ -85,7 +85,7 @@ class LitsrmmHardwareTest extends TestCase
     public function test_a_link_local_address_is_never_chosen(): void
     {
         // 169.254/16 is Windows' "DHCP failed" address; it identifies nothing.
-        // The flag and explicit link-local check overlap; deleting either alone is an equivalent mutant.
+        // For 169.254/16 the flag and the explicit check overlap, so deleting the explicit check alone is an equivalent mutant. Deleting the flag is not: test_reserved_ipv4_ranges_are_never_chosen kills it.
         $inventory = self::inventory();
         $inventory['network']['payload'] = [
             ['name' => 'Wi-Fi', 'mac' => '00:00:5E:00:53:FF', 'ipv4' => ['169.254.1.2'], 'up' => true],

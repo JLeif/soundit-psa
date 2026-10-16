@@ -80,6 +80,9 @@ class LitsrmmSettingsPanelTest extends TestCase
         \Illuminate\Support\Facades\Http::preventStrayRequests();
         if ($configured) {
             $this->configure();
+        } elseif ($unconfiguredBy === 'url') {
+            Setting::setEncrypted('litsrmm_api_key', 'panel-token-value');
+            Setting::setValue('litsrmm_base_url', '');
         } elseif ($unconfiguredBy === 'key') {
             Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
             Setting::where('key', 'litsrmm_api_key')->delete();

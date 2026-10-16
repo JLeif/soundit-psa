@@ -413,6 +413,11 @@ class LitsrmmSyncControlsTest extends TestCase
         foreach ([false, true] as $configured) {
             foreach ([false, true] as $enabled) {
                 foreach ([false, true] as $scheduled) {
+                    if ($configured) {
+                        $states['configured=1 enabled='.(int) $enabled.' scheduled='.(int) $scheduled] = [$configured, $enabled, $scheduled, 'none'];
+
+                        continue;
+                    }
                     foreach (['url', 'key'] as $unconfiguredBy) {
                         $states['configured='.(int) $configured.' enabled='.(int) $enabled.' scheduled='.(int) $scheduled.' unconfigured-by='.$unconfiguredBy] = [$configured, $enabled, $scheduled, $unconfiguredBy];
                     }
