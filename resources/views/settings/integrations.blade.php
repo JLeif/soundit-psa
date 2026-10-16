@@ -897,8 +897,9 @@
                 </div>
                 <div id="test-result-litsrmm" class="mt-3" style="display: none;"></div>
 
-                @if($litsrmmAvailable)
+                @if($litsrmmAvailable || $litsrmmScheduleEnabled)
                 <div class="border-top pt-3 mt-3">
+                    @if($litsrmmAvailable)
                     <form method="POST" action="{{ route('settings.integrations.litsrmm.sync-devices') }}">
                         @csrf
                         <button type="submit" class="btn btn-outline-primary">
@@ -906,11 +907,8 @@
                         </button>
                         <div class="form-text">Creates and updates assets, and LITSRMM seats, for every mapped client.</div>
                     </form>
-                </div>
-                @endif
+                    @endif
 
-                @if($litsrmmAvailable || $litsrmmScheduleEnabled)
-                <div class="border-top pt-3 mt-3">
                     <form method="POST" action="{{ route('settings.integrations.litsrmm.schedule') }}" class="mt-3">
                         @csrf
                         <div class="form-check form-switch">
