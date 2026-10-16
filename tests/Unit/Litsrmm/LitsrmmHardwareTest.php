@@ -40,7 +40,7 @@ class LitsrmmHardwareTest extends TestCase
         ];
     }
 
-    public function test_a_real_inventory_maps_to_the_columns_a_level_asset_carries(): void
+    public function test_a_full_inventory_maps_to_the_columns_a_level_asset_carries(): void
     {
         $hw = LitsrmmHardware::fromInventory(self::inventory());
 
@@ -85,12 +85,35 @@ class LitsrmmHardwareTest extends TestCase
     public function test_a_link_local_address_is_never_chosen(): void
     {
         // 169.254/16 is Windows' "DHCP failed" address; it identifies nothing.
+        // The flag and explicit link-local check overlap; deleting either alone is an equivalent mutant.
         $inventory = self::inventory();
         $inventory['network']['payload'] = [
             ['name' => 'Wi-Fi', 'mac' => '00:00:5E:00:53:FF', 'ipv4' => ['169.254.1.2'], 'up' => true],
         ];
 
         $this->assertNull(LitsrmmHardware::fromInventory($inventory)->ipAddress);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('reservedIpv4Ranges')]
+    public function test_reserved_ipv4_ranges_are_never_chosen(string $ip): void
+    {
+        $inventory = self::inventory();
+        $inventory['network']['payload'] = [
+            ['name' => 'Wi-Fi', 'ipv4' => [$ip], 'up' => true],
+            ['name' => 'Ethernet', 'ipv4' => ['192.0.2.10'], 'up' => true],
+        ];
+
+        $this->assertSame('192.0.2.10', LitsrmmHardware::fromInventory($inventory)->ipAddress);
+    }
+
+    public static function reservedIpv4Ranges(): array
+    {
+        return [
+            '0.0.0.0' => ['0.0.0.0'],
+            '0.1.2.3' => ['0.1.2.3'],
+            '240.0.0.1' => ['240.0.0.1'],
+            '255.255.255.255' => ['255.255.255.255'],
+        ];
     }
 
     public function test_an_adapter_that_is_up_wins_over_one_listed_first_that_is_down(): void
@@ -115,20 +138,26 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertSame('192.0.2.10', LitsrmmHardware::fromInventory($inventory)->ipAddress);
     }
 
-    public function test_a_calendar_invalid_boot_time_is_dropped(): void
+    public function test_a_calendar_invalid_boot_time_drops_the_system_category(): void
     {
         $inventory = self::inventory();
         $inventory['system']['payload']['bootTimeUtc'] = '2026-09-31T03:00:00Z';
+        $hw = LitsrmmHardware::fromInventory($inventory);
 
-        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+        $this->assertNull($hw->lastBootAt);
+        $this->assertNull($hw->needsReboot);
+        $this->assertSame(['system'], $hw->malformed);
     }
 
-    public function test_a_boot_time_with_a_trailing_newline_is_dropped(): void
+    public function test_a_boot_time_with_a_trailing_newline_drops_the_system_category(): void
     {
         $inventory = self::inventory();
         $inventory['system']['payload']['bootTimeUtc'] = '2026-09-30T03:04:05Z'."\n";
+        $hw = LitsrmmHardware::fromInventory($inventory);
 
-        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+        $this->assertNull($hw->lastBootAt);
+        $this->assertNull($hw->needsReboot);
+        $this->assertSame(['system'], $hw->malformed);
     }
 
     public function test_a_valid_leap_day_boot_time_is_kept(): void
@@ -139,21 +168,43 @@ class LitsrmmHardwareTest extends TestCase
         $this->assertSame('2028-02-29T00:00:00+00:00', LitsrmmHardware::fromInventory($inventory)->lastBootAt?->format(DATE_ATOM));
     }
 
-    public function test_a_24_hour_boot_time_is_dropped(): void
+    public function test_a_24_hour_boot_time_drops_the_system_category(): void
     {
         $inventory = self::inventory();
         $inventory['system']['payload']['bootTimeUtc'] = '2026-09-30T24:00:00Z';
+        $hw = LitsrmmHardware::fromInventory($inventory);
 
-        $this->assertNull(LitsrmmHardware::fromInventory($inventory)->lastBootAt);
+        $this->assertNull($hw->lastBootAt);
+        $this->assertNull($hw->needsReboot);
+        $this->assertSame(['system'], $hw->malformed);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('bootFractions')]
+    public function test_boot_time_fractions_are_padded_and_truncated(string $value, string $expected): void
+    {
+        $inventory = self::inventory();
+        $inventory['system']['payload']['bootTimeUtc'] = $value;
+        $hw = LitsrmmHardware::fromInventory($inventory);
+
+        $this->assertSame($expected, $hw->lastBootAt?->format('Y-m-d\TH:i:s.u\Z'));
+    }
+
+    public static function bootFractions(): array
+    {
+        return [
+            'one digit is tenths' => ['2026-09-24T01:00:50.5Z', '2026-09-24T01:00:50.500000Z'],
+            'seven digits' => ['2026-09-24T01:00:50.3310000Z', '2026-09-24T01:00:50.331000Z'],
+            'nine digits' => ['2026-09-24T01:00:50.123456789Z', '2026-09-24T01:00:50.123456Z'],
+        ];
     }
 
     public function test_every_fixed_volume_is_listed(): void
     {
         $inventory = self::inventory();
-        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000000000000, 'freeBytes' => 500000000000];
+        $inventory['disks']['payload'][] = ['drive' => 'D:', 'label' => 'Data', 'fileSystem' => 'NTFS', 'totalBytes' => 1000500000000, 'freeBytes' => 500000000000];
 
-        // D: 931.32 -> 931 GB, free 465.66 -> 466 GB, 466/931 = 50.05 -> 50%.
-        $this->assertSame('C: 447 GB (21% free), D: 931 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
+        // D: 931.79 -> 932 GB, free 465.66 -> 466 GB, 466/932 = 50.0 -> 50%.
+        $this->assertSame('C: 447 GB (21% free), D: 932 GB (50% free)', LitsrmmHardware::fromInventory($inventory)->diskSummary);
     }
 
     public function test_a_malformed_payload_is_ignored_not_fatal(): void
@@ -184,6 +235,20 @@ class LitsrmmHardwareTest extends TestCase
         $merged = array_merge($stored, $hw->columns());
         foreach ($fields as $field) {
             $this->assertSame('old value', $merged[$field]);
+        }
+        foreach ([
+            'cpu' => 'Example CPU',
+            'ram_gb' => 13.97,
+            'disk_summary' => 'C: 447 GB (21% free)',
+            'ip_address' => '192.0.2.10',
+            'needs_reboot' => true,
+        ] as $field => $value) {
+            if (! in_array($field, $fields, true)) {
+                $this->assertSame($value, $hw->columns()[$field]);
+            }
+        }
+        if (! in_array('last_boot_at', $fields, true)) {
+            $this->assertNotNull($hw->columns()['last_boot_at']);
         }
     }
 

@@ -161,6 +161,7 @@ class LitsrmmDeviceParserTest extends TestCase
     public static function longFractions(): array
     {
         return [
+            'one digit is tenths' => ['2026-09-24T01:00:50.5Z', '2026-09-24T01:00:50.500000Z'],
             'six digits' => ['2026-09-24T01:00:50.123456Z', '2026-09-24T01:00:50.123456Z'],
             'seven digits (.NET round-trip form)' => ['2026-09-22T18:20:53.3310000Z', '2026-09-22T18:20:53.331000Z'],
             'nine digits, truncated not rounded' => ['2026-09-24T01:00:50.123456789Z', '2026-09-24T01:00:50.123456Z'],

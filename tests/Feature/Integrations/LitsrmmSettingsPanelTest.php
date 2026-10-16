@@ -7,6 +7,7 @@ use App\Models\Setting;
 use App\Models\User;
 use App\Services\Litsrmm\LitsrmmClient;
 use App\Services\Litsrmm\LitsrmmClientException;
+use App\Support\LitsrmmConfig;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
@@ -74,11 +75,18 @@ class LitsrmmSettingsPanelTest extends TestCase
     // ---- the panel renders and can be configured at all ----
 
     #[DataProvider('l4CardStates')]
-    public function test_l4_card_explains_pending_schedule(bool $configured, bool $enabled, bool $scheduled): void
+    public function test_l4_card_explains_pending_schedule(bool $configured, bool $enabled, bool $scheduled, string $unconfiguredBy): void
     {
         \Illuminate\Support\Facades\Http::preventStrayRequests();
         if ($configured) {
             $this->configure();
+        } elseif ($unconfiguredBy === 'key') {
+            Setting::setValue('litsrmm_base_url', 'https://litsrmm.test');
+            Setting::where('key', 'litsrmm_api_key')->delete();
+            config(['services.litsrmm.api_key' => null]);
+        }
+        if (! $configured) {
+            $this->assertFalse(LitsrmmConfig::isConfigured());
         }
         Setting::setValue('litsrmm_enabled', $enabled ? '1' : '0');
         Setting::setValue('litsrmm_sync_schedule_enabled', $scheduled ? '1' : '0');
