@@ -347,8 +347,7 @@ class LitsrmmAssetSyncService
     /**
      * Sync every mapped, operational client, or only $only (the client page's
      * Sync button). A single-client run writes nothing outside that client:
-     * the estate-wide sweeps (links of clients that are unmapped or not active, and seats of unmapped clients)
-     * belong to a full run only.
+     * the estate-wide sweeps (sweepUnmapped) belong to a full run only.
      *
      * $acceptShortRead: refusal codes (refusalCode()) an admin passed with
      * --accept-short-read for this run only. Each passes at most the one
@@ -542,8 +541,13 @@ class LitsrmmAssetSyncService
     }
 
     /**
-     * Full runs only: the links of clients that are unmapped or not active,
-     * and the LITSRMM seats of unmapped clients.
+     * Full runs only. Clears the LITSRMM link on every asset that is not
+     * soft-deleted and whose client is not a mapped, active client; a
+     * soft-deleted client is never one, whatever its mapping. An asset with no
+     * client keeps its link while any client is mapped and active, and loses it
+     * when none is. Then suspends the LITSRMM seats of unmapped clients that are
+     * not soft-deleted; the seats of a soft-deleted client, and of a client still
+     * mapped but not active, are left as they are (#5346).
      */
     private function sweepUnmapped(array $mappedClientIds, SyncResult $result): void
     {
@@ -1402,7 +1406,7 @@ class LitsrmmAssetSyncService
         return $windows ? 'Windows Workstation' : null;
     }
 
-    /** Links on every asset that is not soft-deleted whose client is unmapped or not active, inactive and retired-stamped assets included. */
+    /** Clears the link on every asset that is not soft-deleted whose client_id is not in $mappedClientIds, inactive and retired-stamped assets included. With $mappedClientIds empty that is every linked asset, those with no client included; otherwise an asset with no client keeps its link (NOT IN never matches null). */
     private function clearUnmappedClients(array $mappedClientIds, SyncResult $result): void
     {
         $result->deactivated += Asset::whereNotNull('litsrmm_device_id')

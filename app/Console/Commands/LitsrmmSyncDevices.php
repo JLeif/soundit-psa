@@ -12,7 +12,8 @@ use Illuminate\Console\Command;
  *
  * Scheduled every 4 hours in routes/console.php, but only once an admin has
  * switched on "Sync every 4 hours" (Settings > Integrations > LITSRMM), which
- * is off by default until a supervised manual run has been read.
+ * is off by default. Switch it on only after a supervised manual run has
+ * been reviewed; nothing in code checks for one.
  *
  * --accept-short-read=<refusal code> (repeatable, #5577) is the one way
  * through the short-read bound for a client whose change an admin has checked
@@ -98,7 +99,8 @@ class LitsrmmSyncDevices extends Command
 
         if ($mapped === 0) {
             $this->warn('No active clients are mapped to LITSRMM.');
-            $this->info('Sweeping: clearing the LITSRMM links of clients that are unmapped or not active, and suspending the LITSRMM seats of unmapped clients.');
+            $this->info('Map a client on its page, under Integrations > Leif IT Solutions RMM. A mapped client is synced only once it is converted from a prospect and marked Active.');
+            $this->info('Sweeping: clearing the LITSRMM link on every asset that is not deleted, and suspending the LITSRMM seats of unmapped clients that are not deleted.');
         } else {
             $this->info("Syncing LITSRMM devices for {$mapped} mapped client(s)...");
         }

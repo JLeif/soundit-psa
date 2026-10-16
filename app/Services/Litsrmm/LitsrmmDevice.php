@@ -130,9 +130,9 @@ final class LitsrmmDevice
      * reports none, a blank string, a firmware placeholder ("System Serial
      * Number", "Default string", "To be filled by O.E.M." and their family),
      * or a value too short or too repetitive to be one. The rule is
-     * App\Support\LitsrmmSerial, which holds the list the vendor's own RMM
-     * refuses plus the entries #5353 added, so, as of that port, this side withholds at least
-     * what the vendor's list did.
+     * App\Support\LitsrmmSerial: the list the vendor's own RMM refused when it
+     * was ported, plus the entries #5353 added. Nothing checks the vendor's
+     * list for later additions.
      * A placeholder is still REAL data and stays in $serial.
      *
      * Even a non-placeholder serial is NOT a key: the vendor says serial
@@ -153,7 +153,7 @@ final class LitsrmmDevice
      * Whether the vendor reports this device retired: BOTH states read
      * `retired`, which is how the vendor says retired devices are listed.
      *
-     * This class only exposes the state. LitsrmmAssetSyncService acts on it on a sync that reads the client's devices in full (not refused, not a degraded read): an active asset linked to a retired device is made inactive and stamped litsrmm_retired_at, unless another RMM still has a live link to it (#5368), and a retired device counts toward no seat.
+     * This class only exposes the state. LitsrmmAssetSyncService acts on it on a sync whose read of the client is neither refused (a short read accepted with --accept-short-read is not refused) nor degraded: an active asset linked to a retired device is made inactive and stamped litsrmm_retired_at, unless another RMM that is switched on, configured and mapped to the asset's client still links it, a Tactical agent row counting even when offline (#5368, #5689), and a retired device counts toward no seat.
      */
     public function isRetired(): bool
     {

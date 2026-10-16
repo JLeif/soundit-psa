@@ -71,6 +71,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->artisan('litsrmm:sync-devices')
             ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
             ->doesntExpectOutputToContain('Sweeping:')
+            ->doesntExpectOutputToContain('Map a client on its page')
             ->expectsOutputToContain('3 created')
             ->assertSuccessful();
     }
@@ -110,7 +111,8 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->artisan('litsrmm:sync-devices')
             ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
             ->expectsOutputToContain('No active clients are mapped to LITSRMM')
-            ->expectsOutputToContain('Sweeping: clearing the LITSRMM links of clients that are unmapped or not active, and suspending the LITSRMM seats of unmapped clients.')
+            ->expectsOutputToContain('Map a client on its page, under Integrations > Leif IT Solutions RMM.')
+            ->expectsOutputToContain('Sweeping: clearing the LITSRMM link on every asset that is not deleted, and suspending the LITSRMM seats of unmapped clients that are not deleted.')
             ->assertSuccessful();
     }
 
@@ -134,6 +136,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
 
         $this->artisan('litsrmm:sync-devices')
             ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
+            ->expectsOutputToContain('Map a client on its page, under Integrations > Leif IT Solutions RMM.')
             ->assertSuccessful();
 
         $this->assertNull($asset->fresh()->litsrmm_device_id);

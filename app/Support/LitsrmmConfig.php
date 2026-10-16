@@ -61,8 +61,8 @@ class LitsrmmConfig
 
     /**
      * Whether the 4-hourly device sync may run. Off unless an admin switched it
-     * on: it writes assets and seats, so it goes live only after a supervised
-     * manual run has been read.
+     * on. It writes assets and seats, so switch it on only after a supervised
+     * manual run has been reviewed; nothing in code checks for one.
      */
     public static function isScheduleEnabled(): bool
     {
