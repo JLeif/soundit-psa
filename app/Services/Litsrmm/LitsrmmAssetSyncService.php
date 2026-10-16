@@ -1175,7 +1175,8 @@ class LitsrmmAssetSyncService
                 continue;
             }
 
-            $asset = $this->write($client, $asset, $device, $hardware[$device->id] ?? null, $result);
+            $serialShared = ($serial = LitsrmmSerial::identity($device->serial)) !== null && ($serialCounts[$serial] ?? 0) > 1;
+            $asset = $this->write($client, $asset, $device, $hardware[$device->id] ?? null, $result, $serialShared);
             $kept[$asset->id] = true;
             $written[$device->id] = true;
         }
@@ -1332,7 +1333,7 @@ class LitsrmmAssetSyncService
         return $byName->first();
     }
 
-    private function write(Client $client, ?Asset $asset, LitsrmmDevice $device, ?LitsrmmHardware $hardware, SyncResult $result): Asset
+    private function write(Client $client, ?Asset $asset, LitsrmmDevice $device, ?LitsrmmHardware $hardware, SyncResult $result, bool $serialShared): Asset
     {
         $data = [
             'litsrmm_device_id' => $device->id,
@@ -1357,11 +1358,11 @@ class LitsrmmAssetSyncService
             $data['last_seen_at'] = Carbon::instance($device->lastSeen);
         }
 
-        // Never write a placeholder or overwrite a real serial; replace a stored value that is not a serial identity, unless another asset of this client that is not soft-deleted already carries a serial with the same identity.
+        // Never write a placeholder or overwrite a real serial. Write the device's serial to a new asset, or in place of a stored value that is not a serial identity, unless another device this read lists that is not retired shares its identity, or another asset of this client that is not soft-deleted already carries a serial with the same identity.
         $serial = $device->matchableSerial();
-        if ($serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
-            $duplicate = $asset !== null && Asset::where('client_id', $client->id)
-                ->where('id', '!=', $asset->id)
+        if (! $serialShared && $serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
+            $duplicate = Asset::where('client_id', $client->id)
+                ->when($asset !== null, fn ($query) => $query->where('id', '!=', $asset->id))
                 ->get(['serial_number'])
                 ->contains(fn (Asset $candidate) => LitsrmmSerial::identity($candidate->serial_number) === LitsrmmSerial::identity($serial));
             if (! $duplicate) {

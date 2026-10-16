@@ -287,6 +287,39 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame($row['id'], $a->fresh()->litsrmm_device_id);
     }
 
+    public function test_b10_two_linked_devices_sharing_a_serial_keep_both_placeholders(): void
+    {
+        $d1 = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9']);
+        $d2 = $this->device('2', ['id' => '00000000-0000-4000-8000-000000000002', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $d1['id']]);
+        $z = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'To be filled by O.E.M.', 'litsrmm_device_id' => $d2['id']]);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame('Default string', $a->fresh()->serial_number);
+        $this->assertSame('To be filled by O.E.M.', $z->fresh()->serial_number);
+        $this->assertSame($d1['id'], $a->fresh()->litsrmm_device_id);
+        $this->assertSame($d2['id'], $z->fresh()->litsrmm_device_id);
+        $this->assertSame(2, $result->updated);
+    }
+
+    public function test_b11_a_new_device_does_not_copy_a_serial_a_linked_asset_carries(): void
+    {
+        $z = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN2REAL2']);
+        $x = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $z['hostname'], 'serial_number' => 'SN1REAL0', 'litsrmm_device_id' => $z['id']]);
+        $y = $this->device('2', ['id' => '00000000-0000-4000-8000-000000000002', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0', 'hostname' => 'EXAMPLE-NEW']);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(1, $result->created);
+        $this->assertSame(2, Asset::where('client_id', $this->client->id)->count());
+        $created = Asset::where('client_id', $this->client->id)->where('litsrmm_device_id', $y['id'])->sole();
+        $this->assertSame($y['id'], $created->litsrmm_device_id);
+        $this->assertNull($created->serial_number);
+        $this->assertSame('SN1REAL0', $x->fresh()->serial_number);
+        $this->assertSame($z['id'], $x->fresh()->litsrmm_device_id);
+    }
+
     public function test_l4_real_serial_replaces_stored_placeholder(): void
     {
         $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);
