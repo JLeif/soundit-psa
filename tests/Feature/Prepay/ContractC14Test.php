@@ -114,7 +114,7 @@ class ContractC14Test extends TestCase
         $spy = $this->h11ResolverSpy();
         $html = $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()->getContent();
         $this->assertSame(2, substr_count($html, 'Needs contract'), 'each held call must render its held badge');
-        $this->assertSame(0, $spy->fromHeldReason, 'the held call badge must reuse the page resolution, not resolve the ticket again per call');
+        $this->assertSame(0, $spy->fromHeldReason, 'the held call badge must pass the page resolution to heldReason, so heldReason does not resolve the ticket again per call');
     }
 
     public function test_h11_held_log_reasons_reuse_the_callers_resolution(): void
@@ -404,11 +404,12 @@ class ContractC14Test extends TestCase
             // Counts a tickets UPDATE whose SET list writes contract_id (contract_id in the
             // WHERE alone does not count) and whose WHERE can reach this ticket: its first
             // top-level (outside every parenthesis) unqualified or tickets-qualified "id"
-            // predicate binds this ticket's id at that predicate's own placeholders (an int
-            // or digit-string binding, never a bool or another column's value) or lists it
-            // inline, or the WHERE has no such predicate (a bulk write, or one keyed only
-            // inside a subquery or group). Another table's "id" (a whereHas subquery's
-            // "clients"."id") never supplies the key.
+            // predicate binds this ticket's id at that predicate's own placeholders (an int or
+            // string binding equal to the id; a bool never matches, and other columns'
+            // bindings are not read) or lists it inline in an "id" in (...) list, or the WHERE
+            // has no such predicate. That last case counts as a bulk write, including one keyed
+            // only inside a subquery or group and Laravel's empty-whereIn "0 = 1". Another
+            // table's "id" (a whereHas subquery's "clients"."id") never supplies the key.
             if (! preg_match('/^update [`"]tickets[`"] set (.*?)(?: where (.*))?$/is', $query->sql, $m)
                 || ! preg_match('/[`"]contract_id[`"] = /i', $m[1])) {
                 return;
