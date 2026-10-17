@@ -253,7 +253,7 @@ class LitsrmmHardwareTest extends TestCase
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('absentEntries')]
-    public function test_h3_null_and_missing_payloads_are_absent(array $inventory): void
+    public function test_h3_null_missing_and_empty_payloads_are_absent(array $inventory): void
     {
         $hw = LitsrmmHardware::fromInventory($inventory);
 

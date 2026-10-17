@@ -44,7 +44,7 @@ class ContractC14Test extends TestCase
         $counting = true;
         $this->get(route('tickets.show', $ticket))->assertOk();
         $counting = false;
-        $this->assertSame($one, $queries, 'H4-1: three held notes must select contracts no more than one held note');
+        $this->assertSame($one, $queries, 'H4-1: three held notes must select contracts exactly as often as one held note');
     }
 
     public function test_h4_2_held_badge_text_pins_ambiguous_and_single_contract(): void
