@@ -53,11 +53,12 @@ use Illuminate\Support\Sleep;
  *    which come from the list. An inventory category LitsrmmHardware reads
  *    as malformed (a shape we do not read; its docblock lists them) is
  *    drift: it is logged and recorded as an error. A category that is left
- *    out or null, or whose payload is missing, null or empty, is absent,
- *    not drift: nothing is logged or recorded and the columns it would feed
- *    are left as they were. So a category the vendor sends without its
- *    payload wrapper, or with the payload under another key, reads as
- *    absent too (#7166).
+ *    out or null, or is an array whose payload is missing, null or an empty
+ *    array, is absent, not drift: nothing is logged or recorded and the
+ *    columns it would feed are left as they were. So a category the vendor
+ *    sends as an array without its payload wrapper, or with the payload
+ *    under another key, reads as absent too (#7166); one sent as a scalar,
+ *    or with a payload that is not an array, is malformed, so it is drift.
  *  - MANY 404s ARE A DEGRADED READ, NOT DEVICES LEAVING (#5578). A client's
  *    detail read is degraded when at least one read answers 404 and either
  *    every read answers 404 (a one-device client whose only read answers

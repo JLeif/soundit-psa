@@ -3314,7 +3314,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertNull($assets[0]->fresh()->litsrmm_device_id);
     }
 
-    /** #7166: a category sent without its payload wrapper is absent, not drift. */
+    /** #7166: an array category sent without its payload wrapper is absent, not drift. */
     public function test_a_category_without_its_payload_wrapper_is_absent_not_drift(): void
     {
         $row = $this->device('1');
@@ -3326,16 +3326,16 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $result = $this->service()->sync();
 
-        $this->assertSame(0, $result->errors, 'A category with no payload must be absent, not drift, so it must record no error.');
-        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'A category with no payload must leave the stored CPU as it was.');
-        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'A category with no payload must leave the stored disk summary as it was.');
+        $this->assertSame(0, $result->errors, 'An array category with no payload wrapper must be absent, not drift, so it must record no error.');
+        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'An array category with no payload wrapper must leave the stored CPU as it was.');
+        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'An array category with no payload wrapper must leave the stored disk summary as it was.');
         $this->assertSame('192.0.2.10', $asset->fresh()->ip_address, 'The categories that carry a payload must still be read.');
     }
 
     /** #7177: a half-retired device is "not retired" for the shared-serial rule: it withholds its sibling's serial while it is itself skipped. */
     public function test_a_half_retired_device_sharing_a_serial_withholds_it_from_its_sibling(): void
     {
-        $this->device('1', ['serial' => 'SN5REAL5', 'enrollmentState' => 'retired', 'availabilityState' => 'offline']);
+        $d1 = $this->device('1', ['serial' => 'SN5REAL5', 'enrollmentState' => 'retired', 'availabilityState' => 'offline']);
         $d2 = $this->device('2', ['serial' => 'SN5REAL5']);
         $a = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $d2['hostname'], 'serial_number' => 'Default string', 'litsrmm_device_id' => $d2['id']]);
 
@@ -3345,6 +3345,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame($d2['id'], $a->fresh()->litsrmm_device_id, 'The sibling must keep its link.');
         $this->assertSame(1, $result->updated, 'The sibling\'s other list facts must still be written.');
         $this->assertSame(1, $result->skipped, 'The half-retired device must be skipped.');
+        $this->assertContains("{$d1['hostname']}: only one of its two states reads retired; left as it was", $result->skippedMessages, 'The half-retired device must be skipped for its split state, not for its shared serial.');
         $this->assertSame(0, $result->created, 'Nothing must be created.');
     }
 }
