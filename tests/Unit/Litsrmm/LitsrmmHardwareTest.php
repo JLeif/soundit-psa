@@ -268,6 +268,7 @@ class LitsrmmHardwareTest extends TestCase
             'null system payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'payload' => null]]],
             'missing payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z']]],
             'empty hardware object' => [['hardware' => ['payload' => []]]],
+            'empty system object' => [['system' => ['payload' => []]]],
         ];
     }
 
@@ -300,6 +301,8 @@ class LitsrmmHardwareTest extends TestCase
             'ipv4 string' => ['network', [['ipv4' => '192.0.2.10']], ['ip_address']],
             'ipv4 element int' => ['network', [['ipv4' => [42]]], ['ip_address']],
             'up string' => ['network', [['ipv4' => ['192.0.2.10'], 'up' => 'true']], ['ip_address']],
+            'adapter string' => ['network', ['eth0'], ['ip_address']],
+            'ipv4 object' => ['network', [['ipv4' => ['primary' => '192.0.2.10'], 'up' => true]], ['ip_address']],
             'boot leap second' => ['system', ['bootTimeUtc' => '2016-12-31T23:59:60Z', 'pendingReboot' => true], ['last_boot_at', 'needs_reboot']],
             'disks object' => ['disks', ['drive' => 'C:', 'totalBytes' => 480000000000], ['disk_summary']],
             'network object' => ['network', ['ipv4' => ['192.0.2.10'], 'up' => true], ['ip_address']],

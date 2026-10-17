@@ -278,21 +278,24 @@ class LitsrmmAssetSyncTest extends TestCase
         $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
         $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'sn1real0', 'litsrmm_device_id' => null]);
         $this->assertSame('sn1real0', $b->fresh()->serial_number);
+        $before = $b->fresh()->getAttributes();
 
         $this->service()->sync();
 
         $this->assertSame('Default string', $a->fresh()->serial_number);
         $this->assertSame('sn1real0', $b->fresh()->serial_number);
+        $this->assertSame($this->client->id, $b->fresh()->client_id);
+        $this->assertSame($before, $b->fresh()->getAttributes(), 'Every stored column of B must be unchanged by the sync.');
         $this->assertNull($b->fresh()->litsrmm_device_id);
         $this->assertSame($row['id'], $a->fresh()->litsrmm_device_id);
     }
 
     public function test_b10_two_linked_devices_sharing_a_serial_keep_both_placeholders(): void
     {
-        $d1 = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9']);
-        $d2 = $this->device('2', ['id' => '00000000-0000-4000-8000-000000000002', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9']);
-        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $d1['id']]);
-        $z = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'To be filled by O.E.M.', 'litsrmm_device_id' => $d2['id']]);
+        $d1 = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9', 'hostname' => 'EXAMPLE-D1']);
+        $d2 = $this->device('2', ['id' => '00000000-0000-4000-8000-000000000002', 'clientName' => 'Example Client', 'serial' => 'SN9REAL9', 'hostname' => 'EXAMPLE-D2', 'osName' => 'Windows Server 2022 Standard']);
+        $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $d1['id'], 'asset_type' => null]);
+        $z = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'To be filled by O.E.M.', 'litsrmm_device_id' => $d2['id'], 'asset_type' => null]);
 
         $result = $this->service()->sync();
 
@@ -301,6 +304,13 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame($d1['id'], $a->fresh()->litsrmm_device_id);
         $this->assertSame($d2['id'], $z->fresh()->litsrmm_device_id);
         $this->assertSame(2, $result->updated);
+        // The serial is withheld; the hostname, os and asset_type are still written to each asset.
+        $this->assertSame('EXAMPLE-D1', $a->fresh()->hostname);
+        $this->assertSame('EXAMPLE-D2', $z->fresh()->hostname);
+        $this->assertSame('Win 11 Pro (build 26200)', $a->fresh()->os);
+        $this->assertSame('Windows Server 2022 Standard (build 26200)', $z->fresh()->os);
+        $this->assertSame('Windows Workstation', $a->fresh()->asset_type);
+        $this->assertSame('Windows Server', $z->fresh()->asset_type);
     }
 
     public function test_b11_a_new_device_does_not_copy_a_serial_a_linked_asset_carries(): void
