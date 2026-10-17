@@ -98,6 +98,7 @@ class LitsrmmSettingsPanelTest extends TestCase
 
         if ($scheduled && (! $configured || ! $enabled)) {
             $response->assertSee($text);
+            $this->assertPendingLineSitsDirectlyUnderTheSwitch($response->getContent(), $text);
         } else {
             $response->assertDontSee($text);
         }
@@ -122,6 +123,7 @@ class LitsrmmSettingsPanelTest extends TestCase
         $xpath = new \DOMXPath($document);
         $this->assertSame(1, $xpath->query('//form[@action="'.route('settings.integrations.litsrmm.schedule').'"]//input[@id="litsrmm_sync_schedule" and @checked]')->length);
         $response->assertSee('Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.');
+        $this->assertPendingLineSitsDirectlyUnderTheSwitch($response->getContent(), 'Sync every 4 hours is still on. Scheduled sync will run once the integration is configured and enabled.');
     }
 
     public function test_schedule_off_has_no_form_when_not_configured(): void
@@ -133,6 +135,31 @@ class LitsrmmSettingsPanelTest extends TestCase
 
         $this->actingAs($this->admin())->get(route('settings.integrations'))->assertOk()
             ->assertDontSee(route('settings.integrations.litsrmm.schedule'));
+    }
+
+    /**
+     * The pending line's exact text must appear once in the page, exactly one
+     * <p> must carry it once whitespace is normalised, and that <p> must be the
+     * element directly after the form-check div that holds the switch, inside
+     * the schedule form. Moving it outside the form, above the switch, or below
+     * the "Off by default" form-text fails here, as does a second exact copy or
+     * a second <p> copy. A rewrapped copy in another element, or one joined by a
+     * non-breaking space, is not counted.
+     */
+    private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
+    {
+        $this->assertSame(1, substr_count($html, $text), 'the exact pending line text must appear exactly once in the page');
+        $document = new \DOMDocument;
+        @$document->loadHTML($html);
+        $xpath = new \DOMXPath($document);
+        $this->assertSame(1, $xpath->query('//p[normalize-space(.)="'.$text.'"]')->length, 'the pending line must render as exactly one <p>');
+        $switch = '//form[@action="'.route('settings.integrations.litsrmm.schedule').'"]'
+            .'/div[contains(concat(" ", normalize-space(@class), " "), " form-check ")][.//input[@id="litsrmm_sync_schedule"]]';
+        $this->assertSame(1, $xpath->query($switch)->length, 'the schedule form must hold the switch in a form-check div');
+        $next = $xpath->query($switch.'/following-sibling::*[1]')->item(0);
+        $this->assertNotNull($next, 'an element must follow the switch inside the schedule form');
+        $this->assertSame('p', $next->nodeName, 'the pending line must be the element directly after the switch');
+        $this->assertSame($text, trim($next->textContent), 'the element directly after the switch must be the pending line');
     }
 
     public static function l4CardStates(): array
