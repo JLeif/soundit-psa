@@ -138,10 +138,11 @@ class LitsrmmSettingsPanelTest extends TestCase
     }
 
     /**
-     * The pending line must render once, as the element directly after the
-     * form-check div that holds the switch, inside the schedule form. Moving it
-     * outside the form, above the switch, or below the "Off by default"
-     * form-text fails here.
+     * The pending line must render once (its exact text once in the page, and
+     * one <p> carrying it after whitespace is normalised), as the element
+     * directly after the form-check div that holds the switch, inside the
+     * schedule form. Moving it outside the form, above the switch, or below the
+     * "Off by default" form-text fails here.
      */
     private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
     {
@@ -149,6 +150,7 @@ class LitsrmmSettingsPanelTest extends TestCase
         $document = new \DOMDocument;
         @$document->loadHTML($html);
         $xpath = new \DOMXPath($document);
+        $this->assertSame(1, $xpath->query('//p[normalize-space(.)="'.$text.'"]')->length, 'the pending line must render as exactly one <p>');
         $switch = '//form[@action="'.route('settings.integrations.litsrmm.schedule').'"]'
             .'/div[contains(concat(" ", normalize-space(@class), " "), " form-check ")][.//input[@id="litsrmm_sync_schedule"]]';
         $this->assertSame(1, $xpath->query($switch)->length, 'the schedule form must hold the switch in a form-check div');
