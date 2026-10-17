@@ -406,8 +406,11 @@ class ContractC14Test extends TestCase
         DB::listen(function ($query) use (&$contractWrites, $ticket) {
             // Counts an UPDATE whose SQL starts update "tickets" set (double- or
             // backtick-quoted, as the query builder emits it) and whose SET list writes
-            // "contract_id" = (contract_id in the WHERE alone does not count; raw SQL in
-            // another form and upserts are not seen), and whose WHERE can reach this ticket.
+            // "contract_id" = outside every parenthesis (contract_id in the WHERE or only inside
+            // a SET subquery does not count; raw SQL in another form and upserts are not seen),
+            // and whose WHERE can reach this ticket. The SET list ends at the first " where "
+            // outside every parenthesis, so a subquery SET value (its own where, "id" and
+            // bindings) stays in the SET list and never supplies the key.
             // The key is the first top-level (outside every parenthesis), unqualified or
             // tickets-qualified predicate of one of three shapes: "id" = ?,
             // "id" in (?, ...) or "id" in (<digits>). Any other id predicate ("id" != ?,
@@ -419,11 +422,24 @@ class ContractC14Test extends TestCase
             // counts as a bulk write, including one keyed only inside a subquery or group and
             // Laravel's empty-whereIn "0 = 1". Another table's "id" (a whereHas subquery's
             // "clients"."id") never supplies the key.
-            if (! preg_match('/^update [`"]tickets[`"] set (.*?)(?: where (.*))?$/is', $query->sql, $m)
-                || ! preg_match('/[`"]contract_id[`"] = /i', $m[1])) {
+            if (! preg_match('/^update [`"]tickets[`"] set (.*)$/is', $query->sql, $m)) {
                 return;
             }
-            $where = $m[2] ?? '';
+            $outside = fn (string $sql, int $at) => substr_count(substr($sql, 0, $at), '(') === substr_count(substr($sql, 0, $at), ')');
+            $set = $m[1];
+            $where = '';
+            preg_match_all('/ where /i', $m[1], $splits, PREG_OFFSET_CAPTURE);
+            foreach ($splits[0] as $split) {
+                if ($outside($m[1], $split[1])) {
+                    $set = substr($m[1], 0, $split[1]);
+                    $where = substr($m[1], $split[1] + strlen(' where '));
+                    break;
+                }
+            }
+            preg_match_all('/[`"]contract_id[`"] = /i', $set, $writes, PREG_OFFSET_CAPTURE);
+            if (! array_filter($writes[0], fn ($w) => $outside($set, $w[1]))) {
+                return;
+            }
             $key = null;
             preg_match_all('/(?<![`"]\.)(?:[`"]tickets[`"]\.)?[`"]id[`"] (?:= \?|in \(([?, ]+|[0-9, ]+)\))/i', $where, $keys, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
             foreach ($keys as $candidate) {
@@ -441,7 +457,7 @@ class ContractC14Test extends TestCase
             if (isset($key[1]) && ctype_digit(str_replace([',', ' '], '', $key[1][0]))) {
                 $ids = array_map('trim', explode(',', $key[1][0]));
             } else {
-                $first = substr_count($m[1], '?') + substr_count(substr($where, 0, $key[0][1]), '?');
+                $first = substr_count($set, '?') + substr_count(substr($where, 0, $key[0][1]), '?');
                 $ids = array_map(fn ($b) => is_int($b) || is_string($b) ? (string) $b : null,
                     array_slice($query->bindings, $first, substr_count($key[0][0], '?')));
             }
