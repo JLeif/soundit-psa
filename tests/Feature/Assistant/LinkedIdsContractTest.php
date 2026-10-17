@@ -63,13 +63,15 @@ class LinkedIdsContractTest extends TestCase
 
     /**
      * The text inside the parentheses after "linked_ids: every PSA, foreign-key
-     * and integration id on the <subject> (". get_asset also names
-     * merged_into_asset_id and tactical_asset_id in prose outside that list, so
-     * a whole-description match cannot tell a listed column from a mentioned one.
+     * and integration id on the <subject> (", up to the parenthesis that closes
+     * that one: an aside in parentheses inside the list stays part of the list
+     * (#7206). get_asset also names merged_into_asset_id and tactical_asset_id
+     * in prose outside that list, so a whole-description match cannot tell a
+     * listed column from a mentioned one.
      */
     private static function linkedIdsList(string $description, string $subject): string
     {
-        $found = preg_match('/linked_ids: every PSA, foreign-key and integration id on the '.$subject.' \\(([^)]*)\\)/', $description, $m);
+        $found = preg_match('/linked_ids: every PSA, foreign-key and integration id on the '.$subject.' \\(((?:[^()]++|\\((?1)\\))*)\\)/', $description, $m);
         self::assertSame(1, $found, "the description must introduce linked_ids with a parenthesised list for the {$subject}");
 
         return $m[1];

@@ -270,9 +270,15 @@ class LitsrmmHardwareTest extends TestCase
             'empty hardware object' => [['hardware' => ['payload' => []]]],
             'empty system object' => [['system' => ['payload' => []]]],
             'payload under another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]]],
+            'network payload under another key' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]]],
+            'system payload under another key' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]]],
             'empty category array' => [['disks' => []]],
             'empty disks list' => [['disks' => ['payload' => []]]],
             'empty network list' => [['network' => ['payload' => []]]],
+            'unwrapped hardware payload' => [['hardware' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]],
+            'unwrapped disks list' => [['disks' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]]],
+            'unwrapped network list' => [['network' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]],
+            'unwrapped system payload' => [['system' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]],
         ];
     }
 
@@ -286,10 +292,16 @@ class LitsrmmHardwareTest extends TestCase
     #[\PHPUnit\Framework\Attributes\DataProvider('scalarShapes')]
     public function test_h12a_a_scalar_category_or_payload_is_malformed(array $inventory, string $category): void
     {
-        $hw = LitsrmmHardware::fromInventory($inventory);
+        // #7210: a scalar category, or an array category whose payload is a
+        // scalar, has no field to write, so a second, readable category is sent
+        // beside it and columns() must be exactly that category's columns.
+        [$readable, $expected] = $category === 'disks'
+            ? [['hardware' => ['payload' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]], ['cpu' => 'Example CPU', 'ram_gb' => 13.97]]
+            : [['disks' => ['payload' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]]], ['disk_summary' => 'C: 447 GB (21% free)']];
+        $hw = LitsrmmHardware::fromInventory($inventory + $readable);
 
         $this->assertSame([$category], $hw->malformed, 'A category that is neither null nor an array, or whose payload is present and neither null nor an array, must be malformed.');
-        $this->assertSame([], $hw->columns(), 'A malformed category must write none of its fields.');
+        $this->assertSame($expected, $hw->columns(), 'A scalar category or scalar payload must add no column, and the readable category beside it must still be read.');
     }
 
     public static function scalarShapes(): array
@@ -309,13 +321,15 @@ class LitsrmmHardwareTest extends TestCase
     {
         $hw = LitsrmmHardware::fromInventory([
             'disks' => ['payload' => [['C:', 480000000000], ['drive' => 'D:', 'totalBytes' => 1000500000000, 'freeBytes' => 500000000000]]],
-            'network' => ['payload' => [['192.0.2.10'], ['ipv4' => ['192.0.2.11'], 'up' => true]]],
+            // Neither adapter is up, so the first candidate wins: a read of the
+            // list-shaped adapter would put 192.0.2.10 ahead of 192.0.2.11.
+            'network' => ['payload' => [['192.0.2.10'], ['ipv4' => ['192.0.2.11']]]],
         ]);
 
         $this->assertSame([], $hw->malformed, 'A disk or adapter sent as a list must be skipped, not reported as drift.');
         // D: 931.79 -> 932 GB, free 465.66 -> 466 GB, 466/932 = 50.0 -> 50%.
         $this->assertSame('D: 932 GB (50% free)', $hw->diskSummary, 'A list-shaped disk must not stop the other disks in its category from being read.');
-        $this->assertSame('192.0.2.11', $hw->ipAddress, 'A list-shaped adapter must not stop the other adapters in its category from being read.');
+        $this->assertSame('192.0.2.11', $hw->ipAddress, 'A list-shaped adapter must be skipped, and the other adapters in its category still read.');
     }
 
     public function test_h3_filtered_ipv4_strings_are_not_drift(): void

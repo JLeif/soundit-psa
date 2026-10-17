@@ -274,11 +274,17 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_b9_a_sibling_serial_equal_only_by_identity_blocks_replacement_pin(): void
     {
+        // #7199: updated_at is stored to the second. The clock is frozen here
+        // and moved on 5 seconds before the sync, so an Eloquent write to B
+        // (which sets updated_at) changes the row compared below even when it
+        // changes no other column.
+        $this->freezeSecond();
         $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client', 'serial' => 'SN1REAL0']);
         $a = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'Default string', 'litsrmm_device_id' => $row['id']]);
         $b = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'sn1real0', 'litsrmm_device_id' => null]);
         $this->assertSame('sn1real0', $b->fresh()->serial_number);
         $before = $b->fresh()->getAttributes();
+        $this->travel(5)->seconds();
 
         $this->service()->sync();
 
@@ -3322,13 +3328,33 @@ class LitsrmmAssetSyncTest extends TestCase
         $inventory['hardware'] = ['cpu' => 'Other CPU', 'ramBytes' => 32000000000];
         $inventory['disks'] = [['drive' => 'C:', 'totalBytes' => 960000000000, 'freeBytes' => 1]];
         $this->details[$row['id']] = $inventory;
-        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'litsrmm_device_id' => $row['id'], 'cpu' => 'Stored CPU', 'disk_summary' => 'C: 100 GB']);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'litsrmm_device_id' => $row['id'], 'cpu' => 'Stored CPU', 'ram_gb' => 16, 'disk_summary' => 'C: 100 GB']);
 
         $result = $this->service()->sync();
 
         $this->assertSame(0, $result->errors, 'An array category with no payload wrapper must be absent, not drift, so it must record no error.');
         $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'An array category with no payload wrapper must leave the stored CPU as it was.');
+        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'An array category with no payload wrapper must leave the stored RAM as it was.');
         $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'An array category with no payload wrapper must leave the stored disk summary as it was.');
+        $this->assertSame('192.0.2.10', $asset->fresh()->ip_address, 'The categories that carry a payload must still be read.');
+    }
+
+    /** #7204: an array category whose payload is under another key is absent, not drift. */
+    public function test_a_category_with_its_payload_under_another_key_is_absent_not_drift(): void
+    {
+        $row = $this->device('1');
+        $inventory = self::inventory();
+        $inventory['hardware'] = ['collectedAt' => '2026-09-30T10:00:00.000Z', 'data' => ['cpu' => 'Other CPU', 'ramBytes' => 32000000000]];
+        $inventory['disks'] = ['collectedAt' => '2026-09-30T10:00:00.000Z', 'data' => [['drive' => 'C:', 'totalBytes' => 960000000000, 'freeBytes' => 1]]];
+        $this->details[$row['id']] = $inventory;
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'litsrmm_device_id' => $row['id'], 'cpu' => 'Stored CPU', 'ram_gb' => 16, 'disk_summary' => 'C: 100 GB']);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(0, $result->errors, 'An array category with its payload under another key must be absent, not drift, so it must record no error.');
+        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'An array category with its payload under another key must leave the stored CPU as it was.');
+        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'An array category with its payload under another key must leave the stored RAM as it was.');
+        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'An array category with its payload under another key must leave the stored disk summary as it was.');
         $this->assertSame('192.0.2.10', $asset->fresh()->ip_address, 'The categories that carry a payload must still be read.');
     }
 
