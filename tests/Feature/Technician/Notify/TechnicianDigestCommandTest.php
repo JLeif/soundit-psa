@@ -42,15 +42,17 @@ class TechnicianDigestCommandTest extends TestCase
     {
         $user = \App\Models\User::factory()->create();
 
+        // A public IP literal: SafeUrlInspector range-checks a literal and never
+        // resolves it, so this save does not depend on the runner's DNS (#7080).
         $this->actingAs($user)->post(route('settings.integrations.technician.update'), [
             'technician_enabled' => '1',
-            'technician_teams_webhook_url' => 'https://x.webhook.office.com/h',
+            'technician_teams_webhook_url' => 'https://93.184.216.34/h',
             'technician_notify_email' => 'ops@example.com',
             'technician_digest_time' => '07:30',
             'technician_heartbeat_interval' => '20',
         ])->assertRedirect();
 
-        $this->assertSame('https://x.webhook.office.com/h', \App\Support\TechnicianConfig::teamsWebhookUrl());
+        $this->assertSame('https://93.184.216.34/h', \App\Support\TechnicianConfig::teamsWebhookUrl(), 'A public https webhook URL must be saved.');
         $this->assertSame('ops@example.com', \App\Support\TechnicianConfig::notifyEmail());
         $this->assertSame('07:30', \App\Support\TechnicianConfig::digestTimeLocal());
         $this->assertSame(20, \App\Support\TechnicianConfig::heartbeatIntervalMinutes());
