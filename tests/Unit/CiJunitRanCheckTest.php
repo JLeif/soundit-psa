@@ -7,10 +7,13 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * scripts/ci/check-junit-ran.php, the MariaDB lock-order job's guard (#7192).
- * Each fixture is a reduced <testcase> carrying only what the checker reads:
- * name, class, assertions, and a <skipped/>, <failure> or <error> child. Name,
- * class, assertions and the <skipped/> child of a skipped test were measured
- * with PHPUnit 11.5's --log-junit; other attributes and nesting are left out.
+ * Each fixture is a reduced <testcase>. The checker reads its name, class and
+ * assertions attributes and any <skipped/>, <failure> or <error> child. The
+ * classname and time attributes are also present, as PHPUnit writes both, but
+ * the checker does not read them. PHPUnit's file and line attributes are left
+ * out, and nested <testsuite> levels are flattened to one. Name, class,
+ * assertions and the <skipped/> child of a skipped test were measured with
+ * PHPUnit 11.5's --log-junit.
  */
 class CiJunitRanCheckTest extends TestCase
 {
