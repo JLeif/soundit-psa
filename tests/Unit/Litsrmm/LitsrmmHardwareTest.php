@@ -270,6 +270,8 @@ class LitsrmmHardwareTest extends TestCase
             'empty hardware object' => [['hardware' => ['payload' => []]]],
             'empty system object' => [['system' => ['payload' => []]]],
             'payload under another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]]],
+            'network payload under another key' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]]],
+            'system payload under another key' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]]],
             'empty category array' => [['disks' => []]],
             'empty disks list' => [['disks' => ['payload' => []]]],
             'empty network list' => [['network' => ['payload' => []]]],
@@ -290,16 +292,16 @@ class LitsrmmHardwareTest extends TestCase
     #[\PHPUnit\Framework\Attributes\DataProvider('scalarShapes')]
     public function test_h12a_a_scalar_category_or_payload_is_malformed(array $inventory, string $category): void
     {
-        // #7210: a scalar category has no field to write, so a second, readable
-        // category is sent beside it and columns() must be exactly that
-        // category's columns.
+        // #7210: a scalar category, or an array category whose payload is a
+        // scalar, has no field to write, so a second, readable category is sent
+        // beside it and columns() must be exactly that category's columns.
         [$readable, $expected] = $category === 'disks'
             ? [['hardware' => ['payload' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]], ['cpu' => 'Example CPU', 'ram_gb' => 13.97]]
             : [['disks' => ['payload' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]]], ['disk_summary' => 'C: 447 GB (21% free)']];
         $hw = LitsrmmHardware::fromInventory($inventory + $readable);
 
         $this->assertSame([$category], $hw->malformed, 'A category that is neither null nor an array, or whose payload is present and neither null nor an array, must be malformed.');
-        $this->assertSame($expected, $hw->columns(), 'A scalar category must add no column, and the readable category beside it must still be read.');
+        $this->assertSame($expected, $hw->columns(), 'A scalar category or scalar payload must add no column, and the readable category beside it must still be read.');
     }
 
     public static function scalarShapes(): array
