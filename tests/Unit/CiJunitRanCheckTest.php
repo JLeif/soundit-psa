@@ -7,9 +7,10 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * scripts/ci/check-junit-ran.php, the MariaDB lock-order job's guard (#7192).
- * Each fixture copies the testcase shape PHPUnit 11.5's JUnit logger writes
- * (measured with --log-junit: name, class, assertions, and a <skipped/>
- * child on a skipped test).
+ * Each fixture is a reduced <testcase> carrying only what the checker reads:
+ * name, class, assertions, and a <skipped/>, <failure> or <error> child. Name,
+ * class, assertions and the <skipped/> child of a skipped test were measured
+ * with PHPUnit 11.5's --log-junit; other attributes and nesting are left out.
  */
 class CiJunitRanCheckTest extends TestCase
 {
@@ -47,7 +48,7 @@ class CiJunitRanCheckTest extends TestCase
     }
 
     #[DataProvider('failingLogs')]
-    public function test_a_log_that_does_not_show_both_legs_asserting_fails(string $xml, string $reason): void
+    public function test_a_log_that_breaks_a_rule_fails_and_names_it(string $xml, string $reason): void
     {
         [$code, $stderr] = self::check($xml);
 
@@ -60,7 +61,7 @@ class CiJunitRanCheckTest extends TestCase
         return [
             'one leg not selected' => [self::testcase(self::MOVE, 14), self::TRANSFER.' ran 0 times'],
             'no leg selected' => ['', self::MOVE.' ran 0 times'],
-            'a leg skipped' => [self::testcase(self::MOVE, 14).self::testcase(self::TRANSFER, 0, '<skipped/>'), self::TRANSFER.' skipped'],
+            'a leg skipped' => [self::testcase(self::MOVE, 14).self::testcase(self::TRANSFER, 0, '<skipped/>'), self::TRANSFER.' skipped or incomplete'],
             'a leg with no assertion' => [self::testcase(self::MOVE, 0).self::testcase(self::TRANSFER, 7), self::MOVE.' made no assertion'],
             'a leg failed' => [self::testcase(self::MOVE, 3, '<failure type="x">x</failure>').self::testcase(self::TRANSFER, 7), self::MOVE.' failure'],
             'a leg errored' => [self::testcase(self::MOVE, 14).self::testcase(self::TRANSFER, 0, '<error type="x">x</error>'), self::TRANSFER.' error'],

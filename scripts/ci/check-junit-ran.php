@@ -34,9 +34,10 @@ foreach ($xml->xpath('//testcase') as $case) {
     if ((int) $case['assertions'] < 1) {
         $problems[] = "{$id} made no assertion";
     }
-    foreach (['skipped', 'failure', 'error'] as $outcome) {
+    // PHPUnit writes <skipped/> for an incomplete test as well as a skipped one.
+    foreach (['skipped' => 'skipped or incomplete', 'failure' => 'failure', 'error' => 'error'] as $outcome => $label) {
         if (isset($case->{$outcome})) {
-            $problems[] = "{$id} {$outcome}";
+            $problems[] = "{$id} {$label}";
         }
     }
 }
