@@ -55,8 +55,8 @@ jobs:
           php artisan key:generate
       - name: Run lock-order tests in both move directions
         run: >-
-          php -d memory_limit=1024M vendor/bin/phpunit --fail-on-warning
-          --filter 'test_m4_lock_order_entry_then_row_then_contracts_ascending|test_reverse_transfer_selects_contracts_ascending_before_writes'
+          php -d memory_limit=1024M vendor/bin/phpunit --fail-on-warning --fail-on-skipped
+          --filter 'test_m4_lock_order_native_mariadb|test_reverse_transfer_native_mariadb'
 
   verify:
     name: Tests & style gate
