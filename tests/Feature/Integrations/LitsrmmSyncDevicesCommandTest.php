@@ -149,7 +149,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             $this->assertStringNotContainsString('Map a client on its page', $line, 'The mapping pointer must not come before the warning.');
             $this->assertStringNotContainsString('Sweeping:', $line, 'Sweeping must not come before the warning.');
         }
-        $this->assertStringNotContainsString('Map a client on its page', $lines[$warnIndex], 'The mapping pointer must be printed once.');
+        $this->assertStringNotContainsString('Map a client on its page', $lines[$warnIndex], 'The mapping pointer must not be on the warning line.');
         $this->assertStringNotContainsString('Sweeping:', $lines[$warnIndex], 'Sweeping must not be on the warning line.');
         $this->assertStringContainsString('Map a client on its page', $lines[$warnIndex + 1] ?? '', 'The mapping pointer must be the line right after the warning.');
         $this->assertStringNotContainsString('Sweeping:', $lines[$warnIndex + 1] ?? '', 'Sweeping must not be on the mapping pointer line.');
