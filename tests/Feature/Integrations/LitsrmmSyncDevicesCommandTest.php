@@ -119,6 +119,31 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertSuccessful();
     }
 
+    public function test_zero_mapped_lines_are_in_ruled_order(): void
+    {
+        $service = Mockery::mock(LitsrmmAssetSyncService::class);
+        $result = new SyncResult;
+        $result->details['full_run_clients'] = 0;
+        $service->shouldReceive('sync')->once()->with(null, [])->andReturn($result);
+        $this->app->instance(LitsrmmAssetSyncService::class, $service);
+
+        $this->assertSame(0, \Illuminate\Support\Facades\Artisan::call('litsrmm:sync-devices'));
+        $lines = array_values(array_filter(
+            array_map('trim', explode("\n", \Illuminate\Support\Facades\Artisan::output())),
+            fn (string $line): bool => $line !== '',
+        ));
+        $indices = [];
+        foreach (['No active clients are mapped to LITSRMM.', 'Map a client on its page', 'Sweeping:'] as $substring) {
+            $matches = array_keys(array_filter($lines, fn (string $line): bool => str_contains($line, $substring)));
+            $this->assertCount(1, $matches, "Expected exactly one line containing: {$substring}");
+            $indices[] = $matches[0];
+        }
+
+        [$warnIndex, $pointerIndex, $sweepingIndex] = $indices;
+        $this->assertSame($warnIndex + 1, $pointerIndex, 'The mapping pointer must immediately follow the warning.');
+        $this->assertSame($pointerIndex + 1, $sweepingIndex, 'Sweeping must immediately follow the mapping pointer.');
+    }
+
     public function test_no_operational_mapped_client_still_sweeps_asset_links(): void
     {
         $client = $this->mapClient();
