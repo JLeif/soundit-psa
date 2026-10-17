@@ -743,4 +743,73 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         }
         $this->assertSame(6, (int) $seat->fresh()->quantity, 'no seat cut');
     }
+
+    // ---- H5b (#7143, #7144, #7146, #7147) ----
+
+    public function test_h5b_1_an_unlinked_asset_of_an_unmapped_client_is_not_counted_by_the_sweep(): void
+    {
+        // #7143: the sweep's null-or-not-mapped filter is grouped under the
+        // litsrmm_device_id guard, so an asset with no link is never matched.
+        $client = $this->mapClient();
+        $row = self::row(1);
+        Asset::factory()->create(['client_id' => $client->id, 'litsrmm_device_id' => $row['id']]);
+        $unmapped = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true, 'litsrmm_client_id' => null]);
+        $unlinked = Asset::factory()->create(['client_id' => $unmapped->id, 'litsrmm_device_id' => null]);
+        $noClient = Asset::factory()->create(['client_id' => null, 'litsrmm_device_id' => '00000000-0000-4000-8000-000000000031']);
+        $this->realSync([$row]);
+
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain(', 1 deactivated')
+            ->assertSuccessful();
+
+        $this->assertNull($noClient->fresh()->litsrmm_device_id);
+        $this->assertNull($unlinked->fresh()->litsrmm_device_id);
+    }
+
+    public function test_h5b_2_a_real_run_with_one_mapped_client_says_so_and_does_not_say_sweeping(): void
+    {
+        // #7144: the count the command prints is the one the real sync wrote.
+        $client = $this->mapClient();
+        $row = self::row(1);
+        Asset::factory()->create(['client_id' => $client->id, 'litsrmm_device_id' => $row['id']]);
+        $this->realSync([$row]);
+
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
+            ->doesntExpectOutputToContain('No active clients are mapped')
+            ->doesntExpectOutputToContain('Sweeping:')
+            ->assertSuccessful();
+    }
+
+    public function test_h5b_3_a_full_run_result_without_the_count_prints_neither_line(): void
+    {
+        // #7146: the ruled "key absent: print neither" branch.
+        $this->mapClient();
+        $this->syncReturns(new SyncResult);
+
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('No active clients are mapped')
+            ->doesntExpectOutputToContain('Sweeping:')
+            ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
+            ->assertSuccessful();
+    }
+
+    public function test_h5b_4_a_failed_list_read_still_prints_the_mapped_count(): void
+    {
+        // #7147: full_run_clients is written before the list read, so a run
+        // whose list read fails still says how many clients it would sync.
+        $this->mapClient();
+        $handler = fn (RequestInterface $request) => Create::promiseFor(new Response(503, ['Content-Type' => 'application/json'], '{}'));
+        $this->app->instance(LitsrmmAssetSyncService::class, new LitsrmmAssetSyncService(new LitsrmmClient([
+            'api_key' => 'fake-'.bin2hex(random_bytes(8)),
+            'base_url' => 'https://litsrmm.test',
+            'handler' => HandlerStack::create($handler),
+            'request_timeout' => 5,
+        ])));
+
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
+            ->expectsOutputToContain('Failed to read LITSRMM devices (HTTP 503); nothing was changed')
+            ->assertFailed();
+    }
 }
