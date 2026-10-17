@@ -132,9 +132,10 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         // line between two of the three lines breaks the adjacency below.
         // #7184: only the first line containing the warning is located and
         // the two lines after it are read by position; no line before the
-        // warning may contain the pointer or 'Sweeping:'. The warning and the
-        // pointer must each be printed once; a later line that contains
-        // 'Sweeping:' does not fail this test.
+        // warning, nor the warning line itself, may contain the pointer or
+        // 'Sweeping:', and the pointer line may not contain 'Sweeping:'. The
+        // warning and the pointer must each be printed once; a later line that
+        // contains 'Sweeping:' does not fail this test.
         $lines = explode("\n", \Illuminate\Support\Facades\Artisan::output());
         $warnIndex = null;
         foreach ($lines as $index => $line) {
@@ -148,7 +149,10 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             $this->assertStringNotContainsString('Map a client on its page', $line, 'The mapping pointer must not come before the warning.');
             $this->assertStringNotContainsString('Sweeping:', $line, 'Sweeping must not come before the warning.');
         }
+        $this->assertStringNotContainsString('Map a client on its page', $lines[$warnIndex], 'The mapping pointer must be printed once.');
+        $this->assertStringNotContainsString('Sweeping:', $lines[$warnIndex], 'Sweeping must not be on the warning line.');
         $this->assertStringContainsString('Map a client on its page', $lines[$warnIndex + 1] ?? '', 'The mapping pointer must be the line right after the warning.');
+        $this->assertStringNotContainsString('Sweeping:', $lines[$warnIndex + 1] ?? '', 'Sweeping must not be on the mapping pointer line.');
         $this->assertStringContainsString('Sweeping:', $lines[$warnIndex + 2] ?? '', 'Sweeping must be the line right after the mapping pointer.');
         foreach (array_slice($lines, $warnIndex + 1) as $line) {
             $this->assertStringNotContainsString('No active clients are mapped to LITSRMM.', $line, 'The warning must be printed once.');
