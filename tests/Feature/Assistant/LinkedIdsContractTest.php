@@ -41,6 +41,10 @@ class LinkedIdsContractTest extends TestCase
         foreach (LinkedIds::ASSET_COLUMNS as $column) {
             $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $tools['get_asset']['description'], $column);
         }
+        $list = self::linkedIdsList($tools['get_asset']['description'], 'device');
+        foreach (LinkedIds::ASSET_COLUMNS as $column) {
+            $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $list, "{$column} must be named inside get_asset's parenthesised linked_ids list, not only in the prose around it");
+        }
     }
 
     public function test_get_client_description_names_every_linked_id(): void
@@ -51,6 +55,24 @@ class LinkedIdsContractTest extends TestCase
         foreach (LinkedIds::CLIENT_COLUMNS as $column) {
             $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $tools['get_client']['description'], $column);
         }
+        $list = self::linkedIdsList($tools['get_client']['description'], 'client');
+        foreach (LinkedIds::CLIENT_COLUMNS as $column) {
+            $this->assertMatchesRegularExpression('/\\b'.preg_quote($column, '/').'\\b/', $list, "{$column} must be named inside get_client's parenthesised linked_ids list, not only in the prose around it");
+        }
+    }
+
+    /**
+     * The text inside the parentheses after "linked_ids: every PSA, foreign-key
+     * and integration id on the <subject> (". get_asset also names
+     * merged_into_asset_id and tactical_asset_id in prose outside that list, so
+     * a whole-description match cannot tell a listed column from a mentioned one.
+     */
+    private static function linkedIdsList(string $description, string $subject): string
+    {
+        $found = preg_match('/linked_ids: every PSA, foreign-key and integration id on the '.$subject.' \\(([^)]*)\\)/', $description, $m);
+        self::assertSame(1, $found, "the description must introduce linked_ids with a parenthesised list for the {$subject}");
+
+        return $m[1];
     }
 
     /** The columns the contract governs, derived from the live schema. */
