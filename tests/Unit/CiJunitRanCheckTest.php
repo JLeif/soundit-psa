@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * scripts/ci/check-junit-ran.php, the MariaDB lock-order job's guard (#7192).
  * Each fixture copies the testcase shape PHPUnit 11.5's JUnit logger writes
- * (measured on .102 with --log-junit: name, class, assertions, and a <skipped/>
+ * (measured with --log-junit: name, class, assertions, and a <skipped/>
  * child on a skipped test).
  */
 class CiJunitRanCheckTest extends TestCase
