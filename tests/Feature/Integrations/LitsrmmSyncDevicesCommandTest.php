@@ -132,8 +132,9 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         // line between two of the three lines breaks the adjacency below.
         // #7184: only the first line containing the warning is located and
         // the two lines after it are read by position; no line before the
-        // warning may contain the pointer or 'Sweeping:'. A line after these
-        // three that contains either text does not fail this test.
+        // warning may contain the pointer or 'Sweeping:'. The warning and the
+        // pointer must each be printed once; a later line that contains
+        // 'Sweeping:' does not fail this test.
         $lines = explode("\n", \Illuminate\Support\Facades\Artisan::output());
         $warnIndex = null;
         foreach ($lines as $index => $line) {
@@ -149,6 +150,12 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         }
         $this->assertStringContainsString('Map a client on its page', $lines[$warnIndex + 1] ?? '', 'The mapping pointer must be the line right after the warning.');
         $this->assertStringContainsString('Sweeping:', $lines[$warnIndex + 2] ?? '', 'Sweeping must be the line right after the mapping pointer.');
+        foreach (array_slice($lines, $warnIndex + 1) as $line) {
+            $this->assertStringNotContainsString('No active clients are mapped to LITSRMM.', $line, 'The warning must be printed once.');
+        }
+        foreach (array_slice($lines, $warnIndex + 2) as $line) {
+            $this->assertStringNotContainsString('Map a client on its page', $line, 'The mapping pointer must be printed once.');
+        }
     }
 
     public function test_no_operational_mapped_client_still_sweeps_asset_links(): void
@@ -772,10 +779,11 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertSuccessful();
 
         $this->assertNull($noClient->fresh()->litsrmm_device_id);
+        $this->assertNull($unlinked->fresh()->litsrmm_device_id);
         // #7190: an Eloquent builder update() stamps updated_at, and the
         // clock has moved since $unlinked was written, so such an update
         // that matched $unlinked changes this value whether or not it counted it.
-        $this->assertSame($unlinkedUpdatedAt, $unlinked->fresh()->updated_at->toDateTimeString(), 'the unlinked asset was not written');
+        $this->assertSame($unlinkedUpdatedAt, $unlinked->fresh()->updated_at->toDateTimeString(), 'The unlinked asset must not be written.');
     }
 
     public function test_h5b_2_a_real_run_with_one_mapped_client_says_so_and_does_not_say_sweeping(): void
@@ -786,12 +794,14 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         Asset::factory()->create(['client_id' => $client->id, 'litsrmm_device_id' => $row['id']]);
         $this->realSync([$row]);
 
-        $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
-            ->doesntExpectOutputToContain('No active clients are mapped')
-            ->doesntExpectOutputToContain('Map a client on its page')
-            ->doesntExpectOutputToContain('Sweeping:')
-            ->assertSuccessful();
+        // The whole output is read, so the count line is also checked for
+        // the three texts.
+        $this->assertSame(0, \Illuminate\Support\Facades\Artisan::call('litsrmm:sync-devices'));
+        $output = \Illuminate\Support\Facades\Artisan::output();
+        $this->assertStringContainsString('Syncing LITSRMM devices for 1 mapped client(s)...', $output);
+        foreach (['No active clients are mapped', 'Map a client on its page', 'Sweeping:'] as $absent) {
+            $this->assertStringNotContainsString($absent, $output);
+        }
     }
 
     public function test_h5b_3_a_full_run_result_without_the_count_prints_neither_line(): void
@@ -801,14 +811,14 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->syncReturns(new SyncResult);
 
         // #7191: 'Done:' is printed by report(), so this passes only if the
-        // run reached report() and its output was captured.
-        $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('Done:')
-            ->doesntExpectOutputToContain('No active clients are mapped')
-            ->doesntExpectOutputToContain('Map a client on its page')
-            ->doesntExpectOutputToContain('Sweeping:')
-            ->doesntExpectOutputToContain('Syncing LITSRMM devices for')
-            ->assertSuccessful();
+        // run reached report() and its output was captured. The whole output
+        // is read, so the 'Done:' line is also checked for the four texts.
+        $this->assertSame(0, \Illuminate\Support\Facades\Artisan::call('litsrmm:sync-devices'));
+        $output = \Illuminate\Support\Facades\Artisan::output();
+        $this->assertStringContainsString('Done:', $output);
+        foreach (['No active clients are mapped', 'Map a client on its page', 'Sweeping:', 'Syncing LITSRMM devices for'] as $absent) {
+            $this->assertStringNotContainsString($absent, $output);
+        }
     }
 
     public function test_h5b_4_a_failed_list_read_still_prints_the_mapped_count(): void
