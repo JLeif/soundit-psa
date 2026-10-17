@@ -402,16 +402,28 @@ class ContractC14Test extends TestCase
         $contractWrites = 0;
         DB::listen(function ($query) use (&$contractWrites, $ticket) {
             // Counts a tickets UPDATE whose SET list writes contract_id (contract_id in the
-            // WHERE alone does not count) and whose WHERE can reach this ticket: its "id"
+            // WHERE alone does not count) and whose WHERE can reach this ticket: its first
+            // top-level (outside every parenthesis) unqualified or tickets-qualified "id"
             // predicate binds this ticket's id at that predicate's own placeholders (an int
             // or digit-string binding, never a bool or another column's value) or lists it
-            // inline, or the WHERE has no "id" predicate at all (a bulk write).
+            // inline, or the WHERE has no such predicate (a bulk write, or one keyed only
+            // inside a subquery or group). Another table's "id" (a whereHas subquery's
+            // "clients"."id") never supplies the key.
             if (! preg_match('/^update [`"]tickets[`"] set (.*?)(?: where (.*))?$/is', $query->sql, $m)
                 || ! preg_match('/[`"]contract_id[`"] = /i', $m[1])) {
                 return;
             }
             $where = $m[2] ?? '';
-            if (! preg_match('/(?:[`"]tickets[`"]\.)?[`"]id[`"] (?:= \?|in \(([?, ]+|[0-9, ]+)\))/i', $where, $key, PREG_OFFSET_CAPTURE)) {
+            $key = null;
+            preg_match_all('/(?<![`"]\.)(?:[`"]tickets[`"]\.)?[`"]id[`"] (?:= \?|in \(([?, ]+|[0-9, ]+)\))/i', $where, $keys, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
+            foreach ($keys as $candidate) {
+                $before = substr($where, 0, $candidate[0][1]);
+                if (substr_count($before, '(') === substr_count($before, ')')) {
+                    $key = $candidate;
+                    break;
+                }
+            }
+            if ($key === null) {
                 $contractWrites++;
 
                 return;
