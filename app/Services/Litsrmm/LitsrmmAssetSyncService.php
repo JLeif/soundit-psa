@@ -41,14 +41,24 @@ use Illuminate\Support\Sleep;
  *    device's hardware: its hardware is left as it was and the run records
  *    an error, which says whether its list facts were written (they are,
  *    unless syncClient() skips the device for another reason: a shared
- *    serial, an ambiguous match, an asset already claimed, #5784). A single detail read
+ *    serial, an ambiguous match, an asset already claimed, #5784).
+ *    "Written" there means write() ran for the device: a serial write()
+ *    withholds (see write()) is still withheld, and the error does not say
+ *    so (#7179). A single detail read
  *    answered 404 among reads that succeed is most likely the device leaving
  *    between the list and the detail read, though a 404 does not prove that
  *    (#5583), so its asset is left exactly as it was (no write, its link
  *    kept) and it is reported as skipped, with the reason
  *    'detail_read_not_found', not as an error. It still counts for seats,
- *    which come from the list. A hardware category in a shape we do not
- *    read is drift: it is logged and recorded as an error.
+ *    which come from the list. An inventory category LitsrmmHardware reads
+ *    as malformed (a shape we do not read; its docblock lists them) is
+ *    drift: it is logged and recorded as an error. A category that is left
+ *    out or null, or is an array whose payload is missing, null or an empty
+ *    array, is absent, not drift: nothing is logged or recorded and the
+ *    columns it would feed are left as they were. So a category the vendor
+ *    sends as an array without its payload wrapper, or with the payload
+ *    under another key, reads as absent too (#7166); one sent as a scalar,
+ *    or with a payload that is not an array, is malformed, so it is drift.
  *  - MANY 404s ARE A DEGRADED READ, NOT DEVICES LEAVING (#5578). A client's
  *    detail read is degraded when at least one read answers 404 and either
  *    every read answers 404 (a one-device client whose only read answers
@@ -1029,7 +1039,8 @@ class LitsrmmAssetSyncService
      * The error for a device whose detail read failed other than with a 404,
      * once syncClient() knows whether it wrote the device's list facts
      * (#5682): it may still skip the device (a shared serial, an ambiguous
-     * match, an asset already claimed this run).
+     * match, an asset already claimed this run). $written means write() ran
+     * for the device; a serial write() withheld is not named (#7179).
      *
      * @param  array{kind: string, status?: int}  $failure
      */
@@ -1358,7 +1369,7 @@ class LitsrmmAssetSyncService
             $data['last_seen_at'] = Carbon::instance($device->lastSeen);
         }
 
-        // Never write a placeholder or overwrite a real serial. Write the device's serial to a new asset, or in place of a stored value that is not a serial identity, unless another device of this client that this read lists and that is not retired shares its identity, or another asset of this client that is not soft-deleted already carries a serial with the same identity.
+        // Never write a placeholder or overwrite a real serial. Write the device's serial to a new asset, or in place of a stored value that is not a serial identity, unless another device of this client that this read lists and that is not retired (retired meaning both of its states read retired, so a half-retired device, which syncClient() skips, still counts) shares its identity, or another asset of this client that is not soft-deleted already carries a serial with the same identity.
         $serial = $device->matchableSerial();
         if (! $serialShared && $serial !== null && ($asset === null || LitsrmmSerial::identity($asset->serial_number) === null)) {
             $duplicate = Asset::where('client_id', $client->id)
