@@ -114,7 +114,7 @@ class ContractC14Test extends TestCase
         $spy = $this->h11ResolverSpy();
         $html = $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()->getContent();
         $this->assertSame(2, substr_count($html, 'Needs contract'), 'each held call must render its held badge');
-        $this->assertSame(0, $spy->fromHeldReason, 'the held call badge must pass the page resolution to heldReason, so heldReason does not resolve the ticket again per call');
+        $this->assertSame(0, $spy->fromHeldReason, 'the held call badge must pass the page resolution to heldReason: PrepayService::heldReason must not call forEntry() itself while the page renders');
     }
 
     public function test_h11_held_log_reasons_reuse_the_callers_resolution(): void
@@ -139,12 +139,14 @@ class ContractC14Test extends TestCase
         foreach (['Ticket note', 'Phone call'] as $label) {
             $this->assertCount(1, array_filter($logs->getRecords(), fn ($r) => $r->message === '[Prepay] '.$label.' debit held: needs contract'));
         }
-        $this->assertSame(0, $spy->fromHeldReason, 'the note and call hold logs must pass their resolution to heldReason, not resolve the ticket again');
+        $this->assertSame(0, $spy->fromHeldReason, 'the note and call hold logs must pass their resolution to heldReason: PrepayService::heldReason must not call forEntry() itself');
     }
 
     /**
-     * Binds a ContractResolver that counts the forEntry() calls made directly
-     * from PrepayService::heldReason(); it resolves exactly as the real one.
+     * Binds a ContractResolver that counts the forEntry() calls whose immediate
+     * caller is PrepayService::heldReason(); a resolution routed through a
+     * closure, a helper or forClient() is not counted. It resolves exactly as
+     * the real one.
      */
     private function h11ResolverSpy(): ContractResolver
     {
@@ -154,7 +156,8 @@ class ContractC14Test extends TestCase
 
             public function forEntry(Ticket $ticket, ?int $pickedContractId = null): ContractResolution
             {
-                if ((debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? null) === 'heldReason') {
+                $caller = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1] ?? [];
+                if (($caller['function'] ?? null) === 'heldReason' && ($caller['class'] ?? null) === \App\Services\PrepayService::class) {
                     $this->fromHeldReason++;
                 }
 
@@ -401,15 +404,21 @@ class ContractC14Test extends TestCase
         ]);
         $contractWrites = 0;
         DB::listen(function ($query) use (&$contractWrites, $ticket) {
-            // Counts a tickets UPDATE whose SET list writes contract_id (contract_id in the
-            // WHERE alone does not count) and whose WHERE can reach this ticket: its first
-            // top-level (outside every parenthesis) unqualified or tickets-qualified "id"
-            // predicate binds this ticket's id at that predicate's own placeholders (an int or
-            // string binding equal to the id; a bool never matches, and other columns'
-            // bindings are not read) or lists it inline in an "id" in (...) list, or the WHERE
-            // has no such predicate. That last case counts as a bulk write, including one keyed
-            // only inside a subquery or group and Laravel's empty-whereIn "0 = 1". Another
-            // table's "id" (a whereHas subquery's "clients"."id") never supplies the key.
+            // Counts an UPDATE whose SQL starts update "tickets" set (double- or
+            // backtick-quoted, as the query builder emits it) and whose SET list writes
+            // "contract_id" = (contract_id in the WHERE alone does not count; raw SQL in
+            // another form and upserts are not seen), and whose WHERE can reach this ticket.
+            // The key is the first top-level (outside every parenthesis), unqualified or
+            // tickets-qualified predicate of one of three shapes: "id" = ?,
+            // "id" in (?, ...) or "id" in (<digits>). Any other id predicate ("id" != ?,
+            // not in, >, in (select ...), a mixed list) is not a key and is skipped. The write
+            // counts when the key binds this ticket's id at its own placeholders (an int
+            // binding, or a string binding identical to the id's decimal text; a float, a
+            // bool or a padded string never matches, and other columns' bindings are not
+            // read) or lists it inline, or when the WHERE has no key at all. That last case
+            // counts as a bulk write, including one keyed only inside a subquery or group and
+            // Laravel's empty-whereIn "0 = 1". Another table's "id" (a whereHas subquery's
+            // "clients"."id") never supplies the key.
             if (! preg_match('/^update [`"]tickets[`"] set (.*?)(?: where (.*))?$/is', $query->sql, $m)
                 || ! preg_match('/[`"]contract_id[`"] = /i', $m[1])) {
                 return;
