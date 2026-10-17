@@ -269,6 +269,10 @@ class LitsrmmHardwareTest extends TestCase
             'missing payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z']]],
             'empty hardware object' => [['hardware' => ['payload' => []]]],
             'empty system object' => [['system' => ['payload' => []]]],
+            'payload under another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]]],
+            'empty category array' => [['disks' => []]],
+            'empty disks list' => [['disks' => ['payload' => []]]],
+            'empty network list' => [['network' => ['payload' => []]]],
         ];
     }
 
@@ -276,6 +280,42 @@ class LitsrmmHardwareTest extends TestCase
     {
         $this->assertSame(['disks'], LitsrmmHardware::fromInventory(['disks' => 'x'])->malformed);
         $this->assertSame(['system'], LitsrmmHardware::fromInventory(['system' => ['payload' => 'x']])->malformed);
+    }
+
+    /** #7161: a scalar category, or an array category whose payload is a scalar, is malformed; "", 0 and false are not absent. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('scalarShapes')]
+    public function test_h12a_a_scalar_category_or_payload_is_malformed(array $inventory, string $category): void
+    {
+        $hw = LitsrmmHardware::fromInventory($inventory);
+
+        $this->assertSame([$category], $hw->malformed, 'A category that is neither null nor an array, or whose payload is present and neither null nor an array, must be malformed.');
+        $this->assertSame([], $hw->columns(), 'A malformed category must write none of its fields.');
+    }
+
+    public static function scalarShapes(): array
+    {
+        return [
+            'empty string category' => [['hardware' => ''], 'hardware'],
+            'zero category' => [['system' => 0], 'system'],
+            'false category' => [['network' => false], 'network'],
+            'empty string payload' => [['disks' => ['payload' => '']], 'disks'],
+            'zero payload' => [['hardware' => ['payload' => 0]], 'hardware'],
+            'false payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'payload' => false]], 'system'],
+        ];
+    }
+
+    /** #7163: a disk or adapter sent as a list has none of the keys this class reads, so it is skipped, not drift. */
+    public function test_h12a_a_list_shaped_disk_or_adapter_is_skipped_not_drift(): void
+    {
+        $hw = LitsrmmHardware::fromInventory([
+            'disks' => ['payload' => [['C:', 480000000000], ['drive' => 'D:', 'totalBytes' => 1000500000000, 'freeBytes' => 500000000000]]],
+            'network' => ['payload' => [['192.0.2.10'], ['ipv4' => ['192.0.2.11'], 'up' => true]]],
+        ]);
+
+        $this->assertSame([], $hw->malformed, 'A disk or adapter sent as a list must be skipped, not reported as drift.');
+        // D: 931.79 -> 932 GB, free 465.66 -> 466 GB, 466/932 = 50.0 -> 50%.
+        $this->assertSame('D: 932 GB (50% free)', $hw->diskSummary, 'A list-shaped disk must not stop the other disks in its category from being read.');
+        $this->assertSame('192.0.2.11', $hw->ipAddress, 'A list-shaped adapter must not stop the other adapters in its category from being read.');
     }
 
     public function test_h3_filtered_ipv4_strings_are_not_drift(): void
@@ -302,6 +342,8 @@ class LitsrmmHardwareTest extends TestCase
             'ipv4 element int' => ['network', [['ipv4' => [42]]], ['ip_address']],
             'up string' => ['network', [['ipv4' => ['192.0.2.10'], 'up' => 'true']], ['ip_address']],
             'adapter string' => ['network', ['eth0'], ['ip_address']],
+            'disk null' => ['disks', [null], ['disk_summary']],
+            'adapter null' => ['network', [null], ['ip_address']],
             'ipv4 object' => ['network', [['ipv4' => ['primary' => '192.0.2.10'], 'up' => true]], ['ip_address']],
             'boot leap second' => ['system', ['bootTimeUtc' => '2016-12-31T23:59:60Z', 'pendingReboot' => true], ['last_boot_at', 'needs_reboot']],
             'disks object' => ['disks', ['drive' => 'C:', 'totalBytes' => 480000000000], ['disk_summary']],
