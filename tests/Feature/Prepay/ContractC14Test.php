@@ -7,6 +7,7 @@ use App\Models\PhoneCall;
 use App\Models\PrepayTransaction;
 use App\Models\Ticket;
 use App\Models\TicketNote;
+use App\Services\ContractResolution;
 use App\Services\ContractResolver;
 use App\Services\PhoneCallService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -25,10 +26,15 @@ class ContractC14Test extends TestCase
     {
         [$ticket, $user] = $this->h4HeldFixture();
         $queries = 0;
+        $clientQueries = 0;
         $counting = false;
-        DB::listen(function ($query) use (&$queries, &$counting) {
+        DB::listen(function ($query) use (&$queries, &$clientQueries, &$counting) {
             if ($counting && preg_match('/^select .* from [`"]contracts[`"]/i', $query->sql)) {
                 $queries++;
+            }
+            // forEntry() -> forClient() reads the client default from clients, not contracts.
+            if ($counting && preg_match('/^select .* from [`"]clients[`"]/i', $query->sql)) {
+                $clientQueries++;
             }
         });
         $this->actingAs($user);
@@ -36,15 +42,19 @@ class ContractC14Test extends TestCase
         $this->get(route('tickets.show', $ticket))->assertOk();
         $counting = false;
         $one = $queries;
+        $oneClients = $clientQueries;
         $this->assertGreaterThan(0, $one);
+        $this->assertGreaterThan(0, $oneClients);
         $this->h4HeldNote($ticket, $user);
         $this->h4HeldNote($ticket, $user);
         $this->assertSame(3, $ticket->notes()->whereNotNull('contract_held_at')->count());
         $queries = 0;
+        $clientQueries = 0;
         $counting = true;
         $this->get(route('tickets.show', $ticket))->assertOk();
         $counting = false;
         $this->assertSame($one, $queries, 'H4-1: three held notes must select contracts exactly as often as one held note');
+        $this->assertSame($oneClients, $clientQueries, 'H4-1: three held notes must select clients exactly as often as one held note');
     }
 
     public function test_h4_2_held_badge_text_pins_ambiguous_and_single_contract(): void
@@ -88,6 +98,72 @@ class ContractC14Test extends TestCase
             'body' => 'Synthetic H4 held time', 'is_private' => true, 'is_billable' => true,
             'time_minutes' => 60, 'noted_at' => now(), 'contract_held_at' => now(), 'contract_id' => null,
         ]));
+    }
+
+    public function test_h11_held_call_badge_reuses_the_page_resolution(): void
+    {
+        [$ticket, $user] = $this->h4HeldFixture();
+        $ticket->notes()->update(['contract_held_at' => null]);
+        for ($i = 0; $i < 2; $i++) {
+            PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+                'ticket_id' => $ticket->id, 'call_uuid' => 'synthetic-h11-badge-'.$i,
+                'direction' => 'inbound', 'from_number' => '+15555550142', 'status' => 'completed',
+                'is_billable' => true, 'duration' => 3600, 'started_at' => now(), 'contract_held_at' => now(),
+            ]));
+        }
+        $spy = $this->h11ResolverSpy();
+        $html = $this->actingAs($user)->get(route('tickets.show', $ticket))->assertOk()->getContent();
+        $this->assertSame(2, substr_count($html, 'Needs contract'), 'each held call must render its held badge');
+        $this->assertSame(0, $spy->fromHeldReason, 'the held call badge must reuse the page resolution, not resolve the ticket again per call');
+    }
+
+    public function test_h11_held_log_reasons_reuse_the_callers_resolution(): void
+    {
+        [$ticket, $user] = $this->h4HeldFixture();
+        $note = TicketNote::withoutEvents(fn () => TicketNote::forceCreate([
+            'ticket_id' => $ticket->id, 'author_id' => $user->id, 'note_type' => 'note',
+            'body' => 'Synthetic H11 log time', 'is_billable' => true, 'time_minutes' => 60, 'noted_at' => now(),
+        ]));
+        $call = PhoneCall::withoutEvents(fn () => PhoneCall::forceCreate([
+            'ticket_id' => $ticket->id, 'call_uuid' => 'synthetic-h11-log', 'direction' => 'inbound',
+            'from_number' => '+15555550142', 'status' => 'completed', 'is_billable' => true,
+            'duration' => 3600, 'started_at' => now(),
+        ]));
+        $logs = new TestHandler;
+        Log::getLogger()->pushHandler($logs);
+        $spy = $this->h11ResolverSpy();
+        $service = app(\App\Services\PrepayService::class);
+        $service->debitFromTicketNote($note);
+        $service->debitFromPhoneCall($call);
+        $this->assertSame(0, PrepayTransaction::count());
+        foreach (['Ticket note', 'Phone call'] as $label) {
+            $this->assertCount(1, array_filter($logs->getRecords(), fn ($r) => $r->message === '[Prepay] '.$label.' debit held: needs contract'));
+        }
+        $this->assertSame(0, $spy->fromHeldReason, 'the note and call hold logs must pass their resolution to heldReason, not resolve the ticket again');
+    }
+
+    /**
+     * Binds a ContractResolver that counts the forEntry() calls made directly
+     * from PrepayService::heldReason(); it resolves exactly as the real one.
+     */
+    private function h11ResolverSpy(): ContractResolver
+    {
+        $spy = new class extends ContractResolver
+        {
+            public int $fromHeldReason = 0;
+
+            public function forEntry(Ticket $ticket, ?int $pickedContractId = null): ContractResolution
+            {
+                if ((debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? null) === 'heldReason') {
+                    $this->fromHeldReason++;
+                }
+
+                return parent::forEntry($ticket, $pickedContractId);
+            }
+        };
+        $this->app->instance(ContractResolver::class, $spy);
+
+        return $spy;
     }
 
     public function test_inactive_stamp_on_unverified_ambiguous_ticket_needs_contract(): void
@@ -325,8 +401,29 @@ class ContractC14Test extends TestCase
         ]);
         $contractWrites = 0;
         DB::listen(function ($query) use (&$contractWrites, $ticket) {
-            if (preg_match('/^update [`"]tickets[`"] set .*[`"]contract_id[`"]/i', $query->sql)
-                && in_array($ticket->id, $query->bindings)) {
+            // Counts a tickets UPDATE whose SET list writes contract_id (contract_id in the
+            // WHERE alone does not count) and whose WHERE can reach this ticket: its "id"
+            // predicate binds this ticket's id at that predicate's own placeholders (an int
+            // or digit-string binding, never a bool or another column's value) or lists it
+            // inline, or the WHERE has no "id" predicate at all (a bulk write).
+            if (! preg_match('/^update [`"]tickets[`"] set (.*?)(?: where (.*))?$/is', $query->sql, $m)
+                || ! preg_match('/[`"]contract_id[`"] = /i', $m[1])) {
+                return;
+            }
+            $where = $m[2] ?? '';
+            if (! preg_match('/(?:[`"]tickets[`"]\.)?[`"]id[`"] (?:= \?|in \(([?, ]+|[0-9, ]+)\))/i', $where, $key, PREG_OFFSET_CAPTURE)) {
+                $contractWrites++;
+
+                return;
+            }
+            if (isset($key[1]) && ctype_digit(str_replace([',', ' '], '', $key[1][0]))) {
+                $ids = array_map('trim', explode(',', $key[1][0]));
+            } else {
+                $first = substr_count($m[1], '?') + substr_count(substr($where, 0, $key[0][1]), '?');
+                $ids = array_map(fn ($b) => is_int($b) || is_string($b) ? (string) $b : null,
+                    array_slice($query->bindings, $first, substr_count($key[0][0], '?')));
+            }
+            if (in_array((string) $ticket->id, $ids, true)) {
                 $contractWrites++;
             }
         });
