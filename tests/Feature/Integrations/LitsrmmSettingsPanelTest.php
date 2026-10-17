@@ -138,15 +138,17 @@ class LitsrmmSettingsPanelTest extends TestCase
     }
 
     /**
-     * The pending line must render once (its exact text once in the page, and
-     * one <p> carrying it after whitespace is normalised), as the element
-     * directly after the form-check div that holds the switch, inside the
-     * schedule form. Moving it outside the form, above the switch, or below the
-     * "Off by default" form-text fails here.
+     * The pending line's exact text must appear once in the page, exactly one
+     * <p> must carry it once whitespace is normalised, and that <p> must be the
+     * element directly after the form-check div that holds the switch, inside
+     * the schedule form. Moving it outside the form, above the switch, or below
+     * the "Off by default" form-text fails here, as does a second exact copy or
+     * a second <p> copy. A rewrapped copy in another element, or one joined by a
+     * non-breaking space, is not counted.
      */
     private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
     {
-        $this->assertSame(1, substr_count($html, $text), 'the pending line must render exactly once');
+        $this->assertSame(1, substr_count($html, $text), 'the exact pending line text must appear exactly once in the page');
         $document = new \DOMDocument;
         @$document->loadHTML($html);
         $xpath = new \DOMXPath($document);
