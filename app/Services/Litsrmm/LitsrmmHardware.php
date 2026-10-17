@@ -21,17 +21,23 @@ use DateTimeZone;
  * with a null that means "nobody asked".
  *
  * A malformed category writes none of its fields. A category is malformed
- * when it is present and not null but it or its payload is not an array, its
- * payload is a non-empty list (hardware, system) or not a list (disks,
- * network), or a key this class reads is present, not null and of another
- * type: ramBytes, totalBytes and freeBytes numbers; cpu and drive strings;
- * pendingReboot and up booleans; bootTimeUtc a time instant() can read; each
- * disk and adapter an array; ipv4 a list of strings.
- * An IPv4 string that is not usable (link-local,
- * reserved, not an address) is skipped, not drift. A null category, a
- * missing, null or empty payload, and missing or null keys are absent, not
- * drift. Other categories remain readable. $malformed names each category
- * once for drift reporting.
+ * when it is neither null nor an array (a string, "" included, a number or a
+ * boolean), or is an array whose payload is present and neither null nor an
+ * array (again a string, "" included, a number or a boolean). It is also
+ * malformed when its payload is a non-empty list (hardware, system) or not a
+ * list (disks, network), when a disk or adapter in that list is not an array
+ * (null included), or when a key this class reads is present, not null and
+ * of another type: ramBytes, totalBytes and freeBytes numbers; cpu and drive
+ * strings; pendingReboot and up booleans; bootTimeUtc a time instant() can
+ * read; ipv4 a list of strings. A disk or adapter that is an array is read by
+ * those keys alone, so one sent as a list (["C:", 480000000000]) carries none
+ * of them: it is skipped, not drift, and does not on its own make its
+ * category malformed. An IPv4 string that is not usable (link-local,
+ * reserved, not an address) is skipped, not drift. Absent, not drift: a
+ * category that is left out or null; an array category whose payload is
+ * missing (left out, or under another key), null or an empty array; and a
+ * key this class reads that is missing or null. Other categories remain
+ * readable. $malformed names each category once for drift reporting.
  */
 final class LitsrmmHardware
 {
