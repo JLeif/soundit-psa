@@ -6081,11 +6081,14 @@ class StaffCippWriteToolExecutor
         $marker = 'JIT person='.$personId.' role='.$params['role_template_id'].';';
         $queued = TechnicianActionLog::where('client_id', $clientId)
             ->where('action_type', 'cipp_stage_add_directory_role')
-            ->where('result_status', 'queued_unverified')
+            // Only a post-POST failure row carries the marker; a not-sent error row never brakes.
+            ->whereIn('result_status', ['queued_unverified', 'error'])
             ->where('created_at', '>', now()->subMinutes(30))
             ->where('summary', 'like', $marker.'%')->latest('id')->first();
         if ($queued !== null) {
-            throw new CippWriteScopeException('A grant of '.$params['role_name'].' to this user was queued at '.$queued->created_at->toIso8601String().' and is not yet verified. Confirm with cipp_list_roles before re-staging.');
+            throw new CippWriteScopeException($queued->result_status === 'queued_unverified'
+                ? 'A grant of '.$params['role_name'].' to this user was queued at '.$queued->created_at->toIso8601String().' and is not yet verified. Confirm with cipp_list_roles before re-staging.'
+                : 'An approval of '.$params['role_name'].' for this user at '.$queued->created_at->toIso8601String().' ended without CIPP confirming the queue. Confirm with cipp_list_roles before re-staging.');
         }
         $pending = TechnicianRun::where('client_id', $clientId)
             ->where('action_type', 'cipp_stage_add_directory_role')
@@ -6221,12 +6224,16 @@ class StaffCippWriteToolExecutor
             $this->client->queueJitRoleGrant($tenant, $person->userId, $params['role_template_id'], \Carbon\CarbonImmutable::parse($params['end_date'])->timestamp, $payload['reason']);
         } catch (\Throwable $e) {
             $message = $this->jitFailure($e);
-            $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $run->content_hash, $message, $this->approverLabel($approverId), $run->id, $approverId);
             // Only a not-sent failure reopens the proposal. Past the POST, CIPP may have
-            // queued the enable, so the run closes and cannot be re-approved into a second one.
+            // queued the enable, so the run closes and cannot be re-approved into a second one,
+            // and the marked row makes jitBrake refuse a fresh proposal for the same triple.
             if ($e instanceof CippWriteNotSentException) {
+                $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $run->content_hash, $message, $this->approverLabel($approverId), $run->id, $approverId);
                 $run->releaseClaim();
             } else {
+                $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, null, null, $run->content_hash,
+                    'JIT person='.$person->person->id.' role='.$params['role_template_id'].'; '.$message,
+                    $this->approverLabel($approverId), $run->id, $approverId);
                 $run->advanceTo(TechnicianRunState::Done);
             }
 

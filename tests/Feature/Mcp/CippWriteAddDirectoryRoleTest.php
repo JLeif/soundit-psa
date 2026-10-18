@@ -170,6 +170,12 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         return $run;
     }
 
+    /** ExecJITAdmin sends recorded before this run's approval: one per earlier closed run. */
+    private function jitSendsBefore(TechnicianRun $run): int
+    {
+        return TechnicianRun::where('id', '<', $run->id)->where('state', TechnicianRunState::Denied)->count();
+    }
+
     private function assertNoWrite(): void
     {
         Http::assertNotSent(fn ($request) => str_contains($request->url(), '/api/ExecJITAdmin'));
@@ -269,6 +275,12 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
         $again = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run->fresh(), $this->actor->id);
         $this->assertSame('already_handled', $again->status);
+        // Nor may a fresh proposal for the same triple, on any ticket, inside the window.
+        $otherTicket = Ticket::factory()->for($this->fixture['client'])->create();
+        $response = $this->callGrant(['ticket_id' => $otherTicket->id]);
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('without CIPP confirming the queue', (string) $response->json('result.content.0.text'));
+        $this->assertSame(1, TechnicianRun::count());
         $this->assertSame(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/api/ExecJITAdmin'))->count());
     }
 
@@ -334,6 +346,12 @@ class CippWriteAddDirectoryRoleTest extends TestCase
             $this->assertDatabaseMissing('technician_action_logs', ['run_id' => $run->id, 'result_status' => 'queued_unverified']);
             $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'A failure after the POST must not reopen the proposal.');
             $run->fresh()->update(['state' => TechnicianRunState::Denied]);
+            // The closed run leaves a marked row: a re-stage of the triple on another ticket is refused.
+            $response = $this->callGrant(['ticket_id' => Ticket::factory()->for($this->fixture['client'])->create()->id]);
+            $this->assertTrue((bool) $response->json('result.isError'));
+            $this->assertStringContainsString('without CIPP confirming the queue', (string) $response->json('result.content.0.text'));
+            $this->assertSame(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/api/ExecJITAdmin'))->count() - $this->jitSendsBefore($run));
+            $this->travel(31)->minutes();
         }
     }
 
