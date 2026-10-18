@@ -139,7 +139,7 @@ class CippWriteDirectoryRoleTest extends TestCase
     {
         return [
             [
-                'Id' => 'role-object-1',
+                'Id' => 'role-definition-1',
                 'roleTemplateId' => strtoupper(self::EXCHANGE_ADMIN_TEMPLATE_ID),
                 'DisplayName' => 'Exchange Administrator',
                 'Description' => 'Can manage all aspects of the Exchange product.',
@@ -149,7 +149,7 @@ class CippWriteDirectoryRoleTest extends TestCase
                 ],
             ],
             [
-                'Id' => 'role-object-2',
+                'Id' => 'role-definition-2',
                 'roleTemplateId' => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
                 'DisplayName' => 'Helpdesk Administrator',
                 'Description' => 'Can reset passwords for non-administrators.',
@@ -279,13 +279,13 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertSame('cipp_stage_remove_directory_role', $run->action_type);
 
         // The stored proposal keeps only safe local scalars: the template GUID is
-        // canonicalized to lowercase, the typed role name and PSA person id ride
-        // along, and no upstream role OBJECT id exists yet (resolved at approval).
+        // canonicalized to lowercase and the typed role name and PSA person id ride
+        // along. The role row is never read while staging (listDirectoryRoles is
+        // forbidden on this mock); it is read only at approval.
         $stored = json_encode($run->proposed_meta);
         $this->assertStringContainsString(self::EXCHANGE_ADMIN_TEMPLATE_ID, $stored);
         $this->assertStringNotContainsString(strtoupper(self::EXCHANGE_ADMIN_TEMPLATE_ID), $stored);
         $this->assertStringContainsString('Exchange Administrator', $stored);
-        $this->assertStringNotContainsString('role-object-1', $stored);
 
         // The operator-facing proposal names the target by UPN and the role by
         // name so the human gate can verify who loses which admin role.
@@ -293,7 +293,8 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertStringContainsString('Exchange Administrator', $run->proposed_content);
 
         // Approval re-resolves the tenant's activated role from the template id
-        // (case-insensitively) and executes against the RESOLVED object id with
+        // (case-insensitively) and executes against the RESOLVED row's role
+        // template id (never its Id, which is a role-definition id; #7238) with
         // the server-derived user identity.
         $approveClient = Mockery::mock(CippRestWriteClient::class);
         $approveClient->shouldReceive('listDirectoryRoles')
@@ -302,7 +303,7 @@ class CippWriteDirectoryRoleTest extends TestCase
             ->andReturn($this->tenantRoles());
         $approveClient->shouldReceive('removeDirectoryRoleMember')
             ->once()
-            ->with('acme.onmicrosoft.com', 'role-object-1', 'Exchange Administrator', 'user-acme', 'alex@acme.example')
+            ->with('acme.onmicrosoft.com', strtoupper(self::EXCHANGE_ADMIN_TEMPLATE_ID), 'Exchange Administrator', 'user-acme', 'alex@acme.example')
             ->andReturn(['success' => true, 'status' => 200]);
         $this->app->instance(CippRestWriteClient::class, $approveClient);
 
@@ -412,7 +413,7 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertStringContainsString('role_name', (string) $missingName->json('result.content.0.text'));
 
         // The upstream endpoint's own body keys are never accepted from the caller.
-        foreach (['RoleId' => 'role-object-1', 'Users' => [['value' => 'attacker']], 'RoleName' => 'Global Administrator'] as $key => $value) {
+        foreach (['RoleId' => 'role-definition-1', 'RoleTemplateId' => self::EXCHANGE_ADMIN_TEMPLATE_ID, 'Users' => [['value' => 'attacker']], 'RoleName' => 'Global Administrator'] as $key => $value) {
             $rejected = $this->callTool($token, 'cipp_stage_remove_directory_role', $this->roleArguments($fixture, [$key => $value]));
             $this->assertTrue((bool) $rejected->json('result.isError'), $key);
             $this->assertStringContainsString('upstream CIPP identifiers are not accepted', (string) $rejected->json('result.content.0.text'));

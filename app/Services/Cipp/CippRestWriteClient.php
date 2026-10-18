@@ -490,8 +490,8 @@ class CippRestWriteClient
      * List the tenant's ACTIVATED Entra directory roles with their members via
      * CIPP's ListRoles endpoint. Read support for the directory-role removal
      * write: the caller-facing tool accepts only the universal role TEMPLATE id,
-     * and this read is how execution re-resolves it to the tenant's activated
-     * role object id (and re-verifies name + membership) at approval time.
+     * and this read is how execution re-finds that role's row (and re-verifies
+     * name + membership) at approval time.
      *
      * Source shape (CIPP-API Invoke-ListRoles.ps1): GET api/ListRoles?tenantFilter=X
      * returning a bare array of {Id, roleTemplateId, DisplayName, Description,
@@ -515,22 +515,26 @@ class CippRestWriteClient
 
     /**
      * Remove ONE user from ONE assigned Entra directory (admin) role via CIPP's
-     * ExecRemoveAdminRole endpoint. RoleId must be the tenant's activated
-     * directoryRole OBJECT id (from listDirectoryRoles), never a caller-supplied
-     * value; RoleName is the resolved display name CIPP uses for its own log
-     * line; the single Users entry follows the CIPP autocomplete {value,label}
-     * shape with the server-derived user object id and UPN.
+     * ExecRemoveAdminRole endpoint. RoleTemplateId must be the role's TEMPLATE
+     * id, read from the tenant's listDirectoryRoles row (its roleTemplateId),
+     * never a caller-supplied value; RoleName is the resolved display name CIPP
+     * uses for its own log line; the single Users entry follows the CIPP
+     * autocomplete {value,label} shape with the server-derived user object id
+     * and UPN.
      *
-     * Source shape (CIPP-API Invoke-ExecRemoveAdminRole.ps1): per user, CIPP runs
-     * Graph DELETE /v1.0/directoryRoles/{RoleId}/members/{UserId}/$ref and
-     * returns HTTP 500 when any removal fails (send() then throws).
+     * Source shape (CIPP-API Invoke-ExecRemoveAdminRole.ps1): the endpoint reads
+     * RoleId or RoleTemplateId. With RoleTemplateId set it runs, per user, Graph
+     * DELETE /v1.0/directoryRoles(roleTemplateId='{RoleTemplateId}')/members/{UserId}/$ref;
+     * with only RoleId it treats RoleId as a directoryRole OBJECT id. RoleId is
+     * never sent: the ListRoles Id is a role-definition id, not that object id
+     * (#7238). CIPP returns HTTP 500 when any removal fails (send() then throws).
      *
      * @return array<int|string, mixed>
      */
-    public function removeDirectoryRoleMember(string $tenantFilter, string $roleId, string $roleName, string $userId, string $userPrincipalName): array
+    public function removeDirectoryRoleMember(string $tenantFilter, string $roleTemplateId, string $roleName, string $userId, string $userPrincipalName): array
     {
-        if (trim($roleId) === '') {
-            throw new CippWriteNotSentException('Directory role id is required');
+        if (trim($roleTemplateId) === '') {
+            throw new CippWriteNotSentException('Directory role template id is required');
         }
         if (trim($userId) === '') {
             throw new CippWriteNotSentException('Directory role member user id is required');
@@ -538,7 +542,7 @@ class CippRestWriteClient
 
         return $this->send('api/ExecRemoveAdminRole', [
             'tenantFilter' => $tenantFilter,
-            'RoleId' => $roleId,
+            'RoleTemplateId' => $roleTemplateId,
             'RoleName' => $roleName,
             'Users' => [['value' => $userId, 'label' => $userPrincipalName]],
         ]);

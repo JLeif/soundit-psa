@@ -526,6 +526,8 @@ class StaffCippWriteToolExecutor
         'RoleId',
         'roleId',
         'role_id',
+        'RoleTemplateId',
+        'roleTemplateId',
         'RoleName',
         'roleName',
         'ruleId',
@@ -5193,9 +5195,10 @@ class StaffCippWriteToolExecutor
     /**
      * Execute an approved directory-role removal. The staged payload carries
      * only the universal role TEMPLATE id and the typed role name, so the
-     * tenant's activated role OBJECT id is re-resolved fresh here — then the
-     * resolved display name and the target user's CURRENT membership are
-     * re-verified before the single-member removal is sent. Every guard fails
+     * tenant's role row is re-resolved fresh here — then the resolved display
+     * name and the target user's CURRENT membership are re-verified before the
+     * single-member removal is sent, addressed by the resolved row's role
+     * template id. Every guard fails
      * closed as a CippClientException: the approval is declined and audited,
      * and nothing upstream is changed.
      */
@@ -5235,12 +5238,11 @@ class StaffCippWriteToolExecutor
             throw new CippClientException('The target user does not currently hold this directory role; nothing was removed.');
         }
 
-        $roleId = trim((string) ($match['Id'] ?? ''));
-        if ($roleId === '') {
-            throw new CippClientException('The resolved directory role has no object id; nothing was removed.');
-        }
+        // CIPP addresses the removal by the role TEMPLATE id; the ListRoles Id
+        // is a role-definition id, not a directoryRole object id (#7238).
+        $roleTemplateId = trim((string) ($match['roleTemplateId'] ?? ''));
 
-        $this->client->removeDirectoryRoleMember($tenant, $roleId, trim((string) $match['DisplayName']), $person->userId, $person->userPrincipalName);
+        $this->client->removeDirectoryRoleMember($tenant, $roleTemplateId, trim((string) $match['DisplayName']), $person->userId, $person->userPrincipalName);
     }
 
     /**
@@ -6260,7 +6262,7 @@ class StaffCippWriteToolExecutor
      * Microsoft constant surfaced by the CIPP role reads, canonicalized to
      * lowercase so casing cannot fork the idempotency hash) plus a typed
      * role_name confirmation; both are safe local scalars, and execution
-     * re-resolves the tenant's activated role object from them at approval.
+     * re-reads the tenant's role row for them at approval to re-verify the name and membership.
      *
      * @return array<string, mixed>
      */
@@ -7653,7 +7655,7 @@ class StaffCippWriteToolExecutor
         return [
             'role_template_id' => [
                 'type' => 'string',
-                'description' => 'Universal Microsoft Entra role TEMPLATE GUID identifying which directory role to remove (the roleTemplateId surfaced by the CIPP role reads, e.g. cipp_list_roles). The server re-resolves the tenant\'s activated role object from it at execution; the tenant role object id is never accepted from the caller.',
+                'description' => 'Universal Microsoft Entra role TEMPLATE GUID identifying which directory role to remove (the roleTemplateId surfaced by the CIPP role reads, e.g. cipp_list_roles). At execution the server re-reads the tenant\'s role row for it, re-checks the role name and the target\'s current membership, and addresses the removal by this template id; no tenant role id is ever accepted from the caller.',
             ],
             'role_name' => [
                 'type' => 'string',
