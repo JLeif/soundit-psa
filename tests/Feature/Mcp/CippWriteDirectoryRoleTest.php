@@ -293,7 +293,8 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertStringContainsString('Exchange Administrator', $run->proposed_content);
 
         // Approval re-resolves the tenant's activated role from the template id
-        // (case-insensitively) and executes against the RESOLVED object id with
+        // (case-insensitively) and executes against the RESOLVED row's role
+        // template id (never its Id, which is a role-definition id; #7238) with
         // the server-derived user identity.
         $approveClient = Mockery::mock(CippRestWriteClient::class);
         $approveClient->shouldReceive('listDirectoryRoles')
@@ -302,7 +303,7 @@ class CippWriteDirectoryRoleTest extends TestCase
             ->andReturn($this->tenantRoles());
         $approveClient->shouldReceive('removeDirectoryRoleMember')
             ->once()
-            ->with('acme.onmicrosoft.com', 'role-object-1', 'Exchange Administrator', 'user-acme', 'alex@acme.example')
+            ->with('acme.onmicrosoft.com', strtoupper(self::EXCHANGE_ADMIN_TEMPLATE_ID), 'Exchange Administrator', 'user-acme', 'alex@acme.example')
             ->andReturn(['success' => true, 'status' => 200]);
         $this->app->instance(CippRestWriteClient::class, $approveClient);
 

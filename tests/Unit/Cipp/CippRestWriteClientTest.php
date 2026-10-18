@@ -227,7 +227,7 @@ class CippRestWriteClientTest extends TestCase
 
         $result = $client->removeDirectoryRoleMember(
             'acme.onmicrosoft.com',
-            'role-object-1',
+            '29232cdf-9323-42fd-ade2-1d097af3e4de',
             'Exchange Administrator',
             'user-123',
             'alex@acme.example',
@@ -237,15 +237,18 @@ class CippRestWriteClientTest extends TestCase
         $this->assertSame(['success' => true, 'status' => 200], $result);
         $this->assertStringNotContainsString('not returned', json_encode($result));
 
-        // Source-pinned body (CIPP-API Invoke-ExecRemoveAdminRole.ps1): tenantFilter,
-        // RoleId (the tenant's ACTIVATED directoryRole object id), RoleName (label used
-        // for upstream logging), and ONE Users entry in {value,label} autocomplete shape.
+        // Source-pinned body (CIPP-API Invoke-ExecRemoveAdminRole.ps1 :17-18, :53-57):
+        // tenantFilter, RoleTemplateId (the role TEMPLATE id, which CIPP addresses as
+        // directoryRoles(roleTemplateId='...')), RoleName (label used for upstream
+        // logging), and ONE Users entry in {value,label} autocomplete shape. No RoleId
+        // key: CIPP would read that as a directoryRole OBJECT id, and the ListRoles
+        // Id is a role-definition id, not an object id (#7238).
         Http::assertSent(fn ($request) => $request->url() === 'https://cipp.example.test/api/ExecRemoveAdminRole'
             && $request->method() === 'POST'
             && $request->hasHeader('Authorization', 'Bearer WRITE-TOKEN')
             && $request->data() === [
                 'tenantFilter' => 'acme.onmicrosoft.com',
-                'RoleId' => 'role-object-1',
+                'RoleTemplateId' => '29232cdf-9323-42fd-ade2-1d097af3e4de',
                 'RoleName' => 'Exchange Administrator',
                 'Users' => [['value' => 'user-123', 'label' => 'alex@acme.example']],
             ]);
@@ -264,13 +267,13 @@ class CippRestWriteClientTest extends TestCase
 
         try {
             $client->removeDirectoryRoleMember('acme.onmicrosoft.com', '  ', 'Exchange Administrator', 'user-123', 'alex@acme.example');
-            $this->fail('Expected CippClientException for empty role id');
+            $this->fail('Expected CippClientException for empty role template id');
         } catch (CippClientException $e) {
-            $this->assertStringContainsString('role id is required', $e->getMessage());
+            $this->assertStringContainsString('role template id is required', $e->getMessage());
         }
 
         try {
-            $client->removeDirectoryRoleMember('acme.onmicrosoft.com', 'role-object-1', 'Exchange Administrator', '', 'alex@acme.example');
+            $client->removeDirectoryRoleMember('acme.onmicrosoft.com', '29232cdf-9323-42fd-ade2-1d097af3e4de', 'Exchange Administrator', '', 'alex@acme.example');
             $this->fail('Expected CippClientException for empty user id');
         } catch (CippClientException $e) {
             $this->assertStringContainsString('user id is required', $e->getMessage());
