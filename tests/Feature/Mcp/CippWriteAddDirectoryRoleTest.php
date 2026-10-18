@@ -279,7 +279,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $otherTicket = Ticket::factory()->for($this->fixture['client'])->create();
         $response = $this->callGrant(['ticket_id' => $otherTicket->id]);
         $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('without CIPP confirming the queue', (string) $response->json('result.content.0.text'));
+        $this->assertStringContainsString('An approval of Teams Administrator for this user at '.now()->toIso8601String().' queued the enable but its expiry was NOT confirmed. Remove the role manually or check CIPP scheduled tasks before re-staging.', (string) $response->json('result.content.0.text'));
         $this->assertSame(1, TechnicianRun::count());
         $this->assertSame(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/api/ExecJITAdmin'))->count());
     }
@@ -422,6 +422,21 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $this->assertStringContainsString('CippWriteNotSentException', $result->message);
         $this->assertNoWrite();
         $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+    }
+
+    public function test_local_staging_fault_after_membership_read_does_not_claim_read_failure(): void
+    {
+        TechnicianRun::creating(function () {
+            throw new \LogicException('synthetic local fault');
+        });
+
+        $response = $this->callGrant();
+
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertStringContainsString('could not stage the role grant (LogicException); nothing was sent.', (string) $response->json('result.content.0.text'));
+        $this->assertCount(1, $this->membershipReads);
+        $this->assertSame(0, TechnicianRun::count());
+        $this->assertNoWrite();
     }
 
     public function test_lost_claim_after_queue_reports_outcome_unknown_not_executed(): void

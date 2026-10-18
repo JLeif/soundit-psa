@@ -409,19 +409,7 @@ class CippRestWriteClient
         return $this->send('api/ExecEditMailboxPermissions', $body);
     }
 
-    /**
-     * List the tenant's ACTIVATED Entra directory roles with their members via
-     * CIPP's ListRoles endpoint. Read support for the directory-role removal
-     * write: the caller-facing tool accepts only the universal role TEMPLATE id,
-     * and this read is how execution re-resolves it to the tenant's activated
-     * role object id (and re-verifies name + membership) at approval time.
-     *
-     * Source shape (CIPP-API Invoke-ListRoles.ps1): GET api/ListRoles?tenantFilter=X
-     * returning a bare array of {Id, roleTemplateId, DisplayName, Description,
-     * Members: [{displayName, userPrincipalName, id}], SID}.
-     *
-     * @return array<int, mixed>
-     */
+    /** Read one role by template id, refusing an unverified role or membership shape. */
     public function strictDirectoryRole(string $tenantFilter, string $templateId): array
     {
         // Invoke-ListRoles.ps1 at 5efb2f9d: bare list, roleTemplateId, Members[].id.
@@ -498,6 +486,19 @@ class CippRestWriteClient
         return ['status' => 'queued_unverified'];
     }
 
+    /**
+     * List the tenant's ACTIVATED Entra directory roles with their members via
+     * CIPP's ListRoles endpoint. Read support for the directory-role removal
+     * write: the caller-facing tool accepts only the universal role TEMPLATE id,
+     * and this read is how execution re-resolves it to the tenant's activated
+     * role object id (and re-verifies name + membership) at approval time.
+     *
+     * Source shape (CIPP-API Invoke-ListRoles.ps1): GET api/ListRoles?tenantFilter=X
+     * returning a bare array of {Id, roleTemplateId, DisplayName, Description,
+     * Members: [{displayName, userPrincipalName, id}], SID}.
+     *
+     * @return array<int, mixed>
+     */
     public function listDirectoryRoles(string $tenantFilter): array
     {
         $body = $this->sendGet('api/ListRoles', ['tenantFilter' => $tenantFilter]);

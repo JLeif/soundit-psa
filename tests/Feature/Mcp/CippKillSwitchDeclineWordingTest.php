@@ -6,10 +6,10 @@ use App\Services\Mcp\StaffCippWriteToolExecutor;
 use Tests\TestCase;
 
 /**
- * #3901 / yf7IXuhQ effect-denial sweep — the five CIPP kill-switch decline
- * messages.
+ * #3901 / yf7IXuhQ effect-denial sweep — the six CIPP kill-switch decline
+ * messages, including approveDirectoryRoleGrant added 2026-10-18 (uztKjE24).
  *
- * These five arms were adjudicated on 2026-09-26 as TRUE on every path: each
+ * These six arms include the original five adjudicated on 2026-09-26 as TRUE on every path: each
  * checks the kill switch, writes an audit row, and declines before any client
  * call (measured, with a positive control finding 7 `->client->` calls past the
  * kill switch in the same method). The list was closed with no wording change.

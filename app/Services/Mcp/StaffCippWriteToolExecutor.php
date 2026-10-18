@@ -6031,20 +6031,6 @@ class StaffCippWriteToolExecutor
         ];
     }
 
-    /**
-     * Resolve directory-role removal params on the initial call and the held
-     * approval replay. STRUCTURALLY HELD-ONLY (external-forwarding precedent):
-     * an admin-role removal is never directly executable, whatever mode the
-     * token was granted — the non-held path throws before any state is touched,
-     * so the upstream call can only ever be reached through a cockpit approval.
-     * The role is identified by its universal Entra role TEMPLATE id (a
-     * Microsoft constant surfaced by the CIPP role reads, canonicalized to
-     * lowercase so casing cannot fork the idempotency hash) plus a typed
-     * role_name confirmation; both are safe local scalars, and execution
-     * re-resolves the tenant's activated role object from them at approval.
-     *
-     * @return array<string, mixed>
-     */
     private const JIT_ROLES = [
         '69091246-20e8-4a56-aa4d-066075b2a7a8' => 'Teams Administrator',
         'baf37b3a-610e-45da-9e62-d9d1e5e8914b' => 'Teams Communications Administrator',
@@ -6086,6 +6072,9 @@ class StaffCippWriteToolExecutor
             ->where('created_at', '>', now()->subMinutes(30))
             ->where('summary', 'like', $marker.'%')->latest('id')->first();
         if ($queued !== null) {
+            if ($queued->result_status === 'error' && str_contains($queued->summary, 'enable queued; expiry NOT confirmed')) {
+                throw new CippWriteScopeException('An approval of '.$params['role_name'].' for this user at '.$queued->created_at->toIso8601String().' queued the enable but its expiry was NOT confirmed. Remove the role manually or check CIPP scheduled tasks before re-staging.');
+            }
             throw new CippWriteScopeException($queued->result_status === 'queued_unverified'
                 ? 'A grant of '.$params['role_name'].' to this user was queued at '.$queued->created_at->toIso8601String().' and is not yet verified. Confirm with cipp_list_roles before re-staging.'
                 : 'An approval of '.$params['role_name'].' for this user at '.$queued->created_at->toIso8601String().' ended without CIPP confirming the queue. Confirm with cipp_list_roles before re-staging.');
@@ -6133,7 +6122,13 @@ class StaffCippWriteToolExecutor
             }
             $person = $this->resolver->resolveActiveCippPerson($clientId, $context['person']->person->id, 'user');
 
-            $this->jitMembership($context['tenant'], $person, $params);
+            try {
+                $this->jitMembership($context['tenant'], $person, $params);
+            } catch (CippWriteScopeException $e) {
+                throw $e;
+            } catch (\Throwable $e) {
+                return ['error' => 'could not verify current role membership ('.get_class($e).')'];
+            }
 
             // Serialize the brake and proposal creation across tickets; no CIPP call holds the lock.
             return \Illuminate\Support\Facades\DB::transaction(function () use ($clientId, $params, $context, $person, $actorLabel, $tokenLabel) {
@@ -6167,7 +6162,7 @@ class StaffCippWriteToolExecutor
         } catch (CippWriteScopeException $e) {
             return ['error' => $e->getMessage()];
         } catch (\Throwable $e) {
-            return ['error' => 'could not verify current role membership ('.get_class($e).')'];
+            return ['error' => 'could not stage the role grant ('.get_class($e).'); nothing was sent.'];
         }
     }
 
@@ -6253,6 +6248,20 @@ class StaffCippWriteToolExecutor
         return new TechnicianApprovalResult('outcome_unknown', message: self::JIT_QUEUED_MESSAGE);
     }
 
+    /**
+     * Resolve directory-role removal params on the initial call and the held
+     * approval replay. STRUCTURALLY HELD-ONLY (external-forwarding precedent):
+     * an admin-role removal is never directly executable, whatever mode the
+     * token was granted — the non-held path throws before any state is touched,
+     * so the upstream call can only ever be reached through a cockpit approval.
+     * The role is identified by its universal Entra role TEMPLATE id (a
+     * Microsoft constant surfaced by the CIPP role reads, canonicalized to
+     * lowercase so casing cannot fork the idempotency hash) plus a typed
+     * role_name confirmation; both are safe local scalars, and execution
+     * re-resolves the tenant's activated role object from them at approval.
+     *
+     * @return array<string, mixed>
+     */
     private function directoryRoleParams(array $arguments, bool $isHeld): array
     {
         if (! $isHeld) {
@@ -8054,19 +8063,21 @@ class StaffCippWriteToolExecutor
         );
     }
 
-    /** @return array<string, mixed> */
     private static function addDirectoryRoleTool(bool $staged): array
     {
         return self::tool(
             $staged ? 'cipp_stage_add_directory_role' : 'cipp_add_directory_role',
             'HELD-ONLY JIT role proposal for cockpit approval. Only Teams Administrator and Teams Communications Administrator. Server-derived user requires confirm_upn. Approval queues with CIPP, never proves a grant: confirm with cipp_list_roles. Expiry defaults to 8 hours, maximum 7 days, RemoveRoles only. Current membership is checked at staging and approval.',
-            array_merge(self::personProperties(), self::directoryRoleProperties(), [
+            array_merge(self::personProperties(ticket: true), [
+                'role_template_id' => ['type' => 'string', 'description' => 'Universal Entra role template GUID of the allowlisted role to queue with CIPP.'],
+                'role_name' => ['type' => 'string', 'description' => 'Exact, case-sensitive allowlisted name: Teams Administrator or Teams Communications Administrator. Must match role_template_id.'],
                 'end_date' => ['type' => 'string', 'description' => 'ISO 8601 expiry, default 8 hours from staging, maximum 7 days.'],
             ]),
             ['person_id', 'role_template_id', 'role_name', 'confirm_upn', 'reason', 'ticket_id'],
         );
     }
 
+    /** @return array<string, mixed> */
     private static function removeDirectoryRoleTool(): array
     {
         return self::tool(
