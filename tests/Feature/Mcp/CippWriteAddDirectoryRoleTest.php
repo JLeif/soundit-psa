@@ -71,6 +71,10 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         ], \Illuminate\Support\Facades\Cache::store(), fn () => ['93.184.216.34']));
         Http::fake(function ($request) {
             if (str_starts_with($request->url(), 'https://login.microsoftonline.com/')) {
+                if ($this->vendorState['tokenDown'] ?? false) {
+                    return Http::response([], 500);
+                }
+
                 return Http::response(['access_token' => 'synthetic-access', 'expires_in' => 3600]);
             }
             if (str_starts_with($request->url(), 'https://cipp.example.test/api/ListRoles')) {
@@ -78,11 +82,20 @@ class CippWriteAddDirectoryRoleTest extends TestCase
                     'transaction_level' => \Illuminate\Support\Facades\DB::transactionLevel(),
                     'executing' => TechnicianRun::where('state', TechnicianRunState::Executing)->count(),
                 ];
+                if ($this->vendorState['tokenDownAfterRead'] ?? false) {
+                    // The cached token is gone and cannot be renewed before the write.
+                    \Illuminate\Support\Facades\Cache::flush();
+                    $this->vendorState['tokenDown'] = true;
+                }
 
                 return Http::response($this->vendorState['roles'], $this->vendorState['readStatus']);
             }
             if ($request->url() === 'https://cipp.example.test/api/ExecJITAdmin') {
                 $this->assertSame($this->baseTransactionLevel, \Illuminate\Support\Facades\DB::transactionLevel(), 'No application transaction may span ExecJITAdmin');
+                if ($this->vendorState['stealClaim'] ?? false) {
+                    // Another request takes the run while the POST is in flight.
+                    TechnicianRun::where('state', TechnicianRunState::Executing)->update(['state' => TechnicianRunState::Denied->value]);
+                }
 
                 return Http::response($this->vendorState['reply'], $this->vendorState['writeStatus']);
             }
@@ -252,6 +265,11 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $this->assertNotSame('executed', $result->status);
         $this->assertStringContainsString('enable queued; expiry NOT confirmed. Remove the role manually or check CIPP scheduled tasks.', $result->message);
         $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_unverified')->count());
+        // The enable may be queued: the run must not reopen for a second ExecJITAdmin.
+        $this->assertSame(TechnicianRunState::Done, $run->fresh()->state);
+        $again = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run->fresh(), $this->actor->id);
+        $this->assertSame('already_handled', $again->status);
+        $this->assertSame(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/api/ExecJITAdmin'))->count());
     }
 
     public function test_strict_membership_failures_refuse_at_staging_and_approval(): void
@@ -314,6 +332,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
             $this->assertStringContainsString('CIPP did not confirm the queue', $result->message);
             $this->assertStringContainsString('cipp_list_roles', $result->message);
             $this->assertDatabaseMissing('technician_action_logs', ['run_id' => $run->id, 'result_status' => 'queued_unverified']);
+            $this->assertSame(TechnicianRunState::Done, $run->fresh()->state, 'A failure after the POST must not reopen the proposal.');
             $run->fresh()->update(['state' => TechnicianRunState::Denied]);
         }
     }
@@ -374,5 +393,29 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $this->stage(['ticket_id' => $otherTicket->id, 'role_template_id' => self::OTHER_ROLE, 'role_name' => 'Teams Communications Administrator']);
         $this->assertSame(2, TechnicianRun::count());
         $this->assertNoWrite();
+    }
+
+    public function test_failure_before_the_post_reopens_the_proposal_and_sends_nothing(): void
+    {
+        $run = $this->stage();
+        $this->vendorState['tokenDownAfterRead'] = true;
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertStringContainsString('CippWriteNotSentException', $result->message);
+        $this->assertNoWrite();
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+    }
+
+    public function test_lost_claim_after_queue_reports_outcome_unknown_not_executed(): void
+    {
+        $run = $this->stage();
+        $this->vendorState['stealClaim'] = true;
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
+        $this->assertSame('outcome_unknown', $result->status);
+        $this->assertStringStartsWith(self::MESSAGE, (string) $result->message);
+        $this->assertStringNotContainsStringIgnoringCase('executed', (string) $result->message);
+        $this->assertDatabaseHas('technician_action_logs', ['run_id' => $run->id, 'result_status' => 'queued_unverified']);
+        $this->assertDatabaseMissing('technician_action_logs', ['run_id' => $run->id, 'result_status' => 'executed']);
+        $this->assertSame(TechnicianRunState::Denied, $run->fresh()->state);
     }
 }

@@ -6222,7 +6222,13 @@ class StaffCippWriteToolExecutor
         } catch (\Throwable $e) {
             $message = $this->jitFailure($e);
             $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $run->content_hash, $message, $this->approverLabel($approverId), $run->id, $approverId);
-            $run->releaseClaim();
+            // Only a not-sent failure reopens the proposal. Past the POST, CIPP may have
+            // queued the enable, so the run closes and cannot be re-approved into a second one.
+            if ($e instanceof CippWriteNotSentException) {
+                $run->releaseClaim();
+            } else {
+                $run->advanceTo(TechnicianRunState::Done);
+            }
 
             return $this->declined($message);
         }
@@ -6230,7 +6236,11 @@ class StaffCippWriteToolExecutor
             'JIT person='.$person->person->id.' role='.$params['role_template_id'].'; '.self::JIT_QUEUED_MESSAGE,
             $this->approverLabel($approverId), $run->id, $approverId);
         if (! $run->advanceTo(TechnicianRunState::Done)) {
-            return self::executedNotClosed($run);
+            \Illuminate\Support\Facades\Log::warning('[CIPP] a JIT role grant was queued with CIPP (not verified) but the run was not closed: this request no longer holds it', [
+                'run_id' => $run->id, 'action' => $run->action_type,
+            ]);
+
+            return new TechnicianApprovalResult('outcome_unknown', message: self::JIT_QUEUED_MESSAGE.' The run was not closed because this request no longer holds it; check its current state before acting on it again.');
         }
 
         return new TechnicianApprovalResult('outcome_unknown', message: self::JIT_QUEUED_MESSAGE);
