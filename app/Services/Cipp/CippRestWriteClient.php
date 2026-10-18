@@ -490,8 +490,8 @@ class CippRestWriteClient
      * List the tenant's ACTIVATED Entra directory roles with their members via
      * CIPP's ListRoles endpoint. Read support for the directory-role removal
      * write: the caller-facing tool accepts only the universal role TEMPLATE id,
-     * and this read is how execution re-resolves it to the tenant's activated
-     * role object id (and re-verifies name + membership) at approval time.
+     * and this read is how execution re-finds that role's row (and re-verifies
+     * name + membership) at approval time.
      *
      * Source shape (CIPP-API Invoke-ListRoles.ps1): GET api/ListRoles?tenantFilter=X
      * returning a bare array of {Id, roleTemplateId, DisplayName, Description,

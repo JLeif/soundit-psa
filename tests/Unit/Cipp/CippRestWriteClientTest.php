@@ -210,6 +210,7 @@ class CippRestWriteClientTest extends TestCase
 
     public function test_remove_directory_role_member_posts_exec_remove_admin_role_shape(): void
     {
+        Http::preventStrayRequests();
         Http::fake([
             'login.microsoftonline.com/*' => Http::response([
                 'access_token' => 'WRITE-TOKEN',
@@ -237,7 +238,7 @@ class CippRestWriteClientTest extends TestCase
         $this->assertSame(['success' => true, 'status' => 200], $result);
         $this->assertStringNotContainsString('not returned', json_encode($result));
 
-        // Source-pinned body (CIPP-API Invoke-ExecRemoveAdminRole.ps1 :17-18, :53-57):
+        // Source-pinned body (CIPP-API Invoke-ExecRemoveAdminRole.ps1 @5efb2f9d :17-18, :53-57):
         // tenantFilter, RoleTemplateId (the role TEMPLATE id, which CIPP addresses as
         // directoryRoles(roleTemplateId='...')), RoleName (label used for upstream
         // logging), and ONE Users entry in {value,label} autocomplete shape. No RoleId
@@ -291,7 +292,7 @@ class CippRestWriteClientTest extends TestCase
             ]),
             'cipp.example.test/api/ListRoles*' => Http::response([
                 [
-                    'Id' => 'role-object-1',
+                    'Id' => 'role-definition-1',
                     'roleTemplateId' => '29232cdf-9323-42fd-ade2-1d097af3e4de',
                     'DisplayName' => 'Exchange Administrator',
                     'Description' => 'Can manage all aspects of the Exchange product.',
@@ -310,7 +311,7 @@ class CippRestWriteClientTest extends TestCase
         $roles = $client->listDirectoryRoles('acme.onmicrosoft.com');
 
         $this->assertCount(1, $roles);
-        $this->assertSame('role-object-1', $roles[0]['Id']);
+        $this->assertSame('role-definition-1', $roles[0]['Id']);
         $this->assertSame('29232cdf-9323-42fd-ade2-1d097af3e4de', $roles[0]['roleTemplateId']);
         $this->assertSame('Exchange Administrator', $roles[0]['DisplayName']);
         $this->assertSame('user-123', $roles[0]['Members'][0]['id']);
@@ -628,7 +629,7 @@ class CippRestWriteClientTest extends TestCase
         Http::fake([
             'login.microsoftonline.com/*' => Http::response(['access_token' => 'WRITE-TOKEN', 'expires_in' => 3600]),
             'cipp.example.test/api/ListRoles*' => Http::response([
-                'Results' => [['Id' => 'role-object-2', 'roleTemplateId' => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'DisplayName' => 'Helpdesk Administrator', 'Members' => []]],
+                'Results' => [['Id' => 'role-definition-2', 'roleTemplateId' => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'DisplayName' => 'Helpdesk Administrator', 'Members' => []]],
             ]),
         ]);
 
@@ -642,7 +643,7 @@ class CippRestWriteClientTest extends TestCase
         $roles = $client->listDirectoryRoles('acme.onmicrosoft.com');
 
         $this->assertCount(1, $roles);
-        $this->assertSame('role-object-2', $roles[0]['Id']);
+        $this->assertSame('role-definition-2', $roles[0]['Id']);
     }
 
     public function test_set_mailbox_delegate_rejects_empty_trustee_before_any_request(): void
