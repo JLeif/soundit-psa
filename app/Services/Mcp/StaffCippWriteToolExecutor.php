@@ -6086,7 +6086,7 @@ class StaffCippWriteToolExecutor
             ->get()->contains(fn ($candidate) => (int) ($candidate->proposed_meta['person_id'] ?? 0) === $personId
                 && ($candidate->proposed_meta['redacted_params']['role_template_id'] ?? null) === $params['role_template_id']);
         if ($pending) {
-            throw new CippWriteScopeException('A grant of '.$params['role_name'].' to this user is already awaiting approval.');
+            throw new CippWriteScopeException('A grant of '.$params['role_name'].' to this user already has an open proposal (awaiting approval or being approved).');
         }
     }
 
@@ -6094,7 +6094,7 @@ class StaffCippWriteToolExecutor
     {
         $role = $this->client->strictDirectoryRole($tenant, $params['role_template_id']);
         if ($role['DisplayName'] !== $params['role_name']) {
-            throw new CippWriteScopeException('could not verify current role membership: role name changed.');
+            throw new CippWriteScopeException('could not verify current role membership: role name does not match.');
         }
         foreach ($role['Members'] as $member) {
             if (strcasecmp($member['id'], $person->userId) === 0) {
@@ -6162,7 +6162,7 @@ class StaffCippWriteToolExecutor
         } catch (CippWriteScopeException $e) {
             return ['error' => $e->getMessage()];
         } catch (\Throwable $e) {
-            return ['error' => 'could not stage the role grant ('.get_class($e).'); nothing was sent.'];
+            return ['error' => 'could not stage the role grant ('.get_class($e).'); no change was sent.'];
         }
     }
 
@@ -6230,6 +6230,8 @@ class StaffCippWriteToolExecutor
                     'JIT person='.$person->person->id.' role='.$params['role_template_id'].'; '.$message,
                     $this->approverLabel($approverId), $run->id, $approverId);
                 $run->advanceTo(TechnicianRunState::Done);
+
+                return new TechnicianApprovalResult('outcome_unknown', message: $message);
             }
 
             return $this->declined($message);

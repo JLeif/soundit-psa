@@ -9,10 +9,7 @@ use Tests\TestCase;
  * #3901 / yf7IXuhQ effect-denial sweep — the six CIPP kill-switch decline
  * messages, including approveDirectoryRoleGrant added 2026-10-18 (uztKjE24).
  *
- * These six arms include the original five adjudicated on 2026-09-26 as TRUE on every path: each
- * checks the kill switch, writes an audit row, and declines before any client
- * call (measured, with a positive control finding 7 `->client->` calls past the
- * kill switch in the same method). The list was closed with no wording change.
+ * The original five arms were adjudicated on 2026-09-26 as TRUE on every path: each checks the kill switch, writes an audit row, and declines before any client call (measured, with a positive control finding 7 `->client->` calls past the kill switch in the same method). The sixth, approveDirectoryRoleGrant, was added 2026-10-18 with its own ruled sentence and was not part of that measurement.
  *
  * The gap Jeeves named is that nothing pinned them, so a later edit could put an
  * effect claim back into a message that currently has none, and no control would
@@ -124,7 +121,7 @@ class CippKillSwitchDeclineWordingTest extends TestCase
         }
     }
 
-    public function test_the_arm_count_is_pinned_so_a_sixth_cannot_arrive_unread(): void
+    public function test_the_arm_count_is_pinned_so_a_new_arm_cannot_arrive_unread(): void
     {
         // Round 1 (diff:4, contract:7, context:10): the first version counted
         // copies of ONE literal spelling of declined('Technician kill-switch

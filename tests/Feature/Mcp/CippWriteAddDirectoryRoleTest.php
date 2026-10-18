@@ -268,7 +268,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $run = $this->stage();
         $this->fakeVendor(reply: ['Results' => ['Queued JIT Admin enable task for jit.user@contoso.example to run now']]);
         $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
-        $this->assertNotSame('executed', $result->status);
+        $this->assertSame('outcome_unknown', $result->status);
         $this->assertStringContainsString('enable queued; expiry NOT confirmed. Remove the role manually or check CIPP scheduled tasks.', $result->message);
         $this->assertSame(0, TechnicianActionLog::where('run_id', $run->id)->where('result_status', 'queued_unverified')->count());
         // The enable may be queued: the run must not reopen for a second ExecJITAdmin.
@@ -340,7 +340,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
             $run = $this->stage();
             $this->fakeVendor(reply: $reply, writeStatus: $status);
             $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
-            $this->assertSame('gate_declined', $result->status);
+            $this->assertSame('outcome_unknown', $result->status);
             $this->assertStringContainsString('CIPP did not confirm the queue', $result->message);
             $this->assertStringContainsString('cipp_list_roles', $result->message);
             $this->assertDatabaseMissing('technician_action_logs', ['run_id' => $run->id, 'result_status' => 'queued_unverified']);
@@ -389,7 +389,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $sibling->save();
         $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
         $this->assertSame('gate_declined', $result->status);
-        $this->assertStringContainsString('already awaiting approval', $result->message);
+        $this->assertSame('A grant of Teams Administrator to this user already has an open proposal (awaiting approval or being approved).', $result->message);
         $this->assertNoWrite();
         $sibling->update(['state' => TechnicianRunState::Denied]);
         $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run->fresh(), $this->actor->id);
@@ -407,9 +407,31 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $otherTicket = Ticket::factory()->for($this->fixture['client'])->create();
         $response = $this->callGrant(['ticket_id' => $otherTicket->id]);
         $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('already awaiting approval', (string) $response->json('result.content.0.text'));
+        $this->assertStringContainsString('A grant of Teams Administrator to this user already has an open proposal (awaiting approval or being approved).', (string) $response->json('result.content.0.text'));
         $this->stage(['ticket_id' => $otherTicket->id, 'role_template_id' => self::OTHER_ROLE, 'role_name' => 'Teams Communications Administrator']);
         $this->assertSame(2, TechnicianRun::count());
+        $this->assertNoWrite();
+    }
+
+    public function test_executing_proposal_blocks_the_same_triple(): void
+    {
+        $run = $this->stage();
+        $run->update(['state' => TechnicianRunState::Executing]);
+        $response = $this->callGrant(['ticket_id' => Ticket::factory()->for($this->fixture['client'])->create()->id]);
+        $this->assertStringContainsString('A grant of Teams Administrator to this user already has an open proposal (awaiting approval or being approved).', (string) $response->json('result.content.0.text'));
+        $this->assertTrue((bool) $response->json('result.isError'));
+        $this->assertNoWrite();
+    }
+
+    public function test_role_display_name_mismatch_refuses_without_sending_jit(): void
+    {
+        $run = $this->stage();
+        $roles = $this->roles();
+        $roles[0]['DisplayName'] = 'Different synthetic name';
+        $this->fakeVendor($roles);
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
+        $this->assertSame('could not verify current role membership: role name does not match.', $result->message);
+        $this->assertSame('gate_declined', $result->status);
         $this->assertNoWrite();
     }
 
@@ -433,7 +455,7 @@ class CippWriteAddDirectoryRoleTest extends TestCase
         $response = $this->callGrant();
 
         $this->assertTrue((bool) $response->json('result.isError'));
-        $this->assertStringContainsString('could not stage the role grant (LogicException); nothing was sent.', (string) $response->json('result.content.0.text'));
+        $this->assertStringContainsString('could not stage the role grant (LogicException); no change was sent.', (string) $response->json('result.content.0.text'));
         $this->assertCount(1, $this->membershipReads);
         $this->assertSame(0, TechnicianRun::count());
         $this->assertNoWrite();
