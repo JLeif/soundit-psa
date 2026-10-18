@@ -20,6 +20,7 @@ final class ActionRegistry
         'cipp_stage_set_mailbox_out_of_office' => 'cipp_set_mailbox_out_of_office',
         'cipp_stage_set_mailbox_delegate' => 'cipp_set_mailbox_delegate',
         'cipp_stage_remove_directory_role' => 'cipp_remove_directory_role',
+        'cipp_stage_add_directory_role' => 'cipp_add_directory_role',
         'cipp_stage_remove_mailbox_rule' => 'cipp_remove_mailbox_rule',
         'cipp_stage_release_quarantine_message' => 'cipp_release_quarantine_message',
         'cipp_stage_add_tenant_allow_entry' => 'cipp_add_tenant_allow_entry',
