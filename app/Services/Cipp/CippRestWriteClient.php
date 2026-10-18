@@ -409,6 +409,83 @@ class CippRestWriteClient
         return $this->send('api/ExecEditMailboxPermissions', $body);
     }
 
+    /** Read one role by template id, refusing an unverified role or membership shape. */
+    public function strictDirectoryRole(string $tenantFilter, string $templateId): array
+    {
+        // Invoke-ListRoles.ps1 at 5efb2f9d: bare list, roleTemplateId, Members[].id.
+        $status = 0;
+        try {
+            $url = $this->endpointUrl('api/ListRoles');
+            $options = $this->safeRequestOptions($url);
+            $response = Http::timeout(60)->acceptJson()->withOptions($options)
+                ->withToken($this->getToken())->get($url, ['tenantFilter' => $tenantFilter]);
+            $status = $response->status();
+            $body = json_decode($response->body());
+            if (! $response->successful() || ! is_array($body)) {
+                throw new CippClientException('could not verify current role membership');
+            }
+            $matches = array_values(array_filter($body, fn ($row) => is_object($row)
+                && is_string($row->roleTemplateId ?? null)
+                && strcasecmp($row->roleTemplateId, $templateId) === 0));
+            if (count($matches) !== 1 || ! is_array($matches[0]->Members ?? null)
+                || ! is_string($matches[0]->DisplayName ?? null)) {
+                throw new CippClientException('could not verify current role membership');
+            }
+            foreach ($matches[0]->Members as $member) {
+                if (! is_object($member) || ! is_string($member->id ?? null) || trim($member->id) === '') {
+                    throw new CippClientException('could not verify current role membership');
+                }
+            }
+
+            return ['DisplayName' => $matches[0]->DisplayName, 'Members' => array_map(fn ($member) => (array) $member, $matches[0]->Members)];
+        } catch (CippWriteNotSentException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new CippClientException('could not verify current role membership (status '.$status.'; '.get_class($e).')');
+        }
+    }
+
+    /** Queue only; the two scheduler receipts are not proof of a grant. */
+    public function queueJitRoleGrant(string $tenantFilter, string $userId, string $templateId, int $endDate, string $reason): array
+    {
+        if (trim($userId) === '' || trim($templateId) === '') {
+            throw new CippWriteNotSentException('Directory role user and template ids are required');
+        }
+        // Invoke-ExecJITAdmin.ps1 at 5efb2f9d: existing user, run-now branch,
+        // Results mixed list with enable and RemoveRoles scheduler receipts.
+        $reply = $this->send('api/ExecJITAdmin', [
+            'tenantFilter' => $tenantFilter,
+            'userAction' => 'existing',
+            'existingUser' => ['value' => $userId],
+            'AdminRoles' => [['value' => $templateId]],
+            'StartDate' => now()->timestamp - 60,
+            'EndDate' => $endDate,
+            'ExpireAction' => ['value' => 'RemoveRoles'],
+            'UseTAP' => false,
+            'GroupMemberships' => [],
+            'Reason' => $reason,
+        ], captureBody: true);
+        $results = $reply['body']['Results'] ?? null;
+        $queued = false;
+        $expiry = false;
+        if ($reply['status'] >= 200 && $reply['status'] < 300 && is_array($results) && array_is_list($results)) {
+            foreach ($results as $line) {
+                if (is_string($line)) {
+                    $queued = $queued || str_starts_with($line, 'Queued JIT Admin enable task');
+                    $expiry = $expiry || str_starts_with($line, 'Scheduling JIT Admin RemoveRoles task');
+                }
+            }
+        }
+        if ($queued && ! $expiry) {
+            throw new CippWriteUnconfirmedException('api/ExecJITAdmin', CippWriteUnconfirmedException::UNKNOWN, confirmedPart: 'jit_enable_queued');
+        }
+        if (! $queued || ! $expiry) {
+            throw new CippWriteUnconfirmedException('api/ExecJITAdmin', CippWriteUnconfirmedException::UNKNOWN);
+        }
+
+        return ['status' => 'queued_unverified'];
+    }
+
     /**
      * List the tenant's ACTIVATED Entra directory roles with their members via
      * CIPP's ListRoles endpoint. Read support for the directory-role removal

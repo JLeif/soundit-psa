@@ -76,6 +76,7 @@ class StaffCippWriteToolExecutor
         'cipp_stage_set_mailbox_out_of_office' => 'cipp_set_mailbox_out_of_office',
         'cipp_stage_set_mailbox_delegate' => 'cipp_set_mailbox_delegate',
         'cipp_stage_remove_directory_role' => 'cipp_remove_directory_role',
+        'cipp_stage_add_directory_role' => 'cipp_add_directory_role',
         'cipp_stage_remove_mailbox_rule' => 'cipp_remove_mailbox_rule',
         'cipp_stage_release_quarantine_message' => 'cipp_release_quarantine_message',
         'cipp_stage_add_tenant_allow_entry' => 'cipp_add_tenant_allow_entry',
@@ -234,6 +235,8 @@ class StaffCippWriteToolExecutor
         // deduplication still applies; zero disables only the mailbox-wide cooldown.
         'cipp_set_mailbox_delegate' => 0,
         'cipp_stage_set_mailbox_delegate' => 0,
+        'cipp_add_directory_role' => 0,
+        'cipp_stage_add_directory_role' => 0,
         'cipp_remove_directory_role' => 0,
         'cipp_stage_remove_directory_role' => 0,
         'cipp_remove_mailbox_rule' => 0,
@@ -667,6 +670,8 @@ class StaffCippWriteToolExecutor
             self::stageSetMailboxOutOfOfficeTool(),
             self::setMailboxDelegateTool(),
             self::stageSetMailboxDelegateTool(),
+            self::addDirectoryRoleTool(false),
+            self::addDirectoryRoleTool(true),
             self::removeDirectoryRoleTool(),
             self::stageRemoveDirectoryRoleTool(),
             self::removeMailboxRuleTool(),
@@ -727,6 +732,14 @@ class StaffCippWriteToolExecutor
             // The controller strips execute_at on the staged path of an adapter capability
             // only; anything else reaching here is refused by name, never run now.
             return ['error' => ExecuteAt::refusalFor($name)];
+        }
+
+        if (in_array($name, ['cipp_add_directory_role', 'cipp_stage_add_directory_role'], true)) {
+            if ($name !== 'cipp_stage_add_directory_role') {
+                return ['error' => 'Directory role grant is held-only; stage it for cockpit approval.'];
+            }
+
+            return $this->stageDirectoryRoleGrant($arguments, $clientId, $actorLabel, $tokenLabel);
         }
 
         if (in_array($name, ['cipp_offboard_user', 'cipp_stage_offboard_user'], true)) {
@@ -885,6 +898,9 @@ class StaffCippWriteToolExecutor
 
     public function approveStagedRun(TechnicianRun $run, int $approverId, array $approvalInputs = []): TechnicianApprovalResult
     {
+        if ($run->action_type === 'cipp_stage_add_directory_role') {
+            return $this->approveDirectoryRoleGrant($run, $approverId);
+        }
         if ($run->action_type === 'cipp_stage_offboard_user') {
             return app(\App\Services\Cipp\Offboarding\OffboardingAdmission::class)->approve($run, $approverId, $approvalInputs);
         }
@@ -6015,6 +6031,225 @@ class StaffCippWriteToolExecutor
         ];
     }
 
+    private const JIT_ROLES = [
+        '69091246-20e8-4a56-aa4d-066075b2a7a8' => 'Teams Administrator',
+        'baf37b3a-610e-45da-9e62-d9d1e5e8914b' => 'Teams Communications Administrator',
+    ];
+
+    private const JIT_QUEUED_MESSAGE = 'Queued with CIPP; not yet verified. Confirm with cipp_list_roles.';
+
+    private function jitParams(array $arguments): array
+    {
+        $id = strtolower($this->requiredString($arguments, 'role_template_id') ?? '');
+        if (! isset(self::JIT_ROLES[$id])) {
+            throw new CippWriteScopeException('Only Teams Administrator and Teams Communications Administrator are allowed. Global Administrator, Privileged Role Administrator and all other roles are refused.');
+        }
+        if (($arguments['role_name'] ?? null) !== self::JIT_ROLES[$id]) {
+            throw new CippWriteScopeException('role_name must match the allowlisted role.');
+        }
+        try {
+            $end = isset($arguments['end_date'])
+                ? \Carbon\CarbonImmutable::parse($arguments['end_date'])
+                : now()->toImmutable()->addHours(8);
+        } catch (\Throwable) {
+            throw new CippWriteScopeException('end_date must be a valid date.');
+        }
+        if ($end->lessThanOrEqualTo(now()) || $end->greaterThan(now()->addDays(7))) {
+            throw new CippWriteScopeException('end_date must be in the future and no more than 7 days from now.');
+        }
+
+        return ['role_template_id' => $id, 'role_name' => self::JIT_ROLES[$id], 'end_date' => $end->toIso8601String()];
+    }
+
+    private function jitBrake(int $clientId, int $personId, array $params, ?int $exceptRun = null): void
+    {
+        // Immutable summary marker retains the triple even if a historical run is removed.
+        $marker = 'JIT person='.$personId.' role='.$params['role_template_id'].';';
+        $queued = TechnicianActionLog::where('client_id', $clientId)
+            ->where('action_type', 'cipp_stage_add_directory_role')
+            // Only a post-POST failure row carries the marker; a not-sent error row never brakes.
+            ->whereIn('result_status', ['queued_unverified', 'error'])
+            ->where('created_at', '>', now()->subMinutes(30))
+            ->where('summary', 'like', $marker.'%')->latest('id')->first();
+        if ($queued !== null) {
+            if ($queued->result_status === 'error' && str_contains($queued->summary, 'enable queued; expiry NOT confirmed')) {
+                throw new CippWriteScopeException('An approval of '.$params['role_name'].' for this user at '.$queued->created_at->toIso8601String().' queued the enable but its expiry was NOT confirmed. Remove the role manually or check CIPP scheduled tasks before re-staging.');
+            }
+            throw new CippWriteScopeException($queued->result_status === 'queued_unverified'
+                ? 'A grant of '.$params['role_name'].' to this user was queued at '.$queued->created_at->toIso8601String().' and is not yet verified. Confirm with cipp_list_roles before re-staging.'
+                : 'An approval of '.$params['role_name'].' for this user at '.$queued->created_at->toIso8601String().' ended without CIPP confirming the queue. Confirm with cipp_list_roles before re-staging.');
+        }
+        $pending = TechnicianRun::where('client_id', $clientId)
+            ->where('action_type', 'cipp_stage_add_directory_role')
+            ->whereIn('state', [TechnicianRunState::AwaitingApproval->value, TechnicianRunState::Executing->value])
+            ->when($exceptRun !== null, fn ($query) => $query->where('id', '!=', $exceptRun))
+            ->get()->contains(fn ($candidate) => (int) ($candidate->proposed_meta['person_id'] ?? 0) === $personId
+                && ($candidate->proposed_meta['redacted_params']['role_template_id'] ?? null) === $params['role_template_id']);
+        if ($pending) {
+            throw new CippWriteScopeException('A grant of '.$params['role_name'].' to this user already has an open proposal (awaiting approval or being approved).');
+        }
+    }
+
+    private function jitMembership(string $tenant, ResolvedCippPerson $person, array $params): void
+    {
+        $role = $this->client->strictDirectoryRole($tenant, $params['role_template_id']);
+        if ($role['DisplayName'] !== $params['role_name']) {
+            throw new CippWriteScopeException('could not verify current role membership: role name does not match.');
+        }
+        foreach ($role['Members'] as $member) {
+            if (strcasecmp($member['id'], $person->userId) === 0) {
+                throw new CippWriteScopeException('The user already holds this role; grant refused.');
+            }
+        }
+    }
+
+    private function jitFailure(\Throwable $e): string
+    {
+        if ($e instanceof CippWriteUnconfirmedException && $e->confirmedPart === 'jit_enable_queued') {
+            return 'enable queued; expiry NOT confirmed. Remove the role manually or check CIPP scheduled tasks.';
+        }
+
+        return 'CIPP did not confirm the queue. Confirm with cipp_list_roles. ('.get_class($e).')';
+    }
+
+    private function stageDirectoryRoleGrant(array $arguments, int $clientId, string $actorLabel, ?string $tokenLabel): array
+    {
+        try {
+            $params = $this->jitParams($arguments);
+            $context = $this->context('cipp_stage_add_directory_role', $arguments, $clientId, $actorLabel, requireTicket: true);
+            if (isset($context['error'])) {
+                return ['error' => $context['error']];
+            }
+            $person = $this->resolver->resolveActiveCippPerson($clientId, $context['person']->person->id, 'user');
+
+            try {
+                $this->jitMembership($context['tenant'], $person, $params);
+            } catch (CippWriteScopeException $e) {
+                throw $e;
+            } catch (\Throwable $e) {
+                return ['error' => 'could not verify current role membership ('.get_class($e).')'];
+            }
+
+            // Serialize the brake and proposal creation across tickets; no CIPP call holds the lock.
+            return \Illuminate\Support\Facades\DB::transaction(function () use ($clientId, $params, $context, $person, $actorLabel, $tokenLabel) {
+                Client::whereKey($clientId)->lockForUpdate()->firstOrFail();
+                $this->jitBrake($clientId, $person->person->id, $params);
+                $ticket = $context['ticket'];
+                $payload = [
+                    'client_id' => $clientId, 'person_id' => $person->person->id,
+                    'ticket_id' => $ticket->id, 'params' => $params,
+                    'tenant' => $context['tenant'], 'user_id' => $person->userId,
+                    'upn' => $person->userPrincipalName, 'reason' => $context['reason'],
+                ];
+                $run = TechnicianRun::create([
+                    'ticket_id' => $ticket->id, 'client_id' => $clientId,
+                    'action_type' => 'cipp_stage_add_directory_role',
+                    'content_hash' => hash('sha256', (string) Str::uuid()),
+                    'state' => TechnicianRunState::AwaitingApproval,
+                    'proposed_content' => 'Queue '.$params['role_name'].' with CIPP until '.$params['end_date'].'. Not a verified grant; confirm with cipp_list_roles.',
+                    'proposed_meta' => [
+                        ...DraftedByToken::meta($actorLabel, $tokenLabel),
+                        'person_id' => $person->person->id, 'redacted_params' => $params,
+                        'reasons' => [$context['reason']],
+                        'encrypted_payload' => Crypt::encryptString(json_encode($payload, JSON_THROW_ON_ERROR)),
+                    ],
+                    'tokens_used' => 0,
+                ]);
+                $this->auditAttempt($run->action_type, 'awaiting_approval', $clientId, $ticket, $person, null, $run->content_hash, 'JIT role proposal awaiting approval.', $actorLabel, $run->id);
+
+                return ['run_id' => $run->id, 'ticket_id' => $ticket->id, 'message' => 'Held for approval to queue with CIPP; confirm any grant with cipp_list_roles.'];
+            });
+        } catch (CippWriteScopeException $e) {
+            return ['error' => $e->getMessage()];
+        } catch (\Throwable $e) {
+            return ['error' => 'could not stage the role grant ('.get_class($e).'); no change was sent.'];
+        }
+    }
+
+    private function approveDirectoryRoleGrant(TechnicianRun $run, int $approverId): TechnicianApprovalResult
+    {
+        $prepared = \Illuminate\Support\Facades\DB::transaction(function () use ($run, $approverId) {
+            Client::whereKey($run->client_id)->lockForUpdate()->firstOrFail();
+            if (! $run->claimForExecution()) {
+                return new TechnicianApprovalResult('already_handled');
+            }
+            try {
+                $payload = $this->decryptRunPayload($run);
+                if ($payload === null || (int) ($payload['client_id'] ?? 0) !== (int) $run->client_id) {
+                    throw new CippWriteScopeException('The held payload could not be verified; deny and re-stage.');
+                }
+                $params = $this->jitParams($payload['params']);
+                $client = Client::findOrFail($run->client_id);
+                $tenant = $this->resolver->resolveCippTenant($client);
+                $person = $this->resolver->resolveActiveCippPerson($client->id, $payload['person_id'], 'user');
+                $ticket = $this->resolver->resolveTicketForHeldAction($client->id, $payload['ticket_id']);
+                if ($tenant !== $payload['tenant'] || $person->userId !== $payload['user_id'] || $person->userPrincipalName !== $payload['upn']) {
+                    throw new CippWriteScopeException('The approved tenant or user identity changed; deny and re-stage.');
+                }
+                if (TechnicianConfig::killSwitchEngaged()) {
+                    $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $run->content_hash, 'Technician kill-switch engaged; staged role grant refused.', $this->approverLabel($approverId), $run->id, $approverId);
+                    $run->releaseClaim();
+
+                    return $this->declined('Technician kill-switch engaged; the staged role grant was refused.');
+                }
+                $this->jitBrake($client->id, $person->person->id, $params, $run->id);
+            } catch (CippWriteScopeException $e) {
+                $run->releaseClaim();
+
+                return $this->declined($e->getMessage());
+            }
+
+            return compact('tenant', 'person', 'params', 'payload', 'client', 'ticket');
+        });
+        if ($prepared instanceof TechnicianApprovalResult) {
+            return $prepared;
+        }
+        ['tenant' => $tenant, 'person' => $person, 'params' => $params, 'payload' => $payload, 'client' => $client, 'ticket' => $ticket] = $prepared;
+        // The committed Executing claim blocks the triple; no DB lock spans either CIPP call.
+        try {
+            $this->jitMembership($tenant, $person, $params);
+        } catch (\Throwable $e) {
+            $run->releaseClaim();
+
+            return $this->declined($e instanceof CippWriteScopeException
+                ? $e->getMessage()
+                : 'could not verify current role membership ('.get_class($e).')');
+        }
+        try {
+            $this->client->queueJitRoleGrant($tenant, $person->userId, $params['role_template_id'], \Carbon\CarbonImmutable::parse($params['end_date'])->timestamp, $payload['reason']);
+        } catch (\Throwable $e) {
+            $message = $this->jitFailure($e);
+            // Only a not-sent failure reopens the proposal. Past the POST, CIPP may have
+            // queued the enable, so the run closes and cannot be re-approved into a second one,
+            // and the marked row makes jitBrake refuse a fresh proposal for the same triple.
+            if ($e instanceof CippWriteNotSentException) {
+                $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, $person, null, $run->content_hash, $message, $this->approverLabel($approverId), $run->id, $approverId);
+                $run->releaseClaim();
+            } else {
+                $this->auditAttempt($run->action_type, 'error', $client->id, $ticket, null, null, $run->content_hash,
+                    'JIT person='.$person->person->id.' role='.$params['role_template_id'].'; '.$message,
+                    $this->approverLabel($approverId), $run->id, $approverId);
+                $run->advanceTo(TechnicianRunState::Done);
+
+                return new TechnicianApprovalResult('outcome_unknown', message: $message);
+            }
+
+            return $this->declined($message);
+        }
+        $this->auditAttempt($run->action_type, 'queued_unverified', $client->id, $ticket, null, null, $run->content_hash,
+            'JIT person='.$person->person->id.' role='.$params['role_template_id'].'; '.self::JIT_QUEUED_MESSAGE,
+            $this->approverLabel($approverId), $run->id, $approverId);
+        if (! $run->advanceTo(TechnicianRunState::Done)) {
+            \Illuminate\Support\Facades\Log::warning('[CIPP] a JIT role grant was queued with CIPP (not verified) but the run was not closed: this request no longer holds it', [
+                'run_id' => $run->id, 'action' => $run->action_type,
+            ]);
+
+            return new TechnicianApprovalResult('outcome_unknown', message: self::JIT_QUEUED_MESSAGE.' The run was not closed because this request no longer holds it; check its current state before acting on it again.');
+        }
+
+        return new TechnicianApprovalResult('outcome_unknown', message: self::JIT_QUEUED_MESSAGE);
+    }
+
     /**
      * Resolve directory-role removal params on the initial call and the held
      * approval replay. STRUCTURALLY HELD-ONLY (external-forwarding precedent):
@@ -7827,6 +8062,20 @@ class StaffCippWriteToolExecutor
             'Stage a Microsoft 365 mailbox delegate permission change (FullAccess, Send-As, or Send-on-Behalf) for cockpit approval. Delegate grants expose another user\'s mailbox; the held payload stores only local PSA identifiers plus the permission/operation, and approval revalidates local client/person scope before CIPP execution. confirm_upn must be the mailbox OWNER\'s UPN (person_id); delegate_person_id is a different person in the same client.',
             array_merge(self::personProperties(ticket: true), self::delegateProperties()),
             ['person_id', 'delegate_person_id', 'permission', 'operation', 'ticket_id', 'confirm_upn', 'reason'],
+        );
+    }
+
+    private static function addDirectoryRoleTool(bool $staged): array
+    {
+        return self::tool(
+            $staged ? 'cipp_stage_add_directory_role' : 'cipp_add_directory_role',
+            'HELD-ONLY JIT role proposal for cockpit approval. Only Teams Administrator and Teams Communications Administrator. Server-derived user requires confirm_upn. Approval queues with CIPP, never proves a grant: confirm with cipp_list_roles. Expiry defaults to 8 hours, maximum 7 days, RemoveRoles only. Current membership is checked at staging and approval.',
+            array_merge(self::personProperties(ticket: true), [
+                'role_template_id' => ['type' => 'string', 'description' => 'Universal Entra role template GUID of the allowlisted role to queue with CIPP.'],
+                'role_name' => ['type' => 'string', 'description' => 'Exact, case-sensitive allowlisted name: Teams Administrator or Teams Communications Administrator. Must match role_template_id.'],
+                'end_date' => ['type' => 'string', 'description' => 'ISO 8601 expiry, default 8 hours from staging, maximum 7 days.'],
+            ]),
+            ['person_id', 'role_template_id', 'role_name', 'confirm_upn', 'reason', 'ticket_id'],
         );
     }
 

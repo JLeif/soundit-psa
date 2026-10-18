@@ -6,13 +6,10 @@ use App\Services\Mcp\StaffCippWriteToolExecutor;
 use Tests\TestCase;
 
 /**
- * #3901 / yf7IXuhQ effect-denial sweep — the five CIPP kill-switch decline
- * messages.
+ * #3901 / yf7IXuhQ effect-denial sweep — the six CIPP kill-switch decline
+ * messages, including approveDirectoryRoleGrant added 2026-10-18 (uztKjE24).
  *
- * These five arms were adjudicated on 2026-09-26 as TRUE on every path: each
- * checks the kill switch, writes an audit row, and declines before any client
- * call (measured, with a positive control finding 7 `->client->` calls past the
- * kill switch in the same method). The list was closed with no wording change.
+ * The original five arms were adjudicated on 2026-09-26 as TRUE on every path: each checks the kill switch, writes an audit row, and declines before any client call (measured, with a positive control finding 7 `->client->` calls past the kill switch in the same method). The sixth, approveDirectoryRoleGrant, was added 2026-10-18 with its own ruled sentence and was not part of that measurement.
  *
  * The gap Jeeves named is that nothing pinned them, so a later edit could put an
  * effect claim back into a message that currently has none, and no control would
@@ -39,6 +36,7 @@ class CippKillSwitchDeclineWordingTest extends TestCase
             'approveCreateUserStagedRun' => ['approveCreateUserStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
             'approveGroupMembershipStagedRun' => ['approveGroupMembershipStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
             'approveLicenseTargetStagedRun' => ['approveLicenseTargetStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
+            'approveDirectoryRoleGrant' => ['approveDirectoryRoleGrant', 'Technician kill-switch engaged; the staged role grant was refused.'],
         ];
     }
 
@@ -123,7 +121,7 @@ class CippKillSwitchDeclineWordingTest extends TestCase
         }
     }
 
-    public function test_the_arm_count_is_pinned_so_a_sixth_cannot_arrive_unread(): void
+    public function test_the_arm_count_is_pinned_so_a_new_arm_cannot_arrive_unread(): void
     {
         // Round 1 (diff:4, contract:7, context:10): the first version counted
         // copies of ONE literal spelling of declined('Technician kill-switch
@@ -147,14 +145,14 @@ class CippKillSwitchDeclineWordingTest extends TestCase
             "/\\\$this->declined\('Technician kill-switch engaged;/",
             $source
         );
-        $this->assertSame(5, $declinedArms, 'Five CIPP kill-switch arms decline with an adjudicated sentence; read any new one before it ships.');
+        $this->assertSame(6, $declinedArms, 'Six CIPP kill-switch arms decline with an adjudicated sentence; read any new one before it ships.');
 
-        // The wider anchor. 11 = the 5 above + approveEmailSecurityStagedRun's
+        // The wider anchor. 12 = the 6 above + approveEmailSecurityStagedRun's
         // message-less arm + 5 non-staged MCP write guards that return
         // ['error' => ...] rather than a TechnicianApprovalResult.
         $killSwitchChecks = preg_match_all('/killSwitchEngaged\(/', $source);
         $this->assertSame(
-            11,
+            12,
             $killSwitchChecks,
             'A kill-switch check was added or removed in this executor. Read its arm: if it declines with a sentence, adjudicate the wording and pin it above; if it returns message-less, it renders the cockpit fallback (#3901) instead.'
         );

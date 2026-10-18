@@ -20,6 +20,63 @@ class CippRestWriteClientTest extends TestCase
         Cache::flush();
     }
 
+    public function test_jit_body_and_both_scheduler_receipts_are_required(): void
+    {
+        $this->freezeTime();
+        Http::preventStrayRequests();
+        // Invoke-ExecJITAdmin.ps1 at 5efb2f9d:211–216,359,390–395.
+        $reply = ['Results' => [
+            ['resultText' => 'User: jit@contoso.example', 'copyField' => 'jit@contoso.example', 'state' => 'success'],
+            'Queued JIT Admin enable task for jit@contoso.example to run now',
+            'Scheduling JIT Admin RemoveRoles task for jit@contoso.example',
+        ]];
+        Http::fake(function ($request) use (&$reply) {
+            return str_contains($request->url(), 'login.microsoftonline.com')
+                ? Http::response(['access_token' => 'synthetic-access', 'expires_in' => 3600])
+                : Http::response($reply);
+        });
+        $client = new CippRestWriteClient([
+            'api_url' => 'https://cipp.example.test', 'tenant_id' => 'synthetic-tenant',
+            'client_id' => 'synthetic-client', 'client_secret' => 'synthetic-value',
+        ], Cache::store(), fn () => ['93.184.216.34']);
+        $role = '69091246-20e8-4a56-aa4d-066075b2a7a8';
+        $end = now()->addHours(8)->timestamp;
+        $this->assertSame(['status' => 'queued_unverified'], $client->queueJitRoleGrant('contoso.example', 'synthetic-user', $role, $end, 'Synthetic reason'));
+        Http::assertSent(function ($request) use ($role, $end) {
+            if (! str_contains($request->url(), '/api/ExecJITAdmin')) {
+                return false;
+            }
+            $this->assertSame([
+                'tenantFilter' => 'contoso.example', 'userAction' => 'existing',
+                'existingUser' => ['value' => 'synthetic-user'], 'AdminRoles' => [['value' => $role]],
+                'StartDate' => now()->timestamp - 60, 'EndDate' => $end,
+                'ExpireAction' => ['value' => 'RemoveRoles'], 'UseTAP' => false,
+                'GroupMemberships' => [], 'Reason' => 'Synthetic reason',
+            ], $request->data());
+
+            return true;
+        });
+        $reply = ['Results' => ['JIT Admin request for jit@contoso.example submitted for approval.']];
+        $this->expectException(CippWriteUnconfirmedException::class);
+        $client->queueJitRoleGrant('contoso.example', 'synthetic-user', $role, $end, 'Synthetic reason');
+    }
+
+    public function test_strict_role_not_sent_exceptions_escape_unchanged(): void
+    {
+        Http::preventStrayRequests();
+        Http::fake();
+        foreach (['', 'http://127.0.0.1'] as $url) {
+            $client = new CippRestWriteClient(['api_url' => $url], Cache::store(), fn () => ['127.0.0.1']);
+            try {
+                $client->strictDirectoryRole('contoso.example', '69091246-20e8-4a56-aa4d-066075b2a7a8');
+                $this->fail('Unsafe or missing configuration must refuse');
+            } catch (CippWriteNotSentException $e) {
+                $this->assertSame(CippWriteNotSentException::class, $e::class);
+            }
+        }
+        Http::assertNothingSent();
+    }
+
     public function test_reset_http_failure_carries_status_without_response_body(): void
     {
         Http::preventStrayRequests();

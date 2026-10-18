@@ -88,6 +88,7 @@ class StagedActionLabels
         'cipp_stage_set_mailbox_out_of_office' => 'CIPP out of office',
         'cipp_stage_set_mailbox_delegate' => 'CIPP mailbox delegate',
         'cipp_stage_remove_directory_role' => 'CIPP directory role removal',
+        'cipp_stage_add_directory_role' => 'CIPP JIT role queue (unverified)',
         'cipp_stage_remove_mailbox_rule' => 'CIPP mailbox rule removal',
         'cipp_stage_release_quarantine_message' => 'CIPP quarantine release',
         'cipp_stage_add_tenant_allow_entry' => 'CIPP tenant allow-list',

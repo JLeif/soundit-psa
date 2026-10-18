@@ -13,7 +13,7 @@ class ScheduledApprovalPrimitivesTest extends TestCase
 {
     public function test_exact_allowlist_has_only_five_mailbox_adapters(): void
     {
-        $this->assertCount(30, ActionRegistry::ACTIONS);
+        $this->assertCount(31, ActionRegistry::ACTIONS);
         foreach (ActionRegistry::ACTIONS as $action => $tool) {
             $this->assertSame($tool, ActionRegistry::directTool($action));
             $this->assertSame(in_array($action, ['cipp_stage_convert_mailbox', 'cipp_stage_set_mailbox_forwarding', 'cipp_stage_set_mailbox_gal_visibility', 'cipp_stage_set_mailbox_out_of_office', 'cipp_stage_set_mailbox_delegate', 'tactical_stage_command', 'tactical_stage_reboot', 'tactical_stage_shutdown', 'tactical_stage_recover_mesh', 'tactical_stage_maintenance', 'tactical_stage_start_service', 'tactical_stage_stop_service', 'tactical_stage_restart_service'], true), ActionRegistry::adapterAvailable($action));
