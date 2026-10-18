@@ -526,6 +526,8 @@ class StaffCippWriteToolExecutor
         'RoleId',
         'roleId',
         'role_id',
+        'RoleTemplateId',
+        'roleTemplateId',
         'RoleName',
         'roleName',
         'ruleId',

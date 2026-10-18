@@ -279,13 +279,13 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertSame('cipp_stage_remove_directory_role', $run->action_type);
 
         // The stored proposal keeps only safe local scalars: the template GUID is
-        // canonicalized to lowercase, the typed role name and PSA person id ride
-        // along, and no upstream role id is stored (the role row is re-read at approval).
+        // canonicalized to lowercase and the typed role name and PSA person id ride
+        // along. The role row is never read while staging (listDirectoryRoles is
+        // forbidden on this mock); it is read only at approval.
         $stored = json_encode($run->proposed_meta);
         $this->assertStringContainsString(self::EXCHANGE_ADMIN_TEMPLATE_ID, $stored);
         $this->assertStringNotContainsString(strtoupper(self::EXCHANGE_ADMIN_TEMPLATE_ID), $stored);
         $this->assertStringContainsString('Exchange Administrator', $stored);
-        $this->assertStringNotContainsString('role-definition-1', $stored);
 
         // The operator-facing proposal names the target by UPN and the role by
         // name so the human gate can verify who loses which admin role.
@@ -413,7 +413,7 @@ class CippWriteDirectoryRoleTest extends TestCase
         $this->assertStringContainsString('role_name', (string) $missingName->json('result.content.0.text'));
 
         // The upstream endpoint's own body keys are never accepted from the caller.
-        foreach (['RoleId' => 'role-definition-1', 'Users' => [['value' => 'attacker']], 'RoleName' => 'Global Administrator'] as $key => $value) {
+        foreach (['RoleId' => 'role-definition-1', 'RoleTemplateId' => self::EXCHANGE_ADMIN_TEMPLATE_ID, 'Users' => [['value' => 'attacker']], 'RoleName' => 'Global Administrator'] as $key => $value) {
             $rejected = $this->callTool($token, 'cipp_stage_remove_directory_role', $this->roleArguments($fixture, [$key => $value]));
             $this->assertTrue((bool) $rejected->json('result.isError'), $key);
             $this->assertStringContainsString('upstream CIPP identifiers are not accepted', (string) $rejected->json('result.content.0.text'));
