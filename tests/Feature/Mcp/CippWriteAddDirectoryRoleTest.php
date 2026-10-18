@@ -36,6 +36,8 @@ class CippWriteAddDirectoryRoleTest extends TestCase
 
     private int $baseTransactionLevel;
 
+    private array $membershipReads = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -72,6 +74,11 @@ class CippWriteAddDirectoryRoleTest extends TestCase
                 return Http::response(['access_token' => 'synthetic-access', 'expires_in' => 3600]);
             }
             if (str_starts_with($request->url(), 'https://cipp.example.test/api/ListRoles')) {
+                $this->membershipReads[] = [
+                    'transaction_level' => \Illuminate\Support\Facades\DB::transactionLevel(),
+                    'executing' => TechnicianRun::where('state', TechnicianRunState::Executing)->count(),
+                ];
+
                 return Http::response($this->vendorState['roles'], $this->vendorState['readStatus']);
             }
             if ($request->url() === 'https://cipp.example.test/api/ExecJITAdmin') {
@@ -270,6 +277,23 @@ class CippWriteAddDirectoryRoleTest extends TestCase
             $this->assertNoWrite();
             $run->fresh()->update(['state' => TechnicianRunState::Denied]);
         }
+    }
+
+    public function test_post_commit_membership_refusal_releases_claim_without_sending_jit(): void
+    {
+        $run = $this->stage();
+        $this->fakeVendor($this->roles([['id' => $this->fixture['person']->cipp_user_id, 'directoryScopeId' => '/']]));
+
+        $result = app(StaffCippWriteToolExecutor::class)->approveStagedRun($run, $this->actor->id);
+
+        $this->assertSame('gate_declined', $result->status);
+        $this->assertStringContainsString('already holds', $result->message);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/api/ExecJITAdmin'));
+        $this->assertSame(TechnicianRunState::AwaitingApproval, $run->fresh()->state);
+        $this->assertSame([
+            ['transaction_level' => $this->baseTransactionLevel, 'executing' => 0],
+            ['transaction_level' => $this->baseTransactionLevel, 'executing' => 1],
+        ], $this->membershipReads, 'Staging reads before its transaction; approval reads after committing its Executing claim.');
     }
 
     public function test_non_queue_replies_never_record_queued(): void

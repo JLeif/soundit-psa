@@ -6130,12 +6130,12 @@ class StaffCippWriteToolExecutor
             }
             $person = $this->resolver->resolveActiveCippPerson($clientId, $context['person']->person->id, 'user');
 
-            // One durable database row serializes staging and approval across tickets.
-            // No lease may expire while an upstream request is still in flight.
+            $this->jitMembership($context['tenant'], $person, $params);
+
+            // Serialize the brake and proposal creation across tickets; no CIPP call holds the lock.
             return \Illuminate\Support\Facades\DB::transaction(function () use ($clientId, $params, $context, $person, $actorLabel, $tokenLabel) {
                 Client::whereKey($clientId)->lockForUpdate()->firstOrFail();
                 $this->jitBrake($clientId, $person->person->id, $params);
-                $this->jitMembership($context['tenant'], $person, $params);
                 $ticket = $context['ticket'];
                 $payload = [
                     'client_id' => $clientId, 'person_id' => $person->person->id,
@@ -6189,14 +6189,12 @@ class StaffCippWriteToolExecutor
                     throw new CippWriteScopeException('The approved tenant or user identity changed; deny and re-stage.');
                 }
                 if (TechnicianConfig::killSwitchEngaged()) {
-                    throw new CippWriteScopeException('Technician kill-switch engaged; grant refused.');
+                    $this->auditAttempt($run->action_type, 'blocked', $client->id, $ticket, $person, null, $run->content_hash, 'Technician kill-switch engaged; staged role grant refused.', $this->approverLabel($approverId), $run->id, $approverId);
+                    $run->releaseClaim();
+
+                    return $this->declined('Technician kill-switch engaged; the staged role grant was refused.');
                 }
                 $this->jitBrake($client->id, $person->person->id, $params, $run->id);
-                try {
-                    $this->jitMembership($tenant, $person, $params);
-                } catch (CippClientException $e) {
-                    throw new CippWriteScopeException('could not verify current role membership ('.get_class($e).')');
-                }
             } catch (CippWriteScopeException $e) {
                 $run->releaseClaim();
 
@@ -6209,7 +6207,16 @@ class StaffCippWriteToolExecutor
             return $prepared;
         }
         ['tenant' => $tenant, 'person' => $person, 'params' => $params, 'payload' => $payload, 'client' => $client, 'ticket' => $ticket] = $prepared;
-        // The committed Executing claim blocks the triple; no DB lock spans the write.
+        // The committed Executing claim blocks the triple; no DB lock spans either CIPP call.
+        try {
+            $this->jitMembership($tenant, $person, $params);
+        } catch (\Throwable $e) {
+            $run->releaseClaim();
+
+            return $this->declined($e instanceof CippWriteScopeException
+                ? $e->getMessage()
+                : 'could not verify current role membership ('.get_class($e).')');
+        }
         try {
             $this->client->queueJitRoleGrant($tenant, $person->userId, $params['role_template_id'], \Carbon\CarbonImmutable::parse($params['end_date'])->timestamp, $payload['reason']);
         } catch (\Throwable $e) {

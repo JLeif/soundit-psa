@@ -64,7 +64,7 @@ class CooldownRemovalTest extends TestCase
             }
         }
         // Live positive controls over the same OUTPUT: not an empty scan or a source-text pin.
-        $this->assertCount(125, $definitions);
+        $this->assertCount(127, $definitions);
         foreach (['tactical_run_command', 'cipp_set_mailbox_delegate', 'cipp_reset_user_password'] as $name) {
             $this->assertStringContainsString('cooldown', $definitions[$name], $name);
         }

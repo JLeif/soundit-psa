@@ -39,6 +39,7 @@ class CippKillSwitchDeclineWordingTest extends TestCase
             'approveCreateUserStagedRun' => ['approveCreateUserStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
             'approveGroupMembershipStagedRun' => ['approveGroupMembershipStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
             'approveLicenseTargetStagedRun' => ['approveLicenseTargetStagedRun', 'Technician kill-switch engaged; the staged CIPP write was refused.'],
+            'approveDirectoryRoleGrant' => ['approveDirectoryRoleGrant', 'Technician kill-switch engaged; the staged role grant was refused.'],
         ];
     }
 
@@ -147,14 +148,14 @@ class CippKillSwitchDeclineWordingTest extends TestCase
             "/\\\$this->declined\('Technician kill-switch engaged;/",
             $source
         );
-        $this->assertSame(5, $declinedArms, 'Five CIPP kill-switch arms decline with an adjudicated sentence; read any new one before it ships.');
+        $this->assertSame(6, $declinedArms, 'Six CIPP kill-switch arms decline with an adjudicated sentence; read any new one before it ships.');
 
-        // The wider anchor. 11 = the 5 above + approveEmailSecurityStagedRun's
+        // The wider anchor. 12 = the 6 above + approveEmailSecurityStagedRun's
         // message-less arm + 5 non-staged MCP write guards that return
         // ['error' => ...] rather than a TechnicianApprovalResult.
         $killSwitchChecks = preg_match_all('/killSwitchEngaged\(/', $source);
         $this->assertSame(
-            11,
+            12,
             $killSwitchChecks,
             'A kill-switch check was added or removed in this executor. Read its arm: if it declines with a sentence, adjudicate the wording and pin it above; if it returns message-less, it renders the cockpit fallback (#3901) instead.'
         );
