@@ -4,7 +4,9 @@ namespace Tests\Feature\AutoElevate;
 
 use Illuminate\Console\Scheduling\Event as ScheduleEvent;
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -21,6 +23,8 @@ use Tests\TestCase;
  */
 class AutoElevateScheduleTest extends TestCase
 {
+    use RefreshDatabase;
+
     /** @var list<array{0: string, 1: string}> level, message */
     private array $logged = [];
 
@@ -76,5 +80,33 @@ class AutoElevateScheduleTest extends TestCase
         $event->callAfterCallbacks($this->app);
 
         $this->assertSame([], $this->logged);
+    }
+
+    public function test_the_scheduled_name_is_a_registered_command(): void
+    {
+        $this->syncEvent();
+
+        $this->assertTrue(array_key_exists('autoelevate:sync-assets', Artisan::all()));
+    }
+
+    /**
+     * The no-when() ruling rests on the event always running: with no API key
+     * configured it must still pass its filters, carry no when() filter and no
+     * environment limit. Its one reject is the overlap lock's own mutex check
+     * (added by withoutOverlapping), and nothing else.
+     */
+    public function test_the_event_has_no_filter_and_passes_its_filters(): void
+    {
+        $this->assertFalse(\App\Support\AutoElevateConfig::isConfigured());
+
+        $event = $this->syncEvent();
+        $filters = (new \ReflectionProperty($event, 'filters'))->getValue($event);
+        $rejects = (new \ReflectionProperty($event, 'rejects'))->getValue($event);
+
+        $this->assertSame([], $filters);
+        $this->assertCount(1, $rejects);
+        $this->assertSame([], $event->environments);
+        $this->assertTrue($event->runsInEnvironment($this->app->environment()));
+        $this->assertTrue($event->filtersPass($this->app));
     }
 }

@@ -500,7 +500,7 @@
         {{-- ============================================================ --}}
         <div class="tab-pane fade" id="rmm" role="tabpanel">
 
-        {{-- AutoElevate: stage 1, no polling or elevation writes --}}
+        {{-- AutoElevate: read-only at the vendor (no elevation writes); assets are linked hourly by autoelevate:sync-assets --}}
         <div class="card card-static shadow-sm mb-4">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span>AutoElevate</span>
