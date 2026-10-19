@@ -3320,8 +3320,8 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertNull($assets[0]->fresh()->litsrmm_device_id);
     }
 
-    /** #7166: an array category sent without its payload wrapper is absent, not drift. */
-    public function test_a_category_without_its_payload_wrapper_is_absent_not_drift(): void
+    /** #7166, #7209: an array category sent without its payload wrapper, with a key besides collectedAt that is not null, is drift. */
+    public function test_a_category_without_its_payload_wrapper_is_drift(): void
     {
         $row = $this->device('1');
         $inventory = self::inventory();
@@ -3332,15 +3332,16 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $result = $this->service()->sync();
 
-        $this->assertSame(0, $result->errors, 'An array category with no payload wrapper must be absent, not drift, so it must record no error.');
-        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'An array category with no payload wrapper must leave the stored CPU as it was.');
-        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'An array category with no payload wrapper must leave the stored RAM as it was.');
-        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'An array category with no payload wrapper must leave the stored disk summary as it was.');
+        $this->assertSame(1, $result->errors, 'An array category with no payload wrapper must be drift, so it must record one error.');
+        $this->assertStringContainsString('sent 2 inventory categories', $result->errorMessages[0], 'Both drifted categories must be counted, not just the first.');
+        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'A drifted category with no payload wrapper must leave the stored CPU as it was.');
+        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'A drifted category with no payload wrapper must leave the stored RAM as it was.');
+        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'A drifted category with no payload wrapper must leave the stored disk summary as it was.');
         $this->assertSame('192.0.2.10', $asset->fresh()->ip_address, 'The categories that carry a payload must still be read.');
     }
 
-    /** #7204: an array category whose payload is under another key is absent, not drift. */
-    public function test_a_category_with_its_payload_under_another_key_is_absent_not_drift(): void
+    /** #7204, #7209: an array category whose payload is under another key is drift. */
+    public function test_a_category_with_its_payload_under_another_key_is_drift(): void
     {
         $row = $this->device('1');
         $inventory = self::inventory();
@@ -3351,10 +3352,11 @@ class LitsrmmAssetSyncTest extends TestCase
 
         $result = $this->service()->sync();
 
-        $this->assertSame(0, $result->errors, 'An array category with its payload under another key must be absent, not drift, so it must record no error.');
-        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'An array category with its payload under another key must leave the stored CPU as it was.');
-        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'An array category with its payload under another key must leave the stored RAM as it was.');
-        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'An array category with its payload under another key must leave the stored disk summary as it was.');
+        $this->assertSame(1, $result->errors, 'An array category with its payload under another key must be drift, so it must record one error.');
+        $this->assertStringContainsString('sent 2 inventory categories', $result->errorMessages[0], 'Both drifted categories must be counted, not just the first.');
+        $this->assertSame('Stored CPU', $asset->fresh()->cpu, 'A drifted category with its payload under another key must leave the stored CPU as it was.');
+        $this->assertSame('16.00', $asset->fresh()->ram_gb, 'A drifted category with its payload under another key must leave the stored RAM as it was.');
+        $this->assertSame('C: 100 GB', $asset->fresh()->disk_summary, 'A drifted category with its payload under another key must leave the stored disk summary as it was.');
         $this->assertSame('192.0.2.10', $asset->fresh()->ip_address, 'The categories that carry a payload must still be read.');
     }
 

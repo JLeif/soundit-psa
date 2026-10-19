@@ -269,16 +269,42 @@ class LitsrmmHardwareTest extends TestCase
             'missing payload' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z']]],
             'empty hardware object' => [['hardware' => ['payload' => []]]],
             'empty system object' => [['system' => ['payload' => []]]],
-            'payload under another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]]],
-            'network payload under another key' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]]],
-            'system payload under another key' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]]],
             'empty category array' => [['disks' => []]],
             'empty disks list' => [['disks' => ['payload' => []]]],
             'empty network list' => [['network' => ['payload' => []]]],
-            'unwrapped hardware payload' => [['hardware' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]],
-            'unwrapped disks list' => [['disks' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]]],
-            'unwrapped network list' => [['network' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]],
-            'unwrapped system payload' => [['system' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]],
+            // #7209: payload is present (null or []), so a sibling key beside it is not drift.
+            'null payload beside another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'payload' => null, 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]]],
+            'empty payload beside another key' => [['system' => ['payload' => [], 'data' => ['pendingReboot' => true]]]],
+            // #7209: no payload key, and every key besides collectedAt is null.
+            'no payload, other key null' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => null]]],
+        ];
+    }
+
+    /** #7209: an array category with no payload key that carries any other non-null key besides collectedAt (a renamed or re-nested wrapper) is drift. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('renamedWrappers')]
+    public function test_h14_a_category_with_no_payload_key_and_another_non_null_key_is_drift(array $inventory, string $category): void
+    {
+        $hw = LitsrmmHardware::fromInventory($inventory);
+
+        $this->assertSame([$category], $hw->malformed, 'An array category with no payload key and another non-null key besides collectedAt must be malformed, once.');
+        $this->assertSame([], $hw->columns(), 'A renamed or re-nested wrapper must add no column.');
+    }
+
+    public static function renamedWrappers(): array
+    {
+        return [
+            'payload under another key' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]]], 'hardware'],
+            'network payload under another key' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => [['ipv4' => ['192.0.2.10'], 'up' => true]]]], 'network'],
+            'system payload under another key' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]]], 'system'],
+            'unwrapped hardware payload' => [['hardware' => ['cpu' => 'Example CPU', 'ramBytes' => 15000000000]], 'hardware'],
+            'unwrapped disks list' => [['disks' => [['drive' => 'C:', 'totalBytes' => 480000000000, 'freeBytes' => 100000000000]]], 'disks'],
+            'unwrapped network list' => [['network' => [['ipv4' => ['192.0.2.10'], 'up' => true]]], 'network'],
+            'unwrapped system payload' => [['system' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]], 'system'],
+            'collectedAt beside an error' => [['disks' => ['collectedAt' => '2026-09-30T10:00:00Z', 'error' => 'collector failed']], 'disks'],
+            'collectedAt beside an empty list' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => []]], 'hardware'],
+            'collectedAt beside an empty string' => [['disks' => ['collectedAt' => '2026-09-30T10:00:00Z', 'error' => '']], 'disks'],
+            'collectedAt beside false' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'ok' => false]], 'system'],
+            'collectedAt beside zero' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'count' => 0]], 'network'],
         ];
     }
 
