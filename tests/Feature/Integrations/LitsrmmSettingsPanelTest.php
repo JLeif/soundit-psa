@@ -141,11 +141,14 @@ class LitsrmmSettingsPanelTest extends TestCase
      * The pending line's exact text must appear once in the page, exactly one
      * <p> must carry it once whitespace is normalised, and that <p> must be the
      * element directly after the form-check div that holds the switch, inside
-     * the schedule form. Moving it outside the form, above the switch, or below
-     * the "Off by default" form-text fails here, as does a second exact copy or
-     * a second <p> whose whitespace-normalised text equals the line. A copy in
-     * another element, or a <p> whose text differs once normalised (one joined by
-     * a non-breaking space or broken with <br>), is not counted.
+     * the schedule form, with its trimmed text equal to the line. Moving it
+     * outside the form, above the switch, or below the "Off by default"
+     * form-text fails here. So does a second exact copy in any element, or a
+     * second <p> whose whitespace-normalised text (child elements included)
+     * equals the line, which covers a <br> with whitespace beside it. A copy that
+     * is not byte-exact passes if it sits outside any <p>, or if its <p> text
+     * still differs once normalised (joined by a non-breaking space, or broken by
+     * a <br> with no whitespace beside it).
      */
     private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
     {
