@@ -35,9 +35,11 @@ use DateTimeZone;
  * category malformed. An IPv4 string that is not usable (link-local,
  * reserved, not an address) is skipped, not drift. Absent, not drift: a
  * category that is left out or null; an array category whose payload is
- * missing (left out, or under another key), null or an empty array; and a
- * key this class reads that is missing or null. Other categories remain
- * readable. $malformed names each category once for drift reporting.
+ * missing (left out), null or an empty array; and a key this class reads
+ * that is missing or null. Drift, too: an array category with no payload key
+ * that carries any other non-null key besides collectedAt (a renamed or
+ * re-nested wrapper). Other categories remain readable. $malformed names each
+ * category once for drift reporting.
  */
 final class LitsrmmHardware
 {
@@ -80,7 +82,12 @@ final class LitsrmmHardware
         $malformed = [];
         foreach ($invalid as $category => $unreadable) {
             $entry = $inventory[$category] ?? null;
-            $present = $entry !== null && (! is_array($entry) || ($entry['payload'] ?? null) !== null);
+            $present = $entry !== null && (! is_array($entry) || ($entry['payload'] ?? null) !== null
+                || (! array_key_exists('payload', $entry) && array_filter(
+                    $entry,
+                    static fn ($value, $key) => $key !== 'collectedAt' && $value !== null,
+                    ARRAY_FILTER_USE_BOTH,
+                ) !== []));
             if ($unreadable || ($present && self::payload($inventory, $category) === null)) {
                 $malformed[] = $category;
             }
