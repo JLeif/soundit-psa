@@ -196,6 +196,86 @@ class LitsrmmAssetSyncTest extends TestCase
             ->count();
     }
 
+    public function test_l5_overlapping_runs_do_not_create_duplicate_active_assets(): void
+    {
+        $row = $this->device('1');
+        $service = $this->service();
+        $nested = null;
+        $entered = false;
+        $dispatcher = Asset::getEventDispatcher();
+        Asset::setEventDispatcher(clone $dispatcher);
+        Asset::creating(function () use ($service, &$nested, &$entered) {
+            if (! $entered) {
+                $entered = true;
+                $nested = $service->sync($this->client);
+            }
+        });
+
+        try {
+            $service->sync();
+        } finally {
+            Asset::setEventDispatcher($dispatcher);
+        }
+
+        $this->assertTrue($entered);
+        $this->assertSame(1, Asset::where('client_id', $this->client->id)->where('is_active', true)->count(), 'Overlapping full and single-client runs must leave one active asset.');
+        $this->assertSame(1, $nested->errors);
+        $this->assertSame(['Another LITSRMM device sync is running; nothing was read.'], $nested->errorMessages);
+        $this->assertSame(0, $service->sync()->errors);
+    }
+
+    public function test_l5_lock_is_released_after_a_throw(): void
+    {
+        $this->device('1');
+        $service = $this->service();
+        $dispatcher = Asset::getEventDispatcher();
+        Asset::setEventDispatcher(clone $dispatcher);
+        Asset::creating(function () {
+            throw new \RuntimeException('synthetic failure');
+        });
+        try {
+            $service->sync();
+            $this->fail('Expected the synthetic failure');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('synthetic failure', $e->getMessage());
+        } finally {
+            Asset::setEventDispatcher($dispatcher);
+        }
+        $this->assertSame(0, $service->sync()->errors);
+        $this->assertSame(1, Asset::where('client_id', $this->client->id)->count());
+    }
+
+    public function test_l5_disabled_settings_post_with_the_real_service_changes_nothing(): void
+    {
+        $this->client->update(['litsrmm_client_id' => null]);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '00000000-0000-4000-8000-000000000001']);
+        $this->app->instance(LitsrmmAssetSyncService::class, $this->service());
+        Setting::setValue('litsrmm_enabled', '0');
+
+        $this->actingAs(User::factory()->admin()->create())
+            ->post(route('settings.integrations.litsrmm.sync-devices'))
+            ->assertSessionHas('error', 'LITSRMM is switched off or not configured. Nothing was read.');
+
+        $this->assertSame($asset->litsrmm_device_id, $asset->fresh()->litsrmm_device_id);
+        $this->assertCount(0, $this->history);
+    }
+
+    public function test_l5_disabled_service_preserves_unmapped_assets_and_seats(): void
+    {
+        $this->client->update(['litsrmm_client_id' => null]);
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '00000000-0000-4000-8000-000000000001']);
+        $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'rmm_workstation', 'name' => 'Example seat', 'is_active' => true]);
+        $seat = License::create(['license_type_id' => $type->id, 'client_id' => $this->client->id, 'vendor_ref' => self::VENDOR_CLIENT, 'quantity' => 3, 'status' => 'active']);
+        Setting::setValue('litsrmm_enabled', '0');
+        $result = $this->service()->sync();
+        $this->assertSame(1, $result->errors);
+        $this->assertSame(['LITSRMM is switched off or not configured; nothing was read or changed.'], $result->errorMessages);
+        $this->assertSame($asset->litsrmm_device_id, $asset->fresh()->litsrmm_device_id);
+        $this->assertSame('active', $seat->fresh()->status);
+        $this->assertEquals(3, $seat->fresh()->quantity);
+        $this->assertCount(0, $this->history);
+    }
+
     public function test_l4_duplicate_device_link_keeps_lowest_id_pin(): void
     {
         $row = $this->device('1', ['id' => '00000000-0000-4000-8000-000000000001', 'clientName' => 'Example Client']);

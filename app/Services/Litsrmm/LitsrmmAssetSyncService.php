@@ -375,6 +375,34 @@ class LitsrmmAssetSyncService
     public function sync(?Client $only = null, array $acceptShortRead = []): SyncResult
     {
         $result = new SyncResult;
+        if (! \App\Support\LitsrmmConfig::isAvailable()) {
+            $result->recordError('LITSRMM is switched off or not configured; nothing was read or changed.');
+
+            return $result;
+        }
+
+        $lock = \Illuminate\Support\Facades\Cache::lock('litsrmm-asset-sync', self::SYNC_LOCK_TTL);
+        if (! $lock->get()) {
+            $result->recordError('Another LITSRMM device sync is running; nothing was read.');
+
+            return $result;
+        }
+
+        try {
+            return $this->syncLocked($only, $acceptShortRead);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    // The TTL must exceed the longest real full-sync run (not measured).
+    // A killed holder expires after this interval.
+    private const SYNC_LOCK_TTL = 3600;
+
+    /** @param list<string> $acceptShortRead */
+    private function syncLocked(?Client $only, array $acceptShortRead): SyncResult
+    {
+        $result = new SyncResult;
         $accepted = [];
         // #5785 (i): a code is single-use. One given more than once in a run
         // passes nothing: its refusal is refused, saying so.
