@@ -226,6 +226,12 @@ if [ -n "${GC_VERIFY_JUNIT:-}" ]; then
             exit 1 ;;
     esac
 fi
+# Consumed: unset both so nothing the suite starts inherits them. The suite
+# itself runs gc-verify.sh in fixtures (GcVerify*Test); measured on the first
+# parallel gate of this change, an inherited GC_VERIFY_PARALLEL sent --parallel
+# to those fixtures' plain PHPUnit runner (6 failures), and an inherited
+# GC_VERIFY_JUNIT would have pointed their reports at this run's file.
+unset GC_VERIFY_PARALLEL GC_VERIFY_JUNIT
 
 echo "==> [1/3] php artisan test ${GC_TEST_ARGS[*]}"
 if ! php artisan config:clear --ansi >/dev/null; then

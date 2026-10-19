@@ -51,6 +51,7 @@ if ($argv[1] === "config:clear") { exit(0); }
 if ($argv[1] === "key:generate") { exit(0); }
 if ($argv[1] !== "test") { exit(99); }
 file_put_contents(__DIR__."/argv.log", implode(" ", array_slice($argv, 1))."\n", FILE_APPEND);
+file_put_contents(__DIR__."/env.log", var_export([getenv("GC_VERIFY_PARALLEL"), getenv("GC_VERIFY_JUNIT")], true));
 fwrite(STDOUT, '.var_export($summary."\n", true).');
 exit('.$exit.');
 ');
@@ -423,6 +424,20 @@ exit('.$exit.');
             "test --parallel --processes=3 --fail-on-warning --log-junit /nonexistent-dir/j.xml\n",
             file_get_contents($this->fixture.'/argv.log')
         );
+    }
+
+    /**
+     * The options are consumed, not inherited: the suite runs gc-verify.sh in
+     * fixtures, and an inherited value made those nested gates run --parallel
+     * against a plain PHPUnit (measured: 6 failures on the first parallel gate).
+     */
+    public function test_options_are_not_inherited_by_the_suite(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3', 'GC_VERIFY_JUNIT' => '/nonexistent-dir/j.xml']);
+
+        self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
+        self::assertSame(var_export([false, false], true), file_get_contents($this->fixture.'/env.log'));
     }
 
     public static function badParallelValues(): array
