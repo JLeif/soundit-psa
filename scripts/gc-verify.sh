@@ -9,6 +9,13 @@
 #
 # Gates:
 #   1. php artisan test          — the full PHPUnit suite must pass without warnings.
+#      Serial by default; GC_VERIFY_PARALLEL=<N> opts into ParaTest with N
+#      processes (see stage 1). The runner flag and the belt-two parser are
+#      the same on either path, but the summary belt two reads is not: under
+#      ParaTest it does not count @-suppressed warnings (belt one misses that
+#      class in both modes), so the parallel path does NOT cover the warning
+#      class belt two exists for (see stage 1, KNOWN GAP). Which belt trips
+#      under ParaTest has not been measured through this script (stage 1).
 #      Enforced by TWO independent belts, because --fail-on-warning alone was
 #      measured to be partial: it does not fail on the @-suppressed read at
 #      vendor/vlucas/phpdotenv/src/Store/File/Reader.php:73 that Laravel's error
@@ -185,7 +192,87 @@ if ! declare -F assert_no_warnings >/dev/null; then
     exit 1
 fi
 
-echo "==> [1/3] php artisan test --fail-on-warning"
+# --- optional parallel run (opt-in; serial stays the default) ----------------
+# GC_VERIFY_PARALLEL=<N> runs stage 1 as `php artisan test --parallel
+# --processes=<N>` (ParaTest, a require-dev package). Unset, empty or 0 keeps
+# the serial argv and exit policy as they were, provided GC_VERIFY_JUNIT is
+# also unset (see below). The runner flag --fail-on-warning and the belt-two
+# parser are the same on both paths. Which belt trips under ParaTest is
+# not measured through this script. A planted test-triggered warning
+# (E_USER_WARNING), run with `php artisan test --parallel` directly (burner
+# tree, not through this script), surfaced as an error ("Errors: 1"). An
+# error makes the runner exit non-zero, which belt one fails on (inferred from
+# PHPUnit's exit-code rules; that run's exit code was not recorded). The
+# "Warnings: 1" ParaTest label was captured
+# separately, through a bypass adapter that called vendor/bin/paratest
+# directly (not artisan or Collision) with an earlier revision of this script.
+# It shows ParaTest's label, not which belt trips on the app path. Belt two is
+# pinned against both ParaTest summary labels in GcVerifySummaryWarningGateTest.
+#
+# KNOWN GAP ON THE PARALLEL PATH (inferred from vendored source, not measured):
+# the parser is the same, but what it reads is not. Serially, belt two reads
+# Collision's summary. Its DefaultPrinter counts every warning event,
+# @-suppressed ones included, and that is the column the header's phpdotenv
+# read surfaced in. Under --parallel the summary is ParaTest's, built from
+# PHPUnit's TestResult. PHPUnit's Collector drops a warning event that
+# wasSuppressed() unless <source> sets ignoreSuppressionOf(Php)Warnings
+# (Runner\IssueFilter::shouldBeProcessed), and this repo's phpunit.xml sets
+# neither. So an @-suppressed warning that the serial gate FAILs on can reach
+# neither belt in parallel, and the run PASSes. The measured instance (the
+# no-.env phpdotenv read) is closed on both paths by the .env provisioning
+# above. The class is not closed. A parallel PASS does not stand in for a
+# serial one on that class, and serial stays the gate of record. The only
+# switch found in PHPUnit 11.5 is that phpunit.xml attribute (its CLI has no
+# suppression option). Setting it would also change what the serial run's
+# --fail-on-warning sees, so this change does not set it.
+# Ruled by Jeeves on Trello card 6ab5736b (2026-10-19 03:26 PT): parallel is
+# opt-in, serial stays the default, and --fail-on-warning and belt two are
+# kept. Forge's choices, not ruled text: the 1-99 range; any other value is a
+# FAIL, never a quiet fallback to serial, so a typo cannot change what the
+# gate measured without saying so; and the absolute-path rule below.
+#
+# GC_VERIFY_JUNIT=<absolute path> additionally passes --log-junit <path>, so a
+# caller can compare the passed/skipped sets by name between runs. It acts on
+# either path, serial included. It can fail the run: a relative value is a
+# FAIL here, and the runner's JUnit write (which creates missing parent
+# directories) can fail the run if it cannot write the report.
+#
+# ORDER MATTERS: artisan's test command binds its own declared options
+# (--parallel among them; --processes is not one of them and is passed through
+# to ParaTest) only BEFORE the first option it does not know; everything from
+# there on is forwarded to the runner. Measured: `artisan test --fail-on-warning
+# --parallel` hands --parallel to PHPUnit, which refuses it ("Unknown option").
+# So the parallel options go first and --fail-on-warning follows.
+GC_TEST_ARGS=()
+case "${GC_VERIFY_PARALLEL:-}" in
+    ''|0) ;;
+    *)
+        if [[ "$GC_VERIFY_PARALLEL" =~ ^[1-9][0-9]?$ ]]; then
+            GC_TEST_ARGS+=(--parallel "--processes=$GC_VERIFY_PARALLEL")
+        else
+            echo "ERROR: GC_VERIFY_PARALLEL must be unset, 0, or a process count 1-99." >&2
+            echo "==> gc-verify: FAIL (bad GC_VERIFY_PARALLEL)" >&2
+            exit 1
+        fi ;;
+esac
+GC_TEST_ARGS+=(--fail-on-warning)
+if [ -n "${GC_VERIFY_JUNIT:-}" ]; then
+    case "$GC_VERIFY_JUNIT" in
+        /*) GC_TEST_ARGS+=(--log-junit "$GC_VERIFY_JUNIT") ;;
+        *)
+            echo "ERROR: GC_VERIFY_JUNIT must be an absolute path." >&2
+            echo "==> gc-verify: FAIL (bad GC_VERIFY_JUNIT)" >&2
+            exit 1 ;;
+    esac
+fi
+# Consumed: unset both so nothing the suite starts inherits them. The suite
+# itself runs gc-verify.sh in fixtures (GcVerify*Test); measured on the first
+# parallel gate of this change, an inherited GC_VERIFY_PARALLEL sent --parallel
+# to those fixtures' plain PHPUnit runner (6 failures), and an inherited
+# GC_VERIFY_JUNIT would have pointed their reports at this run's file.
+unset GC_VERIFY_PARALLEL GC_VERIFY_JUNIT
+
+echo "==> [1/3] php artisan test ${GC_TEST_ARGS[*]}"
 if ! php artisan config:clear --ansi >/dev/null; then
     echo "==> gc-verify: FAIL (configuration clear)" >&2
     exit 1
@@ -195,11 +282,11 @@ fi
 TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/gc-verify-tests.XXXXXX")"
 trap 'rm -f "$TEST_LOG"' EXIT
 set +e
-php artisan test --fail-on-warning 2>&1 | tee "$TEST_LOG"
+php artisan test "${GC_TEST_ARGS[@]}" 2>&1 | tee "$TEST_LOG"
 TEST_STATUS="${PIPESTATUS[0]}"
 set -e
 if [ "$TEST_STATUS" -ne 0 ]; then
-    echo "==> gc-verify: FAIL (PHPUnit failed or reported warnings)" >&2
+    echo "==> gc-verify: FAIL (test run failed or reported warnings)" >&2
     exit 1
 fi
 

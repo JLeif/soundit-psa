@@ -58,7 +58,10 @@ $args = array_merge([PHP_BINARY, '.$phpunit.', "--no-configuration", "--colors=n
 passthru(implode(" ", array_map("escapeshellarg", $args)), $status);
 exit($status);
 ');
-        $run = new Process(['bash', $root.'/scripts/gc-verify.sh'], $this->fixture);
+        // The gate's opt-in options are scrubbed, so an ambient value in the caller's
+        // shell cannot leak into this fixture gate (gc-verify unsets them only for
+        // suites it starts itself).
+        $run = new Process(['bash', $root.'/scripts/gc-verify.sh'], $this->fixture, ['GC_VERIFY_PARALLEL' => false, 'GC_VERIFY_JUNIT' => false]);
         $run->setTimeout(60);
         $run->run();
         $output = $run->getOutput().$run->getErrorOutput();

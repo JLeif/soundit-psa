@@ -51,7 +51,10 @@ exit(0);
 
     private function runGate(): Process
     {
-        $run = new Process(['bash', dirname(__DIR__, 2).'/scripts/gc-verify.sh'], $this->fixture);
+        // The gate's opt-in options are scrubbed, so an ambient value in the caller's
+        // shell cannot leak into this fixture gate (gc-verify unsets them only for
+        // suites it starts itself).
+        $run = new Process(['bash', dirname(__DIR__, 2).'/scripts/gc-verify.sh'], $this->fixture, ['GC_VERIFY_PARALLEL' => false, 'GC_VERIFY_JUNIT' => false]);
         $run->setTimeout(60);
         $run->run();
 
