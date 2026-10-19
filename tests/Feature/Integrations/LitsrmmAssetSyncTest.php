@@ -198,6 +198,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_l5_overlapping_runs_do_not_create_duplicate_active_assets(): void
     {
+        Log::spy();
         $row = $this->device('1');
         $service = $this->service();
         $nested = null;
@@ -207,7 +208,9 @@ class LitsrmmAssetSyncTest extends TestCase
         Asset::creating(function () use ($service, &$nested, &$entered) {
             if (! $entered) {
                 $entered = true;
+                $before = count($this->history);
                 $nested = $service->sync($this->client);
+                $this->assertSame(0, count($this->history) - $before);
             }
         });
 
@@ -220,7 +223,8 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertTrue($entered);
         $this->assertSame(1, Asset::where('client_id', $this->client->id)->where('is_active', true)->count(), 'Overlapping full and single-client runs must leave one active asset.');
         $this->assertSame(1, $nested->errors);
-        $this->assertSame(['Another LITSRMM device sync is running; nothing was read.'], $nested->errorMessages);
+        $this->assertSame(['Another LITSRMM device sync is running, or one that stopped early still holds the lock (it frees itself within an hour); nothing was read.'], $nested->errorMessages);
+        Log::shouldHaveReceived('warning')->once()->with('[LitsrmmAssetSync] run refused: run lock held', ['client_id' => $this->client->id]);
         $this->assertSame(0, $service->sync()->errors);
     }
 
@@ -245,7 +249,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame(1, Asset::where('client_id', $this->client->id)->count());
     }
 
-    public function test_l5_disabled_settings_post_with_the_real_service_changes_nothing(): void
+    public function test_l5_disabled_settings_post_stops_at_the_controller_and_reads_nothing(): void
     {
         $this->client->update(['litsrmm_client_id' => null]);
         $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '00000000-0000-4000-8000-000000000001']);
@@ -262,6 +266,7 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_l5_disabled_service_preserves_unmapped_assets_and_seats(): void
     {
+        Log::spy();
         $this->client->update(['litsrmm_client_id' => null]);
         $asset = Asset::factory()->create(['client_id' => $this->client->id, 'litsrmm_device_id' => '00000000-0000-4000-8000-000000000001']);
         $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'rmm_workstation', 'name' => 'Example seat', 'is_active' => true]);
@@ -270,6 +275,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $result = $this->service()->sync();
         $this->assertSame(1, $result->errors);
         $this->assertSame(['LITSRMM is switched off or not configured; nothing was read or changed.'], $result->errorMessages);
+        Log::shouldHaveReceived('warning')->once()->with('[LitsrmmAssetSync] run refused: LITSRMM unavailable', ['client_id' => null]);
         $this->assertSame($asset->litsrmm_device_id, $asset->fresh()->litsrmm_device_id);
         $this->assertSame('active', $seat->fresh()->status);
         $this->assertEquals(3, $seat->fresh()->quantity);

@@ -367,8 +367,9 @@ class LitsrmmAssetSyncService
      * a client another code passed included, #5789) is listed by PSA client
      * id in details['short_read_accept_unused'], and logged. When a client's
      * transaction throws, the exception leaves this method and no result is
-     * returned, so those ids are in the log record only (#5868). Nothing
-     * marks a code used beyond this run.
+     * returned, so those ids are in the log record only (#5868).
+     * Two refusals return before any client is read and so list and log no unused code: LITSRMM unavailable, and the run lock already held.
+     * Nothing marks a code used beyond this run.
      *
      * @param  list<string>  $acceptShortRead
      */
@@ -376,6 +377,7 @@ class LitsrmmAssetSyncService
     {
         $result = new SyncResult;
         if (! \App\Support\LitsrmmConfig::isAvailable()) {
+            Log::warning('[LitsrmmAssetSync] run refused: LITSRMM unavailable', ['client_id' => $only?->id]);
             $result->recordError('LITSRMM is switched off or not configured; nothing was read or changed.');
 
             return $result;
@@ -383,7 +385,8 @@ class LitsrmmAssetSyncService
 
         $lock = \Illuminate\Support\Facades\Cache::lock('litsrmm-asset-sync', self::SYNC_LOCK_TTL);
         if (! $lock->get()) {
-            $result->recordError('Another LITSRMM device sync is running; nothing was read.');
+            Log::warning('[LitsrmmAssetSync] run refused: run lock held', ['client_id' => $only?->id]);
+            $result->recordError('Another LITSRMM device sync is running, or one that stopped early still holds the lock (it frees itself within an hour); nothing was read.');
 
             return $result;
         }

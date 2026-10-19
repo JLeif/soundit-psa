@@ -349,6 +349,16 @@ class LitsrmmSyncControlsTest extends TestCase
     {
         $client = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true]);
 
+        $this->actingAs(User::factory()->tech()->create())
+            ->get(route('clients.show', $client))
+            ->assertOk()
+            ->assertDontSee(route('clients.litsrmm.sync', $client));
+    }
+
+    public function test_an_unlinked_client_page_has_no_sync_button_for_an_admin(): void
+    {
+        $client = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true]);
+
         $this->actingAs(User::factory()->admin()->create())
             ->get(route('clients.show', $client))
             ->assertOk()
