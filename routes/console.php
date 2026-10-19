@@ -53,6 +53,21 @@ Schedule::command('litsrmm:sync-devices')
         && \App\Support\LitsrmmConfig::isAvailable())
     ->onFailure(fn () => \Illuminate\Support\Facades\Log::error('[LitsrmmSyncDevices] scheduled run failed'));
 
+// AutoElevate asset sync — hourly: links AutoElevate computers to PSA assets
+// by hostname within each mapped client (read-only at the vendor; never
+// creates assets). A run reads each mapped client in turn, waiting
+// CLIENT_SPACING_SECONDS before every read after the first, and reads no
+// further client once MAX_RUN_SECONDS (1800) have passed. The overlap lock
+// expires after 55 minutes, so a run killed while holding it does not block
+// the next hour's. A failed run (non-zero exit, including a run while the API
+// key is not configured) writes one fixed log line; its output is not
+// appended to a file.
+Schedule::command('autoelevate:sync-assets')
+    ->hourly()
+    ->withoutOverlapping(55)
+    ->runInBackground()
+    ->onFailure(fn () => \Illuminate\Support\Facades\Log::error('[AutoElevateSyncAssets] scheduled run failed'));
+
 // Mesh license sync — daily
 Schedule::command('mesh:sync-licenses')
     ->dailyAt('04:30')
