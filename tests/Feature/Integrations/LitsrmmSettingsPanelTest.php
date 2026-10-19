@@ -141,10 +141,15 @@ class LitsrmmSettingsPanelTest extends TestCase
      * The pending line's exact text must appear once in the page, exactly one
      * <p> must carry it once whitespace is normalised, and that <p> must be the
      * element directly after the form-check div that holds the switch, inside
-     * the schedule form. Moving it outside the form, above the switch, or below
-     * the "Off by default" form-text fails here, as does a second exact copy or
-     * a second <p> copy. A rewrapped copy in another element, or one joined by a
-     * non-breaking space, is not counted.
+     * the schedule form, with its trimmed text equal to the line. Moving it
+     * outside the form, above the switch, or below the "Off by default"
+     * form-text fails here. So does a second exact copy in any element, or a
+     * second <p> whose whitespace-normalised text (child elements included)
+     * equals the line, which covers a <br> with whitespace beside it. A copy that
+     * is not byte-exact passes the two copy checks if it sits outside any <p>, or
+     * if its <p> text still differs once normalised (joined by a non-breaking
+     * space, or broken by a <br> with no whitespace beside it); placed directly
+     * after the switch, it displaces the line and fails the position check.
      */
     private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
     {
@@ -152,7 +157,7 @@ class LitsrmmSettingsPanelTest extends TestCase
         $document = new \DOMDocument;
         @$document->loadHTML($html);
         $xpath = new \DOMXPath($document);
-        $this->assertSame(1, $xpath->query('//p[normalize-space(.)="'.$text.'"]')->length, 'the pending line must render as exactly one <p>');
+        $this->assertSame(1, $xpath->query('//p[normalize-space(.)="'.$text.'"]')->length, 'exactly one <p> must have the pending line as its whole whitespace-normalised text');
         $switch = '//form[@action="'.route('settings.integrations.litsrmm.schedule').'"]'
             .'/div[contains(concat(" ", normalize-space(@class), " "), " form-check ")][.//input[@id="litsrmm_sync_schedule"]]';
         $this->assertSame(1, $xpath->query($switch)->length, 'the schedule form must hold the switch in a form-check div');
