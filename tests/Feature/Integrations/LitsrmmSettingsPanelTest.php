@@ -146,9 +146,10 @@ class LitsrmmSettingsPanelTest extends TestCase
      * form-text fails here. So does a second exact copy in any element, or a
      * second <p> whose whitespace-normalised text (child elements included)
      * equals the line, which covers a <br> with whitespace beside it. A copy that
-     * is not byte-exact passes if it sits outside any <p>, or if its <p> text
-     * still differs once normalised (joined by a non-breaking space, or broken by
-     * a <br> with no whitespace beside it).
+     * is not byte-exact passes the two copy checks if it sits outside any <p>, or
+     * if its <p> text still differs once normalised (joined by a non-breaking
+     * space, or broken by a <br> with no whitespace beside it); placed directly
+     * after the switch, it displaces the line and fails the position check.
      */
     private function assertPendingLineSitsDirectlyUnderTheSwitch(string $html, string $text): void
     {
