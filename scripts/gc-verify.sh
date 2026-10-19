@@ -198,7 +198,13 @@ fi
 # GC_VERIFY_JUNIT=<absolute path> additionally passes --log-junit <path>, so a
 # caller can compare the passed/skipped sets by name between runs. It is a
 # report only and changes no verdict.
-GC_TEST_ARGS=(--fail-on-warning)
+#
+# ORDER MATTERS: artisan's test command binds its own options (--parallel,
+# --processes) only BEFORE the first option it does not know; everything from
+# there on is forwarded to the runner. Measured: `artisan test --fail-on-warning
+# --parallel` hands --parallel to PHPUnit, which refuses it ("Unknown option").
+# So the parallel options go first and --fail-on-warning follows.
+GC_TEST_ARGS=()
 case "${GC_VERIFY_PARALLEL:-}" in
     ''|0) ;;
     *)
@@ -210,6 +216,7 @@ case "${GC_VERIFY_PARALLEL:-}" in
             exit 1
         fi ;;
 esac
+GC_TEST_ARGS+=(--fail-on-warning)
 if [ -n "${GC_VERIFY_JUNIT:-}" ]; then
     case "$GC_VERIFY_JUNIT" in
         /*) GC_TEST_ARGS+=(--log-junit "$GC_VERIFY_JUNIT") ;;

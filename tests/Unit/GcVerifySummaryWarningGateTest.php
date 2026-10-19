@@ -407,7 +407,12 @@ exit('.$exit.');
         self::assertSame("test --fail-on-warning\n", file_get_contents($this->fixture.'/argv.log'));
     }
 
-    /** Opting in adds --parallel and the process count, and keeps --fail-on-warning. */
+    /**
+     * Opting in adds --parallel and the process count, and keeps --fail-on-warning.
+     * The order is pinned: artisan binds --parallel only before the first option
+     * it does not know, so `--fail-on-warning --parallel` reaches PHPUnit as an
+     * unknown option and the run dies (measured on card 6ab5736b).
+     */
     public function test_parallel_opt_in_keeps_fail_on_warning(): void
     {
         $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
@@ -415,7 +420,7 @@ exit('.$exit.');
 
         self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
         self::assertSame(
-            "test --fail-on-warning --parallel --processes=3 --log-junit /nonexistent-dir/j.xml\n",
+            "test --parallel --processes=3 --fail-on-warning --log-junit /nonexistent-dir/j.xml\n",
             file_get_contents($this->fixture.'/argv.log')
         );
     }
