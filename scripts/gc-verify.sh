@@ -11,8 +11,11 @@
 #   1. php artisan test          — the full PHPUnit suite must pass without warnings.
 #      Serial by default; GC_VERIFY_PARALLEL=<N> opts into ParaTest with N
 #      processes (see stage 1). The runner flag and the belt-two parser are
-#      the same on either path; which belt trips under ParaTest is measured
-#      only for the case named in stage 1.
+#      the same on either path, but the summary they read is not: under
+#      ParaTest it does not count @-suppressed warnings, so the parallel path
+#      does NOT cover the warning class belt two exists for (see stage 1,
+#      KNOWN GAP). Which belt trips under ParaTest is measured only for the
+#      case named in stage 1.
 #      Enforced by TWO independent belts, because --fail-on-warning alone was
 #      measured to be partial: it does not fail on the @-suppressed read at
 #      vendor/vlucas/phpdotenv/src/Store/File/Reader.php:73 that Laravel's error
@@ -198,6 +201,23 @@ fi
 # measured for one case only: a test-triggered warning (E_USER_WARNING) failed
 # the run at belt one, through the runner's non-zero exit. Belt two is pinned
 # against both ParaTest summary labels in GcVerifySummaryWarningGateTest.
+#
+# KNOWN GAP ON THE PARALLEL PATH (inferred from vendored source, not measured):
+# the parser is the same, but what it reads is not. Serially, belt two reads
+# Collision's summary. Its DefaultPrinter counts every warning event,
+# @-suppressed ones included, and that is the column the header's phpdotenv
+# read surfaced in. Under --parallel the summary is ParaTest's, built from
+# PHPUnit's TestResult. PHPUnit's Collector drops a warning event that
+# wasSuppressed() unless <source> sets ignoreSuppressionOf(Php)Warnings
+# (Runner\IssueFilter::shouldBeProcessed), and this repo's phpunit.xml sets
+# neither. So an @-suppressed warning that the serial gate FAILs on can reach
+# neither belt in parallel, and the run PASSes. The measured instance (the
+# no-.env phpdotenv read) is closed on both paths by the .env provisioning
+# above. The class is not closed. A parallel PASS does not stand in for a
+# serial one on that class, and serial stays the gate of record. The only
+# switch found in PHPUnit 11.5 is that phpunit.xml attribute (its CLI has no
+# suppression option). Setting it would also change what the serial run's
+# --fail-on-warning sees, so this change does not set it.
 # Ruled by Jeeves on Trello card 6ab5736b (2026-10-19 03:26 PT): parallel is
 # opt-in, serial stays the default, and --fail-on-warning and belt two are
 # kept. Forge's choices, not ruled text: the 1-99 range; any other value is a
