@@ -10,7 +10,9 @@
 # Gates:
 #   1. php artisan test          — the full PHPUnit suite must pass without warnings.
 #      Serial by default; GC_VERIFY_PARALLEL=<N> opts into ParaTest with N
-#      processes (see stage 1). Both belts are identical on either path.
+#      processes (see stage 1). The runner flag and the belt-two parser are
+#      the same on either path; which belt trips under ParaTest is measured
+#      only for the case named in stage 1.
 #      Enforced by TWO independent belts, because --fail-on-warning alone was
 #      measured to be partial: it does not fail on the @-suppressed read at
 #      vendor/vlucas/phpdotenv/src/Store/File/Reader.php:73 that Laravel's error
@@ -190,17 +192,27 @@ fi
 # --- optional parallel run (opt-in; serial stays the default) ----------------
 # GC_VERIFY_PARALLEL=<N> runs stage 1 as `php artisan test --parallel
 # --processes=<N>` (ParaTest, a require-dev package). Unset, empty or 0 keeps
-# the serial run exactly as it was. Anything else is a FAIL, never a quiet
-# fallback to serial, so a typo cannot change what the gate measured without
-# saying so. --fail-on-warning and belt two apply unchanged on both paths.
-# Ruled by Jeeves on Trello card 6ab5736b (2026-10-19 03:26 PT).
+# the serial argv and exit policy as they were, provided GC_VERIFY_JUNIT is
+# also unset (see below). The runner flag --fail-on-warning and the belt-two
+# parser are the same on both paths. Which belt trips under ParaTest is
+# measured for one case only: a test-triggered warning (E_USER_WARNING) failed
+# the run at belt one, through the runner's non-zero exit. Belt two is pinned
+# against both ParaTest summary labels in GcVerifySummaryWarningGateTest.
+# Ruled by Jeeves on Trello card 6ab5736b (2026-10-19 03:26 PT): parallel is
+# opt-in, serial stays the default, and --fail-on-warning and belt two are
+# kept. Forge's choices, not ruled text: the 1-99 range; any other value is a
+# FAIL, never a quiet fallback to serial, so a typo cannot change what the
+# gate measured without saying so; and the absolute-path rule below.
 #
 # GC_VERIFY_JUNIT=<absolute path> additionally passes --log-junit <path>, so a
-# caller can compare the passed/skipped sets by name between runs. It is a
-# report only and changes no verdict.
+# caller can compare the passed/skipped sets by name between runs. It acts on
+# either path, serial included. It can fail the run: a relative value is a
+# FAIL here, and the runner's JUnit write (which creates missing parent
+# directories) can fail the run if it cannot write the report.
 #
-# ORDER MATTERS: artisan's test command binds its own options (--parallel,
-# --processes) only BEFORE the first option it does not know; everything from
+# ORDER MATTERS: artisan's test command binds its own declared options
+# (--parallel among them; --processes is not one of them and is passed through
+# to ParaTest) only BEFORE the first option it does not know; everything from
 # there on is forwarded to the runner. Measured: `artisan test --fail-on-warning
 # --parallel` hands --parallel to PHPUnit, which refuses it ("Unknown option").
 # So the parallel options go first and --fail-on-warning follows.
@@ -247,7 +259,7 @@ php artisan test "${GC_TEST_ARGS[@]}" 2>&1 | tee "$TEST_LOG"
 TEST_STATUS="${PIPESTATUS[0]}"
 set -e
 if [ "$TEST_STATUS" -ne 0 ]; then
-    echo "==> gc-verify: FAIL (PHPUnit failed or reported warnings)" >&2
+    echo "==> gc-verify: FAIL (test run failed or reported warnings)" >&2
     exit 1
 fi
 

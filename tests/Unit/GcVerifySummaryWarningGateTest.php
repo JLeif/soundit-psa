@@ -370,13 +370,35 @@ exit('.$exit.');
     }
 
     /**
-     * ParaTest's warning summary. The runner is stubbed to exit 0, so only
-     * belt two can catch it, and it must catch it AS a warning count -- not
-     * fall onto the unknown-token refusal because of the "PHPUnit " prefix.
+     * ParaTest's summary for a PHPUnit (runner-issued) warning, verbatim from
+     * the burner probe on card 6ab5736b: warn-par-flag.log:19 and
+     * warn-par-noflag.log:19, both under --parallel. The runner is stubbed to
+     * exit 0, so only belt two can catch it, and it must catch it AS a warning
+     * count -- not fall onto the unknown-token refusal because of the
+     * "PHPUnit " prefix.
      */
     public function test_paratest_warning_summary_fails_on_the_count(): void
     {
         $this->stubArtisan("OK, but there were issues!\nTests: 1, Assertions: 1, PHPUnit Warnings: 1.", 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3']);
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(1, $run->getExitCode(), $output);
+        self::assertStringContainsString('PHPUnit reported 1 warning(s)', $output);
+        self::assertStringContainsString('gc-verify: FAIL', $output);
+        self::assertStringNotContainsString('gc-verify: PASS', $output);
+        self::assertStringNotContainsString('[2/3]', $output);
+    }
+
+    /**
+     * ParaTest's summary for a test-triggered warning (a planted E_USER_WARNING),
+     * verbatim from the negative check on card 6ab5736b: neg-warn.out:20, a real
+     * parallel gc-verify run. No "PHPUnit " prefix on this label. Stubbed to exit
+     * 0, so only belt two can catch it.
+     */
+    public function test_paratest_test_warning_summary_fails_on_the_count(): void
+    {
+        $this->stubArtisan("OK, but there were issues!\nTests: 3, Assertions: 3, Warnings: 1.", 0);
         $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3']);
         $output = $run->getOutput().$run->getErrorOutput();
 
@@ -406,6 +428,29 @@ exit('.$exit.');
 
         self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
         self::assertSame("test --fail-on-warning\n", file_get_contents($this->fixture.'/argv.log'));
+    }
+
+    /** An empty GC_VERIFY_PARALLEL is the documented serial value, like unset and "0". */
+    public function test_parallel_empty_is_serial(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '']);
+
+        self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
+        self::assertSame("test --fail-on-warning\n", file_get_contents($this->fixture.'/argv.log'));
+    }
+
+    /** GC_VERIFY_JUNIT acts on the serial path too: --log-junit is added, --parallel is not. */
+    public function test_serial_with_junit_adds_only_the_report(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate(['GC_VERIFY_JUNIT' => '/nonexistent-dir/j.xml']);
+
+        self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
+        self::assertSame(
+            "test --fail-on-warning --log-junit /nonexistent-dir/j.xml\n",
+            file_get_contents($this->fixture.'/argv.log')
+        );
     }
 
     /**
