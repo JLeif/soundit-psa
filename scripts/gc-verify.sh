@@ -9,6 +9,8 @@
 #
 # Gates:
 #   1. php artisan test          — the full PHPUnit suite must pass without warnings.
+#      Serial by default; GC_VERIFY_PARALLEL=<N> opts into ParaTest with N
+#      processes (see stage 1). Both belts are identical on either path.
 #      Enforced by TWO independent belts, because --fail-on-warning alone was
 #      measured to be partial: it does not fail on the @-suppressed read at
 #      vendor/vlucas/phpdotenv/src/Store/File/Reader.php:73 that Laravel's error
@@ -185,7 +187,40 @@ if ! declare -F assert_no_warnings >/dev/null; then
     exit 1
 fi
 
-echo "==> [1/3] php artisan test --fail-on-warning"
+# --- optional parallel run (opt-in; serial stays the default) ----------------
+# GC_VERIFY_PARALLEL=<N> runs stage 1 as `php artisan test --parallel
+# --processes=<N>` (ParaTest, a require-dev package). Unset, empty or 0 keeps
+# the serial run exactly as it was. Anything else is a FAIL, never a quiet
+# fallback to serial, so a typo cannot change what the gate measured without
+# saying so. --fail-on-warning and belt two apply unchanged on both paths.
+# Ruled by Jeeves on Trello card 6ab5736b (2026-10-19 03:26 PT).
+#
+# GC_VERIFY_JUNIT=<absolute path> additionally passes --log-junit <path>, so a
+# caller can compare the passed/skipped sets by name between runs. It is a
+# report only and changes no verdict.
+GC_TEST_ARGS=(--fail-on-warning)
+case "${GC_VERIFY_PARALLEL:-}" in
+    ''|0) ;;
+    *)
+        if [[ "$GC_VERIFY_PARALLEL" =~ ^[1-9][0-9]?$ ]]; then
+            GC_TEST_ARGS+=(--parallel "--processes=$GC_VERIFY_PARALLEL")
+        else
+            echo "ERROR: GC_VERIFY_PARALLEL must be unset, 0, or a process count 1-99." >&2
+            echo "==> gc-verify: FAIL (bad GC_VERIFY_PARALLEL)" >&2
+            exit 1
+        fi ;;
+esac
+if [ -n "${GC_VERIFY_JUNIT:-}" ]; then
+    case "$GC_VERIFY_JUNIT" in
+        /*) GC_TEST_ARGS+=(--log-junit "$GC_VERIFY_JUNIT") ;;
+        *)
+            echo "ERROR: GC_VERIFY_JUNIT must be an absolute path." >&2
+            echo "==> gc-verify: FAIL (bad GC_VERIFY_JUNIT)" >&2
+            exit 1 ;;
+    esac
+fi
+
+echo "==> [1/3] php artisan test ${GC_TEST_ARGS[*]}"
 if ! php artisan config:clear --ansi >/dev/null; then
     echo "==> gc-verify: FAIL (configuration clear)" >&2
     exit 1
@@ -195,7 +230,7 @@ fi
 TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/gc-verify-tests.XXXXXX")"
 trap 'rm -f "$TEST_LOG"' EXIT
 set +e
-php artisan test --fail-on-warning 2>&1 | tee "$TEST_LOG"
+php artisan test "${GC_TEST_ARGS[@]}" 2>&1 | tee "$TEST_LOG"
 TEST_STATUS="${PIPESTATUS[0]}"
 set -e
 if [ "$TEST_STATUS" -ne 0 ]; then

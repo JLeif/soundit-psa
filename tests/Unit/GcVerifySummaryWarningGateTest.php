@@ -50,14 +50,21 @@ class GcVerifySummaryWarningGateTest extends TestCase
 if ($argv[1] === "config:clear") { exit(0); }
 if ($argv[1] === "key:generate") { exit(0); }
 if ($argv[1] !== "test") { exit(99); }
+file_put_contents(__DIR__."/argv.log", implode(" ", array_slice($argv, 1))."\n", FILE_APPEND);
 fwrite(STDOUT, '.var_export($summary."\n", true).');
 exit('.$exit.');
 ');
     }
 
-    private function runGate(): Process
+    /**
+     * @param  array<string, string>  $env  gate options; both are unset by
+     *                                      default so an ambient value in the
+     *                                      caller's shell cannot leak in.
+     */
+    private function runGate(array $env = []): Process
     {
-        $run = new Process(['bash', dirname(__DIR__, 2).'/scripts/gc-verify.sh'], $this->fixture);
+        $env += ['GC_VERIFY_PARALLEL' => false, 'GC_VERIFY_JUNIT' => false];
+        $run = new Process(['bash', dirname(__DIR__, 2).'/scripts/gc-verify.sh'], $this->fixture, $env);
         $run->setTimeout(60);
         $run->run();
 
@@ -342,6 +349,100 @@ exit('.$exit.');
 
         self::assertSame(1, $run->getExitCode(), $output);
         self::assertStringContainsString('gc-verify: FAIL', $output);
+    }
+
+    /**
+     * ParaTest's summary, verbatim in shape from the measured parallel runs on
+     * card 6ab5736b: "OK, but there were issues!" over a TextUI counts line
+     * whose deprecation label carries a "PHPUnit " prefix. Zero warnings, so
+     * it must PASS through belt two exactly as the serial summary does.
+     */
+    public function test_paratest_clean_summary_passes(): void
+    {
+        $this->stubArtisan("OK, but there were issues!\nTests: 12813, Assertions: 246960, PHPUnit Deprecations: 102, Skipped: 165.", 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3']);
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(0, $run->getExitCode(), $output);
+        self::assertStringContainsString('summary parsed: warnings=0', $output);
+        self::assertStringContainsString('gc-verify: PASS', $output);
+    }
+
+    /**
+     * ParaTest's warning summary. The runner is stubbed to exit 0, so only
+     * belt two can catch it, and it must catch it AS a warning count -- not
+     * fall onto the unknown-token refusal because of the "PHPUnit " prefix.
+     */
+    public function test_paratest_warning_summary_fails_on_the_count(): void
+    {
+        $this->stubArtisan("OK, but there were issues!\nTests: 1, Assertions: 1, PHPUnit Warnings: 1.", 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3']);
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(1, $run->getExitCode(), $output);
+        self::assertStringContainsString('PHPUnit reported 1 warning(s)', $output);
+        self::assertStringContainsString('gc-verify: FAIL', $output);
+        self::assertStringNotContainsString('gc-verify: PASS', $output);
+        self::assertStringNotContainsString('[2/3]', $output);
+    }
+
+    /** Serial stays the default: no option means the runner sees exactly the old arguments. */
+    public function test_serial_is_the_default_runner_invocation(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate();
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(0, $run->getExitCode(), $output);
+        self::assertSame("test --fail-on-warning\n", file_get_contents($this->fixture.'/argv.log'));
+    }
+
+    /** "0" is the documented explicit serial value. */
+    public function test_parallel_zero_is_serial(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '0']);
+
+        self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
+        self::assertSame("test --fail-on-warning\n", file_get_contents($this->fixture.'/argv.log'));
+    }
+
+    /** Opting in adds --parallel and the process count, and keeps --fail-on-warning. */
+    public function test_parallel_opt_in_keeps_fail_on_warning(): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate(['GC_VERIFY_PARALLEL' => '3', 'GC_VERIFY_JUNIT' => '/nonexistent-dir/j.xml']);
+
+        self::assertSame(0, $run->getExitCode(), $run->getOutput().$run->getErrorOutput());
+        self::assertSame(
+            "test --fail-on-warning --parallel --processes=3 --log-junit /nonexistent-dir/j.xml\n",
+            file_get_contents($this->fixture.'/argv.log')
+        );
+    }
+
+    public static function badParallelValues(): array
+    {
+        return [
+            'word' => ['GC_VERIFY_PARALLEL', 'yes', 'bad GC_VERIFY_PARALLEL'],
+            'negative' => ['GC_VERIFY_PARALLEL', '-3', 'bad GC_VERIFY_PARALLEL'],
+            'leading zero' => ['GC_VERIFY_PARALLEL', '03', 'bad GC_VERIFY_PARALLEL'],
+            'three digits' => ['GC_VERIFY_PARALLEL', '100', 'bad GC_VERIFY_PARALLEL'],
+            'trailing junk' => ['GC_VERIFY_PARALLEL', '3 --no-fail', 'bad GC_VERIFY_PARALLEL'],
+            'relative junit' => ['GC_VERIFY_JUNIT', 'j.xml', 'bad GC_VERIFY_JUNIT'],
+        ];
+    }
+
+    /** A malformed option is a FAIL before the runner starts, never a silent serial run. */
+    #[DataProvider('badParallelValues')]
+    public function test_bad_option_fails_before_the_runner(string $name, string $value, string $because): void
+    {
+        $this->stubArtisan('  Tests:    15 passed (17 assertions)', 0);
+        $run = $this->runGate([$name => $value]);
+        $output = $run->getOutput().$run->getErrorOutput();
+
+        self::assertSame(1, $run->getExitCode(), $output);
+        self::assertStringContainsString('gc-verify: FAIL ('.$because.')', $output);
+        self::assertFileDoesNotExist($this->fixture.'/argv.log');
     }
 
     /** A non-zero runner exit is still a FAIL; belt one is not weakened. */
