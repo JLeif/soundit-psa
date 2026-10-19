@@ -392,9 +392,13 @@ exit('.$exit.');
 
     /**
      * ParaTest's summary for a test-triggered warning (a planted E_USER_WARNING),
-     * verbatim from the negative check on card 6ab5736b: neg-warn.out:20, a real
-     * parallel gc-verify run. No "PHPUnit " prefix on this label. Stubbed to exit
-     * 0, so only belt two can catch it.
+     * verbatim from the negative check on card 6ab5736b: neg-warn.out:20. That
+     * run went through a bypass adapter that called vendor/bin/paratest
+     * directly, not artisan or Collision, so this pins ParaTest's label only.
+     * Run with php artisan test --parallel directly, the same warning printed
+     * "Errors: 1" (warn2-par-flag.log:20), which belt one catches through the
+     * runner's non-zero exit code. No "PHPUnit " prefix on this
+     * label. Stubbed to exit 0, so only belt two can catch it.
      */
     public function test_paratest_test_warning_summary_fails_on_the_count(): void
     {
