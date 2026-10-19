@@ -35,11 +35,13 @@ use DateTimeZone;
  * category malformed. An IPv4 string that is not usable (link-local,
  * reserved, not an address) is skipped, not drift. Absent, not drift: a
  * category that is left out or null; an array category whose payload is
- * missing (left out), null or an empty array; and a key this class reads
- * that is missing or null. Drift, too: an array category with no payload key
- * that carries any other non-null key besides collectedAt (a renamed or
- * re-nested wrapper). Other categories remain readable. $malformed names each
- * category once for drift reporting.
+ * null or an empty array; an array category with no payload key whose every
+ * key besides collectedAt is null ([] and {collectedAt} alone included);
+ * and a key this class reads that is missing or null. Drift, too: an array
+ * category with no payload key that carries any other key besides
+ * collectedAt whose value is not null ([], "", false and 0 included), a
+ * renamed or re-nested wrapper. Other categories remain readable. $malformed
+ * names each category once for drift reporting.
  */
 final class LitsrmmHardware
 {

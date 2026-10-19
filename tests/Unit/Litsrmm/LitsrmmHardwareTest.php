@@ -301,6 +301,10 @@ class LitsrmmHardwareTest extends TestCase
             'unwrapped network list' => [['network' => [['ipv4' => ['192.0.2.10'], 'up' => true]]], 'network'],
             'unwrapped system payload' => [['system' => ['bootTimeUtc' => '2026-09-30T03:04:05Z', 'pendingReboot' => true]], 'system'],
             'collectedAt beside an error' => [['disks' => ['collectedAt' => '2026-09-30T10:00:00Z', 'error' => 'collector failed']], 'disks'],
+            'collectedAt beside an empty list' => [['hardware' => ['collectedAt' => '2026-09-30T10:00:00Z', 'data' => []]], 'hardware'],
+            'collectedAt beside an empty string' => [['disks' => ['collectedAt' => '2026-09-30T10:00:00Z', 'error' => '']], 'disks'],
+            'collectedAt beside false' => [['system' => ['collectedAt' => '2026-09-30T10:00:00Z', 'ok' => false]], 'system'],
+            'collectedAt beside zero' => [['network' => ['collectedAt' => '2026-09-30T10:00:00Z', 'count' => 0]], 'network'],
         ];
     }
 
