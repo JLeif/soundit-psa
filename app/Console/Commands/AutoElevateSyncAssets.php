@@ -9,8 +9,7 @@ use Illuminate\Console\Command;
 
 /**
  * Stage 3a: link AutoElevate computers to PSA assets (read-only at the vendor).
- * Deliberately NOT scheduled in routes/console.php — turning the nightly run on is an
- * activation decision, not part of this change.
+ * Scheduled hourly in routes/console.php, with a 55-minute overlap lock.
  */
 class AutoElevateSyncAssets extends Command
 {
