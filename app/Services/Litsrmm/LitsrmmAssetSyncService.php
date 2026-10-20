@@ -214,10 +214,14 @@ use Illuminate\Support\Sleep;
  *    until an operator resolves it by hand (unlink or remove the Tactical
  *    agent row, or mark the asset inactive). This is accepted, ruled on
  *    #5689. The same device coming back, or the machine re-enrolled under
- *    a new device id (matched by its real serial, or by hostname while the
- *    asset still carries the old link), reactivates it. A person changing
- *    is_active ends the sync's claim (Asset clears litsrmm_retired_at and the
- *    link), and an asset a person made inactive is never reactivated, never
+ *    a new device id (matched by its real serial, or, when the asset has no
+ *    real serial, by hostname while it still carries the old link, #5376),
+ *    reactivates it. A person ends the sync's claim by changing is_active
+ *    through AssetService::updateAsset or by restoring the asset (web or
+ *    MCP): each calls Asset::endLitsrmmClaim(), which clears
+ *    litsrmm_retired_at and, unless the same write sets a new link, the
+ *    link; a model save alone does not end it. An asset a person made
+ *    inactive is never reactivated, never
  *    stamped retired, and never matched by hostname (a real serial still
  *    links it, leaving it inactive).
  *  - A LINK TO A DEVICE THIS READ DOES NOT LIST LIVE does not hold its asset:
