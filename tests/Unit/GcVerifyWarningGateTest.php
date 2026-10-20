@@ -54,7 +54,7 @@ class GcVerifyWarningGateTest extends TestCase
         file_put_contents($this->fixture.'/artisan', '<?php
 if ($argv[1] === "config:clear") { exit(0); }
 if ($argv[1] !== "test") { exit(99); }
-$args = array_merge([PHP_BINARY, '.$phpunit.', "--no-configuration", "--colors=never", "GateProbeTest.php"], array_slice($argv, 2));
+$args = array_merge([PHP_BINARY, '.$phpunit.', "--no-configuration", "--do-not-cache-result", "--colors=never", "GateProbeTest.php"], array_slice($argv, 2));
 passthru(implode(" ", array_map("escapeshellarg", $args)), $status);
 exit($status);
 ');
