@@ -36,8 +36,11 @@ class AssetService
         'm365_device_id' => ['m365_compliance_state', 'm365_is_compliant', 'm365_enrollment_type', 'm365_os_version', 'm365_last_sync_at', 'm365_device_owner_type', 'm365_defender_status', 'm365_defender_version', 'm365_last_scan_at', 'm365_synced_at'],
         'screenconnect_session_id' => ['screenconnect_online', 'screenconnect_client_version', 'screenconnect_last_seen_at', 'screenconnect_synced_at'],
         // Not unique (see the LITSRMM migration), but an identity all the same:
-        // LitsrmmAssetSyncService follows it first, so a merge must carry it to
-        // the survivor or the link is stranded on the tombstone.
+        // LitsrmmAssetSyncService follows it first, so a merge carries a
+        // duplicate's link the sync did not retire to the survivor (in place of
+        // a link the sync retired there) rather than strand it on the
+        // tombstone; a link the sync retired on the duplicate is dropped
+        // (mergeAssets, #5374).
         'litsrmm_device_id' => ['litsrmm_synced_at'],
     ];
 
@@ -195,7 +198,11 @@ class AssetService
             $data['rmm_online'] = null;
         }
 
-        $asset->update($data);
+        $asset->fill($data);
+        if (array_key_exists('is_active', $data) && $asset->isDirty('is_active')) {
+            $asset->endLitsrmmClaim();
+        }
+        $asset->save();
 
         return $asset->fresh();
     }
@@ -212,6 +219,10 @@ class AssetService
     {
         $conflicts = [];
         foreach (array_keys(self::EXTERNAL_IDENTITY_COLUMNS) as $column) {
+            if ($column === 'litsrmm_device_id'
+                && ($survivor->litsrmm_retired_at !== null || $duplicate->litsrmm_retired_at !== null)) {
+                continue;
+            }
             $survivorValue = $survivor->getAttribute($column);
             $duplicateValue = $duplicate->getAttribute($column);
             if ($survivorValue !== null && $duplicateValue !== null
@@ -272,7 +283,11 @@ class AssetService
      * Repoints every reference to the duplicate (ticket links, alerts, user and
      * contract assignments, Tactical detail row and action logs, ScreenConnect
      * events), carries blank-only descriptive fields and any external vendor
-     * identity the survivor lacks, clears EVERY external identity AND the
+     * identity the survivor lacks (LITSRMM aside: a survivor the sync retired
+     * takes a linked duplicate's link and sync stamp in place of its own unless
+     * that duplicate was retired too, gives up its own link and stamp to an
+     * unlinked duplicate that is active and not soft-deleted, and a duplicate's
+     * link the sync retired is never carried, #5374), clears EVERY external identity AND the
      * serial_number on the duplicate (the RMM sync/webhook paths match on vendor
      * id and FALL BACK to a serial_number match guarded by `whereNull(<vendor
      * id>)`, then write `deleted_at => null` straight through, never restore() —
@@ -453,11 +468,32 @@ class AssetService
                 }
             }
 
-            // External identities — carry each one the survivor lacks, with its
-            // vendor companion fields (blank-only), so the next sync binds to the
-            // survivor instead of the tombstone.
+            // External identities — carry missing identities and blank companions.
+            // For LITSRMM, a retired survivor instead takes a live duplicate's
+            // link and sync stamp when that duplicate is linked (whether or not it is live: a retired survivor that takes a person-inactive duplicate's link stays inactive, as that duplicate was). An unlinked
+            // duplicate leaves the survivor's link and stamp as they are unless
+            // it is active and not soft-deleted: the survivor then ends active
+            // (billing safety below), so it gives up its retired link and stamp,
+            // or the next sync would retire it again. A retired duplicate never
+            // supplies a claim.
             $carriedIdentities = [];
             foreach (self::EXTERNAL_IDENTITY_COLUMNS as $column => $companions) {
+                if ($column === 'litsrmm_device_id') {
+                    if ($duplicate->litsrmm_retired_at !== null) {
+                        continue;
+                    }
+                    if ($survivor->litsrmm_retired_at !== null
+                        && ($duplicate->litsrmm_device_id !== null || (! $duplicate->trashed() && (bool) $duplicate->is_active))) {
+                        $survivor->litsrmm_device_id = $duplicate->litsrmm_device_id;
+                        $survivor->litsrmm_synced_at = $duplicate->litsrmm_synced_at;
+                        $survivor->litsrmm_retired_at = null;
+                        if ($duplicate->litsrmm_device_id !== null) {
+                            $carriedIdentities[] = $column;
+                        }
+
+                        continue;
+                    }
+                }
                 if ($survivor->getAttribute($column) === null && $duplicate->getAttribute($column) !== null) {
                     $survivor->{$column} = $duplicate->getAttribute($column);
                     $carriedIdentities[] = $column;

@@ -1986,6 +1986,7 @@ class StaffPsaActionToolExecutor
 
         $asset->restore();
         $asset->is_active = true;
+        $asset->endLitsrmmClaim();
         $asset->save();
 
         $this->auditEntityExecution(
