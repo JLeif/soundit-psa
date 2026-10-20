@@ -303,7 +303,11 @@ class LitsrmmAssetSyncService
      */
     public static function describe(SyncResult $result): string
     {
-        $message = "LITSRMM device sync: {$result->summary()}.";
+        $summary = $result->summary();
+        if ($summary === 'no changes' && ($result->details['seats_suspended'] ?? 0) > 0) {
+            $summary = 'no asset changes';
+        }
+        $message = "LITSRMM device sync: {$summary}.";
 
         if (($result->details['seats_on_refused_duplicates'] ?? 0) > 0) {
             $message .= " {$result->details['seats_on_refused_duplicates']} seat(s) are still billed on devices this sync refused as duplicates (shared serial or ambiguous match).";

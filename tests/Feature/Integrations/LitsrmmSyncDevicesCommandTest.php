@@ -68,7 +68,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $result->details['seats_on_refused_duplicates'] = 2;
         $this->syncReturns($result);
         $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): 2')
+            ->expectsOutput('  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): 2')
             ->assertSuccessful();
     }
 
@@ -79,7 +79,7 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $result->details['seats_suspended'] = 1;
         $this->syncReturns($result);
         $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('  Seat rows suspended (unmapped clients): 1')
+            ->expectsOutput('  Seat rows suspended (unmapped clients): 1')
             ->assertSuccessful();
     }
 

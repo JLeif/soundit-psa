@@ -112,7 +112,11 @@ class LitsrmmSyncDevices extends Command
     private function report(\App\Services\SyncResult $result): int
     {
         $this->newLine();
-        $this->info("Done: {$result->summary()}");
+        $summary = $result->summary();
+        if ($summary === 'no changes' && ($result->details['seats_suspended'] ?? 0) > 0) {
+            $summary = 'no asset changes';
+        }
+        $this->info("Done: {$summary}");
 
         if (($result->details['seats_on_refused_duplicates'] ?? 0) > 0) {
             $this->warn("  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): {$result->details['seats_on_refused_duplicates']}");

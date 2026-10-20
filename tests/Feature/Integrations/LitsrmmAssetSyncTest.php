@@ -89,6 +89,36 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->client = $this->mappedClient(self::VENDOR_CLIENT);
     }
 
+    public function test_l7_only_suspended_rows_reports_no_asset_changes(): void
+    {
+        $this->client->update(['litsrmm_client_id' => null]);
+        $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'workstations', 'name' => 'Example seats']);
+        License::create(['license_type_id' => $type->id, 'client_id' => $this->client->id, 'vendor_ref' => self::VENDOR_CLIENT, 'quantity' => 1, 'status' => 'active']);
+        $service = $this->service();
+        $result = $service->sync();
+        $flash = LitsrmmAssetSyncService::describe($result);
+        $this->assertStringStartsWith('LITSRMM device sync: no asset changes. 1 LITSRMM seat row(s) suspended', $flash);
+        $this->assertStringNotContainsString('no changes.', $flash);
+        License::query()->update(['quantity' => 1, 'status' => 'active']);
+        $this->app->instance(LitsrmmAssetSyncService::class, $service);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutput('Done: no asset changes')
+            ->assertSuccessful();
+    }
+
+    // Pin at r2: a detail-read 404 is not a duplicate refusal.
+    public function test_l7_detail_not_found_has_no_duplicate_seat_key_or_warning(): void
+    {
+        Log::spy();
+        $this->linkedAssets(3);
+        $this->rows[0]['agentVersion'] = '1.0.0';
+        $this->details[$this->rows[0]['id']] = 404;
+        $result = $this->service()->sync();
+        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] device not written', ['client_id' => $this->client->id, 'reason' => 'detail_read_not_found'])->once();
+        $this->assertArrayNotHasKey('seats_on_refused_duplicates', $result->details);
+        Log::shouldNotHaveReceived('warning', fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates');
+    }
+
     public function test_l7_two_clients_accumulate_seats_but_log_client_counts(): void
     {
         Log::spy();
@@ -130,7 +160,7 @@ class LitsrmmAssetSyncTest extends TestCase
         License::query()->update(['quantity' => 12, 'status' => 'active']);
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
         $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('  Seat rows suspended (unmapped clients): 1')
+            ->expectsOutput('  Seat rows suspended (unmapped clients): 1')
             ->assertSuccessful();
     }
 
