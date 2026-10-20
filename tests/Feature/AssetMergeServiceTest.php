@@ -72,6 +72,33 @@ class AssetMergeServiceTest extends TestCase
         $this->assertTrue($duplicate->fresh()->trashed());
     }
 
+    public function test_live_unlinked_duplicate_ends_retired_survivor_claim(): void
+    {
+        $client = Client::factory()->create();
+        $user = User::factory()->create();
+        $survivor = Asset::factory()->for($client)->create([
+            'is_active' => false,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000011',
+            'litsrmm_synced_at' => '2026-10-01 00:00:00',
+            'litsrmm_retired_at' => '2026-10-02 00:00:00',
+        ]);
+        $duplicate = Asset::factory()->for($client)->create([
+            'is_active' => true,
+            'litsrmm_device_id' => null,
+            'litsrmm_synced_at' => null,
+            'litsrmm_retired_at' => null,
+        ]);
+        $summary = $this->service()->mergeAssets($survivor, $duplicate, $user->id);
+        $survivor->refresh();
+        $this->assertTrue($summary['reactivated_survivor']);
+        $this->assertTrue($survivor->is_active);
+        $this->assertNull($survivor->litsrmm_device_id);
+        $this->assertNull($survivor->litsrmm_synced_at);
+        $this->assertNull($survivor->litsrmm_retired_at);
+        $this->assertNotContains('litsrmm_device_id', $summary['carried_identities'] ?? []);
+        $this->assertTrue($duplicate->fresh()->trashed());
+    }
+
     private function assertLitsrmmMergeOutcome(bool $survivorRetired, bool $duplicateRetired): void
     {
         $client = Client::factory()->create();

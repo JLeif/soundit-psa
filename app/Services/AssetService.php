@@ -285,8 +285,9 @@ class AssetService
      * events), carries blank-only descriptive fields and any external vendor
      * identity the survivor lacks (LITSRMM aside: a survivor the sync retired
      * takes a linked duplicate's link and sync stamp in place of its own unless
-     * that duplicate was retired too, and a duplicate's link the sync retired
-     * is never carried, #5374), clears EVERY external identity AND the
+     * that duplicate was retired too, gives up its own link and stamp to an
+     * unlinked duplicate that is active and not soft-deleted, and a duplicate's
+     * link the sync retired is never carried, #5374), clears EVERY external identity AND the
      * serial_number on the duplicate (the RMM sync/webhook paths match on vendor
      * id and FALL BACK to a serial_number match guarded by `whereNull(<vendor
      * id>)`, then write `deleted_at => null` straight through, never restore() —
@@ -469,20 +470,26 @@ class AssetService
 
             // External identities — carry missing identities and blank companions.
             // For LITSRMM, a retired survivor instead takes a live duplicate's
-            // link and sync stamp when that duplicate is linked (an unlinked one
-            // leaves the survivor's link and stamp as they are); a retired
-            // duplicate never supplies a claim.
+            // link and sync stamp when that duplicate is linked. An unlinked
+            // duplicate leaves the survivor's link and stamp as they are unless
+            // it is active and not soft-deleted: the survivor then ends active
+            // (billing safety below), so it gives up its retired link and stamp,
+            // or the next sync would retire it again. A retired duplicate never
+            // supplies a claim.
             $carriedIdentities = [];
             foreach (self::EXTERNAL_IDENTITY_COLUMNS as $column => $companions) {
                 if ($column === 'litsrmm_device_id') {
                     if ($duplicate->litsrmm_retired_at !== null) {
                         continue;
                     }
-                    if ($survivor->litsrmm_retired_at !== null && $duplicate->litsrmm_device_id !== null) {
+                    if ($survivor->litsrmm_retired_at !== null
+                        && ($duplicate->litsrmm_device_id !== null || (! $duplicate->trashed() && (bool) $duplicate->is_active))) {
                         $survivor->litsrmm_device_id = $duplicate->litsrmm_device_id;
                         $survivor->litsrmm_synced_at = $duplicate->litsrmm_synced_at;
                         $survivor->litsrmm_retired_at = null;
-                        $carriedIdentities[] = $column;
+                        if ($duplicate->litsrmm_device_id !== null) {
+                            $carriedIdentities[] = $column;
+                        }
 
                         continue;
                     }
