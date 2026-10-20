@@ -18,6 +18,7 @@ use GuzzleHttp\Middleware;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Sleep;
@@ -122,22 +123,68 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertStringNotContainsString('no asset changes', $flash);
     }
 
+    /** @return \ArrayObject<int, MessageLogged> */
+    private function captureLogs(): \ArrayObject
+    {
+        $records = new \ArrayObject;
+        Log::listen(function (MessageLogged $record) use ($records): void {
+            $records->append($record);
+        });
+
+        return $records;
+    }
+
+    /** @param \ArrayObject<int, MessageLogged> $records */
+    private function assertLogRecords(\ArrayObject $records, string $message, array $contexts): void
+    {
+        $matching = array_values(array_filter($records->getArrayCopy(), fn (MessageLogged $record) => $record->message === $message));
+        $this->assertCount(count($contexts), $matching);
+        foreach ($matching as $index => $record) {
+            $this->assertSame('warning', $record->level);
+            $this->assertSame($contexts[$index], $record->context);
+        }
+    }
+
+    public function test_rolled_back_client_has_no_refused_duplicate_seat_record(): void
+    {
+        $records = $this->captureLogs();
+        $this->device('1', ['serial' => 'SHARED-L8']);
+        $this->device('2', ['serial' => 'SHARED-L8']);
+        $savingCalls = 0;
+        $synthetic = new \RuntimeException('synthetic');
+        License::saving(function () use (&$savingCalls, $synthetic): void {
+            $savingCalls++;
+            throw $synthetic;
+        });
+
+        try {
+            $this->service()->sync();
+            $this->fail('Expected the synthetic saving exception.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame($synthetic, $exception);
+            $this->assertSame('synthetic', $exception->getMessage());
+        }
+
+        $this->assertGreaterThanOrEqual(1, $savingCalls);
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', []);
+    }
+
     // Pin at r2: a detail-read 404 is not a duplicate refusal.
     public function test_l7_detail_not_found_has_no_duplicate_seat_key_or_warning(): void
     {
-        Log::spy();
+        $records = $this->captureLogs();
         $this->linkedAssets(3);
         $this->rows[0]['agentVersion'] = '1.0.0';
         $this->details[$this->rows[0]['id']] = 404;
         $result = $this->service()->sync();
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] device not written', ['client_id' => $this->client->id, 'reason' => 'detail_read_not_found'])->once();
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] device not written', [['client_id' => $this->client->id, 'reason' => 'detail_read_not_found']]);
         $this->assertArrayNotHasKey('seats_on_refused_duplicates', $result->details);
-        Log::shouldNotHaveReceived('warning', fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates');
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', []);
     }
 
     public function test_l7_two_clients_accumulate_seats_but_log_client_counts(): void
     {
-        Log::spy();
+        $records = $this->captureLogs();
         $other = $this->mappedClient(self::OTHER_VENDOR_CLIENT);
         $this->device('1', ['serial' => 'SHARED-L7']);
         $this->device('2', ['serial' => 'SHARED-L7']);
@@ -148,20 +195,21 @@ class LitsrmmAssetSyncTest extends TestCase
         $result = $this->service()->sync();
 
         $this->assertSame(3, $result->details['seats_on_refused_duplicates']);
-        Log::shouldHaveReceived('warning')->withArgs(fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates')->twice();
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $this->client->id, 'seats' => 2])->once();
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $other->id, 'seats' => 1])->once();
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', [
+            ['client_id' => $this->client->id, 'seats' => 2],
+            ['client_id' => $other->id, 'seats' => 1],
+        ]);
     }
 
     public function test_l7_agentless_shared_serial_has_no_seat_key_or_warning(): void
     {
-        Log::spy();
+        $records = $this->captureLogs();
         $this->device('1', ['serial' => 'SHARED-L7', 'agentVersion' => null]);
         $this->device('2', ['serial' => 'SHARED-L7', 'agentVersion' => null]);
         $result = $this->service()->sync();
         $this->assertSame(2, $result->skipped);
         $this->assertArrayNotHasKey('seats_on_refused_duplicates', $result->details);
-        Log::shouldNotHaveReceived('warning', fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates');
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', []);
     }
 
     public function test_l7_one_quantity_twelve_row_is_one_suspended_row(): void
@@ -189,39 +237,39 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_l7_shared_duplicates_report_two_billed_seats(): void
     {
-        Log::spy();
+        $records = $this->captureLogs();
         $this->device('1', ['serial' => 'SHARED-L7']);
         $this->device('2', ['serial' => 'SHARED-L7']);
         $this->device('3', ['serial' => 'SHARED-L7', 'agentVersion' => null]);
         $result = $this->service()->sync();
         $this->assertSame(2, $result->details['seats_on_refused_duplicates'] ?? null);
         $this->assertSame(2, (int) License::where('client_id', $this->client->id)->sum('quantity'));
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $this->client->id, 'seats' => 2])->once();
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', [['client_id' => $this->client->id, 'seats' => 2]]);
         $this->assertStringContainsString(' 2 seat(s) are still billed on devices this sync refused as duplicates (shared serial or ambiguous match).', LitsrmmAssetSyncService::describe($result));
     }
 
     public function test_l7_ambiguous_duplicates_are_counted(): void
     {
-        Log::spy();
+        $records = $this->captureLogs();
         Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => null]);
         Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'workstation-1', 'serial_number' => null]);
         $this->device('1', ['serial' => null, 'agentVersion' => '1.0.0']);
         $result = $this->service()->sync();
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] device not written', ['client_id' => $this->client->id, 'reason' => 'ambiguous_match'])->once();
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] device not written', [['client_id' => $this->client->id, 'reason' => 'ambiguous_match']]);
         // One seat-eligible device refused against two free assets: N = 1, not 2.
         $this->assertSame(1, $result->details['seats_on_refused_duplicates'] ?? null);
-        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $this->client->id, 'seats' => 1])->once();
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', [['client_id' => $this->client->id, 'seats' => 1]]);
     }
 
     // Pin: base already omits the duplicate warning when there are no duplicates.
     public function test_l7_no_duplicates_has_no_key_or_sentence(): void
     {
-        Log::spy();
-        Log::shouldReceive('warning')->withArgs(fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates')->never();
+        $records = $this->captureLogs();
         $this->device('1');
         $result = $this->service()->sync();
         $this->assertArrayNotHasKey('seats_on_refused_duplicates', $result->details);
         $this->assertStringNotContainsString('seat(s) are still billed', LitsrmmAssetSyncService::describe($result));
+        $this->assertLogRecords($records, '[LitsrmmAssetSync] seats counted on refused duplicates', []);
     }
 
     public function test_l7_suspended_seats_are_not_released_links(): void
@@ -232,6 +280,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $result = $this->service()->sync();
         $this->assertSame(1, $result->details['seats_suspended'] ?? null);
         $this->assertSame(1, $result->deactivated);
+        $this->assertStringStartsWith('LITSRMM device sync: 1 deactivated.', LitsrmmAssetSyncService::describe($result));
         $this->assertStringContainsString(' 1 LITSRMM seat row(s) suspended for unmapped clients.', LitsrmmAssetSyncService::describe($result));
     }
 
