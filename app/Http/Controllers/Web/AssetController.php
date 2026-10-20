@@ -508,6 +508,7 @@ class AssetController extends Controller
 
         $asset->restore();
         $asset->is_active = true;
+        $asset->endLitsrmmClaim();
         $asset->save();
 
         return redirect()->route('assets.show', $asset)

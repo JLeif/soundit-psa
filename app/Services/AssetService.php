@@ -195,7 +195,11 @@ class AssetService
             $data['rmm_online'] = null;
         }
 
-        $asset->update($data);
+        $asset->fill($data);
+        if (array_key_exists('is_active', $data) && $asset->isDirty('is_active')) {
+            $asset->endLitsrmmClaim();
+        }
+        $asset->save();
 
         return $asset->fresh();
     }
@@ -212,6 +216,10 @@ class AssetService
     {
         $conflicts = [];
         foreach (array_keys(self::EXTERNAL_IDENTITY_COLUMNS) as $column) {
+            if ($column === 'litsrmm_device_id'
+                && ($survivor->litsrmm_retired_at !== null || $duplicate->litsrmm_retired_at !== null)) {
+                continue;
+            }
             $survivorValue = $survivor->getAttribute($column);
             $duplicateValue = $duplicate->getAttribute($column);
             if ($survivorValue !== null && $duplicateValue !== null
@@ -453,11 +461,24 @@ class AssetService
                 }
             }
 
-            // External identities — carry each one the survivor lacks, with its
-            // vendor companion fields (blank-only), so the next sync binds to the
-            // survivor instead of the tombstone.
+            // External identities — carry missing identities and blank companions.
+            // For LITSRMM, a retired survivor instead takes the live duplicate's
+            // link and sync stamp; a retired duplicate never supplies a claim.
             $carriedIdentities = [];
             foreach (self::EXTERNAL_IDENTITY_COLUMNS as $column => $companions) {
+                if ($column === 'litsrmm_device_id') {
+                    if ($duplicate->litsrmm_retired_at !== null) {
+                        continue;
+                    }
+                    if ($survivor->litsrmm_retired_at !== null) {
+                        $survivor->litsrmm_device_id = $duplicate->litsrmm_device_id;
+                        $survivor->litsrmm_synced_at = $duplicate->litsrmm_synced_at;
+                        $survivor->litsrmm_retired_at = null;
+                        $carriedIdentities[] = $column;
+
+                        continue;
+                    }
+                }
                 if ($survivor->getAttribute($column) === null && $duplicate->getAttribute($column) !== null) {
                     $survivor->{$column} = $duplicate->getAttribute($column);
                     $carriedIdentities[] = $column;

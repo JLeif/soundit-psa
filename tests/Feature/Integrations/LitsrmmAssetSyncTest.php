@@ -89,6 +89,38 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->client = $this->mappedClient(self::VENDOR_CLIENT);
     }
 
+    public function test_retirement_survives_unmap_and_remap(): void
+    {
+        $row = $this->retiredDevice('1');
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'serial_number' => null, 'litsrmm_device_id' => $row['id']]);
+        $this->service()->sync();
+        $this->assertNotNull($asset->fresh()->litsrmm_retired_at);
+        $this->client->update(['litsrmm_client_id' => null]);
+        $this->service()->sync();
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+        $this->client->update(['litsrmm_client_id' => self::VENDOR_CLIENT]);
+        $this->rows = [];
+        $this->device('1', ['serial' => 'Default string']);
+        $this->service()->sync();
+        $this->assertSame(1, Asset::count());
+        $this->assertTrue($asset->fresh()->is_active);
+        $this->assertNull($asset->fresh()->litsrmm_retired_at);
+    }
+
+    public function test_hostname_reuse_does_not_reclaim_a_retired_real_serial(): void
+    {
+        $row = $this->retiredDevice('1');
+        $asset = Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'serial_number' => 'SN-OLD-REAL', 'litsrmm_device_id' => $row['id']]);
+        $this->service()->sync();
+        $stamp = $asset->fresh()->litsrmm_retired_at;
+        $this->device('2', ['hostname' => $row['hostname'], 'serial' => 'System Serial Number']);
+        $this->service()->sync();
+        $this->assertFalse($asset->fresh()->is_active);
+        $this->assertEquals($stamp, $asset->fresh()->litsrmm_retired_at);
+        $this->assertSame($row['id'], $asset->fresh()->litsrmm_device_id);
+        $this->assertSame(2, Asset::count());
+    }
+
     private function mappedClient(?string $vendorClientId): Client
     {
         return Client::factory()->create([
@@ -1195,7 +1227,7 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->service()->sync();
         $this->assertNotNull($asset->fresh()->litsrmm_retired_at);
 
-        $asset->fresh()->forceFill(['is_active' => true])->save();
+        app(AssetService::class)->updateAsset($asset->fresh(), ['is_active' => true]);
 
         $asset->refresh();
         $this->assertNull($asset->litsrmm_retired_at);
@@ -1215,8 +1247,8 @@ class LitsrmmAssetSyncTest extends TestCase
         $asset = Asset::factory()->create(['client_id' => $this->client->id, 'serial_number' => 'SN1REAL0', 'is_active' => true, 'litsrmm_device_id' => $row['id']]);
         $this->service()->sync();
 
-        $asset->fresh()->forceFill(['is_active' => true])->save();
-        $asset->fresh()->forceFill(['is_active' => false])->save();
+        app(AssetService::class)->updateAsset($asset->fresh(), ['is_active' => true]);
+        app(AssetService::class)->updateAsset($asset->fresh(), ['is_active' => false]);
 
         $this->rows = [];
         $this->device('1');
@@ -3115,8 +3147,8 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->rows = array_slice($this->rows, 0, 1);
         $code = self::acceptCode($this->service()->sync());
         $first = $assets[0]->litsrmm_device_id;
-        $assets[0]->update(['litsrmm_device_id' => $assets[1]->litsrmm_device_id]);
-        $assets[1]->update(['litsrmm_device_id' => $first]);
+        $assets[0]->forceFill(['litsrmm_device_id' => $assets[1]->litsrmm_device_id])->save();
+        $assets[1]->forceFill(['litsrmm_device_id' => $first])->save();
 
         $result = $this->service()->sync(null, [$code]);
 
