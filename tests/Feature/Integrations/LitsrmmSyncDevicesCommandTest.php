@@ -83,6 +83,20 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertSuccessful();
     }
 
+    public function test_l7_retired_and_suspended_rows_do_not_report_no_asset_changes(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 1;
+        $result->details['retired'] = 1;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('no asset changes')
+            ->expectsOutput('  Seat rows suspended (unmapped clients): 1')
+            ->expectsOutput('  Marked inactive (device retired): 1')
+            ->assertSuccessful();
+    }
+
     // Pin: base has neither warning, so zero already remains silent.
     public function test_l7_zero_counts_have_no_warning(): void
     {

@@ -106,6 +106,22 @@ class LitsrmmAssetSyncTest extends TestCase
             ->assertSuccessful();
     }
 
+    public function test_l7_retired_and_suspended_rows_do_not_say_no_asset_changes(): void
+    {
+        $row = $this->retiredDevice('1');
+        Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => $row['hostname'], 'serial_number' => null, 'litsrmm_device_id' => $row['id']]);
+        $other = $this->mappedClient(self::OTHER_VENDOR_CLIENT);
+        $other->update(['litsrmm_client_id' => null]);
+        $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'workstations', 'name' => 'Example seats']);
+        License::create(['license_type_id' => $type->id, 'client_id' => $other->id, 'vendor_ref' => self::OTHER_VENDOR_CLIENT, 'quantity' => 1, 'status' => 'active']);
+        $result = $this->service()->sync();
+        $this->assertSame(1, $result->details['retired']);
+        $this->assertSame(1, $result->details['seats_suspended'] ?? null);
+        $flash = LitsrmmAssetSyncService::describe($result);
+        $this->assertStringContainsString(' 1 asset(s) marked inactive because their device is retired.', $flash);
+        $this->assertStringNotContainsString('no asset changes', $flash);
+    }
+
     // Pin at r2: a detail-read 404 is not a duplicate refusal.
     public function test_l7_detail_not_found_has_no_duplicate_seat_key_or_warning(): void
     {

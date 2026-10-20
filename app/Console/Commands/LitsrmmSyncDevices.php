@@ -113,7 +113,7 @@ class LitsrmmSyncDevices extends Command
     {
         $this->newLine();
         $summary = $result->summary();
-        if ($summary === 'no changes' && ($result->details['seats_suspended'] ?? 0) > 0) {
+        if ($summary === 'no changes' && ($result->details['seats_suspended'] ?? 0) > 0 && ($result->details['retired'] ?? 0) === 0) {
             $summary = 'no asset changes';
         }
         $this->info("Done: {$summary}");
