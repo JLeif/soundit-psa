@@ -428,7 +428,7 @@ These commands execute automatically based on their schedule:
 | `version:refresh` | Re-check update availability (how many commits behind `origin/main`) and print the served commit. **The served commit needs no refresh** — it is read from the git plumbing files on every request and is never cached, so a deploy is reflected immediately. It is not scheduled and `scripts/deploy.sh` does not run it; it is a step of the manual update in [§10 Updating](#10-updating), because the update count is cached for an hour and would otherwise keep listing just-deployed commits as available. Run it by hand whenever you want the count re-checked (it fetches from the remote). |
 | `tickets:recalculate-sla` | Recompute ticket SLA deadlines (`response_due_at`, `due_at`) from contract SLA terms. Open tickets only unless `--all`. See "SLA deadline recalculation" below. |
 
-> **Note:** Commands only execute if their respective integration is configured. It's safe to have the cron entry active even before you set up any integrations.
+> **Note:** It's safe to have the cron entry active even before you set up any integrations, but not every command waits for its integration to be configured. `autoelevate:sync-assets` runs every hour once the cron entry is active. While the AutoElevate API key is not configured, each run fails before reading or clearing anything and logs `[AutoElevateSyncAssets] scheduled run failed` at error level. That line means the schedule is in place and nothing is syncing; it stops once the key is saved.
 
 ---
 
