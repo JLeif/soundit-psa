@@ -470,7 +470,7 @@ class AssetService
 
             // External identities — carry missing identities and blank companions.
             // For LITSRMM, a retired survivor instead takes a live duplicate's
-            // link and sync stamp when that duplicate is linked. An unlinked
+            // link and sync stamp when that duplicate is linked (whether or not it is live: a retired survivor that takes a person-inactive duplicate's link stays inactive, as that duplicate was). An unlinked
             // duplicate leaves the survivor's link and stamp as they are unless
             // it is active and not soft-deleted: the survivor then ends active
             // (billing safety below), so it gives up its retired link and stamp,

@@ -99,6 +99,50 @@ class AssetMergeServiceTest extends TestCase
         $this->assertTrue($duplicate->fresh()->trashed());
     }
 
+    public function test_live_unlinked_survivor_does_not_take_retired_duplicate_claim(): void
+    {
+        $client = Client::factory()->create();
+        $user = User::factory()->create();
+        $survivor = Asset::factory()->for($client)->create([
+            'is_active' => true,
+            'litsrmm_device_id' => null,
+            'litsrmm_retired_at' => null,
+        ]);
+        $duplicate = Asset::factory()->for($client)->create([
+            'is_active' => false,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000012',
+            'litsrmm_retired_at' => '2026-10-04 00:00:00',
+        ]);
+        $summary = $this->service()->mergeAssets($survivor, $duplicate, $user->id);
+        $survivor->refresh();
+        $this->assertNull($survivor->litsrmm_device_id);
+        $this->assertNull($survivor->litsrmm_retired_at);
+        $this->assertNotContains('litsrmm_device_id', $summary['carried_identities']);
+    }
+
+    public function test_retired_survivor_takes_person_inactive_duplicate_claim_and_stays_inactive(): void
+    {
+        $client = Client::factory()->create();
+        $user = User::factory()->create();
+        $survivor = Asset::factory()->for($client)->create([
+            'is_active' => false,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000011',
+            'litsrmm_retired_at' => '2026-10-02 00:00:00',
+        ]);
+        $duplicate = Asset::factory()->for($client)->create([
+            'is_active' => false,
+            'litsrmm_device_id' => '00000000-0000-4000-8000-000000000012',
+            'litsrmm_retired_at' => null,
+            'deleted_at' => null,
+        ]);
+        $summary = $this->service()->mergeAssets($survivor, $duplicate, $user->id);
+        $survivor->refresh();
+        $this->assertSame('00000000-0000-4000-8000-000000000012', $survivor->litsrmm_device_id);
+        $this->assertNull($survivor->litsrmm_retired_at);
+        $this->assertFalse($survivor->is_active);
+        $this->assertContains('litsrmm_device_id', $summary['carried_identities']);
+    }
+
     private function assertLitsrmmMergeOutcome(bool $survivorRetired, bool $duplicateRetired): void
     {
         $client = Client::factory()->create();
