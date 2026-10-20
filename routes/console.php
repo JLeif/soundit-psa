@@ -59,8 +59,11 @@ Schedule::command('litsrmm:sync-devices')
 // including one that stops reading early (its unread clients keep their
 // links), then clears the AutoElevate link on every asset that is not
 // soft-deleted whose client is not a mapped, operational client; an asset
-// with no client is cleared only when no client is mapped. A run refused for
-// a missing API key, or one that throws, clears nothing. Clients are read in
+// with no client is cleared only when no client is both mapped and
+// operational. A run refused for a missing API key clears nothing. A run that
+// throws skips that final clear but keeps what it already committed: each
+// client read successfully is written in its own transaction, which also
+// clears that client's links its read did not return. Clients are read in
 // turn, waiting CLIENT_SPACING_SECONDS before each client after the first
 // (one client's pages are read without that wait); no new client is started
 // once MAX_RUN_SECONDS (1800) have passed, checked before each client, and a
