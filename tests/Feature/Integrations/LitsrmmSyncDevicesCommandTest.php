@@ -72,6 +72,18 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
             ->assertSuccessful();
     }
 
+    public function test_suspended_seats_preserve_a_nonempty_summary(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->deactivated = 1;
+        $result->details['seats_suspended'] = 1;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutput('Done: 1 deactivated')
+            ->assertSuccessful();
+    }
+
     public function test_l7_reports_suspended_seats(): void
     {
         $this->mapClient();
@@ -119,12 +131,12 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $result->details['full_run_clients'] = 1;
         $this->syncReturns($result);
 
-        $this->artisan('litsrmm:sync-devices')
-            ->expectsOutputToContain('Syncing LITSRMM devices for 1 mapped client(s)...')
-            ->doesntExpectOutputToContain('Sweeping:')
-            ->doesntExpectOutputToContain('Map a client on its page')
-            ->expectsOutputToContain('3 created')
-            ->assertSuccessful();
+        $this->assertSame(0, \Illuminate\Support\Facades\Artisan::call('litsrmm:sync-devices'));
+        $output = \Illuminate\Support\Facades\Artisan::output();
+        $this->assertStringContainsString('Syncing LITSRMM devices for 1 mapped client(s)...', $output);
+        $this->assertStringContainsString('3 created', $output);
+        $this->assertStringNotContainsString('Sweeping:', $output);
+        $this->assertStringNotContainsString('Map a client on its page', $output);
     }
 
     public function test_skipped_devices_are_listed_but_do_not_fail_the_run(): void

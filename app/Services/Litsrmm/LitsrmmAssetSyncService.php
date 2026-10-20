@@ -59,7 +59,7 @@ use Illuminate\Support\Sleep;
  *    key is absent only when every key besides collectedAt is null; one
  *    that carries any other non-null key (sent without its payload wrapper,
  *    or with the payload under another key) is drift (#7209), as is one
- *    sent as a scalar or with a payload that is not an array.
+ *    sent as a scalar or with a payload that is neither null nor an array.
  *  - MANY 404s ARE A DEGRADED READ, NOT DEVICES LEAVING (#5578). A client's
  *    detail read is degraded when at least one read answers 404 and either
  *    every read answers 404 (a one-device client whose only read answers
@@ -292,7 +292,9 @@ class LitsrmmAssetSyncService
     }
 
     /**
-     * The text a Sync button flashes: the counts, then the positive-count
+     * The text a Sync button flashes: the counts (summary(), except that a
+     * run whose summary() is 'no changes' and that suspended seat rows but
+     * retired nothing opens 'no asset changes' instead), then the positive-count
      * sentences for seats still billed on refused duplicates and LITSRMM seat
      * rows suspended for unmapped clients, before the retired, accepted and
      * unused-accept notes, then every refused guess ('Skipped: '), then every
@@ -521,17 +523,23 @@ class LitsrmmAssetSyncService
                 continue;
             }
 
-            $notes = DB::transaction(function () use ($client, $rows, $hardware, $left, $failed, $result) {
-                $notes = $this->syncClient($client, $rows, $hardware, $left, $failed, $result);
+            $committed = DB::transaction(function () use ($client, $rows, $hardware, $left, $failed, $result) {
+                $pending = $this->syncClient($client, $rows, $hardware, $left, $failed, $result);
                 $this->syncSeats($client, $rows);
 
-                return $notes;
+                return $pending;
             });
 
             // Only once the client's transaction has committed: a throw inside
             // it rolls the client back and reaches none of this (#5681, #5682).
-            foreach ($notes as $note) {
+            foreach ($committed['notes'] as $note) {
                 $result->recordError($note);
+            }
+
+            $seats = $committed['refused_seats'];
+            if ($seats > 0) {
+                $result->details['seats_on_refused_duplicates'] = ($result->details['seats_on_refused_duplicates'] ?? 0) + $seats;
+                Log::warning('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $client->id, 'seats' => $seats]);
             }
 
             if ($acceptedRefusal !== null) {
@@ -1132,7 +1140,7 @@ class LitsrmmAssetSyncService
      * @param  array<string, LitsrmmHardware>  $hardware
      * @param  array<string, true>  $left  device ids whose detail read answered 404
      * @param  array<string, array{kind: string, status?: int}>  $failed  device id => failure, for detail reads that failed other than with a 404
-     * @return list<string> one error per device in $failed, saying whether its list facts were written; sync() records them once the transaction commits
+     * @return array{notes: list<string>, refused_seats: int} one error per device in $failed, saying whether its list facts were written, and the refused duplicate seat count; sync() records them once the transaction commits
      */
     private function syncClient(Client $client, array $rows, array $hardware, array $left, array $failed, SyncResult $result): array
     {
@@ -1249,10 +1257,6 @@ class LitsrmmAssetSyncService
         }
 
         $seats = array_sum(self::seatCounts($refusedDuplicates));
-        if ($seats > 0) {
-            $result->details['seats_on_refused_duplicates'] = ($result->details['seats_on_refused_duplicates'] ?? 0) + $seats;
-            Log::warning('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $client->id, 'seats' => $seats]);
-        }
 
         // A retired device's asset: inactive, reversibly. An asset a live
         // device took back above no longer carries the retired id (write()
@@ -1298,7 +1302,7 @@ class LitsrmmAssetSyncService
             $notes[] = self::detailFailureNote($client, $failure, isset($written[$deviceId]));
         }
 
-        return $notes;
+        return ['notes' => $notes, 'refused_seats' => $seats];
     }
 
     /**
