@@ -202,15 +202,16 @@ class LitsrmmAssetSyncTest extends TestCase
         $row = $this->device('1');
         $service = $this->service();
         $nested = null;
+        $nestedRequests = null;
         $entered = false;
         $dispatcher = Asset::getEventDispatcher();
         Asset::setEventDispatcher(clone $dispatcher);
-        Asset::creating(function () use ($service, &$nested, &$entered) {
+        Asset::creating(function () use ($service, &$nested, &$nestedRequests, &$entered) {
             if (! $entered) {
                 $entered = true;
                 $before = count($this->history);
                 $nested = $service->sync($this->client);
-                $this->assertSame(0, count($this->history) - $before);
+                $nestedRequests = count($this->history) - $before;
             }
         });
 
@@ -220,12 +221,19 @@ class LitsrmmAssetSyncTest extends TestCase
             Asset::setEventDispatcher($dispatcher);
         }
 
-        $this->assertTrue($entered);
         $this->assertSame(1, Asset::where('client_id', $this->client->id)->where('is_active', true)->count(), 'Overlapping full and single-client runs must leave one active asset.');
+        $this->assertSame(0, $nestedRequests, 'The refused nested run must read nothing.');
+        $this->assertTrue($entered);
         $this->assertSame(1, $nested->errors);
         $this->assertSame(['Another LITSRMM device sync is running, or one that stopped early still holds the lock (it frees itself within an hour); nothing was read.'], $nested->errorMessages);
         Log::shouldHaveReceived('warning')->once()->with('[LitsrmmAssetSync] run refused: run lock held', ['client_id' => $this->client->id]);
         $this->assertSame(0, $service->sync()->errors);
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'] as $level) {
+            Log::shouldNotHaveReceived($level, fn (...$args) => ($args[0] ?? null) === '[LitsrmmAssetSync] run refused: LITSRMM unavailable');
+        }
+        foreach (['log', 'write'] as $method) {
+            Log::shouldNotHaveReceived($method, fn (...$args) => ($args[1] ?? null) === '[LitsrmmAssetSync] run refused: LITSRMM unavailable');
+        }
     }
 
     public function test_l5_lock_is_released_after_a_throw(): void
@@ -276,6 +284,12 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->assertSame(1, $result->errors);
         $this->assertSame(['LITSRMM is switched off or not configured; nothing was read or changed.'], $result->errorMessages);
         Log::shouldHaveReceived('warning')->once()->with('[LitsrmmAssetSync] run refused: LITSRMM unavailable', ['client_id' => null]);
+        foreach (['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'] as $level) {
+            Log::shouldNotHaveReceived($level, fn (...$args) => ($args[0] ?? null) === '[LitsrmmAssetSync] run refused: run lock held');
+        }
+        foreach (['log', 'write'] as $method) {
+            Log::shouldNotHaveReceived($method, fn (...$args) => ($args[1] ?? null) === '[LitsrmmAssetSync] run refused: run lock held');
+        }
         $this->assertSame($asset->litsrmm_device_id, $asset->fresh()->litsrmm_device_id);
         $this->assertSame('active', $seat->fresh()->status);
         $this->assertEquals(3, $seat->fresh()->quantity);
