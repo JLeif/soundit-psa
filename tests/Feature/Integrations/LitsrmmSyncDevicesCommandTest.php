@@ -61,6 +61,45 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
     }
 
+    public function test_l7_reports_duplicate_seats(): void
+    {
+        Http::fake();
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_on_refused_duplicates'] = 2;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): 2')
+            ->assertSuccessful();
+    }
+
+    public function test_l7_reports_suspended_seats(): void
+    {
+        Http::fake();
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 1;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('  Seats suspended (unmapped clients): 1')
+            ->assertSuccessful();
+    }
+
+    // Pin: base has neither warning, so zero already remains silent.
+    public function test_l7_zero_counts_have_no_warning(): void
+    {
+        Http::fake();
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 0;
+        $result->details['seats_on_refused_duplicates'] = 0;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('Seats suspended (unmapped clients)')
+            ->doesntExpectOutputToContain('Seats still billed on devices refused as duplicates')
+            ->assertSuccessful();
+    }
+
     public function test_a_clean_run_reports_its_counts_and_succeeds(): void
     {
         $this->mapClient();

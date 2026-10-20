@@ -114,6 +114,14 @@ class LitsrmmSyncDevices extends Command
         $this->newLine();
         $this->info("Done: {$result->summary()}");
 
+        if (($result->details['seats_on_refused_duplicates'] ?? 0) > 0) {
+            $this->warn("  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): {$result->details['seats_on_refused_duplicates']}");
+        }
+
+        if (($result->details['seats_suspended'] ?? 0) > 0) {
+            $this->warn("  Seats suspended (unmapped clients): {$result->details['seats_suspended']}");
+        }
+
         // Counted apart from "deactivated" (released links): these assets left
         // the active, billed list this run.
         if (($result->details['retired'] ?? 0) > 0) {

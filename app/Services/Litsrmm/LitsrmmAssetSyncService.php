@@ -303,6 +303,14 @@ class LitsrmmAssetSyncService
     {
         $message = "LITSRMM device sync: {$result->summary()}.";
 
+        if (($result->details['seats_on_refused_duplicates'] ?? 0) > 0) {
+            $message .= " {$result->details['seats_on_refused_duplicates']} seat(s) are still billed on devices this sync refused as duplicates (shared serial or ambiguous match).";
+        }
+
+        if (($result->details['seats_suspended'] ?? 0) > 0) {
+            $message .= " {$result->details['seats_suspended']} LITSRMM seat row(s) suspended for unmapped clients.";
+        }
+
         if (($result->details['retired'] ?? 0) > 0) {
             $message .= " {$result->details['retired']} asset(s) marked inactive because their device is retired.";
         }
@@ -602,7 +610,7 @@ class LitsrmmAssetSyncService
     {
         DB::transaction(function () use ($mappedClientIds, $result) {
             $this->clearUnmappedClients($mappedClientIds, $result);
-            $result->deactivated += License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
+            $result->details['seats_suspended'] = License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
         });
     }
 
@@ -1154,6 +1162,7 @@ class LitsrmmAssetSyncService
         $kept = [];
         /** @var array<string, true> $written device ids whose list facts write() wrote */
         $written = [];
+        $refusedDuplicates = [];
 
         foreach ($rows as $device) {
             $asset = $linked[strtolower($device->id)] ?? null;
@@ -1199,6 +1208,7 @@ class LitsrmmAssetSyncService
             if ($asset === null) {
                 $serial = LitsrmmSerial::identity($device->serial);
                 if ($serial !== null && ($serialCounts[$serial] ?? 0) > 1) {
+                    $refusedDuplicates[] = $device;
                     $this->recordSkip($result, $client, 'shared_serial', "{$device->hostname}: shares its serial with another device; not linked, not created");
 
                     continue;
@@ -1207,6 +1217,7 @@ class LitsrmmAssetSyncService
                 $match = $this->matchUnlinked($device, $assets, $kept, $nameCounts, $liveIds);
 
                 if ($match === false) {
+                    $refusedDuplicates[] = $device;
                     $this->recordSkip($result, $client, 'ambiguous_match', "{$device->hostname}: more than one asset or device could be this machine; not linked, not created");
 
                     continue;
@@ -1226,6 +1237,12 @@ class LitsrmmAssetSyncService
             $asset = $this->write($client, $asset, $device, $hardware[$device->id] ?? null, $result, $serialShared);
             $kept[$asset->id] = true;
             $written[$device->id] = true;
+        }
+
+        $seats = array_sum(self::seatCounts($refusedDuplicates));
+        if ($seats > 0) {
+            $result->details['seats_on_refused_duplicates'] = ($result->details['seats_on_refused_duplicates'] ?? 0) + $seats;
+            Log::warning('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $client->id, 'seats' => $seats]);
         }
 
         // A retired device's asset: inactive, reversibly. An asset a live
