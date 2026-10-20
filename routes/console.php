@@ -55,16 +55,20 @@ Schedule::command('litsrmm:sync-devices')
 
 // AutoElevate asset sync — hourly: links AutoElevate computers to PSA assets
 // by hostname within each mapped, operational client (read-only at the
-// vendor; never creates assets), and clears the AutoElevate link on assets of
-// every other client. Clients are read in turn, waiting
-// CLIENT_SPACING_SECONDS before each client after the first (one client's
-// pages are read without that wait); no new client is started once
-// MAX_RUN_SECONDS (1800) have passed, checked before each client, and a client
-// already being read runs to its own bound. The overlap lock expires after 55
-// minutes, so a run killed while holding it does not block the next hour's.
-// A failed run (non-zero exit, including a run while the API key is not
-// configured) logs one fixed line here, on top of the sync's own lines; its
-// output is not appended to a file.
+// vendor; never creates assets). A run that gets through its client list,
+// including one that stops reading early (its unread clients keep their
+// links), then clears the AutoElevate link on every asset that is not
+// soft-deleted whose client is not a mapped, operational client; an asset
+// with no client is cleared only when no client is mapped. A run refused for
+// a missing API key, or one that throws, clears nothing. Clients are read in
+// turn, waiting CLIENT_SPACING_SECONDS before each client after the first
+// (one client's pages are read without that wait); no new client is started
+// once MAX_RUN_SECONDS (1800) have passed, checked before each client, and a
+// client already being read runs to its own bound. The overlap lock expires
+// after 55 minutes, so a run killed while holding it does not block the next
+// hour's. A failed run (non-zero exit, including a run while the API key is
+// not configured) logs one fixed line here; its output is not appended to a
+// file, so on the no-key path that line is the only trace.
 Schedule::command('autoelevate:sync-assets')
     ->hourly()
     ->withoutOverlapping(55)
