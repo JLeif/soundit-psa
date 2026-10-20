@@ -404,7 +404,7 @@ Route::middleware('auth')->group(function () {
     // the card rather than changed here.
     Route::post('/settings/integrations/litsrmm', [IntegrationsController::class, 'updateLitsrmm'])->middleware('admin')->name('settings.integrations.litsrmm.update');
     Route::post('/settings/integrations/litsrmm/test', [IntegrationsController::class, 'testLitsrmm'])->middleware('admin')->name('settings.integrations.litsrmm.test');
-    Route::post('/settings/integrations/litsrmm/sync-devices', [IntegrationsController::class, 'syncLitsrmmDevices'])->middleware('admin')->name('settings.integrations.litsrmm.sync-devices');
+    Route::post('/settings/integrations/litsrmm/sync-devices', [IntegrationsController::class, 'syncLitsrmmDevices'])->middleware(['admin', 'throttle:10,1'])->name('settings.integrations.litsrmm.sync-devices');
     Route::post('/settings/integrations/litsrmm/schedule', [IntegrationsController::class, 'updateLitsrmmSchedule'])->middleware('admin')->name('settings.integrations.litsrmm.schedule');
     Route::post('/settings/integrations/screenconnect', [IntegrationsController::class, 'updateScreenConnect'])->name('settings.integrations.screenconnect.update');
     Route::post('/settings/integrations/tactical', [IntegrationsController::class, 'updateTactical'])->name('settings.integrations.tactical.update');

@@ -367,12 +367,43 @@ class LitsrmmAssetSyncService
      * a client another code passed included, #5789) is listed by PSA client
      * id in details['short_read_accept_unused'], and logged. When a client's
      * transaction throws, the exception leaves this method and no result is
-     * returned, so those ids are in the log record only (#5868). Nothing
-     * marks a code used beyond this run.
+     * returned, so those ids are in the log record only (#5868).
+     * Two refusals return before any client is read and so list and log no unused code: LITSRMM unavailable, and the run lock already held.
+     * Nothing marks a code used beyond this run.
      *
      * @param  list<string>  $acceptShortRead
      */
     public function sync(?Client $only = null, array $acceptShortRead = []): SyncResult
+    {
+        $result = new SyncResult;
+        if (! \App\Support\LitsrmmConfig::isAvailable()) {
+            Log::warning('[LitsrmmAssetSync] run refused: LITSRMM unavailable', ['client_id' => $only?->id]);
+            $result->recordError('LITSRMM is switched off or not configured; nothing was read or changed.');
+
+            return $result;
+        }
+
+        $lock = \Illuminate\Support\Facades\Cache::lock('litsrmm-asset-sync', self::SYNC_LOCK_TTL);
+        if (! $lock->get()) {
+            Log::warning('[LitsrmmAssetSync] run refused: run lock held', ['client_id' => $only?->id]);
+            $result->recordError('Another LITSRMM device sync is running, or one that stopped early still holds the lock (it frees itself within an hour); nothing was read.');
+
+            return $result;
+        }
+
+        try {
+            return $this->syncLocked($only, $acceptShortRead);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    // The TTL must exceed the longest real full-sync run (not measured).
+    // A killed holder expires after this interval.
+    private const SYNC_LOCK_TTL = 3600;
+
+    /** @param list<string> $acceptShortRead */
+    private function syncLocked(?Client $only, array $acceptShortRead): SyncResult
     {
         $result = new SyncResult;
         $accepted = [];

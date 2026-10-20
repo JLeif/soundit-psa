@@ -355,6 +355,31 @@ class LitsrmmSyncControlsTest extends TestCase
             ->assertDontSee(route('clients.litsrmm.sync', $client));
     }
 
+    public function test_an_unlinked_client_page_has_no_sync_button_for_an_admin(): void
+    {
+        $client = Client::factory()->create(['stage' => ClientStage::Active, 'is_active' => true]);
+
+        $this->actingAs(User::factory()->admin()->create())
+            ->get(route('clients.show', $client))
+            ->assertOk()
+            ->assertDontSee(route('clients.litsrmm.sync', $client));
+    }
+
+    public function test_l5_settings_sync_has_the_shared_throttle(): void
+    {
+        $this->assertContains('throttle:10,1', app('router')->getRoutes()->getByName('settings.integrations.litsrmm.sync-devices')->gatherMiddleware());
+    }
+
+    public function test_l5_disabled_settings_post_keeps_the_controller_guard(): void
+    {
+        Setting::setValue('litsrmm_enabled', '0');
+        $this->syncService()->shouldNotReceive('sync');
+
+        $this->actingAs(User::factory()->admin()->create())
+            ->post(route('settings.integrations.litsrmm.sync-devices'))
+            ->assertSessionHas('error', 'LITSRMM is switched off or not configured. Nothing was read.');
+    }
+
     // ---- Settings > Integrations ----
 
     public function test_the_settings_button_runs_a_full_sync_for_an_admin(): void
