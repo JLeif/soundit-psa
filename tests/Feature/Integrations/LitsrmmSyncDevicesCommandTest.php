@@ -61,6 +61,56 @@ class LitsrmmSyncDevicesCommandTest extends TestCase
         $this->app->instance(LitsrmmAssetSyncService::class, $service);
     }
 
+    public function test_l7_reports_duplicate_seats(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_on_refused_duplicates'] = 2;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutput('  Seats still billed on devices refused as duplicates (shared serial or ambiguous match): 2')
+            ->assertSuccessful();
+    }
+
+    public function test_l7_reports_suspended_seats(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 1;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutput('  Seat rows suspended (unmapped clients): 1')
+            ->assertSuccessful();
+    }
+
+    public function test_l7_retired_and_suspended_rows_do_not_report_no_asset_changes(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 1;
+        $result->details['retired'] = 1;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('no asset changes')
+            ->expectsOutput('  Seat rows suspended (unmapped clients): 1')
+            ->expectsOutput('  Marked inactive (device retired): 1')
+            ->assertSuccessful();
+    }
+
+    // Pin: base has neither warning, so zero already remains silent.
+    public function test_l7_zero_counts_have_no_warning(): void
+    {
+        $this->mapClient();
+        $result = new SyncResult;
+        $result->details['seats_suspended'] = 0;
+        $result->details['seats_on_refused_duplicates'] = 0;
+        $this->syncReturns($result);
+        $this->artisan('litsrmm:sync-devices')
+            ->doesntExpectOutputToContain('Seat rows suspended (unmapped clients)')
+            ->doesntExpectOutputToContain('Seats still billed on devices refused as duplicates')
+            ->assertSuccessful();
+    }
+
     public function test_a_clean_run_reports_its_counts_and_succeeds(): void
     {
         $this->mapClient();
