@@ -292,7 +292,9 @@ class LitsrmmAssetSyncService
     }
 
     /**
-     * The text a Sync button flashes: the counts, the retired, accepted and
+     * The text a Sync button flashes: the counts, then the positive-count
+     * sentences for seats still billed on refused duplicates and LITSRMM seat
+     * rows suspended for unmapped clients, before the retired, accepted and
      * unused-accept notes, then every refused guess ('Skipped: '), then every
      * error ('Errors: ', joinErrors()), so a flash message never hides why a
      * machine was not linked. One line, unless a refusal is among the
@@ -610,7 +612,10 @@ class LitsrmmAssetSyncService
     {
         DB::transaction(function () use ($mappedClientIds, $result) {
             $this->clearUnmappedClients($mappedClientIds, $result);
-            $result->details['seats_suspended'] = License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
+            $suspended = License::deactivateOrphaned(self::LICENSE_VENDOR, 'litsrmm_client_id');
+            if ($suspended > 0) {
+                $result->details['seats_suspended'] = $suspended;
+            }
         });
     }
 

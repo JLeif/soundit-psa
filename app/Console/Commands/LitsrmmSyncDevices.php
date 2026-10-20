@@ -119,7 +119,7 @@ class LitsrmmSyncDevices extends Command
         }
 
         if (($result->details['seats_suspended'] ?? 0) > 0) {
-            $this->warn("  Seats suspended (unmapped clients): {$result->details['seats_suspended']}");
+            $this->warn("  Seat rows suspended (unmapped clients): {$result->details['seats_suspended']}");
         }
 
         // Counted apart from "deactivated" (released links): these assets left

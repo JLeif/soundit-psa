@@ -89,9 +89,60 @@ class LitsrmmAssetSyncTest extends TestCase
         $this->client = $this->mappedClient(self::VENDOR_CLIENT);
     }
 
+    public function test_l7_two_clients_accumulate_seats_but_log_client_counts(): void
+    {
+        Log::spy();
+        $other = $this->mappedClient(self::OTHER_VENDOR_CLIENT);
+        $this->device('1', ['serial' => 'SHARED-L7']);
+        $this->device('2', ['serial' => 'SHARED-L7']);
+        Asset::factory()->create(['client_id' => $other->id, 'hostname' => 'WORKSTATION-3', 'serial_number' => null]);
+        Asset::factory()->create(['client_id' => $other->id, 'hostname' => 'workstation-3', 'serial_number' => null]);
+        $this->device('3', ['clientId' => self::OTHER_VENDOR_CLIENT, 'serial' => null]);
+
+        $result = $this->service()->sync();
+
+        $this->assertSame(3, $result->details['seats_on_refused_duplicates']);
+        Log::shouldHaveReceived('warning')->withArgs(fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates')->twice();
+        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $this->client->id, 'seats' => 2])->once();
+        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $other->id, 'seats' => 1])->once();
+    }
+
+    public function test_l7_agentless_shared_serial_has_no_seat_key_or_warning(): void
+    {
+        Log::spy();
+        $this->device('1', ['serial' => 'SHARED-L7', 'agentVersion' => null]);
+        $this->device('2', ['serial' => 'SHARED-L7', 'agentVersion' => null]);
+        $result = $this->service()->sync();
+        $this->assertSame(2, $result->skipped);
+        $this->assertArrayNotHasKey('seats_on_refused_duplicates', $result->details);
+        Log::shouldNotHaveReceived('warning', fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates');
+    }
+
+    public function test_l7_one_quantity_twelve_row_is_one_suspended_row(): void
+    {
+        $this->client->update(['litsrmm_client_id' => null]);
+        $type = LicenseType::create(['vendor' => 'litsrmm', 'vendor_sku_id' => 'workstations', 'name' => 'Example seats']);
+        License::create(['license_type_id' => $type->id, 'client_id' => $this->client->id, 'vendor_ref' => self::VENDOR_CLIENT, 'quantity' => 12, 'status' => 'active']);
+        $service = $this->service();
+        $result = $service->sync();
+        $this->assertSame(1, $result->details['seats_suspended']);
+        // Replay the same one-row starting state through the real command and service.
+        License::query()->update(['quantity' => 12, 'status' => 'active']);
+        $this->app->instance(LitsrmmAssetSyncService::class, $service);
+        $this->artisan('litsrmm:sync-devices')
+            ->expectsOutputToContain('  Seat rows suspended (unmapped clients): 1')
+            ->assertSuccessful();
+    }
+
+    public function test_l7_zero_suspended_rows_has_no_key(): void
+    {
+        $this->device('1');
+        $result = $this->service()->sync();
+        $this->assertArrayNotHasKey('seats_suspended', $result->details);
+    }
+
     public function test_l7_shared_duplicates_report_two_billed_seats(): void
     {
-        Http::fake();
         Log::spy();
         $this->device('1', ['serial' => 'SHARED-L7']);
         $this->device('2', ['serial' => 'SHARED-L7']);
@@ -105,12 +156,12 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_l7_ambiguous_duplicates_are_counted(): void
     {
-        Http::fake();
         Log::spy();
         Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'WORKSTATION-1', 'serial_number' => null]);
         Asset::factory()->create(['client_id' => $this->client->id, 'hostname' => 'workstation-1', 'serial_number' => null]);
         $this->device('1', ['serial' => null, 'agentVersion' => '1.0.0']);
         $result = $this->service()->sync();
+        Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] device not written', ['client_id' => $this->client->id, 'reason' => 'ambiguous_match'])->once();
         // One seat-eligible device refused against two free assets: N = 1, not 2.
         $this->assertSame(1, $result->details['seats_on_refused_duplicates'] ?? null);
         Log::shouldHaveReceived('warning')->with('[LitsrmmAssetSync] seats counted on refused duplicates', ['client_id' => $this->client->id, 'seats' => 1])->once();
@@ -119,7 +170,6 @@ class LitsrmmAssetSyncTest extends TestCase
     // Pin: base already omits the duplicate warning when there are no duplicates.
     public function test_l7_no_duplicates_has_no_key_or_sentence(): void
     {
-        Http::fake();
         Log::spy();
         Log::shouldReceive('warning')->withArgs(fn ($message) => $message === '[LitsrmmAssetSync] seats counted on refused duplicates')->never();
         $this->device('1');
@@ -130,7 +180,6 @@ class LitsrmmAssetSyncTest extends TestCase
 
     public function test_l7_suspended_seats_are_not_released_links(): void
     {
-        Http::fake();
         $this->device('1');
         $this->service()->sync();
         $this->client->update(['litsrmm_client_id' => null]);
